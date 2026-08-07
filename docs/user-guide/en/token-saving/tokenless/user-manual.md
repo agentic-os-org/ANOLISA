@@ -17,7 +17,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
+This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](QUICKSTART.md).
 
 ## Build the Python SDK from source
 
@@ -75,7 +75,7 @@ current host contracts. See
 
 ### Installation does not enable every adapter
 
-`anolisa install tokenless` installs the component and its adapter resources. To make an agent use Tokenless automatically, also run:
+Regardless of whether Tokenless is installed via the anolisa CLI, npm, curl, or Skill, installation only sets up the component and its adapter resources. To make an agent use Tokenless automatically, also run:
 
 ```bash
 anolisa adapter enable tokenless <framework>
@@ -222,6 +222,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | I want to | Document |
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
+| Install via npm, curl, or Skill | [Quick Start · Install Tokenless](QUICKSTART.md#2-install-tokenless) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
 | Use the in-process Python SDK | [Python SDK](sdk.md) |
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |

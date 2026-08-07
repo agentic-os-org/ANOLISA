@@ -11,6 +11,17 @@ Agent 的方式。
 
 ## 1. 安装 Tokenless 并接入 Claude Code
 
+根据使用场景选择安装方式：
+
+| 方式 | 适用场景 | 说明 |
+|------|----------|------|
+| [anolisa CLI](#方式-aanolisa-cli推荐) | 完整 ANOLISA 组件管理 | 统一管理所有组件和 Adapter |
+| [npm](#方式-bnpm) | 独立安装 CLI 和 Adapter | 面向开发者，预编译二进制 + Adapter 资源 |
+| [curl](#方式-ccurl-独立安装) | 一键安装，无需前置依赖 | 自动选择 npm 或源码构建 |
+| [Skill](#方式-dskill面向-agent) | Agent 自动安装 | 面向 Agent 框架的 Skill 安装方式 |
+
+### 方式 A：anolisa CLI（推荐）
+
 下面以 Claude Code 作为示例 Agent：
 
 ```bash
@@ -26,6 +37,56 @@ anolisa adapter enable tokenless claude-code
 使用其他 Agent？按照[使用其他 Agent](#使用其他-agent)中的对应接入方式操作，后续
 步骤保持不变。大多数 Agent 使用 `anolisa adapter enable` 命令，OpenCode 则使用
 链接指向的生命周期脚本。
+
+### 方式 B：npm
+
+需要 Node.js 16+。自动安装适合当前平台的预编译二进制（`tokenless`、`rtk`、`toon`）和框架 Adapter 资源：
+
+```bash
+npm install -g anolisa-tokenless
+tokenless --version
+```
+
+安装完成后，Adapter 资源位于 `~/.local/share/anolisa/adapters/tokenless/`，可按需为 Agent 框架启用。
+
+支持的平台：
+
+| 平台 | 架构 | npm 包 |
+|------|------|--------|
+| Linux (glibc) | x86_64 | `@anolisa/tokenless-linux-x64` |
+| Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
+| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
+| macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+
+### 方式 C：curl 独立安装
+
+一键安装脚本，优先使用 npm，npm 不可用时回退到源码构建：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+可指定版本或安装目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+```
+
+### 方式 D：Skill（面向 Agent）
+
+当 Agent 框架（如 cosh、OpenClaw、Hermes 等）需要自行安装和管理 Tokenless 时，可以使用 Skill 方式。
+
+Skill 文件位于仓库的 `src/os-skills/ai/install-tokenless/SKILL.md`。加载此文件的 Agent 可自动完成安装和配置。
+
+使用时，将 Skill 文件路径指向 Agent 框架，或将其内容直接传给 Agent。Skill 包含完整的安装、验证和框架集成指引。
+
+安装 Tokenless 后，还需要为对应的 Agent 框架启用 Adapter（Skill 会自动引导此步骤）：
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless <agent>
+```
 
 ## 2. 运行一次真实任务
 
@@ -157,15 +218,14 @@ tokenless stats list --limit 1
 
 ## 平台适配性
 
-| 平台 | anolisa CLI 安装 |
-|------|------------------|
-| Linux x86_64/aarch64 | 支持 |
-| macOS Apple Silicon | 支持 |
-| macOS x86_64 | 暂不支持 |
-| Windows 或使用 musl 的 Linux（例如 Alpine） | 暂不支持 |
+| 平台 | anolisa CLI | npm | curl | Skill |
+|------|-------------|-----|------|-------|
+| Linux x86_64/aarch64 | 支持 | 支持 | 支持 | 支持 |
+| macOS Apple Silicon | 支持 | 支持 | 支持 | 支持 |
+| macOS x86_64 | 暂不支持 | 支持 | 支持 | 支持 |
+| Windows 或使用 musl 的 Linux（例如 Alpine） | 暂不支持 | 暂不支持 | 仅源码构建 | 仅源码构建 |
 
-本页只提供 anolisa CLI 安装路径。需要从源码构建独立 CLI 时，请参阅
-[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
+npm 和 curl 方式在 macOS x86_64 上提供预编译二进制。anolisa CLI 暂不支持 macOS x86_64。需要从源码构建独立 CLI 时，请参阅[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
 
 ## 下一步
 

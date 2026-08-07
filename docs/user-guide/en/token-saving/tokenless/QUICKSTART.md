@@ -11,6 +11,17 @@ short or conversation-only tasks may show little change.
 
 ## 1. Install Tokenless and connect Claude Code
 
+Choose an installation method based on your use case:
+
+| Method | Use case | Description |
+|--------|----------|-------------|
+| [anolisa CLI](#method-a-anolisa-cli-recommended) | Full ANOLISA component management | Unified management of all components and adapters |
+| [npm](#method-b-npm) | Standalone CLI and adapter install | Prebuilt binaries + adapter resources for developers |
+| [curl](#method-c-curl-standalone-install) | One-liner, no prerequisites | Automatically uses npm or falls back to source build |
+| [Skill](#method-d-skill-for-agents) | Agent-driven install | Skill-based installation for agent frameworks |
+
+### Method A: anolisa CLI (recommended)
+
 This quick path uses Claude Code as the example Agent:
 
 ```bash
@@ -28,6 +39,56 @@ Using another Agent? Follow the matching setup path in
 [Use another Agent](#use-another-agent); the remaining steps stay the same.
 Most Agents use an `anolisa adapter enable` command, while OpenCode uses its
 linked lifecycle script.
+
+### Method B: npm
+
+Requires Node.js 16+. Automatically installs prebuilt binaries (`tokenless`, `rtk`, `toon`) and framework adapter resources for your platform:
+
+```bash
+npm install -g anolisa-tokenless
+tokenless --version
+```
+
+After installation, adapter resources are located at `~/.local/share/anolisa/adapters/tokenless/` and can be enabled for agent frameworks as needed.
+
+Supported platforms:
+
+| Platform | Architecture | npm package |
+|----------|-------------|-------------|
+| Linux (glibc) | x86_64 | `@anolisa/tokenless-linux-x64` |
+| Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
+| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
+| macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+
+### Method C: curl standalone install
+
+A one-liner install script that prefers npm and falls back to source build when npm is unavailable:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Pin a version or set a custom install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+```
+
+### Method D: Skill (for agents)
+
+When an agent framework (cosh, OpenClaw, Hermes, etc.) needs to install and manage Tokenless on its own, use the Skill method.
+
+The Skill file is at `src/os-skills/ai/install-tokenless/SKILL.md` in the repository. An agent that loads this file can complete installation and configuration automatically.
+
+To use it, point your agent framework at the Skill file path, or pass its contents directly to the agent. The Skill contains complete installation, verification, and framework integration guidance.
+
+After installing Tokenless, enable the adapter for the target agent framework (the Skill guides this step automatically):
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless <agent>
+```
 
 ## 2. Run one real task
 
@@ -162,16 +223,14 @@ without removable fields is returned unchanged and is not recorded.
 
 ## Platform support
 
-| Platform | anolisa CLI installation |
-|----------|--------------------------|
-| Linux x86_64/aarch64 | Supported |
-| macOS Apple Silicon | Supported |
-| macOS x86_64 | Not currently supported |
-| Windows or Linux with musl, such as Alpine | Not currently supported |
+| Platform | anolisa CLI | npm | curl | Skill |
+|----------|-------------|-----|------|-------|
+| Linux x86_64/aarch64 | Supported | Supported | Supported | Supported |
+| macOS Apple Silicon | Supported | Supported | Supported | Supported |
+| macOS x86_64 | Not currently supported | Supported | Supported | Supported |
+| Windows or Linux with musl, such as Alpine | Not currently supported | Not currently supported | Source build only | Source build only |
 
-This page covers installation with the anolisa CLI only. To build the
-standalone CLI from source, see
-[User manual · Build the standalone CLI from source](user-manual.md#build-the-standalone-cli-from-source).
+npm and curl provide prebuilt binaries on macOS x86_64; the anolisa CLI does not currently support macOS x86_64. To build the standalone CLI from source, see [User manual · Build the standalone CLI from source](user-manual.md#build-the-standalone-cli-from-source).
 
 ## Next steps
 
