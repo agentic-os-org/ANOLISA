@@ -222,7 +222,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | I want to | Document |
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
-| Install via npm, curl, or Skill | [Quick Start · Install Tokenless](QUICKSTART.md#2-install-tokenless) |
+| Install via npm, curl, or Skill | [Quick Start · Install Tokenless](QUICKSTART.md#install-tokenless) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
 | Use the in-process Python SDK | [Python SDK](sdk.md) |
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |

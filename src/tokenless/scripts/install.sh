@@ -33,8 +33,10 @@ detect_platform() {
     aarch64|arm64) arch="arm64" ;;
     *)             die "Unsupported architecture: $(uname -m)" ;;
   esac
+  MUSL_LINUX=0
   if [ "$os" = "linux" ] && ldd --version 2>&1 | grep -qi musl; then
-    die "musl-based Linux distributions (e.g. Alpine) are not supported by prebuilt binaries. Build from source instead."
+    warn "musl-based Linux detected (e.g. Alpine). Prebuilt binaries are not available; source build will be used."
+    MUSL_LINUX=1
   fi
   PLATFORM_OS="$os"
   PLATFORM_ARCH="$arch"
@@ -55,6 +57,10 @@ resolve_version() {
 }
 
 try_npm_install() {
+  if [ "${MUSL_LINUX:-0}" = "1" ]; then
+    warn "Skipping npm install on musl Linux (prebuilt binaries not available)"
+    return 1
+  fi
   if ! command -v npm &>/dev/null; then
     warn "npm not found, skipping npm install method"
     return 1
@@ -66,7 +72,11 @@ try_npm_install() {
   local npm_prefix
   npm_prefix=$(npm config get prefix 2>/dev/null || echo "${HOME}/.npm-global")
 
-  npm install -g "${NPM_PACKAGE}@${VERSION}" --prefix "$npm_prefix" 2>&1 | tail -5
+  if ! npm install -g "${NPM_PACKAGE}@${VERSION}" --prefix "$npm_prefix" 2>&1 | tail -5; then
+    warn "npm install failed (possible EACCES or network issue)"
+    warn "To fix npm permissions: mkdir -p ~/.npm-global && npm config set prefix '~/.npm-global'"
+    return 1
+  fi
 
   local npm_bin
   npm_bin="${npm_prefix}/bin"
@@ -86,6 +96,10 @@ try_npm_install() {
   done
 
   info "Installed to ${install_dir}"
+  case ":${PATH}:" in
+    *":${install_dir}:"*) ;;
+    *) warn "${install_dir} is not in PATH. Run: export PATH=\"${install_dir}:\$PATH\"" ;;
+  esac
   return 0
 }
 
@@ -109,7 +123,7 @@ try_source_build() {
   tar -xzf "${tmpdir}/tokenless-${VERSION}.tar.gz" -C "$tmpdir"
 
   local src_dir
-  src_dir=$(find "$tmpdir" -maxdepth 2 -name 'Cargo.toml' -path '*/tokenless/*' -exec dirname {} \; | head -1)
+  src_dir=$(find "$tmpdir" -maxdepth 3 -name 'Cargo.toml' -path '*/tokenless/*' -exec dirname {} \; | head -1)
   [ -n "$src_dir" ] || die "Could not find tokenless source in tarball"
 
   if ! command -v cargo &>/dev/null; then

@@ -9,7 +9,7 @@ background, so your prompts and normal Agent workflow do not change.
 Savings vary by workload. Tool-heavy tasks usually show the clearest result;
 short or conversation-only tasks may show little change.
 
-## 1. Install Tokenless and connect Claude Code
+## 1. Install Tokenless and connect Claude Code {#install-tokenless}
 
 Choose an installation method based on your use case:
 

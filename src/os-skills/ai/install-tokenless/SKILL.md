@@ -64,10 +64,10 @@ Options via environment variables:
 
 ```bash
 # Pin a specific version
-TOKENLESS_VERSION=0.7.4 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
 
 # Custom install directory
-TOKENLESS_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
 ```
 
 ### Step 2: Verify Installation
@@ -100,6 +100,8 @@ bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ```
 
 Supported frameworks:
+
+> **Note:** The script paths below are examples for npm-installed adapters. Not all frameworks ship a standalone install script, and directory names may differ. The recommended integration path is `anolisa adapter enable tokenless <framework>` (for anolisa CLI installs) or check `ls ~/.local/share/anolisa/adapters/tokenless/` to confirm the adapter directory exists before running a script directly.
 
 | Agent | Adapter install script |
 |-------|----------------------|

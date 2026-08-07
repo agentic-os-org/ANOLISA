@@ -9,7 +9,7 @@ Agent 的方式。
 实际节省效果取决于工作负载。工具调用密集型任务通常最明显；较短或以对话为主的
 任务可能变化不大。
 
-## 1. 安装 Tokenless 并接入 Claude Code
+## 1. 安装 Tokenless 并接入 Claude Code {#安装-tokenless}
 
 根据使用场景选择安装方式：
 
