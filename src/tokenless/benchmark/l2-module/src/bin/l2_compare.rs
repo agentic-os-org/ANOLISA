@@ -155,6 +155,13 @@ struct SideSeries {
     /// taken from the first repetition, which is deterministic for static
     /// samples and near-deterministic for the spec'd git/rg commands.
     probe_texts: HashMap<String, (String, String)>,
+    /// Per-sample content ground truth for building probe questions where a
+    /// category's samples are heterogeneous (diff, whose entry points range
+    /// from full passthrough to a two-line summary). Empty for categories that
+    /// share one asset-defined probe set: a single question set applied across
+    /// samples with different content silently drops any sample whose original
+    /// does not contain those facts, hiding the loss it was meant to catch.
+    probe_ground_truth: HashMap<String, Vec<GroundTruth>>,
 }
 
 impl SideSeries {
@@ -163,6 +170,17 @@ impl SideSeries {
             .entry(m.sample_id.clone())
             .or_insert_with(|| (original.to_string(), compressed.to_string()));
         self.measures.push(m);
+    }
+
+    /// Records a sample's own content ground truth for per-sample probing.
+    /// No-op for empty truth, so categories that probe from an asset are left
+    /// on the category-global path.
+    fn record_probe_ground_truth(&mut self, sample_id: &str, ground_truth: &[GroundTruth]) {
+        if !ground_truth.is_empty() {
+            self.probe_ground_truth
+                .entry(sample_id.to_string())
+                .or_insert_with(|| ground_truth.to_vec());
+        }
     }
 }
 
@@ -256,10 +274,14 @@ fn main() -> Result<()> {
     let mut categories = Vec::new();
     for data in &collected {
         let questions: Option<Vec<ProbeQuestion>> = if probe_client.is_some() {
-            Some(samples::load_probe_questions(
-                &l2_dir,
-                samples::probe_file_stem(data.category),
-            )?)
+            // diff builds its probe questions per sample from each sample's own
+            // content (see SideSeries::probe_ground_truth): its entry points are
+            // heterogeneous, so one shared question set would silently skip the
+            // samples that lost everything. probe_file_stem returns None for it.
+            match samples::probe_file_stem(data.category) {
+                Some(stem) => Some(samples::load_probe_questions(&l2_dir, stem)?),
+                None => None,
+            }
         } else {
             None
         };
@@ -478,13 +500,15 @@ fn collect_dynamic(
         for spec in &specs {
             let cwd = repo_root.join(&spec.cwd_rel);
             let (raw_text, rtk_result) = match rtk_bin {
-                Some(bin) => match rtk_side::run_paired(bin, &spec.argv, &cwd) {
-                    Ok(pair) => (pair.raw_text.clone(), Some(pair)),
-                    Err(e) => {
-                        degradations.push(format!("{category}/{} rep {rep}: {e}", spec.id));
-                        continue;
+                Some(bin) => {
+                    match rtk_side::run_paired(bin, &spec.argv, spec.rtk_invocation(), &cwd) {
+                        Ok(pair) => (pair.raw_text.clone(), Some(pair)),
+                        Err(e) => {
+                            degradations.push(format!("{category}/{} rep {rep}: {e}", spec.id));
+                            continue;
+                        }
                     }
-                },
+                }
                 // Without rtk the raw command still runs so the headroom
                 // side keeps its full sample set.
                 None => match run_raw(&spec.argv, &cwd) {
@@ -496,6 +520,18 @@ fn collect_dynamic(
                 },
             };
             let ground_truth = samples::extract_dynamic_ground_truth(category, &raw_text)?;
+            // For diff, register each sample's own content facts so the probe
+            // asks about what THIS sample changed. The facts come from the raw
+            // (uncompressed) output, so a sample that loses everything under
+            // compression is scored against the identifiers it should have
+            // kept, not against another sample's. Both sides share the facts;
+            // the map ignores samples a side never probes.
+            if category == Category::Diff {
+                data.tokenless
+                    .record_probe_ground_truth(&spec.id, &ground_truth);
+                data.headroom
+                    .record_probe_ground_truth(&spec.id, &ground_truth);
+            }
 
             if let Some(pair) = rtk_result {
                 match measure_rtk(&spec.id, &pair, &ground_truth) {
@@ -559,7 +595,7 @@ fn measure_tokenless(record: &SampleRecord) -> Result<(Measure, String, String),
     let output = tokenless_side::compress(record.category, &record.content)?;
     let before = tokenizer::count(&before_wire)?;
     let after = tokenizer::count(&output.compressed)?;
-    let ret = retention::check(&record.ground_truth, &output.compressed)?;
+    let ret = retention::check(&record.ground_truth, &output.retention_text)?;
     let measure = Measure {
         sample_id: record.id.clone(),
         rep: 0,
@@ -700,22 +736,48 @@ fn aggregate_side(
     // questions do not dominate the ratio. The numerator counts only questions
     // the ORIGINAL text already answered, so losing a baseline-answerable fact
     // cannot be offset by a question that compression made answerable.
-    let semantic_score = match (probe_client, questions) {
-        (Some(client), Some(questions)) if !questions.is_empty() => {
+    let mut probed_samples = 0usize;
+    let mut unprobed_samples = 0usize;
+    let semantic_score = match probe_client {
+        Some(client) => {
             let mut correct_unc = 0usize;
             let mut retained = 0usize;
-            for (original, compressed) in series.probe_texts.values() {
-                let score = client.score(questions, original, compressed);
+            let mut asked_any = false;
+            for (sample_id, (original, compressed)) in &series.probe_texts {
+                // Per-sample questions where the sample carries its own content
+                // facts (diff); otherwise the category-global asset questions.
+                // Building diff questions per sample is what stops a sample that
+                // lost everything from being dropped for lacking another
+                // sample's facts.
+                let per_sample = series
+                    .probe_ground_truth
+                    .get(sample_id)
+                    .map(|gt| samples::diff_probe_questions(gt));
+                let qs: &[ProbeQuestion] = match (&per_sample, questions) {
+                    (Some(q), _) => q,
+                    (None, Some(q)) => q,
+                    (None, None) => {
+                        unprobed_samples += 1;
+                        continue;
+                    }
+                };
+                if qs.is_empty() {
+                    unprobed_samples += 1;
+                    continue;
+                }
+                asked_any = true;
+                probed_samples += 1;
+                let score = client.score(qs, original, compressed);
                 correct_unc += score.correct_uncompressed;
                 retained += score.retained;
             }
-            if correct_unc == 0 {
+            if !asked_any || correct_unc == 0 {
                 None
             } else {
                 Some(retained as f64 / correct_unc as f64)
             }
         }
-        _ => None,
+        None => None,
     };
 
     // headroom self-reported counts, averaged as cross-check evidence for
@@ -755,6 +817,8 @@ fn aggregate_side(
         retention_ci: stats::wilson_interval(retention_passed, retention_total, 1.96),
         retention_missing,
         semantic_score,
+        probed_samples,
+        unprobed_samples,
         latency_ms: stats::latency_percentiles(&latencies_ms),
         latency_basis: series
             .measures

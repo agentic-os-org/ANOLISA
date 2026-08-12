@@ -98,6 +98,13 @@ pub struct SideAggregate {
     /// text that are still answerable after compression. `None` when unprobed
     /// or when the original answered nothing.
     pub semantic_score: Option<f64>,
+    /// Samples that had probe questions and were scored.
+    pub probed_samples: usize,
+    /// Samples that had no probe question to ask, so they contributed nothing
+    /// to [`Self::semantic_score`]. Reported because a sample can lose all its
+    /// content and still be absent from the score: without this count a reader
+    /// would take the `S` column as covering every sample in the category.
+    pub unprobed_samples: usize,
     /// Latency percentiles in milliseconds.
     pub latency_ms: LatencyPercentiles,
     /// Which timing basis produced the latency numbers.
@@ -399,7 +406,13 @@ impl Report {
              pseudo-replication; `reps` records the repetitions, which latency\n\
              still uses in full. The `before tok` column is the mean original\n\
              token count, so any input asymmetry between the two sides is\n\
-             visible directly in the numbers.\n\n",
+             visible directly in the numbers.\n\n\
+             Each side is de-duplicated on its own output, so the two rows of a\n\
+             category can carry different N: a side whose output varies across\n\
+             repetitions keeps more observations than one that is byte-stable.\n\
+             Read a row against its own N, and take the head-to-head number from\n\
+             the paired gap table, which pairs per instance instead of comparing\n\
+             two independently pooled means.\n\n",
         );
         md.push_str(
             "| Category | Side | Compression ± 95% CI (N, reps) | before tok | cl100k side-report | Retention [Wilson 95%] | S | p50 ms | p95 ms | p99 ms | Basis |\n",
@@ -420,16 +433,43 @@ impl Report {
                                 a.retention_ci.1
                             )
                         };
+                        // Flag partial probe coverage in the cell itself: an S
+                        // computed over a subset while other samples were never
+                        // asked would otherwise read as covering the category.
+                        let coverage = if a.unprobed_samples > 0 {
+                            format!(
+                                " ({} of {} probed)",
+                                a.probed_samples,
+                                a.probed_samples + a.unprobed_samples
+                            )
+                        } else {
+                            String::new()
+                        };
                         let s = a
                             .semantic_score
                             .map(|v| {
                                 if v < SEMANTIC_FLOOR {
-                                    format!("**{v:.2} ⚠**")
+                                    format!("**{v:.2} ⚠**{coverage}")
                                 } else {
-                                    format!("{v:.2}")
+                                    format!("{v:.2}{coverage}")
                                 }
                             })
-                            .unwrap_or_else(|| "None".to_string());
+                            .unwrap_or_else(|| {
+                                if a.unprobed_samples > 0 {
+                                    // Same denominator as the Some branch: a
+                                    // score can be absent while some samples
+                                    // were probed (their originals answered
+                                    // nothing), so hard-coding 0 would
+                                    // misreport the coverage.
+                                    format!(
+                                        "— ({} of {} probed)",
+                                        a.probed_samples,
+                                        a.probed_samples + a.unprobed_samples
+                                    )
+                                } else {
+                                    "None".to_string()
+                                }
+                            });
                         let p99 = if a.latency_ms.p99 > cat.category.p99_budget_ms() {
                             format!("**{:.3} ⚠**", a.latency_ms.p99)
                         } else {

@@ -40,5 +40,49 @@
     "argv": ["git", "diff", "HEAD~1", "HEAD"],
     "cwd_rel": ".",
     "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "read",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff_aggressive",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "read",
+      "-l",
+      "aggressive",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff_smart",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "smart",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
   }
 ]
