@@ -170,6 +170,22 @@
         "install":   "qwenpaw/scripts/install.sh",
         "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
+    },
+    "trae": {
+      "compatibleVersions": "*",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "trae/scripts/detect.sh",
+        "install":   "trae/scripts/install.sh",
+        "uninstall": "trae/scripts/uninstall.sh"
+      }
     }
   }
 }
