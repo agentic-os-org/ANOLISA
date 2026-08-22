@@ -116,6 +116,7 @@ stage_payload() {
         qwenpaw/plugin.json \
         qwenpaw/plugin.py \
         qwenpaw/requirements.txt \
+        trae/hooks/run-hook.sh \
         common/cosh-extension.json \
         common/tool-ready-spec.json \
         common/tokenless-env-fix.sh; do
