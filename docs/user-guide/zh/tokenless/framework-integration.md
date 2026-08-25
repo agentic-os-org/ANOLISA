@@ -624,6 +624,10 @@ bash ~/.local/share/anolisa/adapters/tokenless/workbuddy/scripts/uninstall.sh
 
 生命周期脚本由 `make -C src/tokenless install`、RPM 或 npm 的 postinstall 复制安装。raw 方式的 `anolisa install` 组件契约只铺设带内置 anolisa 驱动的 Adapter；WorkBuddy（与 OpenCode 一样）在本版本未注册进 `anolisa adapter enable`，因此该路径不会铺设其脚本。
 
+`scripts/detect.sh` 是只读脚本，采用与其他生命周期 Adapter 一致的三态退出码汇报状态：`0` = 已检测到 WorkBuddy/CodeBuddy 且 Tokenless Hook 已安装；`1` = 已检测到但 Hook 尚未安装；`2` = 缺少前置条件。缺少 `~/.codebuddy` 视为未安装 WorkBuddy/CodeBuddy，`detect.sh` 返回 `2`；而 `install.sh` 对同样情况做优雅跳过（输出提示并以 `0` 退出），因此在没有 WorkBuddy 的主机上运行生命周期脚本不会失败。本版本中，缺少 `tokenless` 或 `rtk` 二进制同样按前置条件缺失（退出码 `2`）上报。
+
+RPM 卸载钩子（`%preun`）以 root 身份运行，因此只会清理 root 用户的 `~/.codebuddy/settings.json`。在多用户主机上，其他用户需要自行运行 `uninstall.sh`。
+
 ## AgentScope 框架集成
 
 AgentScope 是 Python SDK 的第二层，不是产品 Adapter。完整的构建、版本、挂载、配置与验证说明

@@ -675,6 +675,10 @@ The rewrite hook emits WorkBuddy's `modifiedInput` partial field override togeth
 
 The lifecycle scripts are staged by `make -C src/tokenless install`, the RPM, or the npm postinstall copy. The raw `anolisa install` component contract deploys only adapters with a built-in anolisa driver; WorkBuddy (like OpenCode) is not registered with `anolisa adapter enable` in this release, so its scripts are not laid out on that path.
 
+`scripts/detect.sh` is read-only and reports adapter state with the same tri-state exit code as the other lifecycle adapters: `0` = WorkBuddy/CodeBuddy present and the Tokenless hooks installed; `1` = present but hooks not installed yet; `2` = prerequisites missing. A missing `~/.codebuddy` means WorkBuddy/CodeBuddy is not installed, so `detect.sh` reports `2`; `install.sh` treats the same condition as a graceful no-op and exits `0`, so lifecycle runs on hosts without WorkBuddy never fail. Missing `tokenless` or `rtk` binaries are also reported as missing prerequisites (exit `2`) in this release.
+
+The RPM uninstall hook (`%preun`) runs as root, so it removes the hooks only from root's `~/.codebuddy/settings.json`. On multi-user hosts, other users must run `uninstall.sh` themselves.
+
 ## AgentScope framework integration
 
 AgentScope is the second Python SDK layer, not a product adapter. Its complete build, version,
