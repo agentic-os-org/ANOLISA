@@ -22,7 +22,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | V1 插件透传 |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
-| Trae | `trae` | 已硬关闭 | 替换 RunCommand 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
+| Trae | `trae` | 已硬关闭 | 替换 RunCommand 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -618,7 +618,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/install.sh
 bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
 ```
 
-用户已有的 Hook 配置会被保留；卸载脚本只移除 Tokenless 自己的条目。Trae 将终端工具名标准化为 `RunCommand`，因此命令重写 Hook 匹配该名称。由于 Trae 的 PostToolUse 不支持替换工具输出，响应压缩通过 `additionalContext` 交付。安装或移除后请重启 Trae。
+用户已有的 Hook 配置会被保留；卸载脚本只移除 Tokenless 自己的条目。Trae 将终端工具名标准化为 `RunCommand`，因此命令重写 Hook 匹配该名称。由于 Trae 的 PostToolUse 不支持替换工具输出，响应 Hook 保留原始输出：只在识别出环境失败时追加 `additionalContext`，不会追加压缩副本（那会让模型可见内容变大）。安装或移除后请重启 Trae。
 
 ## AgentScope 框架集成
 

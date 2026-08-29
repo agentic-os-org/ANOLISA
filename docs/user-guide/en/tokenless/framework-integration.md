@@ -21,7 +21,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in the V1 plugin |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
-| Trae | `trae` | Hard-disabled | Replaces RunCommand input | Emits `additionalContext` | Attempted after response compression | — |
+| Trae | `trae` | Hard-disabled | Replaces RunCommand input | Keeps the original; adds context only for classified environment failures | — | — |
 
 “—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
 
@@ -669,7 +669,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/install.sh
 bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
 ```
 
-User-configured hooks are preserved; the uninstall script removes only the Tokenless-owned entries. Trae standardizes the terminal tool name to `RunCommand`, so the rewrite hook matches that name. Response compression is delivered through `additionalContext` because Trae's PostToolUse does not support tool-output replacement. Restart Trae after installing or removing.
+User-configured hooks are preserved; the uninstall script removes only the Tokenless-owned entries. Trae standardizes the terminal tool name to `RunCommand`, so the rewrite hook matches that name. Because Trae's PostToolUse does not support tool-output replacement, the response hook keeps the original output: it only adds `additionalContext` for classified environment failures and never appends a compressed copy, which would grow the model-visible payload. Restart Trae after installing or removing.
 
 ## AgentScope framework integration
 
