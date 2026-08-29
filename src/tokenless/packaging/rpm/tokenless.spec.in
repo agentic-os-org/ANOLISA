@@ -82,8 +82,8 @@ OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and To
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
 Trae (TraeCode) adapter (RTK command rewriting on the standardized RunCommand tool,
-response/TOON compression via additionalContext, and Tool Ready) is available under
-/usr/share/anolisa/adapters/tokenless/trae/. Register it by running the install
+environment-failure diagnostics via additionalContext, and Tool Ready) is available
+under /usr/share/anolisa/adapters/tokenless/trae/. Register it by running the install
 script: trae/scripts/install.sh
 
 %package core
