@@ -54,7 +54,12 @@ def pre_tool(adapter: ModuleType, agent_id: str) -> None:
 
     session_id = input_data.get("session_id", "")
     tool_use_id = adapter.tool_call_id(input_data)
-    if not tool_use_id:
+    # The call id links this rewrite to its PostTool result, so hosts that
+    # declare one must carry it. A host whose documented payload has no
+    # such field (workbuddy's HookInput) opts out with
+    # ``call_id_required = False`` and rewrites without the linkage; the
+    # default keeps every existing adapter's requirement unchanged.
+    if not tool_use_id and getattr(adapter, "call_id_required", True):
         skip()
 
     tool_name, recovery_input = adapter.pre_tool_input(input_data)
@@ -83,11 +88,15 @@ def pre_tool(adapter: ModuleType, agent_id: str) -> None:
     if not isinstance(rewritten, str) or not rewritten or rewritten == command:
         skip()
 
-    try:
-        mark_rtk_optimized(agent_id, session_id, tool_use_id)
-    except OSError as error:
-        warn(f"failed to persist PreTool optimization state: {error}")
-        skip()
+    # The optimization state is keyed by the call id and PostTool can never
+    # consume an id-less entry (consume_output_optimization returns "none"
+    # for an empty id), so a host without one writes no mark at all.
+    if tool_use_id:
+        try:
+            mark_rtk_optimized(agent_id, session_id, tool_use_id)
+        except OSError as error:
+            warn(f"failed to persist PreTool optimization state: {error}")
+            skip()
 
     print(json.dumps(adapter.pre_tool_output(updated_input)))
 

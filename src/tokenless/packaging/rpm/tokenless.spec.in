@@ -82,9 +82,11 @@ OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and To
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
 WorkBuddy (Tencent CodeBuddy) adapter (RTK command rewriting via modifiedInput,
-response/TOON compression via additionalContext, and Tool Ready) is available under
-/usr/share/anolisa/adapters/tokenless/workbuddy/. Register it by running the install
-script: workbuddy/scripts/install.sh
+opt-in with TOKENLESS_WORKBUDDY_AUTO_ALLOW=1; response compression replaces the
+tool result via updatedToolOutput on standalone CodeBuddy Code CLI hosts, while
+WorkBuddy IDE/Enterprise hosts receive no compressed output) is available under
+/usr/share/anolisa/adapters/tokenless/workbuddy/. Register it by running the
+install script: workbuddy/scripts/install.sh
 
 %package core
 Summary:        Tokenless CLI and RTK command rewriting runtime

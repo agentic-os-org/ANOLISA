@@ -1874,17 +1874,17 @@ class TestNonReplacementAdapters(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt" or pty is None,
                      "interactive-shape test needs a POSIX pty")
-    def test_workbuddy_legacy_serve_sidecar_skips_replacement(self):
-        """Pre-marker desktop sidecar: hosted ``--serve`` argv shape.
+    def test_workbuddy_web_ui_serve_uses_updated_tool_output(self):
+        """User-started ``codebuddy --serve`` Web UI is a standalone CLI.
 
-        CODEBUDDY_FORCE_HEADLESS_BUNDLE only exists from CLI 2.136.0 on,
-        while the declared support range starts at 1.16.0; the earlier
-        artifacts already ship the hosted --serve/--prewarm modes. On a
-        legacy desktop host the marker is absent and the sidecar still
-        has the CLI binary among its ancestors, so the hosted argv shape
-        must classify it as non-CLI — even when a controlling terminal
-        is present. Compression is disabled: Core is consulted once
-        and returns a passthrough.
+        The official Web UI reference documents users launching
+        ``codebuddy --serve --port <port>`` directly; the CLI Hooks
+        contract honors ``updatedToolOutput`` in that host, so the serve
+        argv shape must NOT be treated as a spawned sidecar. The
+        resident daemon with an identical argv shape is separated by the
+        daemon session kind (covered separately). With no launcher
+        marker, no daemon kind and no hosted sidecar flag, the host is a
+        standalone CLI and the compressed payload replaces the result.
         """
         large_payload = _make_large_json_payload()
         env = self._pty_env({
@@ -1904,13 +1904,59 @@ class TestNonReplacementAdapters(unittest.TestCase):
              sys.executable, _hook_script_path()],
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         self.assertNotIn("_raw_stdout", result, f"unparsable output: {result}")
         hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso,
+                      "user-started serve (Web UI) must receive the CLI "
+                      "replacement path")
+        self.assertEqual(hso["updatedToolOutput"]["stdout"], "x" * 20)
+        self.assertNotIn("additionalContext", hso,
+                         "CLI replacement must not append the same payload")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    @unittest.skipIf(os.name == "nt", "process ancestry walk is POSIX-only")
+    def test_workbuddy_daemon_worker_skips_replacement(self):
+        """Resident daemon worker: documented session kind, ``--serve`` argv.
+
+        ``daemon start`` forks the resident child with ``--serve``
+        prepended (Daemon Mode reference), so argv alone cannot separate
+        the daemon from a user-started Web UI; the documented
+        ``CODEBUDDY_SESSION_KIND=daemon`` worker-type variable is the
+        contract-backed discriminator and must classify the host as
+        non-CLI. Compression is disabled: Core is consulted once and
+        returns a passthrough.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+                "CODEBUDDY_SESSION_KIND": "daemon",
+            },
+            ancestor_cmd=self._fake_codebuddy(),
+            ancestor_args=["--serve"],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
         self.assertNotIn("updatedToolOutput", hso,
-                         "legacy hosted sidecar must not receive the "
-                         "CLI-only field despite a controlling terminal")
+                         "daemon workers must not receive the CLI-only "
+                         "field despite a CLI ancestor with --serve")
+        self.assertNotIn("additionalContext", hso)
         self.assertEqual(result, {},
-                         "legacy hosted sidecar passes the result through")
+                         "daemon workbuddy hosts pass the result through")
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
                          "exactly one Core passthrough; no compression applied")
 
@@ -2187,21 +2233,28 @@ class TestWorkBuddyCliDetection(unittest.TestCase):
                                       "CODEBUDDY_SESSION_KIND": ""}):
                     self.assertTrue(m._workbuddy_cli_host(), value)
 
-    def test_session_kind_never_disables_cli_detection(self):
-        """CODEBUDDY_SESSION_KIND alone is never hosted evidence.
+    def test_session_kind_daemon_disables_cli_detection(self):
+        """CODEBUDDY_SESSION_KIND=daemon marks the resident daemon worker.
 
         The official Daemon Mode reference documents the session kind as
-        the worker type, and the standalone CLI declares it for its own
-        background sessions (bg for ``codebuddy --bg``), so the kind
-        alone cannot separate hosted workers from standalone sessions.
-        Daemon and teammate workers stay excluded through their hosted
-        argv flags (--serve / --teammate-mode), not through the kind,
-        so the session kind must never route a CLI-shaped ancestor to
-        the non-CLI path.
+        the worker type (interactive / bg / daemon), and the hook
+        inherits it from the daemon child that ``daemon start`` forks
+        with ``--serve`` prepended. The kind is the contract-backed
+        signal separating the daemon from a user-started ``--serve``
+        Web UI session, so it must route a CLI-shaped ancestor to the
+        non-CLI path; every other value (interactive / bg / teammate /
+        unset, any case) belongs to the standalone CLI's own sessions
+        and never disables detection.
         """
         m = self._hook()
-        for kind in ("interactive", "bg", "daemon", "teammate", "BG",
-                     "Daemon", ""):
+        for kind in ("daemon", "Daemon", "DAEMON", " daemon "):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(self._cli_procs())):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertFalse(m._workbuddy_cli_host(), kind)
+        for kind in ("interactive", "bg", "teammate", "BG", ""):
             with mock.patch.object(m, "_ancestor_procs",
                                    return_value=iter(self._cli_procs())):
                 with mock.patch.dict(os.environ,
@@ -2235,13 +2288,15 @@ class TestWorkBuddyCliDetection(unittest.TestCase):
         """Hosted sidecar flags predate the launcher marker and must win.
 
         Artifacts before 2.136.0 carry no CODEBUDDY_FORCE_HEADLESS_BUNDLE
-        but already ship the hosted --serve/--prewarm modes, so a CLI
-        ancestor with one of these flags stays non-CLI even though a
-        bare CLI ancestor would be treated as standalone.
+        but already ship the hosted prewarm and team-sidecar modes, so a
+        CLI ancestor with one of these flags stays non-CLI even though a
+        bare CLI ancestor would be treated as standalone. ``--serve`` is
+        deliberately absent: the Web UI reference documents users
+        starting ``codebuddy --serve`` directly (standalone CLI); the
+        daemon child with the same argv is excluded by the session kind.
         """
         m = self._hook()
-        for flag in ("--serve", "--prewarm", "--prewarm-force",
-                     "--teammate-mode"):
+        for flag in ("--prewarm", "--prewarm-force", "--teammate-mode"):
             tree = [
                 ["/bin/bash", "-c", "python3 compress_response_hook.py"],
                 ["/usr/local/bin/codebuddy", flag, "--team-name", "t"],
@@ -2252,6 +2307,21 @@ class TestWorkBuddyCliDetection(unittest.TestCase):
                                      {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
                                       "CODEBUDDY_SESSION_KIND": ""}):
                     self.assertFalse(m._workbuddy_cli_host(), flag)
+
+    def test_serve_argv_without_daemon_kind_is_standalone_cli(self):
+        """``--serve`` alone is the user-started Web UI, not a sidecar."""
+        m = self._hook()
+        tree = [
+            ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+            ["/usr/local/bin/codebuddy", "--serve", "--port", "7890"],
+        ]
+        for kind in ("interactive", ""):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(tree)):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertTrue(m._workbuddy_cli_host(), kind)
 
     def test_env_var_alone_does_not_select_cli(self):
         """CODEBUDDY_PROJECT_DIR also exists on IDE hosts (IDE Hooks

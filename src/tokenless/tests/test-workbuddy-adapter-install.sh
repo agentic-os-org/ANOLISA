@@ -170,31 +170,47 @@ fi
 
 # --- Test 5a: install/uninstall never widen settings.json permissions -------
 # CodeBuddy allows credentials in the settings env field, so a 0600 file must
-# stay 0600 across both scripts, even under a permissive umask.
+# stay 0600 across both scripts, even under a permissive umask. The
+# replacement inode must also keep the existing owner/group: mkstemp creates
+# it with the installer's UID/GID, so the scripts restore ownership before
+# os.replace (a root- or cross-account run must not reassign the file).
 export HOME="$SANDBOX/home-perms"
 mkdir -p "$HOME/.codebuddy"
 echo '{"model": "default-model"}' > "$HOME/.codebuddy/settings.json"
 chmod 0600 "$HOME/.codebuddy/settings.json"
+owner_before="$(stat -c '%u:%g' "$HOME/.codebuddy/settings.json" 2>/dev/null || stat -f '%u:%g' "$HOME/.codebuddy/settings.json")"
 (
     umask 022
     ANOLISA_TARGET=workbuddy ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
         bash "$ADAPTER_DIR/workbuddy/scripts/install.sh" >/dev/null 2>&1
 )
 mode="$(stat -c '%a' "$HOME/.codebuddy/settings.json" 2>/dev/null || stat -f '%Lp' "$HOME/.codebuddy/settings.json")"
+owner_after="$(stat -c '%u:%g' "$HOME/.codebuddy/settings.json" 2>/dev/null || stat -f '%u:%g' "$HOME/.codebuddy/settings.json")"
 if [ "$mode" = "600" ]; then
     pass "install preserves existing 0600 settings.json mode under umask 022"
 else
     fail "install widened settings.json mode to $mode"
+fi
+if [ "$owner_after" = "$owner_before" ]; then
+    pass "install preserves settings.json owner/group"
+else
+    fail "install changed settings.json owner/group from $owner_before to $owner_after"
 fi
 (
     umask 022
     ANOLISA_TARGET=workbuddy bash "$ADAPTER_DIR/workbuddy/scripts/uninstall.sh" >/dev/null 2>&1
 )
 mode="$(stat -c '%a' "$HOME/.codebuddy/settings.json" 2>/dev/null || stat -f '%Lp' "$HOME/.codebuddy/settings.json")"
+owner_after="$(stat -c '%u:%g' "$HOME/.codebuddy/settings.json" 2>/dev/null || stat -f '%u:%g' "$HOME/.codebuddy/settings.json")"
 if [ "$mode" = "600" ]; then
     pass "uninstall preserves existing 0600 settings.json mode under umask 022"
 else
     fail "uninstall widened settings.json mode to $mode"
+fi
+if [ "$owner_after" = "$owner_before" ]; then
+    pass "uninstall preserves settings.json owner/group"
+else
+    fail "uninstall changed settings.json owner/group from $owner_before to $owner_after"
 fi
 
 # --- Test 5b: a permissive existing mode is left untouched -------------------

@@ -176,6 +176,37 @@ class WorkBuddyContractTest(unittest.TestCase):
         request = result.requests[0]
         self.assertEqual(request["attribution"]["agent_id"], "workbuddy")
 
+    def test_auto_allow_works_with_documented_idless_contract(self) -> None:
+        """The documented workbuddy HookInput carries no tool-call ID.
+
+        The official CLI, IDE and Enterprise HookInput shapes contain
+        only session_id, transcript_path, cwd, permission_mode,
+        hook_event_name and the event fields — no tool_use_id /
+        toolCallId / call_id — so the opt-in rewrite must not depend on
+        one; replaying exactly that shape must reach Core and apply.
+        """
+        result = contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            json.dumps(pre_tool_payload(call_id="")),
+            {
+                "TOKENLESS_AGENT_ID": "workbuddy",
+                "TOKENLESS_WORKBUDDY_AUTO_ALLOW": "1",
+            },
+            "applied",
+        )
+        self.assertEqual(result.spawns, ["compress"])
+        hook_out = result.envelope.get("hookSpecificOutput", {})
+        self.assertEqual(
+            hook_out.get("modifiedInput"),
+            {"command": "/mock/rtk grep error log"},
+        )
+        self.assertEqual(hook_out.get("permissionDecision"), "allow")
+        # No call ID: the attribution omits the field entirely, and no
+        # PreTool->PostTool optimization mark is written (an ID-less mark
+        # could never be consumed).
+        request = result.requests[0]
+        self.assertNotIn("tool_use_id", request["attribution"])
+
     def test_auto_allow_opt_in_keeps_fail_open_classes(self) -> None:
         for behavior in [
             "no_savings",
