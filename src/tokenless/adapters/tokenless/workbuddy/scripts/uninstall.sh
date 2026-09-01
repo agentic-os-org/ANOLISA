@@ -87,11 +87,14 @@ for event in list(hooks.keys()):
             kept.append(group)
     hooks[event] = kept
 
-# Preserve the existing file mode on rewrite: settings.json sits beside
-# settings.json.env, where CodeBuddy officially allows CODEBUDDY_API_KEY
-# and auth tokens, so a default-mode temp file (0644 under umask 022)
-# must not widen a 0600 config on replace. New files are created 0600.
-existing_mode = stat.S_IMODE(os.stat(config_path).st_mode)
+# Preserve the existing file mode AND ownership on rewrite: settings.json
+# sits beside settings.json.env, where CodeBuddy officially allows
+# CODEBUDDY_API_KEY and auth tokens, so a default-mode temp file (0644
+# under umask 022) must not widen a 0600 config on replace. mkstemp
+# creates the inode with the installer's UID/GID; the chown restores the
+# existing owner/group so a root- or cross-account run cannot reassign
+# the file.
+existing = os.stat(config_path)
 fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
 )
@@ -99,7 +102,13 @@ try:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    os.chmod(tmp_path, existing_mode)
+    os.chmod(tmp_path, stat.S_IMODE(existing.st_mode))
+    try:
+        os.chown(tmp_path, existing.st_uid, existing.st_gid)
+    except OSError:
+        # Same-account runs succeed; without privilege the mode
+        # restoration above keeps the credential-safety guarantee.
+        pass
     os.replace(tmp_path, config_path)
 except BaseException:
     try:

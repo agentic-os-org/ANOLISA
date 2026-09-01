@@ -138,10 +138,11 @@ config["hooks"] = hooks
 # settings.json itself may hold sensitive keys. Rewriting must never
 # loosen the existing file mode (a default-mode temp file under umask
 # 022 would turn 0600 into 0644 on replace): stage a unique 0600 temp
-# file in the same directory, restore the original mode, then replace.
-existing_mode = None
-if os.path.exists(config_path):
-    existing_mode = stat.S_IMODE(os.stat(config_path).st_mode)
+# file in the same directory, restore the original mode and ownership,
+# then replace. mkstemp creates the inode with the installer's UID/GID;
+# without the chown a root- or cross-account run would hand an existing
+# user's settings.json to the installer account.
+existing = os.stat(config_path) if os.path.exists(config_path) else None
 fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
 )
@@ -149,7 +150,17 @@ try:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    os.chmod(tmp_path, 0o600 if existing_mode is None else existing_mode)
+    if existing is not None:
+        os.chmod(tmp_path, stat.S_IMODE(existing.st_mode))
+        try:
+            os.chown(tmp_path, existing.st_uid, existing.st_gid)
+        except OSError:
+            # Restoring ownership needs the file's owner or privilege;
+            # same-account runs succeed, and the mode restoration above
+            # keeps the credential-safety guarantee either way.
+            pass
+    else:
+        os.chmod(tmp_path, 0o600)
     os.replace(tmp_path, config_path)
 except BaseException:
     try:
