@@ -43,16 +43,47 @@ def _spec(tmp_path: Path, *, agent_id: str = "django__django-13448") -> OpenClaw
     )
 
 
-def _tokenless_extensions_dir(tmp_path: Path) -> Path:
+def _plugin_extensions_dir(tmp_path: Path, plugin_id: str) -> Path:
     extensions_dir = tmp_path / "host-openclaw-extensions"
-    tokenless_extension = extensions_dir / "tokenless"
-    tokenless_extension.mkdir(parents=True)
-    (tokenless_extension / "openclaw.plugin.json").write_text('{"id":"tokenless"}', encoding="utf-8")
+    extension = extensions_dir / plugin_id
+    extension.mkdir(parents=True, exist_ok=True)
+    (extension / "openclaw.plugin.json").write_text(f'{{"id":"{plugin_id}"}}', encoding="utf-8")
     return extensions_dir
+
+
+def _tokenless_extensions_dir(tmp_path: Path) -> Path:
+    return _plugin_extensions_dir(tmp_path, "tokenless")
 
 
 def _completed(cmd: list[str], stdout: str = "", stderr: str = "", returncode: int = 0) -> CommandResult:
     return CommandResult(args=tuple(cmd), returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_sandbox_manager_applies_sampling_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps({"agents": {"list": [{"id": "main", "default": True}]}}), encoding="utf-8")
+    spec = _spec(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:5] == ["openclaw", "--profile", "profile-1", "sandbox", "explain"]:
+            return _completed(cmd, stdout=json.dumps({"sandbox": {"workspaceRoot": str(spec.workspace_root)}}))
+        return _completed(cmd)
+
+    manager = OpenClawSandboxManager(
+        config_path=config_path,
+        profile="profile-1",
+        cli_path="openclaw",
+        temperature=0.6,
+        seed=3,
+    )
+
+    with patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run):
+        manager.configure(spec)
+
+    params = json.loads(config_path.read_text(encoding="utf-8"))["agents"]["defaults"]["params"]
+    assert params["temperature"] == 0.6
+    assert params["seed"] == 3
+    assert params["top_p"] == 1
 
 
 def test_sandbox_manager_writes_single_case_agent_config(tmp_path: Path) -> None:
@@ -364,3 +395,65 @@ def test_sandbox_manager_rejects_wrong_explained_workspace(tmp_path: Path) -> No
 
 def test_build_openclaw_agent_scope_key_matches_local_agent_scope() -> None:
     assert build_openclaw_agent_scope_key("django__django-13448") == "agent:django__django-13448:main"
+
+
+def test_sandbox_manager_claims_context_engine_slot_for_headroom(tmp_path: Path) -> None:
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text('{"agents":{"list":[{"id":"main","default":true}]}}', encoding="utf-8")
+    extensions_dir = _plugin_extensions_dir(tmp_path, "headroom")
+    spec = _spec(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:5] == ["openclaw", "--profile", "profile-1", "sandbox", "explain"]:
+            return _completed(cmd, stdout=json.dumps({"sandbox": {"workspaceRoot": str(spec.workspace_root)}}))
+        return _completed(cmd)
+
+    manager = OpenClawSandboxManager(config_path=config_path, profile="profile-1", cli_path="openclaw", headroom=True)
+
+    with (
+        patch("swe_runner.agents.openclaw.sandbox._HOST_OPENCLAW_EXTENSIONS_DIR", extensions_dir),
+        patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
+    ):
+        manager.configure(spec)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["plugins"]["entries"]["headroom"]["enabled"] is True
+    assert data["plugins"]["slots"]["contextEngine"] == "headroom"
+    extension_link = config_path.parent / "extensions" / "headroom"
+    assert extension_link.is_symlink()
+    assert extension_link.resolve() == (extensions_dir / "headroom").resolve()
+    # Headroom runs host-side only; injecting sandbox binaries would change what the arm measures.
+    assert not (spec.workspace_root / ".runner" / "tokenless").exists()
+    entry = next(item for item in data["agents"]["list"] if item["id"] == spec.agent_id)
+    assert "/workspace/.runner/tokenless/bin" not in entry["sandbox"]["docker"]["env"]["PATH"]
+
+
+def test_sandbox_manager_releases_context_engine_slot_inherited_from_base_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {"list": [{"id": "main", "default": True}]},
+                "plugins": {
+                    "entries": {"headroom": {"enabled": True}},
+                    "slots": {"contextEngine": "headroom"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = _spec(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:5] == ["openclaw", "--profile", "profile-1", "sandbox", "explain"]:
+            return _completed(cmd, stdout=json.dumps({"sandbox": {"workspaceRoot": str(spec.workspace_root)}}))
+        return _completed(cmd)
+
+    manager = OpenClawSandboxManager(config_path=config_path, profile="profile-1", cli_path="openclaw")
+
+    with patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run):
+        manager.configure(spec)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    # A baseline arm must not silently run a context engine copied in from the host config.
+    assert "contextEngine" not in data["plugins"]["slots"]

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -158,24 +159,51 @@ def run_evaluation(
 
     output_dir = output_dir.resolve()
     preds_path = preds_path.resolve()
-    with _pushd(output_dir):
-        swebench_run_evaluation(
-            dataset_name=dataset_name,
-            split=split,
-            instance_ids=instance_ids,
-            predictions_path=str(preds_path),
-            max_workers=workers,
-            run_id=run_id,
-            timeout=timeout,
-            cache_level=cache_level,
-            force_rebuild=False,
-            clean=False,
-            open_file_limit=4096,
-            namespace=namespace,
-            rewrite_reports=False,
-            modal=False,
-            report_dir=str(output_dir),
+
+    # swebench's entry point is not a stable API: 5.x dropped cache_level,
+    # force_rebuild, clean and namespace, and passing any of them raises TypeError
+    # before a single instance is evaluated. Filter against the installed signature
+    # instead of pinning, and log what was dropped so a silently ignored knob shows
+    # up in the run log rather than as an unexplained result difference.
+    candidate_kwargs = {
+        "dataset_name": dataset_name,
+        "split": split,
+        "instance_ids": instance_ids,
+        "predictions_path": str(preds_path),
+        "max_workers": workers,
+        "run_id": run_id,
+        "timeout": timeout,
+        "cache_level": cache_level,
+        "force_rebuild": False,
+        "clean": False,
+        "open_file_limit": 4096,
+        "namespace": namespace,
+        "rewrite_reports": False,
+        "modal": False,
+        "report_dir": str(output_dir),
+    }
+    accepted = inspect.signature(swebench_run_evaluation).parameters
+    if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in accepted.values()):
+        dropped = sorted(set(candidate_kwargs) - set(accepted))
+        if dropped:
+            logger.warning(
+                "EVAL_SWEBENCH_ARGS_DROPPED unsupported_by_installed_swebench=%s",
+                ",".join(dropped),
+            )
+        missing = sorted(
+            name
+            for name, p in accepted.items()
+            if p.default is inspect.Parameter.empty and name not in candidate_kwargs
         )
+        if missing:
+            raise RuntimeError(
+                "installed swebench requires arguments this runner does not supply: "
+                f"{', '.join(missing)}"
+            )
+        candidate_kwargs = {k: v for k, v in candidate_kwargs.items() if k in accepted}
+
+    with _pushd(output_dir):
+        swebench_run_evaluation(**candidate_kwargs)
 
 
 # ---------------------------------------------------------------------------
