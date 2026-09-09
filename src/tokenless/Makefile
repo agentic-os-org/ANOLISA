@@ -308,6 +308,14 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
+# L4 离线测试仅使用临时夹具，不启动 Docker 或模型调用。
+.PHONY: test-benchmark-l4
+L4_TEST_PYTHON ?= python3
+test: test-benchmark-l4
+test-benchmark-l4:
+	$(L4_TEST_PYTHON) -m pytest -q benchmark/l4-end-to-end/tests
+	@for script in benchmark/l4-end-to-end/assets/scripts/*.sh; do bash -n "$$script" || exit 1; done
+
 # Hook counterfactuals need the real binary to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
 	bash packaging/build/setup-rtk.sh

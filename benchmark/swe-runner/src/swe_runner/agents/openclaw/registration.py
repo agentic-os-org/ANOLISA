@@ -25,7 +25,7 @@ register_agent_descriptor(
         name="openclaw",
         adapter_module="swe_runner.agents.openclaw.adapter",
         required_binaries=("openclaw",),
-        supported_run_options=("tokenless",),
+        supported_run_options=("tokenless", "headroom"),
         metadata_collectors=(collect_openclaw_metadata,),
         input_manifest_collectors=(collect_openclaw_input_manifest,),
     )
