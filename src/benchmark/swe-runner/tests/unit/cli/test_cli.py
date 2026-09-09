@@ -40,6 +40,7 @@ def test_help_shows_options():
     assert "--docker-pull-registry" in result.output
     assert "--use-skill" in result.output
     assert "--tokenless" in result.output
+    assert "--headroom" in result.output
     assert "--no-skill" not in result.output
 
 
@@ -269,6 +270,50 @@ def test_run_rejects_tokenless_for_unsupported_agent() -> None:
     assert "--tokenless is not supported by agent 'cosh'" in result.output
 
 
+def test_run_passes_headroom_into_settings(tmp_path):
+    report = RunReport(
+        succeeded=1,
+        failed=0,
+        total=1,
+        instance_ids=["inst-1"],
+        metadata_path=tmp_path / "run_metadata.json",
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                "--agent",
+                "openclaw",
+                "--output",
+                str(tmp_path),
+                "--headroom",
+            ],
+        )
+
+    assert result.exit_code == 0
+    settings = mock_session_cls.call_args.args[0]
+    assert settings.agent.headroom is True
+    assert settings.agent.tokenless is False
+
+
+def test_run_rejects_headroom_for_unsupported_agent() -> None:
+    result = runner.invoke(app, ["run", "--agent", "cosh", "--headroom"])
+
+    assert result.exit_code == 1
+    assert "--headroom is not supported by agent 'cosh'" in result.output
+
+
+def test_run_rejects_tokenless_combined_with_headroom() -> None:
+    result = runner.invoke(app, ["run", "--agent", "openclaw", "--tokenless", "--headroom"])
+
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
 def test_analyze_traces_can_collect_from_openclaw_jsonl(tmp_path):
     metadata_path = tmp_path / "run_metadata.json"
     profiles_dir = tmp_path / "openclaw-profiles"
@@ -394,3 +439,95 @@ def test_evaluate_none_namespace_uses_local_build_mode(mocker: MockerFixture) ->
     assert result.exit_code == 0
     mock_run_evaluation.assert_called_once()
     assert mock_run_evaluation.call_args.kwargs["namespace"] is None
+
+
+def _write_token_store(profiles_root: Path, instance_id: str, *, aggregate_input: int) -> None:
+    """Create one profile holding a two-turn transcript, in the layout OpenClaw uses."""
+    import json as json_mod
+    import sqlite3
+
+    store = profiles_root / instance_id / "agents" / instance_id / "agent" / "openclaw-agent.sqlite"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(store)
+    with connection:
+        connection.execute("CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT)")
+        connection.execute("CREATE TABLE trajectory_runtime_events (event_json TEXT)")
+        for seq in (1, 2):
+            connection.execute(
+                "INSERT INTO transcript_events VALUES (?, ?, ?)",
+                (
+                    "s1",
+                    seq,
+                    json_mod.dumps({"message": {"usage": {"input": 50, "output": 5, "cacheRead": 500}}}),
+                ),
+            )
+        connection.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?)",
+            (
+                json_mod.dumps(
+                    {
+                        "type": "model.completed",
+                        "data": {"usage": {"input": aggregate_input, "output": 10, "cacheRead": 1000}},
+                    }
+                ),
+            ),
+        )
+    connection.close()
+
+
+def test_token_report_writes_totals_and_the_metric_definition(tmp_path: Path) -> None:
+    import json as json_mod
+
+    profiles_root = tmp_path / "openclaw-profiles"
+    _write_token_store(profiles_root, "instance-a", aggregate_input=100)
+    report_path = tmp_path / "reports" / "report.json"
+
+    result = runner.invoke(
+        app,
+        ["token-report", "--profiles-dir", str(profiles_root), "--arm", "a-baseline", "--output", str(report_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json_mod.loads(report_path.read_text(encoding="utf-8"))
+    assert report["arm"] == "a-baseline"
+    assert report["totals"]["requests"] == 2
+    assert report["totals"]["prompt_tokens"] == 1100
+    assert "requests" in report["metric_definition"]["note"]
+    assert "requests" in result.output, "prompt volume must never be printed without the round count"
+
+
+def test_token_report_fails_when_the_two_readings_disagree(tmp_path: Path) -> None:
+    """A schema drift must break the run instead of shipping a plausible number."""
+    import json as json_mod
+
+    profiles_root = tmp_path / "openclaw-profiles"
+    _write_token_store(profiles_root, "instance-a", aggregate_input=999)
+    report_path = tmp_path / "report.json"
+
+    result = runner.invoke(
+        app,
+        ["token-report", "--profiles-dir", str(profiles_root), "--arm", "c-headroom", "--output", str(report_path)],
+    )
+
+    assert result.exit_code == 1
+    assert "disagrees" in result.output
+    report = json_mod.loads(report_path.read_text(encoding="utf-8"))
+    assert report["totals"]["instances_with_disagreeing_aggregate"] == ["instance-a"]
+
+
+def test_token_report_fails_on_a_missing_profiles_root(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "token-report",
+            "--profiles-dir",
+            str(tmp_path / "never-ran"),
+            "--arm",
+            "a-baseline",
+            "--output",
+            str(tmp_path / "report.json"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "profiles root not found" in result.output

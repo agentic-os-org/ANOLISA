@@ -14,6 +14,7 @@
 
 """CLI entry point for swe-runner."""
 
+import json
 from pathlib import Path
 
 import typer
@@ -26,7 +27,7 @@ from swe_runner.cli_commands import (
     evaluate_patches_command,
     run_instances_command,
 )
-from swe_runner.trace_extraction import ExtractionError
+from swe_runner.trace_extraction import ExtractionError, SqliteUsageError, build_usage_report
 
 app = typer.Typer(
     name="swe-runner",
@@ -83,6 +84,11 @@ def run(
         "--tokenless",
         help="Enable tokenless/rtk helper injection for agents that support it",
     ),
+    headroom: bool = typer.Option(
+        False,
+        "--headroom",
+        help="Enable the Headroom context engine for agents that support it; mutually exclusive with --tokenless",
+    ),
     per_case_prompt: bool = typer.Option(
         False,
         "--per-case-prompt",
@@ -92,6 +98,21 @@ def run(
         None,
         "--prompts-dir",
         help="Directory containing per-instance prompt files named by instance_id",
+    ),
+    base_config: Path | None = typer.Option(
+        None,
+        "--base-config",
+        help="Agent base configuration file copied into every per-instance profile",
+    ),
+    temperature: float | None = typer.Option(
+        None,
+        "--temperature",
+        help="Sampling temperature override; raise it above 0 to measure run-to-run variance",
+    ),
+    seed: int | None = typer.Option(
+        None,
+        "--seed",
+        help="Sampling seed override; vary it across repeats, which only takes effect above temperature 0",
     ),
     redo: bool = typer.Option(False, "--redo", help="Re-run already completed instances"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
@@ -113,8 +134,12 @@ def run(
             use_skill=use_skill,
             skills_dir=skills_dir,
             tokenless=tokenless,
+            headroom=headroom,
             per_case_prompt=per_case_prompt,
             prompts_dir=prompts_dir,
+            base_config=base_config,
+            temperature=temperature,
+            seed=seed,
             redo=redo,
             verbose=verbose,
         )
@@ -210,6 +235,44 @@ def analyze_traces(
     console.print(f"[green]Per-trace CSV dir:[/green] {result.detail_dir}")
     console.print(f"[green]Per-case summary CSV:[/green] {result.summary_csv}")
     console.print(f"[green]Trace metrics CSV:[/green] {result.trace_metrics_csv}")
+
+
+@app.command("token-report")
+def token_report(
+    profiles_dir: Path = typer.Option(..., "--profiles-dir", help="OpenClaw profiles root of a finished run"),
+    arm: str = typer.Option(..., "--arm", help="Arm label recorded in the report, e.g. a-baseline"),
+    output: Path = typer.Option(..., "--output", "-o", help="Path to write report.json"),
+) -> None:
+    """Write per-arm token totals read from OpenClaw's SQLite transcript stores.
+
+    Exits non-zero when an instance's per-turn sum disagrees with the aggregate the
+    agent recorded for the same session: the numbers stay in the report so the
+    disagreement can be inspected, but they must not pass as corroborated.
+    """
+    try:
+        report = build_usage_report(arm=arm, profiles_root=profiles_dir)
+    except SqliteUsageError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    totals = report["totals"]
+    console.print(f"[green]Token report:[/green] {output}")
+    console.print(
+        f"instances={totals['instances']} requests={totals['requests']} prompt_tokens={totals['prompt_tokens']}"
+    )
+    console.print("[dim]prompt_tokens = sum(input + cacheRead); read it together with requests[/dim]")
+
+    without_aggregate = totals["instances_without_aggregate"]
+    if without_aggregate:
+        console.print(f"[yellow]No aggregate to cross-check (uncorroborated):[/yellow] {', '.join(without_aggregate)}")
+
+    disagreeing = totals["instances_with_disagreeing_aggregate"]
+    if disagreeing:
+        console.print(f"[red]Per-turn sum disagrees with the recorded aggregate:[/red] {', '.join(disagreeing)}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
