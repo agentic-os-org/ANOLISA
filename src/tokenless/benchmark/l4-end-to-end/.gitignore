@@ -1,0 +1,30 @@
+# Run-time outputs of the L4 end-to-end runs. Each arm writes a full agent
+# trajectory tree (per-instance profiles, patches, logs, report.json), which is
+# both large and machine-specific: it carries host paths, container ids, the
+# proxy port that happened to be free, and the API endpoint in use. This
+# workspace keeps its own reports/ so L1, L2, L3 and L4 numbers never mix, and
+# nothing report-shaped is committed wherever it lands.
+reports/
+runs/
+*_REPORT.md
+*_REPORT_zh.md
+*_REPORT_DIFF.md
+report.json
+
+# Resolved agent configs. assets/configs/ holds the committed templates, which
+# reference credentials through ${DASHSCOPE_API_KEY} interpolation; anything
+# rendered locally has the key substituted in and must never be committed.
+assets/configs/*.resolved.json
+
+# Proxy logs from the compression arms. These contain per-request
+# tokens_before/tokens_after, and with them the payloads' shape and size.
+*.proxy.log
+__pycache__/
+
+# Run trees recovered from the evaluation hosts: agent profiles, SQLite
+# transcripts, tarballs, and per-host environment fingerprints (revisions, pip
+# freezes, image digests, working-tree snapshots). All of it is run-specific
+# data tied to a particular machine, not part of the harness, so none of it is
+# committed to this public repository -- it stays local and is re-derivable from
+# the host that produced the numbers.
+archive/

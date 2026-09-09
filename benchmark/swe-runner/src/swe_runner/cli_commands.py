@@ -35,6 +35,7 @@ RUN_OUTPUT_SUBDIR = "run"
 EVALUATE_OUTPUT_SUBDIR = "evaluate"
 ANALYZE_TRACES_OUTPUT_SUBDIR = "analyze-traces"
 TOKENLESS_RUN_OPTION = "tokenless"
+HEADROOM_RUN_OPTION = "headroom"
 
 
 class CommandUsageError(ValueError):
@@ -86,8 +87,12 @@ def run_instances_command(
     use_skill: bool,
     skills_dir: Path | None = None,
     tokenless: bool,
+    headroom: bool = False,
     per_case_prompt: bool,
     prompts_dir: Path | None = None,
+    base_config: Path | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
     redo: bool,
     verbose: bool,
 ) -> RunReport:
@@ -108,8 +113,12 @@ def run_instances_command(
         use_skill=use_skill,
         skills_dir=skills_dir,
         tokenless=tokenless,
+        headroom=headroom,
         per_case_prompt=per_case_prompt,
         prompts_dir=prompts_dir,
+        base_config=base_config,
+        temperature=temperature,
+        seed=seed,
     )
     setup_logging(settings.output.output_dir, verbose=verbose, suffix=RUN_OUTPUT_SUBDIR)
     return RunSession(settings, redo=redo).execute()
@@ -132,14 +141,22 @@ def build_run_settings(
     use_skill: bool,
     skills_dir: Path | None = None,
     tokenless: bool,
+    headroom: bool = False,
     per_case_prompt: bool,
     prompts_dir: Path | None = None,
+    base_config: Path | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
 ) -> Settings:
     """Build validated run settings from CLI values."""
     if use_skill and per_case_prompt:
         raise CommandUsageError("--use-skill and --per-case-prompt are mutually exclusive")
+    if tokenless and headroom:
+        raise CommandUsageError("--tokenless and --headroom are mutually exclusive")
     if tokenless and not agent_supports_run_option(agent, TOKENLESS_RUN_OPTION):
         raise CommandUsageError(f"--tokenless is not supported by agent '{agent}'")
+    if headroom and not agent_supports_run_option(agent, HEADROOM_RUN_OPTION):
+        raise CommandUsageError(f"--headroom is not supported by agent '{agent}'")
 
     if instances_file is not None and instance_id is not None:
         raise CommandUsageError("--instances-file and --instance-id are mutually exclusive")
@@ -157,8 +174,12 @@ def build_run_settings(
             use_skill=use_skill,
             skills_dir=skills_dir,
             tokenless=tokenless,
+            headroom=headroom,
             per_case_prompt=per_case_prompt,
             prompts_dir=prompts_dir,
+            base_config=base_config,
+            temperature=temperature,
+            seed=seed,
         ),
         dataset=DatasetConfig(
             subset=subset,

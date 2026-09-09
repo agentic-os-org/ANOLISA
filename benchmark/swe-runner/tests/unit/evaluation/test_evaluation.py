@@ -72,9 +72,9 @@ def test_get_instance_ids_empty_file(tmp_path: Path) -> None:
 
 
 def test_get_dataset_name() -> None:
-    assert _get_dataset_name("lite") == "princeton-nlp/SWE-bench_Lite"
-    assert _get_dataset_name("verified") == "princeton-nlp/SWE-bench_Verified"
-    assert _get_dataset_name("full") == "princeton-nlp/SWE-bench"
+    assert _get_dataset_name("lite") == "SWE-bench/SWE-bench_Lite"
+    assert _get_dataset_name("verified") == "SWE-bench/SWE-bench_Verified"
+    assert _get_dataset_name("full") == "SWE-bench/SWE-bench"
     assert _get_dataset_name("multilingual") == "SWE-bench/SWE-bench_Multilingual"
 
 
@@ -182,7 +182,7 @@ def test_run_evaluation_calls_swebench(tmp_path: Path, mocker: MockerFixture) ->
 
     mock_swebench.assert_called_once()
     call_kwargs = mock_swebench.call_args[1]
-    assert call_kwargs["dataset_name"] == "princeton-nlp/SWE-bench_Lite"
+    assert call_kwargs["dataset_name"] == "SWE-bench/SWE-bench_Lite"
     # Verify the original JSON path is passed directly (no JSONL conversion)
     assert call_kwargs["predictions_path"] == str(preds_file)
     assert call_kwargs["predictions_path"].endswith(".json")

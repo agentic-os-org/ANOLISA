@@ -38,3 +38,11 @@ class OpenClawArtifacts(ArtifactMetadata):
     openclaw_tokenless_hook_seen: str | None = None
     openclaw_tokenless_exec_tool_calls: str | None = None
     openclaw_tokenless_evidence_error: str | None = None
+    openclaw_headroom_requested: str | None = None
+    openclaw_headroom_evidence_path: str | None = None
+    openclaw_headroom_evidence_strong: str | None = None
+    openclaw_headroom_plugin_loaded: str | None = None
+    openclaw_headroom_context_engine_active: str | None = None
+    openclaw_headroom_proxy_traffic_observed: str | None = None
+    openclaw_headroom_proxy_compression_observed: str | None = None
+    openclaw_headroom_evidence_error: str | None = None

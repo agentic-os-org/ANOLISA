@@ -1119,6 +1119,12 @@ jobs:
       - name: Test bundled RTK integration
         run: make -C src/tokenless test-rtk-integration
 
+      - name: Test L4 benchmark offline regressions
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/l4-benchmark-venv"
+          uv pip install --python "$RUNNER_TEMP/l4-benchmark-venv/bin/python" pytest pydantic tiktoken
+          make -C src/tokenless test-benchmark-l4 L4_TEST_PYTHON="$RUNNER_TEMP/l4-benchmark-venv/bin/python"
+
       - name: Build and test Tokenless Python packages
         run: |
           make -C src/tokenless \
