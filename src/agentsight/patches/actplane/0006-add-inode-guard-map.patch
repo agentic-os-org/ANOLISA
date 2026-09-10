@@ -1,0 +1,375 @@
+--- a/bpf/src/lib.rs	2026-09-10 15:11:08.940443903 +0800
++++ b/bpf/src/lib.rs	2026-09-10 17:24:27.071464514 +0800
+@@ -186,11 +186,29 @@
+     hi: u64,
+ }
+ 
++// Mirrors bpf/taint_engine.bpf.h `struct file_id`.
++// Used as HASH key — _pad MUST be explicitly zeroed.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct FileId {
++    pub ino: u64,
++    pub dev: u32,
++    pub _pad: u32,
++}
++
++/// Inode guard flag: block unlink.
++pub const INODE_GUARD_UNLINK: u32 = 1;
++/// Inode guard flag: block rename.
++pub const INODE_GUARD_RENAME: u32 = 2;
++/// Inode guard flag: block write.
++pub const INODE_GUARD_WRITE: u32 = 4;
++
+ unsafe impl aya::Pod for CUpdate {}
+ unsafe impl aya::Pod for CRule {}
+ unsafe impl aya::Pod for ProcState {}
+ unsafe impl aya::Pod for PidDomainKey {}
+ unsafe impl aya::Pod for CapPolicyMask {}
++unsafe impl aya::Pod for FileId {}
+ 
+ // ringbuf event (bpf/process.h: struct event).
+ const EVENT_TYPE_TAINT_VIOLATION: i32 = 3;
+@@ -1708,10 +1726,7 @@
+             block_connect: true,
+             suppress_dataflow_tracepoints: true,
+             file_open_only: true,
+-            policy_features: FEAT_FILE_FLOW
+-                | FEAT_CONNECT
+-                | FEAT_BLOCK_FILE
+-                | FEAT_BLOCK_CONNECT,
++            policy_features: FEAT_FILE_FLOW | FEAT_CONNECT | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT,
+             ..HookReserve::default()
+         }
+     }
+@@ -1794,6 +1809,38 @@
+     }
+ }
+ 
++/// Parse a dotted kernel release string (e.g. "7.1.10-...") and return
++/// `(major, minor)`.  Returns `None` when the format is unexpected.
++fn parse_kernel_major_minor(release: &str) -> Option<(u32, u32)> {
++    let mut parts = release.split('.');
++    let major: u32 = parts.next()?.parse().ok()?;
++    // The minor may be followed by a patch component, so split on '-' as well.
++    let minor_str = parts.next()?;
++    let minor: u32 = minor_str
++        .split(|c: char| !c.is_ascii_digit())
++        .next()?
++        .parse()
++        .ok()?;
++    Some((major, minor))
++}
++
++/// Returns `true` when the running kernel is expected to support `bpf_d_path`
++/// inside LSM hooks (Alibaba Cloud Linux kernel >= 7.1).
++fn kernel_supports_bpf_d_path_in_lsm() -> bool {
++    let mut buf: libc::utsname = unsafe { std::mem::zeroed() };
++    if unsafe { libc::uname(&mut buf) } != 0 {
++        return false;
++    }
++    let release = unsafe { std::ffi::CStr::from_ptr(buf.release.as_ptr()) };
++    let Ok(release) = release.to_str() else {
++        return false;
++    };
++    match parse_kernel_major_minor(release) {
++        Some((major, minor)) => major > 7 || (major == 7 && minor >= 1),
++        None => false,
++    }
++}
++
+ impl PinnedEngine {
+     pub fn open_or_install_singleton() -> io::Result<Self> {
+         let paths = PinnedEnginePaths::from_env();
+@@ -1870,6 +1917,50 @@
+         Ok(())
+     }
+ 
++    /// Add an inode to the guard map. Files matching `(ino, dev)` will be
++    /// blocked from unlink/rename/write according to `flags`.
++    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32) -> io::Result<()> {
++        let key = FileId { ino, dev, _pad: 0 };
++        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
++        guard
++            .insert(key, flags, 0)
++            .map_err(|e| err(format!("guard inode {ino}:{dev}: {e}")))?;
++        Ok(())
++    }
++
++    /// Remove an inode from the guard map.
++    pub fn unguard_inode(&self, ino: u64, dev: u32) -> io::Result<()> {
++        let key = FileId { ino, dev, _pad: 0 };
++        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
++        ignore_missing_remove(guard.remove(&key), "unguard inode")
++    }
++
++    /// Remove all entries from the inode guard map.
++    pub fn clear_inode_guards(&self) -> io::Result<()> {
++        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
++        let keys: Vec<FileId> = guard
++            .keys()
++            .map(|k| k.map_err(|e| err(format!("list inode guards: {e}"))))
++            .collect::<io::Result<_>>()?;
++        for key in keys {
++            ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
++        }
++        Ok(())
++    }
++
++    /// Returns `true` if the current kernel supports `bpf_d_path` in LSM hooks
++    /// (Alibaba Cloud Linux kernel >= 7.1). When `false`, inode guard mode is
++    /// the only option for file-delete-guard.
++    pub fn bpf_d_path_in_lsm_available(&self) -> bool {
++        kernel_supports_bpf_d_path_in_lsm()
++    }
++
++    /// Whether the engine should operate in inode guard mode (vs path mode).
++    /// Returns `true` when `bpf_d_path` is unavailable in LSM hooks.
++    pub fn inode_guard_mode(&self) -> bool {
++        !self.bpf_d_path_in_lsm_available()
++    }
++
+     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
+         Ok(ReloadHandle {
+             cap_req_fd: dup_pinned_map_fd(&self.paths, "cap_req")?,
+@@ -2605,6 +2696,9 @@
+ 
+ const CAP_REQ_APPEND_UPDATE: i32 = -4;
+ const CAP_REQ_APPEND_RULE: i32 = -5;
++
++// RELOAD protocol tags (capability.bpf.h): only check feature support,
++// bypass the cap_check_fields authority gate entirely.
+ const CAP_REQ_RELOAD_UPDATE: i32 = -1;
+ const CAP_REQ_RELOAD_RULE: i32 = -2;
+ const CAP_REQ_RELOAD_COUNTS: i32 = -3;
+@@ -2685,72 +2779,6 @@
+ }
+ 
+ impl ReloadHandle {
+-    pub fn reload_policy_delta(&self, target_id: u32, delta_blob: &[u8]) -> io::Result<()> {
+-        if target_id == 0 {
+-            return Err(err("target_id must be set"));
+-        }
+-        if delta_blob.len() != std::mem::size_of::<CConfig>() {
+-            return Err(err(format!(
+-                "delta config size mismatch: got {}, expected {}",
+-                delta_blob.len(),
+-                std::mem::size_of::<CConfig>()
+-            )));
+-        }
+-        let cfg: Box<CConfig> =
+-            Box::new(unsafe { std::ptr::read_unaligned(delta_blob.as_ptr() as *const CConfig) });
+-        validate_config(&cfg)?;
+-        validate_supported_features(&cfg, self.policy_features, "runtime policy delta (reload)")?;
+-
+-        let _guard = self
+-            .append_lock
+-            .lock()
+-            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
+-        let _file_guard = self.lock_append_file()?;
+-
+-        // Step 1: quiesce — RELOAD_COUNTS(0, 0)
+-        self.submit(&CapReloadCounts {
+-            tag: CAP_REQ_RELOAD_COUNTS,
+-            n_rules: 0,
+-            n_updates: 0,
+-            _pad: 0,
+-        })?;
+-
+-        // Step 2: RELOAD_UPDATE(i) for each active update
+-        for i in 0..cfg.n_updates {
+-            let mut entry = cfg.updates[i as usize];
+-            // RELOAD path does not override domain_id like APPEND does,
+-            // so we must set it explicitly.
+-            entry.domain_id = target_id;
+-            self.submit(&CapReloadUpdate {
+-                tag: CAP_REQ_RELOAD_UPDATE,
+-                index: i,
+-                entry,
+-            })?;
+-        }
+-
+-        // Step 3: RELOAD_RULE(i) for each active rule
+-        for i in 0..cfg.n_rules {
+-            let mut entry = cfg.rules[i as usize];
+-            // RELOAD path does not override domain_id like APPEND does.
+-            entry.domain_id = target_id;
+-            self.submit(&CapReloadRule {
+-                tag: CAP_REQ_RELOAD_RULE,
+-                index: i,
+-                entry,
+-            })?;
+-        }
+-
+-        // Step 4: activate — RELOAD_COUNTS(n_rules, n_updates)
+-        self.submit(&CapReloadCounts {
+-            tag: CAP_REQ_RELOAD_COUNTS,
+-            n_rules: cfg.n_rules,
+-            n_updates: cfg.n_updates,
+-            _pad: 0,
+-        })?;
+-
+-        Ok(())
+-    }
+-
+     fn lock_append_file(&self) -> io::Result<Option<FileLockGuard>> {
+         let Some(file) = &self.append_lock_file else {
+             return Ok(None);
+@@ -3126,6 +3154,80 @@
+ 
+         Ok(())
+     }
++
++    /// Applies a policy delta using the RELOAD protocol instead of APPEND.
++    ///
++    /// The RELOAD path (tags -1/-2/-3) only checks feature support and does not
++    /// require the submitter to hold capability authority in cap_state. This is
++    /// the correct path for an external trusted enforcer injecting policies into
++    /// a freshly seeded domain.
++    ///
++    /// Protocol: RELOAD_COUNTS(0,0) → RELOAD_UPDATE(i) × n → RELOAD_RULE(i) × n → RELOAD_COUNTS(n_rules, n_updates)
++    pub fn reload_policy_delta(&self, target_id: u32, delta_blob: &[u8]) -> io::Result<()> {
++        if target_id == 0 {
++            return Err(err("target_id must be set"));
++        }
++        if delta_blob.len() != std::mem::size_of::<CConfig>() {
++            return Err(err(format!(
++                "delta config size mismatch: got {}, expected {}",
++                delta_blob.len(),
++                std::mem::size_of::<CConfig>()
++            )));
++        }
++        let cfg: Box<CConfig> =
++            Box::new(unsafe { std::ptr::read_unaligned(delta_blob.as_ptr() as *const CConfig) });
++        validate_config(&cfg)?;
++        validate_supported_features(&cfg, self.policy_features, "runtime policy delta (reload)")?;
++
++        let _guard = self
++            .append_lock
++            .lock()
++            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
++        let _file_guard = self.lock_append_file()?;
++
++        // Step 1: quiesce — RELOAD_COUNTS(0, 0)
++        self.submit(&CapReloadCounts {
++            tag: CAP_REQ_RELOAD_COUNTS,
++            n_rules: 0,
++            n_updates: 0,
++            _pad: 0,
++        })?;
++
++        // Step 2: RELOAD_UPDATE(i) for each active update
++        for i in 0..cfg.n_updates {
++            let mut entry = cfg.updates[i as usize];
++            // RELOAD path does not override domain_id like APPEND does,
++            // so we must set it explicitly.
++            entry.domain_id = target_id;
++            self.submit(&CapReloadUpdate {
++                tag: CAP_REQ_RELOAD_UPDATE,
++                index: i,
++                entry,
++            })?;
++        }
++
++        // Step 3: RELOAD_RULE(i) for each active rule
++        for i in 0..cfg.n_rules {
++            let mut entry = cfg.rules[i as usize];
++            // RELOAD path does not override domain_id like APPEND does.
++            entry.domain_id = target_id;
++            self.submit(&CapReloadRule {
++                tag: CAP_REQ_RELOAD_RULE,
++                index: i,
++                entry,
++            })?;
++        }
++
++        // Step 4: activate — RELOAD_COUNTS(n_rules, n_updates)
++        self.submit(&CapReloadCounts {
++            tag: CAP_REQ_RELOAD_COUNTS,
++            n_rules: cfg.n_rules,
++            n_updates: cfg.n_updates,
++            _pad: 0,
++        })?;
++
++        Ok(())
++    }
+ }
+ 
+ fn cstr(buf: &[u8]) -> String {
+@@ -3492,12 +3594,18 @@
+     #[test]
+     fn agent_file_guard_enables_write_rules_and_unlink_lsm_without_dataflow_tracepoints() {
+         let reserve = HookReserve::agent_file_guard();
++        // Write-rule matcher class + file-block LSM hooks are reserved, so a
++        // `block unlink/write file "X" if <label>` rule can be evaluated inside
++        // the LSM hook.
+         assert!(reserve.policy_features & FEAT_WRITE_RULES != 0);
+         assert!(reserve.policy_features & FEAT_BLOCK_FILE != 0);
++        // File-flow dataflow is suppressed (LSM-only): no openat tracepoints.
+         assert!(reserve.suppress_dataflow_tracepoints);
+         assert!(!reserve.file_flow);
+         assert!(!reserve.file_open_only);
++
+         let budget = HookBudget::for_pinned_reserve(reserve);
++        // The path_unlink LSM gate must be attached so deletions are blocked.
+         assert!(lsm_link_expected("enforce_path_unlink", budget, true));
+         assert!(budget.suppress_dataflow_tracepoints);
+     }
+@@ -3661,6 +3769,57 @@
+     }
+ 
+     #[test]
++    fn write_block_rule_alone_does_not_reserve_file_flow() {
++        // A pure label-conditioned `block unlink/write file "X"` rule is evaluated
++        // synchronously in the LSM hook and must NOT pull in the file-flow dataflow
++        // tracepoints (regression guard for the OP_WRITE feature decoupling).
++        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
++        cfg.n_rules = 1;
++        cfg.rules[0].op = OP_WRITE;
++        cfg.rules[0].effect = EFFECT_BLOCK;
++
++        let features = config_features(&cfg);
++        assert_eq!(
++            features & FEAT_FILE_FLOW,
++            0,
++            "a label-conditioned OP_WRITE block rule must not reserve FEAT_FILE_FLOW"
++        );
++        assert!(
++            features & FEAT_WRITE_RULES != 0,
++            "a label-conditioned OP_WRITE block rule must reserve FEAT_WRITE_RULES"
++        );
++        assert!(
++            features & FEAT_BLOCK_FILE != 0,
++            "a label-conditioned OP_WRITE block rule must reserve FEAT_BLOCK_FILE"
++        );
++    }
++
++    #[test]
++    fn write_block_rule_with_file_source_reserves_file_flow() {
++        // Adding a file taint source (source X = file "...") re-introduces the
++        // dataflow requirement, so FEAT_FILE_FLOW must be reserved again even when
++        // the same OP_WRITE block rule is present.
++        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
++        cfg.n_rules = 1;
++        cfg.rules[0].op = OP_WRITE;
++        cfg.rules[0].effect = EFFECT_BLOCK;
++        cfg.n_updates = 1;
++        cfg.updates[0].op = OP_OPEN; // file taint source
++        cfg.updates[0].m = 3; // TAINT_MATCH_ANY
++        cfg.updates[0].add = 1;
++
++        let features = config_features(&cfg);
++        assert!(
++            features & FEAT_FILE_FLOW != 0,
++            "adding a file taint source must re-reserve FEAT_FILE_FLOW for the config"
++        );
++        assert!(
++            features & FEAT_WRITE_RULES != 0,
++            "the OP_WRITE block rule must still reserve FEAT_WRITE_RULES"
++        );
++    }
++
++    #[test]
+     fn block_delta_requires_matching_lsm_hook_profile() {
+         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+         cfg.n_rules = 1;

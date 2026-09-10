@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -51,6 +53,10 @@ struct ActiveBinding {
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
+    /// Inodes guarded in the BPF inode_guard map for this binding.
+    /// Each entry is `(ino, dev)` and must be cleaned up when the binding
+    /// is detached so the map does not leak stale entries.
+    guarded_inodes: Vec<(u64, u32)>,
 }
 
 struct PreparedBinding {
@@ -140,6 +146,12 @@ impl ActPlaneBackend {
                     .map_err(|error| kernel_error("drain stale pinned events", error))
             },
         )?;
+
+        // Clear stale inode guards that may survive a crash or SIGKILL so
+        // they do not leak into the next binding.
+        if let Err(e) = engine.clear_inode_guards() {
+            eprintln!("agentsight: failed to clear stale inode guards on startup: {e}");
+        }
 
         let state = Arc::new(RuntimeState::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -298,6 +310,11 @@ impl ActPlaneBackend {
             ));
         }
 
+        // Populate inode guard map for kernel-level fast-path protection.
+        // This allows 5.10/6.6 kernels (where bpf_d_path is unavailable in
+        // LSM hooks) to still block file deletion via inode matching.
+        let guarded_inodes = populate_inode_guards(&self.engine, &request.policy_dsl);
+
         let binding = Binding {
             request,
             state: BindingState::Enforced,
@@ -317,6 +334,7 @@ impl ActPlaneBackend {
                     .into_iter()
                     .map(|(name, mask)| (mask, name))
                     .collect(),
+                guarded_inodes,
             },
         );
         Ok(binding)
@@ -377,6 +395,13 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
+        // Clean up inode guard entries before tearing down the domain so the
+        // BPF map does not retain stale entries for a detached binding.
+        for &(ino, dev) in &active.guarded_inodes {
+            if let Err(e) = self.engine.unguard_inode(ino, dev) {
+                eprintln!("failed to unguard inode {ino}:{dev}: {e}");
+            }
+        }
         let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
         if !cleanup.is_empty() {
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
@@ -402,6 +427,15 @@ impl EnforcementBackend for ActPlaneBackend {
         capabilities.file_delete_guard = self.engine.supports_file_delete_guard()
             && ebpf_ifc_engine::bpf_lsm_active()
             && self.in_init_pidns;
+        capabilities.file_delete_guard_mode = if capabilities.file_delete_guard {
+            if self.engine.bpf_d_path_in_lsm_available() {
+                Some("path".into())
+            } else {
+                Some("inode".into())
+            }
+        } else {
+            None
+        };
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
@@ -572,6 +606,11 @@ impl Drop for ActPlaneBackend {
                     errors.join("; ")
                 );
             }
+        }
+        // Batch-clear all remaining inode guard entries so no stale inodes
+        // survive the enforcer shutdown — covers both normal and error paths.
+        if let Err(e) = self.engine.clear_inode_guards() {
+            eprintln!("agentsight-enforcer: failed to clear inode guards during shutdown: {e}");
         }
         self.stop.store(true, Ordering::Release);
         let poller = self
@@ -1286,6 +1325,103 @@ fn is_init_pid_namespace() -> bool {
     result
 }
 
+/// Extract concrete file paths from DSL `block (unlink|write|rename) file "..."`
+/// clauses only.  Source definitions (`source X = file "..."`) and non-block
+/// rules (`notify`, `audit`) are excluded so that credential source files and
+/// observation-only policies do not receive unintended delete protection.
+///
+/// Paths containing glob characters (`*`, `?`) are skipped because they cannot
+/// be stat'd for an inode.  Only absolute paths are returned.
+fn extract_guarded_paths(dsl: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    // Only match `block <op> file "..."` — not `source X = file` or `notify`.
+    let block_file_needles = [
+        "block unlink file \"",
+        "block write file \"",
+        "block rename file \"",
+    ];
+    for needle in &block_file_needles {
+        let mut rest = dsl;
+        while let Some(pos) = rest.find(needle) {
+            let start = pos + needle.len();
+            rest = &rest[start..];
+            if let Some(end) = rest.find('"') {
+                let path = &rest[..end];
+                if path.starts_with('/')
+                    && !path.contains('*')
+                    && !path.contains('?')
+                    && !paths.iter().any(|p| p == path)
+                {
+                    // The inode guard fast path only checks te_pid_active()
+                    // (= process is in any domain), which is semantically
+                    // equivalent to "if AGENT" / "if COMMAND" (all exec in
+                    // domain).  Rules with other labels (e.g. "if CREDENTIAL")
+                    // or with "unless" conditions cannot be faithfully evaluated
+                    // by the fast path and must be excluded.
+                    let line_rest = rest[end + 1..].split('\n').next().unwrap_or("");
+                    let has_unless = line_rest.contains("unless");
+                    let has_non_standard_label = line_rest.contains(" if ")
+                        && !line_rest.contains("if AGENT")
+                        && !line_rest.contains("if COMMAND");
+                    if !has_unless && !has_non_standard_label {
+                        paths.push(path.to_string());
+                    }
+                }
+                rest = &rest[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    paths
+}
+
+/// Stat each guarded file path from the DSL and insert the `(ino, dev)` pair
+/// into the BPF inode guard map with UNLINK | RENAME protection flags.
+///
+/// Returns the list of successfully guarded `(ino, dev)` pairs so the caller
+/// can store them for later cleanup.
+#[cfg(target_os = "linux")]
+fn populate_inode_guards(engine: &PinnedEngine, policy_dsl: &str) -> Vec<(u64, u32)> {
+    let mut guarded: Vec<(u64, u32)> = Vec::new();
+    for path in extract_guarded_paths(policy_dsl) {
+        match fs::metadata(&path) {
+            Ok(meta) => {
+                let ino = meta.ino();
+                let dev = userspace_dev_to_kernel(meta.dev());
+                let flags =
+                    ebpf_ifc_engine::INODE_GUARD_UNLINK | ebpf_ifc_engine::INODE_GUARD_RENAME;
+                if let Err(e) = engine.guard_inode(ino, dev, flags) {
+                    eprintln!("failed to guard inode {ino}:{dev} for {path}: {e}");
+                } else {
+                    guarded.push((ino, dev));
+                }
+            }
+            Err(e) => eprintln!("cannot stat {path} for inode guard: {e}"),
+        }
+    }
+    guarded
+}
+
+#[cfg(not(target_os = "linux"))]
+fn populate_inode_guards(_engine: &PinnedEngine, _policy_dsl: &str) -> Vec<(u64, u32)> {
+    Vec::new()
+}
+
+/// Convert a userspace `stat.st_dev` value (glibc `new_encode_dev` format) to
+/// the kernel-internal `dev_t` layout used by `super_block.s_dev` and read by
+/// BPF via `BPF_CORE_READ(inode, i_sb, s_dev)`.
+///
+/// Userspace:  `(minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)`
+/// Kernel:     `MKDEV(major, minor)` = `(major << 20) | minor`
+#[cfg(target_os = "linux")]
+fn userspace_dev_to_kernel(dev: u64) -> u32 {
+    let dev = dev as u32;
+    let major = (dev & 0xfff00) >> 8;
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
+    (major << 20) | minor
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -1324,6 +1460,7 @@ mod tests {
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
+            guarded_inodes: Vec::new(),
         }
     }
 

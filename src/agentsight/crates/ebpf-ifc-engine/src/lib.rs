@@ -34,13 +34,22 @@ pub const GLOBAL_ACTIVE_DOMAIN_ID: u32 = u32::MAX;
 pub const DEFAULT_PIN_ROOT: &str = "/sys/fs/bpf/actplane/v1";
 pub const PIN_ROOT_ENV: &str = "ACTPLANE_BPF_PIN_ROOT";
 
-// ---- prebuilt eBPF object, 8-byte aligned for aya's ELF parser ----
+// ---- prebuilt eBPF objects, 8-byte aligned for aya's ELF parser ----
+// Two variants: full (7.1.x with bpf_d_path) and inode-only (5.10/6.6 without).
 #[repr(align(8))]
 struct Aligned<T: ?Sized>(T);
-static OBJECT: &Aligned<[u8]> =
+static OBJECT_FULL: &Aligned<[u8]> =
     &Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/process.bpf.o")));
+static OBJECT_INODE_ONLY: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/process-inode-only.bpf.o"
+)));
 fn object_bytes() -> &'static [u8] {
-    &OBJECT.0
+    if kernel_supports_bpf_d_path_in_lsm() {
+        &OBJECT_FULL.0
+    } else {
+        &OBJECT_INODE_ONLY.0
+    }
 }
 
 // ===================== ABI mirrors (must match bpf/taint.h) =====================
@@ -186,11 +195,29 @@ struct CapPolicyMask {
     hi: u64,
 }
 
+// Mirrors bpf/taint_engine.bpf.h `struct file_id`.
+// Used as HASH key — _pad MUST be explicitly zeroed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileId {
+    pub ino: u64,
+    pub dev: u32,
+    pub _pad: u32,
+}
+
+/// Inode guard flag: block unlink.
+pub const INODE_GUARD_UNLINK: u32 = 1;
+/// Inode guard flag: block rename.
+pub const INODE_GUARD_RENAME: u32 = 2;
+/// Inode guard flag: block write.
+pub const INODE_GUARD_WRITE: u32 = 4;
+
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
 unsafe impl aya::Pod for PidDomainKey {}
 unsafe impl aya::Pod for CapPolicyMask {}
+unsafe impl aya::Pod for FileId {}
 
 // ringbuf event (bpf/process.h: struct event).
 const EVENT_TYPE_TAINT_VIOLATION: i32 = 3;
@@ -1791,6 +1818,38 @@ fn empty_config_blob() -> Vec<u8> {
     }
 }
 
+/// Parse a dotted kernel release string (e.g. "7.1.10-...") and return
+/// `(major, minor)`.  Returns `None` when the format is unexpected.
+fn parse_kernel_major_minor(release: &str) -> Option<(u32, u32)> {
+    let mut parts = release.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    // The minor may be followed by a patch component, so split on '-' as well.
+    let minor_str = parts.next()?;
+    let minor: u32 = minor_str
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Returns `true` when the running kernel is expected to support `bpf_d_path`
+/// inside LSM hooks (Alibaba Cloud Linux kernel >= 7.1).
+fn kernel_supports_bpf_d_path_in_lsm() -> bool {
+    let mut buf: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut buf) } != 0 {
+        return false;
+    }
+    let release = unsafe { std::ffi::CStr::from_ptr(buf.release.as_ptr()) };
+    let Ok(release) = release.to_str() else {
+        return false;
+    };
+    match parse_kernel_major_minor(release) {
+        Some((major, minor)) => major > 7 || (major == 7 && minor >= 1),
+        None => false,
+    }
+}
+
 impl PinnedEngine {
     pub fn open_or_install_singleton() -> io::Result<Self> {
         let paths = PinnedEnginePaths::from_env();
@@ -1865,6 +1924,50 @@ impl PinnedEngine {
             .insert(pid, 1, 0)
             .map_err(|e| err(format!("protect pid {pid}: {e}")))?;
         Ok(())
+    }
+
+    /// Add an inode to the guard map. Files matching `(ino, dev)` will be
+    /// blocked from unlink/rename/write according to `flags`.
+    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32) -> io::Result<()> {
+        let key = FileId { ino, dev, _pad: 0 };
+        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        guard
+            .insert(key, flags, 0)
+            .map_err(|e| err(format!("guard inode {ino}:{dev}: {e}")))?;
+        Ok(())
+    }
+
+    /// Remove an inode from the guard map.
+    pub fn unguard_inode(&self, ino: u64, dev: u32) -> io::Result<()> {
+        let key = FileId { ino, dev, _pad: 0 };
+        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        ignore_missing_remove(guard.remove(&key), "unguard inode")
+    }
+
+    /// Remove all entries from the inode guard map.
+    pub fn clear_inode_guards(&self) -> io::Result<()> {
+        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        let keys: Vec<FileId> = guard
+            .keys()
+            .map(|k| k.map_err(|e| err(format!("list inode guards: {e}"))))
+            .collect::<io::Result<_>>()?;
+        for key in keys {
+            ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the current kernel supports `bpf_d_path` in LSM hooks
+    /// (Alibaba Cloud Linux kernel >= 7.1). When `false`, inode guard mode is
+    /// the only option for file-delete-guard.
+    pub fn bpf_d_path_in_lsm_available(&self) -> bool {
+        kernel_supports_bpf_d_path_in_lsm()
+    }
+
+    /// Whether the engine should operate in inode guard mode (vs path mode).
+    /// Returns `true` when `bpf_d_path` is unavailable in LSM hooks.
+    pub fn inode_guard_mode(&self) -> bool {
+        !self.bpf_d_path_in_lsm_available()
     }
 
     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
