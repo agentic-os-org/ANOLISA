@@ -202,6 +202,147 @@ receives a plain copy of the mount's contents — subsequent writes land in the
 copy, not on the mounted filesystem, and the two silently diverge. Unmount nested
 mounts before initializing, or keep mount points outside the workspace tree.
 
+### Rolling back an OpenClaw workspace can trigger a safety block
+
+OpenClaw records workspace setup state outside the workspace itself. Restoring
+an older snapshot can therefore make the workspace contents disagree with
+recent OpenClaw state, causing OpenClaw to stop instead of reseeding files:
+
+```
+WorkspaceVanishedError: OpenClaw workspace appears to have disappeared ...
+Refusing to reseed BOOTSTRAP.md over a recently attested workspace.
+```
+
+After a successful agent conversation, consider immediately creating and
+recording a baseline checkpoint:
+
+```bash
+ws-ckpt checkpoint -w /path/to/workspace
+```
+
+Prefer that checkpoint, or a later checkpoint already verified with the agent,
+over snapshots from before the first successful conversation. OpenClaw's check
+combines workspace contents with version-specific setup state. The presence of
+any one file, including BOOTSTRAP.md, is not by itself proof that a snapshot
+will be accepted. After recovery, run the OpenClaw agent that uses the restored
+workspace and confirm that `WorkspaceVanishedError` no longer occurs. Treat
+later provider, credential, or runtime errors separately.
+
+The recovery steps below are limited to the releases reproduced here. For other
+OpenClaw versions, use the recovery guidance shipped with that release rather
+than extrapolating from an adjacent version.
+
+- OpenClaw 2026.7.1 (file-backed attestation) — remove
+  this workspace's attestation files. First obtain the exact effective home and
+  state directory used by the agent process from its invocation, service, or
+  deployment configuration. Do not infer them from the recovery shell's
+  `$HOME` or by scanning `.openclaw*` directories. For example, an agent
+  started with `OPENCLAW_HOME=/srv/oc openclaw --profile team ...` normally
+  uses `/srv/oc` and `/srv/oc/.openclaw-team`; an explicit
+  `OPENCLAW_STATE_DIR` takes precedence.
+
+  The command prompts for those exact absolute paths, examines only the three
+  locations checked by the verified release, removes files carrying OpenClaw's
+  attestation marker, and fails if it removes no valid record:
+
+  ```bash
+  IFS= read -r -p 'Workspace path used by the agent: ' WS
+  IFS= read -r -p 'Effective OpenClaw home: ' OC_HOME
+  IFS= read -r -p 'Effective OpenClaw state directory: ' OC_STATE_DIR
+  node - "$WS" "$OC_HOME" "$OC_STATE_DIR" <<'NODE'
+  const crypto = require("crypto");
+  const fs = require("fs");
+  const path = require("path");
+
+  const HEADER = "openclaw-workspace-attestation:v1\n";
+  const MAX_BYTES = 2048;
+  const [workspaceInput, homeInput, stateDirInput] = process.argv.slice(2);
+  const inputs = [workspaceInput, homeInput, stateDirInput];
+  if (inputs.some((value) => !value || !path.isAbsolute(value))) {
+    console.error("Workspace, effective home, and state directory must be absolute paths.");
+    process.exit(1);
+  }
+
+  const workspace = path.resolve(workspaceInput);
+  const home = path.resolve(homeInput);
+  const stateDir = path.resolve(stateDirInput);
+  const hash = crypto.createHash("sha256").update(workspace).digest("hex");
+  const targets = [...new Set([
+    path.join(stateDir, "workspace-attestations", `${hash}.attested`),
+    path.join(home, ".clawdbot", "workspace-attestations", `${hash}.attested`),
+    `${workspace}.attested`,
+  ])];
+
+  let removed = 0;
+  let failed = false;
+  for (const target of targets) {
+    let stat;
+    try {
+      stat = fs.lstatSync(target);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        console.log(`not present: ${target}`);
+      } else {
+        failed = true;
+        console.error(`FAILED: ${target} (${error.message})`);
+      }
+      continue;
+    }
+
+    if (!stat.isFile() || stat.size > MAX_BYTES) {
+      console.log(`skipped: ${target} (not an OpenClaw attestation file)`);
+      continue;
+    }
+
+    let content;
+    try {
+      content = fs.readFileSync(target, "utf8");
+    } catch (error) {
+      failed = true;
+      console.error(`FAILED: ${target} (${error.message})`);
+      continue;
+    }
+    if (!content.startsWith(HEADER)) {
+      console.log(`skipped: ${target} (not an OpenClaw attestation file)`);
+      continue;
+    }
+
+    try {
+      fs.unlinkSync(target);
+      removed += 1;
+      console.log(`removed: ${target}`);
+    } catch (error) {
+      failed = true;
+      console.error(`FAILED: ${target} (${error.message})`);
+    }
+  }
+  if (failed || removed === 0) {
+    if (removed === 0) {
+      console.error("No valid attestation record was removed; verify all three input paths.");
+    }
+    process.exit(1);
+  }
+  NODE
+  ```
+
+  Run the OpenClaw agent that uses the restored workspace. If it is still
+  blocked, verify the three inputs instead of deleting additional state
+  directories.
+
+- OpenClaw 2026.8.1 (SQLite-backed attestation) — do not edit the SQLite
+  database or depend on its private schema. Roll back to a checkpoint created
+  after a successful agent conversation, then retry the agent:
+
+  ```bash
+  ws-ckpt rollback -w /path/to/workspace -s <known-good-snapshot-id>
+  ```
+
+  If no known-good checkpoint exists, there is currently no non-destructive
+  command that immediately clears only this workspace's block. The error also
+  mentions `openclaw reset --scope full`, but that removes every agent
+  workspace and the complete OpenClaw state directory, including credentials,
+  sessions, and installed plugins, so it is not recommended for this recovery.
+
 ---
 
 ## Natural Language Usage (Agent-Driven)
