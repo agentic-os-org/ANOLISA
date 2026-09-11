@@ -3473,6 +3473,177 @@ mod tests {
         );
     }
 
+    struct ServiceProbeRunner {
+        scope: ServiceScope,
+        response:
+            std::sync::Arc<std::sync::Mutex<Option<anolisa_platform::command::CommandOutput>>>,
+    }
+
+    impl anolisa_platform::command::CommandRunner for ServiceProbeRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+        ) -> std::io::Result<anolisa_platform::command::CommandOutput> {
+            assert_eq!(program, "systemctl");
+            let expected = if self.scope == ServiceScope::System {
+                vec!["is-active", "service-tool.service"]
+            } else {
+                vec!["--user", "is-active", "service-tool.service"]
+            };
+            assert_eq!(args, expected);
+            Ok(self
+                .response
+                .lock()
+                .unwrap()
+                .take()
+                .expect("probe must run exactly once"))
+        }
+    }
+
+    #[test]
+    fn doctor_real_service_backend_distinguishes_probe_error_from_unit_state() {
+        use anolisa_core::SystemdServiceManager;
+        use anolisa_platform::command::CommandOutput;
+        use std::sync::{Arc, Mutex};
+
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            for (code, stdout, stderr, expected_status, expected_finding) in [
+                (
+                    1,
+                    "",
+                    "Failed to connect to bus: Host is down\n",
+                    "probe_error",
+                    Some("service_probe_failed"),
+                ),
+                (
+                    3,
+                    "unknown\n",
+                    "",
+                    "not_installed",
+                    Some("service_unit_missing"),
+                ),
+                (
+                    4,
+                    "unknown\n",
+                    "",
+                    "not_installed",
+                    Some("service_unit_missing"),
+                ),
+                (3, "inactive\n", "", "inactive", Some("service_not_active")),
+                (3, "failed\n", "", "failed", Some("service_not_active")),
+                (
+                    3,
+                    "maintenance\n",
+                    "",
+                    "unknown",
+                    Some("service_not_active"),
+                ),
+                (0, "active\n", "", "active", None),
+            ] {
+                for (dry_run, disabled) in [(false, false), (true, false), (false, true)] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let layout = FsLayout::system(Some(temp.path().to_path_buf()));
+                    write_manifest_snapshot(
+                        &layout,
+                        "service-tool",
+                        "[component]\nname = \"service-tool\"\nversion = \"1.0.0\"\n",
+                    );
+                    let mut object = owned_object(
+                        "service-tool",
+                        if disabled {
+                            LifecycleStatus::Disabled
+                        } else {
+                            LifecycleStatus::Installed
+                        },
+                    );
+                    push_owned_service(&mut object, service_ref("service-tool.service", scope));
+                    let view = system_view_with_layout(layout, state_with_component(object));
+                    let response = Arc::new(Mutex::new(Some(CommandOutput {
+                        code: Some(code),
+                        stdout: stdout.to_string(),
+                        stderr: stderr.to_string(),
+                    })));
+                    let manager = SystemdServiceManager::with_runner(
+                        scope,
+                        ServiceProbeRunner {
+                            scope,
+                            response: response.clone(),
+                        },
+                    );
+                    let env = ResolverEnv::default();
+                    let ctx = DoctorViewContext {
+                        resolver_env: &env,
+                        resolve_runtime_dependencies: &unexpected_runtime_dependencies,
+                        rpm_query: &MissingPackageQuery,
+                        current_system_service: &manager,
+                        system_scope_service: &manager,
+                        user_service: &manager,
+                        dry_run,
+                    };
+                    let payload = diagnose_from_view(&view, Some("service-tool"), &ctx).unwrap();
+                    let component = &payload.components[0];
+                    let health = component
+                        .health_checks
+                        .iter()
+                        .find(|check| check.source == "service_ref")
+                        .unwrap();
+                    assert_eq!(response.lock().unwrap().is_some(), dry_run || disabled);
+                    let service_findings: Vec<_> = component
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.source == "service_ref")
+                        .collect();
+                    if dry_run || disabled {
+                        assert_eq!(health.status, "skipped");
+                        assert!(service_findings.is_empty());
+                        continue;
+                    }
+                    assert_eq!(health.status, expected_status);
+                    assert_eq!(
+                        service_findings
+                            .iter()
+                            .map(|finding| finding.code.as_str())
+                            .collect::<Vec<_>>(),
+                        expected_finding.into_iter().collect::<Vec<_>>()
+                    );
+                    if code == 1 {
+                        let detail = "systemctl is-active service-tool.service exited with status 1: Failed to connect to bus: Host is down";
+                        assert_eq!(health.detail.as_deref(), Some(detail));
+                        assert_eq!(service_findings[0].detail.as_deref(), Some(detail));
+                        assert!(
+                            component
+                                .fix_plan
+                                .iter()
+                                .any(|fix| fix.action == "inspect_logs"
+                                    && fix.command.as_deref()
+                                        == Some(
+                                            "sudo anolisa --install-mode system logs service-tool"
+                                        ))
+                        );
+                        assert!(
+                            !component
+                                .fix_plan
+                                .iter()
+                                .any(|fix| fix.action == "repair_component"
+                                    || fix.action == "restart_component")
+                        );
+                    }
+                    let json = serde_json::to_value(component).unwrap();
+                    assert_eq!(
+                        json["health_checks"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|check| check["source"] == "service_ref")
+                            .unwrap()["status"],
+                        expected_status
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn managed_missing_package_recommends_executable_repair() {
         let object = resolved_delegated_object(
