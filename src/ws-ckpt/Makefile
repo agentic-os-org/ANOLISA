@@ -24,7 +24,7 @@ PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
-.PHONY: build install uninstall clean test test-openclaw-install help
+.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-install test-openclaw-uninstall help
 
 build:
 	cd src && cargo build --release --workspace
@@ -159,13 +159,18 @@ clean:
 
 test:
 	cd src && cargo test --workspace
-	$(MAKE) test-openclaw-install
+	$(MAKE) test-openclaw-scripts
+
+test-openclaw-scripts: test-openclaw-install test-openclaw-uninstall
 
 test-openclaw-install:
 	bash tests/openclaw-install.sh
 
+test-openclaw-uninstall:
+	bash tests/openclaw-uninstall.sh
+
 help:
-	@echo "Targets: build install uninstall clean test test-openclaw-install"
+	@echo "Targets: build install uninstall clean test test-openclaw-scripts"
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= staging root for packages"
