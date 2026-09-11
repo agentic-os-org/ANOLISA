@@ -8,20 +8,30 @@ AW 为能力调用及其记录提供版本化 JSON Schema 和离线校验器。�
 
 ## 运行检查
 
-准备 Rust 工具链及 rustfmt、Clippy。跨语言摘要测试还需要 Python 3 和 Node.js，Rust 库本身不依赖这两个运行时。在仓库根目录执行以下命令。
+通过 rustup 准备 Rust，并安装 Python 3 和 Node.js。Rust、rustfmt 和 Clippy
+由 [rust-toolchain.toml](rust-toolchain.toml) 固定。在仓库根目录运行：
 
 ```bash
-cd src/aw
-cargo test --workspace --locked
-python3 tests/check_canonical.py
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo doc --workspace --no-deps --locked
+python3 src/aw/scripts/check.py
 ```
 
-这些检查可由普通用户运行，无需启动 Agent 或登录服务。Cargo 会下载尚未缓存的依赖，Schema 校验只读取随包资源。
+入口依次运行 CI 行为测试、格式检查、Clippy、完整的 locked workspace 测试、
+Python/JavaScript 摘要向量和 rustdoc。缺少工具、合同或计划测试目标为空或全部
+ignored、向量错误及命令失败均返回非零。每条命令都有超时限制，失败或中断时
+回收其子进程组。日志标明失败命令，可在 `src/aw` 单独运行对应命令定位问题。
 
-已验证的环境为 Linux ARM64，使用 Rust 1.97.1、Python 3.12.3 和 Node.js 24.15.0。最低支持版本和其他操作系统尚未验证。
+这些检查可由普通用户运行，无需启动 Agent 或登录服务。Cargo 会下载尚未缓存的
+依赖，Schema 校验只读取随包资源。检查入口要求 Linux；库本身仍可移植，但本门禁
+不认证其他操作系统或最低支持版本。
+
+[AW CI](../../.github/workflows/aw-ci.yml) 响应分支 push、pull request、merge group
+和手动触发，校验候选提交；PR 校验合成的 merge 结果。无关变化明确返回 no-op；
+范围判定错误、意外跳过或受测提交不一致均使 `AW / required` 失败。仓库管理员
+需要在分支保护中选择该检查才能强制执行。工作流取消不代表门禁通过。
+
+上游 CI 使用自部署 `anolisa-k8s-general-ci-x64` runner；fork CI 使用 GitHub 托管
+Ubuntu 24.04。两者均使用 Python 3.12.3、Node.js 24.15.0 和固定 Rust 工具链。
+本地验证另使用 Linux ARM64。
 
 ## 源码参考
 
