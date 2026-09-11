@@ -11,15 +11,24 @@ import subprocess
 from pathlib import Path
 
 vectors = Path(__file__).parent / "fixtures" / "canonical-vectors.json"
-for vector in json.loads(vectors.read_text(encoding="utf-8")):
+loaded = json.loads(vectors.read_text(encoding="utf-8"))
+if not isinstance(loaded, list) or not loaded:
+    raise ValueError("canonical vectors must be a nonempty list")
+for vector in loaded:
     encoded = json.dumps(
         vector["input"], sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
-    assert encoded.decode("utf-8") == vector["canonical"]
-    assert hashlib.sha256(encoded).hexdigest() == vector["digest"]
+    if encoded.decode("utf-8") != vector["canonical"]:
+        raise ValueError("Python canonical encoding differs from the vector")
+    if hashlib.sha256(encoded).hexdigest() != vector["digest"]:
+        raise ValueError("Python canonical digest differs from the vector")
 
 subprocess.run(
-    ["node", "--input-type=module", "-e", r"""
+    [
+        "node",
+        "--input-type=module",
+        "-e",
+        r"""
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -38,7 +47,9 @@ for (const vector of JSON.parse(readFileSync(process.argv[1], 'utf8'))) {
   assert.equal(encoded, vector.canonical);
   assert.equal(createHash('sha256').update(encoded, 'utf8').digest('hex'), vector.digest);
 }
-""", str(vectors)],
+""",
+        str(vectors),
+    ],
     check=True,
     timeout=15,
 )
