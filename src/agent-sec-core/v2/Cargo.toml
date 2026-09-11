@@ -11,6 +11,13 @@ members = [
     "crates/daemon/asc-daemon-handler",
     "crates/daemon/asc-daemon-protocol",
     "crates/daemon/asc-daemon-service",
+    "crates/data/asc-event-log",
+    "crates/data/asc-event-sink",
+    "crates/data/asc-observability",
+    "crates/data/asc-security-events",
+    "crates/data/asc-security-summary",
+    "crates/data/persistence/asc-persistence-sqlite",
+    "crates/data/persistence/asc-sqlite-kernel",
     "crates/foundation/asc-foundation-types",
     "crates/integrations/asc-agentsight-client",
     "crates/policy/adapters/asc-policy-adapter-agentsight",
@@ -42,21 +49,33 @@ asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
 asc-daemon-handler = { path = "crates/daemon/asc-daemon-handler" }
 asc-daemon-protocol = { path = "crates/daemon/asc-daemon-protocol" }
 asc-daemon-service = { path = "crates/daemon/asc-daemon-service" }
+asc-event-log = { path = "crates/data/asc-event-log" }
+asc-event-sink = { path = "crates/data/asc-event-sink" }
 asc-foundation-types = { path = "crates/foundation/asc-foundation-types" }
+asc-observability = { path = "crates/data/asc-observability" }
 asc-pap = { path = "crates/policy/asc-pap" }
 asc-pap-repository-memory = { path = "crates/policy/asc-pap-repository-memory" }
 asc-pcp = { path = "crates/policy/asc-pcp" }
+asc-persistence-sqlite = { path = "crates/data/persistence/asc-persistence-sqlite" }
 asc-policy-adapter-agentsight = { path = "crates/policy/adapters/asc-policy-adapter-agentsight" }
 asc-policy-engine = { path = "crates/policy/asc-policy-engine" }
 asc-policy-target-contracts = { path = "crates/policy/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/policy/asc-policy-repository" }
 asc-policy-types = { path = "crates/policy/asc-policy-types" }
+asc-security-events = { path = "crates/data/asc-security-events" }
+asc-security-summary = { path = "crates/data/asc-security-summary" }
+asc-sqlite-kernel = { path = "crates/data/persistence/asc-sqlite-kernel" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
 fancy-regex = "0.16"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serial_test = "3"
 socket2 = "0.6"
 sha2 = "0.10"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 unicode-properties = "0.1"

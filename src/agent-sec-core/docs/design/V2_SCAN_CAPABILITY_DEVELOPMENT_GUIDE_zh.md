@@ -308,13 +308,17 @@ Capability 处理。schema error 落在哪一层响应中，按 oracle 和选定
 | --- | --- | --- |
 | `asc-model-client` | 接入 Prompt 模型模式或 Code LLM mode 时 | `v2/crates/integrations/asc-model-client/`；共享 HTTP、连接、超时、重试和配置校验。保留当前本地模型访问边界，并测试构造/注入路径 |
 | `asc-evidence-types` | 扫描结果有 PIP/Decision 等跨领域消费者时 | `v2/crates/action/asc-evidence-types/`；Evidence/Attribute 合同和受控 projector；不直接把完整扫描 JSON 送入 PDP |
-| `asc-persistence-sqlite` | 需要真实安全事件保留和重启后恢复时 | `v2/crates/data/persistence/asc-persistence-sqlite/src/events.rs`、`migrations.rs`；实现事件 port，验证真实存储和恢复 |
-| `asc-observability`、`asc-session` | 需要授权事件查询、session 关联和读模型时 | `v2/crates/data/`；由 daemon query 用例提供访问，不由 CLI 直读数据库 |
+| `asc-persistence-sqlite`、`asc-sqlite-kernel` | 需要真实安全事件保留和重启后恢复时 | `v2/crates/data/persistence/asc-sqlite-kernel/`（与领域无关的连接、schema 收敛、写入阶梯、维护闸门）与 `v2/crates/data/persistence/asc-persistence-sqlite/src/{security_events,observability}/`（各自的 `table`/`repository`/`policy`/`migration`/`writer`/`reader`）。两条流的表契约、故障策略和迁移机制都不同，因此按流分目录而非合并为单个 `events.rs`；实现事件 port，验证真实存储和恢复 |
+| `asc-observability`、`asc-session`、`asc-event-log`、`asc-event-sink`、`asc-security-summary` | 需要授权事件查询、session 关联和读模型时 | `v2/crates/data/`；由 daemon query 用例提供访问，不由 CLI 直读数据库。JSONL 落盘、双写装配与摘要渲染已分别落在 `asc-event-log`、`asc-event-sink`、`asc-security-summary`；`asc-session` 尚未实现 |
 | config/packaging/deploy | 从集成切片进入产品交付时 | `v2/config/`、`v2/packaging/`、`v2/deploy/`；规则资产、模型配置、系统路径、身份和启动就绪合同 |
 
 独立扫描 RPC 不要求先实现 Policy Runtime、PAP 扩展、PCP/Reconciler 或 AgentSight
-规则下发。最小事件路径也不要求先完成整个 trajectory 系统。事件是否兼容 V1 JSONL +
-SQLite 双写、原文保留期限和 sink deadline 仍需由事件工作包定案。
+规则下发。最小事件路径也不要求先完成整个 trajectory 系统。事件工作包已定案上述
+三个待定项（详见
+[《V2 数据持久化层迁移设计》](V2_DATA_PERSISTENCE_MIGRATION_zh.md) §2）：兼容 V1 JSONL +
+SQLite 双写（是，且是文件级兼容，唯一分歧是 JSONL 的 key 顺序）；保留期沿用 v1
+（`security_events` 30 天 / `observability` 7 天）；sink deadline 本次不引入，引入会
+改变可观测行为而破坏迁移等价性，将来应加在 daemon 侧的 `spawn_blocking` 包装上。
 
 若扫描接入改变任一 Agent Hook 的环境变量、默认值或行为，同一 PR 同步 capability
 view、对应文档和合同测试，遵循组件 `AGENTS.md`。只有明确受影响的 Hook 才纳入该变更。

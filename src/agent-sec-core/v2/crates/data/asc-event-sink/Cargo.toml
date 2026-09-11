@@ -1,0 +1,33 @@
+[package]
+name = "asc-event-sink"
+description = "Process-wide dual-write sinks for security and observability events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes the slot reset and injection helpers. Off by default so a production
+# build cannot reach into the process-wide sinks.
+testing = []
+
+[dependencies]
+asc-event-log = { workspace = true }
+asc-observability = { workspace = true }
+asc-persistence-sqlite = { workspace = true }
+asc-security-events = { workspace = true }
+asc-sqlite-kernel = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+asc-security-summary = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

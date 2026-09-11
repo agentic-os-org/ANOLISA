@@ -1,0 +1,138 @@
+{
+    "auto_vacuum": 0,
+    "exists": true,
+    "journal_mode": "wal",
+    "sqlite_master": [
+        "idx_observability_hook_observed_at_epoch",
+        "idx_observability_observed_at_epoch",
+        "idx_observability_session_observed_at_epoch",
+        "idx_observability_session_run_observed_at_epoch",
+        "observability_events"
+    ],
+    "tables": [
+        {
+            "columns": [
+                {
+                    "cid": 0,
+                    "dflt_value": null,
+                    "name": "id",
+                    "notnull": 1,
+                    "pk": 1,
+                    "type": "INTEGER"
+                },
+                {
+                    "cid": 1,
+                    "dflt_value": null,
+                    "name": "hook",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 2,
+                    "dflt_value": null,
+                    "name": "observed_at",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 3,
+                    "dflt_value": null,
+                    "name": "observed_at_epoch",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "FLOAT"
+                },
+                {
+                    "cid": 4,
+                    "dflt_value": null,
+                    "name": "session_id",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 5,
+                    "dflt_value": null,
+                    "name": "run_id",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 6,
+                    "dflt_value": null,
+                    "name": "metrics_json",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 7,
+                    "dflt_value": null,
+                    "name": "metadata_json",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 8,
+                    "dflt_value": null,
+                    "name": "call_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 9,
+                    "dflt_value": null,
+                    "name": "tool_call_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                }
+            ],
+            "indexes": [
+                {
+                    "columns": [
+                        "hook",
+                        "observed_at_epoch"
+                    ],
+                    "name": "idx_observability_hook_observed_at_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "observed_at_epoch"
+                    ],
+                    "name": "idx_observability_observed_at_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "session_id",
+                        "observed_at_epoch"
+                    ],
+                    "name": "idx_observability_session_observed_at_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "session_id",
+                        "run_id",
+                        "observed_at_epoch"
+                    ],
+                    "name": "idx_observability_session_run_observed_at_epoch",
+                    "origin": "c",
+                    "unique": 0
+                }
+            ],
+            "name": "observability_events"
+        }
+    ],
+    "user_version": 1
+}

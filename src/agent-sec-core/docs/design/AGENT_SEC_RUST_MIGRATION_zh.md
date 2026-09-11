@@ -245,7 +245,10 @@ asc-state-migrator 必须定义并验证：
   其中 asc-policy-target-contracts 只定义共享 Adapter/Client trait，依赖纯数据契约
   asc-policy-types；Reconciler 与具体 PEP 实现均依赖该共享层，而不互相依赖实现。
 - data：asc-security-events、asc-observability、asc-session、asc-state、
-  asc-persistence-sqlite；
+  asc-persistence-sqlite；其中事件持久化实际落地时又拆出 asc-sqlite-kernel（与领域
+  无关的 SQLite 内核）、asc-event-log（JSONL 落盘）、asc-security-summary（摘要渲染）
+  和 asc-event-sink（双写装配与进程级单例），拆分理由与 schema/迁移契约见
+  [《V2 数据持久化层迁移设计》](V2_DATA_PERSISTENCE_MIGRATION_zh.md)；
 - integrations：AgentSight/ActPlane、模型和 credential adapter；
 - tests：asc-testkit、asc-contract-tests、asc-integration-tests。
 
