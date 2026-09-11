@@ -19,7 +19,7 @@ When AI Agents modify code, configurations, or data files, mistakes can be costl
 
 - Linux (x86_64 or aarch64)
 - btrfs filesystem on the workspace volume (for native COW snapshots), or any filesystem (ws-ckpt will create a btrfs loop image automatically)
-- Agent runtime: OpenClaw or Hermes (for plugin mode)
+- Agent runtime: OpenClaw (>= 2026.2.13) or Hermes (for plugin mode)
 
 ---
 
@@ -61,6 +61,8 @@ ws-ckpt plugin uninstall --runtime openclaw
 ```
 
 `plugin install` first runs a detect script to verify prerequisites (exit 2 = missing prerequisite, abort; exit 1 = not installed but installable, continue), then runs the install script. Scripts live under `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`.
+
+The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose config write path avoids persisting runtime defaults and restores unchanged `${VAR}` references before writing to disk. OpenClaw >= 2026.9.1 uses conditional config writes. Versions from 2026.2.13 to <2026.9.1 use plain JSON writes only when the root config does not contain `$include`; otherwise installation stops before installing the plugin and requires an OpenClaw upgrade. An unparseable version, missing write capability, or failed allowlist update also aborts installation rather than leaving a partial integration. Uninstall remains best-effort: it removes local plugin files but warns and skips plugin unregister and allowlist cleanup when no safe config write is available.
 
 ---
 

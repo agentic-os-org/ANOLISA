@@ -195,7 +195,7 @@ anolisa adapter enable <component> [framework]
 # Tokenless plugin for OpenClaw
 /usr/share/tokenless/scripts/install.sh --openclaw
 
-# ws-ckpt plugin for OpenClaw
+# ws-ckpt plugin for OpenClaw (requires OpenClaw >= 2026.2.13)
 ws-ckpt plugin install --runtime openclaw
 
 # ws-ckpt plugin for Hermes

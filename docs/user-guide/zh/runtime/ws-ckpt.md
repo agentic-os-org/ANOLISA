@@ -19,7 +19,7 @@ AI Agent 修改代码、配置或数据文件时，误操作代价高昂。ws-ck
 
 - Linux（x86_64 或 aarch64）
 - 工作区所在卷使用 btrfs 文件系统（用于原生 COW 快照），或任意文件系统（ws-ckpt 会自动创建 btrfs loop image）
-- Agent 运行时：OpenClaw 或 Hermes（Plugin 模式）
+- Agent 运行时：OpenClaw（>= 2026.2.13）或 Hermes（Plugin 模式）
 
 ---
 
@@ -61,6 +61,8 @@ ws-ckpt plugin uninstall --runtime openclaw
 ```
 
 `plugin install` 会先执行 detect 脚本检查前置条件（exit 2 = 缺前置依赖，中止；exit 1 = 未安装但可安装，继续），通过后再执行 install 脚本。脚本位于 `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`。
+
+OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次避免固化 runtime defaults，并在写盘前恢复未修改 `${VAR}` 引用的版本。OpenClaw >= 2026.9.1 使用条件配置写入；2026.2.13 到 <2026.9.1 的版本仅在根配置不含 `$include` 时使用普通 JSON 写入，否则安装会在安装插件前中止，并要求升级 OpenClaw。版本无法解析、缺少写入能力或 allowlist 更新失败时，安装同样会中止，避免留下不完整的集成。卸载仍采用 best-effort：本地插件文件会被删除；若不存在安全的配置写入路径，则跳过 plugin unregister 和 allowlist 清理并输出告警。
 
 ---
 

@@ -22,7 +22,7 @@ import {
 import { pluginState, cwdInsideWorkspace, cwdInsideWorkspaceReason } from "./state.js";
 import { registerTools } from "./tool-registry.js";
 import { registerHooks } from "./hooks.js";
-import { ensureToolsAlsoAllow } from "./whitelist.js";
+import { ensureToolsAllowlist } from "./whitelist.js";
 
 // ---------------------------------------------------------------------------
 // register() — main entry point called by OpenClaw runtime
@@ -109,9 +109,10 @@ function register(api: OpenClawPluginApi): void {
   })();
 
   // ------------------------------------------------------------------
-  // 4. Ensure ws-ckpt tools are in tools.alsoAllow whitelist
+  // 4. Warn if ws-ckpt tools are missing from the active allowlist
+  //    (entries are written at install time, never from register())
   // ------------------------------------------------------------------
-  ensureToolsAlsoAllow(api);
+  ensureToolsAllowlist(api);
 
   // ------------------------------------------------------------------
   // 5. Register tools
