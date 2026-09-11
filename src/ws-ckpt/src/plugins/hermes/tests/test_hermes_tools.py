@@ -194,7 +194,7 @@ class TestRunWsCkptCmd:
     @patch("hermes.tools.subprocess.run")
     def test_timeout(self, mock_run):
         import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ws-ckpt", timeout=30)
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ws-ckpt", timeout=240)
         ok, output = _run_ws_ckpt_cmd(["ws-ckpt", "status"])
         assert ok is False
         assert "timed out" in output.lower()
@@ -359,12 +359,14 @@ class TestHandlers:
         result = json.loads(handle_ws_ckpt_checkpoint({"id": "snap1"}))
         assert result["success"] is True
 
-    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
+    @patch("hermes.tools.subprocess.run")
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
-    def test_rollback_success(self, _ws, _cwd, _cmd):
+    def test_rollback_uses_cleanup_compatible_timeout(self, _ws, _cwd, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="rolled back", stderr="")
         result = json.loads(handle_ws_ckpt_rollback({"target": "snap1"}))
         assert result["success"] is True
+        assert mock_run.call_args.kwargs["timeout"] == 240
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "ID  MESSAGE"))
     @patch("hermes.tools._require_workspace", return_value=("/ws", None))

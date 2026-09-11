@@ -30,7 +30,7 @@
 | 语言         | Python 3                                                     | TypeScript → Node ESM                                                 |
 | 入口         | `register(ctx)`                                            | `register(api)`                                                      |
 | 配置位置     | `~/.hermes/config.yaml` 的 `plugins.ws-ckpt` 节          | `~/.openclaw/openclaw.json` 的 `plugins.entries.ws-ckpt.config` 节 |
-| 子进程调用   | `subprocess.run(["ws-ckpt", ...], timeout=30)`             | `execFile("ws-ckpt", [...], { timeout: 30_000 })`                    |
+| 子进程调用   | `subprocess.run(["ws-ckpt", ...], timeout=240)`            | `execFile("ws-ckpt", [...], { timeout: 240_000 })`                   |
 | Hook 三件套  | `on_session_start` / `pre_llm_call` / `on_session_end` | `session_start` / `message_received` / `agent_end`               |
 
 两个实现共享同一组核心抽象:

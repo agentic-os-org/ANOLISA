@@ -51,11 +51,13 @@ pub struct DaemonState {
     pub state_dir: PathBuf,
     /// Backend selection method: "auto-detect" | "config" | "persisted"
     selection_method: String,
-    /// Per-ws-id mutex serializing lifecycle ops (init / adopt / recover) that
-    /// race on the same `index_dir(ws_id)` and `workspaces` slot. Distinct
-    /// from `WorkspaceState::policy_io_mu` (which lives inside an Arc that
-    /// recover would unregister). Held across `await`.
+    /// Per-ws-id mutation mutex serializing lifecycle and snapshot operations
+    /// that race on the backend, `index_dir(ws_id)`, or `workspaces` slot.
+    /// Distinct from `WorkspaceState::policy_io_mu` (which lives inside an Arc
+    /// that recover may unregister). Held across `await`.
     wsid_locks: DashMap<String, Arc<Mutex<()>>>,
+    /// Serializes manifest snapshots and writes across different workspaces.
+    manifest_save_lock: Mutex<()>,
 }
 
 pub struct WorkspaceState {
@@ -96,14 +98,15 @@ impl DaemonState {
             state_dir,
             selection_method,
             wsid_locks: DashMap::new(),
+            manifest_save_lock: Mutex::new(()),
         }
     }
 
-    /// Acquire (or get-or-create) the per-ws-id lifecycle lock. Held by
-    /// init / adopt_existing_subvol / recover_workspace to serialize the
-    /// register/unregister + index-dir-mutation window. Entries are not
-    /// removed: each is ~few hundred bytes, and removal would race with
-    /// another waiter that just cloned the Arc.
+    /// Acquires the per-workspace mutation mutex.
+    ///
+    /// When both locks are needed, acquire this mutex before the workspace
+    /// `RwLock`. Entries are retained because removal could split waiters for
+    /// the same ID across different mutex instances.
     pub async fn lock_wsid(&self, ws_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mtx = self
             .wsid_locks
@@ -111,6 +114,17 @@ impl DaemonState {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         mtx.lock_owned().await
+    }
+
+    /// Acquires the mutation mutex if this workspace instance remains registered.
+    pub(crate) async fn lock_workspace_mutation_if_current(
+        &self,
+        workspace: &Arc<RwLock<WorkspaceState>>,
+    ) -> Option<(String, tokio::sync::OwnedMutexGuard<()>)> {
+        let ws_id = workspace.read().await.ws_id.clone();
+        let guard = self.lock_wsid(&ws_id).await;
+        self.workspace_arc_is_current(&ws_id, workspace)
+            .then_some((ws_id, guard))
     }
 
     /// get the index storage directory for a workspace
@@ -246,6 +260,7 @@ impl DaemonState {
 
     /// Save current runtime state to state.json (atomic write+rename+fsync)
     pub async fn save_manifest(&self) -> anyhow::Result<()> {
+        let _save_guard = self.manifest_save_lock.lock().await;
         let backend_type = self.backend.backend_type();
         let backend = BackendIdentity {
             backend_type,
@@ -333,11 +348,22 @@ impl DaemonState {
     /// Returns the workspace ID registered for this exact path spelling.
     ///
     /// The map guard is dropped before returning so callers can acquire the
-    /// lifecycle lock without retaining a DashMap shard lock across `.await`.
+    /// mutation mutex without retaining a DashMap shard lock across `.await`.
     pub(crate) fn wsid_for_exact_registration_path(&self, path: &Path) -> Option<String> {
         self.path_to_wsid
             .get(path)
             .map(|entry| entry.value().clone())
+    }
+
+    /// Confirms that the workspace ID still maps to this exact allocation.
+    pub(crate) fn workspace_arc_is_current(
+        &self,
+        ws_id: &str,
+        workspace: &Arc<RwLock<WorkspaceState>>,
+    ) -> bool {
+        self.workspaces
+            .get(ws_id)
+            .is_some_and(|entry| Arc::ptr_eq(entry.value(), workspace))
     }
 
     /// Confirms that both registration indexes still name the same workspace.
@@ -351,11 +377,7 @@ impl DaemonState {
             .path_to_wsid
             .get(path)
             .is_some_and(|entry| entry.value() == ws_id);
-        let workspace_matches = self
-            .workspaces
-            .get(ws_id)
-            .is_some_and(|entry| Arc::ptr_eq(entry.value(), workspace));
-        path_matches && workspace_matches
+        path_matches && self.workspace_arc_is_current(ws_id, workspace)
     }
 
     /// Resolve a workspace by identifier: tries workspace ID first, then filesystem path.
@@ -434,10 +456,10 @@ impl DaemonState {
         // subvolume (rename to `<ws_id>.rollback-tmp`, then create the
         // replacement) while holding the workspace write lock, so probing
         // unlocked can observe the transient gap and refuse a healthy
-        // workspace. Callers invoke this guard before taking any lock
-        // themselves, so extending the hold here cannot deadlock; V2's
-        // guarded checkpoint already enforces the same contract by probing
-        // under the write lock.
+        // workspace. Mutation-capable callers already hold `lock_wsid` but
+        // invoke this guard before taking the workspace write lock, preserving
+        // the canonical lock order. V2 guarded checkpoint enforces the same
+        // contract by probing under its workspace lock.
         let ws = workspace.read().await;
         let ws_id = ws.ws_id.clone();
         let registration_path = ws.path.clone();
@@ -497,7 +519,12 @@ impl DaemonState {
             policy_failsafe: failsafe,
             policy_io_mu: Arc::new(Mutex::new(())),
         }));
-        self.workspaces.insert(ws_id.clone(), state);
+        let replaced = self.workspaces.insert(ws_id.clone(), state).is_some();
+        if replaced {
+            self.path_to_wsid.retain(|registered_path, registered_id| {
+                registered_id != &ws_id || registered_path == &path
+            });
+        }
         self.path_to_wsid.insert(path, ws_id);
         self.config_notify.notify_waiters();
     }
@@ -1009,8 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_register_overwrites() {
-        // Registering the same ws_id again should overwrite
+    fn duplicate_register_replaces_reverse_path_mapping() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         let path1 = PathBuf::from("/ws/first");
         let path2 = PathBuf::from("/ws/second");
@@ -1020,10 +1046,11 @@ mod tests {
         state.register_workspace("ws-dup".to_string(), path1.clone(), index1);
         state.register_workspace("ws-dup".to_string(), path2.clone(), index2);
 
-        // The last registration should win
         let arc = state.get_by_wsid("ws-dup").unwrap();
         let ws = arc.try_read().unwrap();
         assert_eq!(ws.path, path2);
+        assert!(state.get_by_path(&path1).is_none());
+        assert!(state.get_by_path(&path2).is_some());
     }
 
     #[tokio::test]
@@ -1385,7 +1412,7 @@ mod tests {
         );
     }
 
-    // ── lock_wsid: serializes init/adopt/recover on a shared ws_id ──
+    // ── lock_wsid: serializes mutations on a shared ws_id ──
 
     #[tokio::test]
     async fn lock_wsid_serializes_same_id() {

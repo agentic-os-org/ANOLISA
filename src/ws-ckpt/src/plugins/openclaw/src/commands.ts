@@ -16,8 +16,8 @@ import { pluginState } from "./state.js";
 
 const execFileAsync = promisify(execFile);
 
-/** Default command execution timeout in milliseconds. */
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** Allows the daemon's 180 s bounded reclamation plus RPC overhead. */
+const DEFAULT_TIMEOUT_MS = 240_000;
 
 /** The ws-ckpt CLI binary name. */
 const WS_CKPT_BIN = "ws-ckpt";
@@ -34,7 +34,7 @@ export class CommandExecutor {
   /**
    * Create a new CommandExecutor.
    *
-   * @param timeoutMs - Timeout for each CLI invocation (default 30 s).
+   * @param timeoutMs - Timeout for each CLI invocation (default 240 s).
    */
   constructor(timeoutMs: number = DEFAULT_TIMEOUT_MS) {
     this.timeoutMs = timeoutMs;

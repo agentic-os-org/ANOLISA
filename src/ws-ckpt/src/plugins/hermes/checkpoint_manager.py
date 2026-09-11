@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from .config import HermesPluginConfig, MSG_TRUNCATE_LEN, load_config
 
-DEFAULT_TIMEOUT_S = 30
+# Allows the daemon's 180 s bounded reclamation plus RPC overhead.
+DEFAULT_TIMEOUT_S = 240
 
 WS_CKPT_BIN = "ws-ckpt"
 

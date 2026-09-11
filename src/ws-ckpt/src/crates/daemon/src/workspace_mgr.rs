@@ -468,6 +468,13 @@ pub async fn delete_snapshot(
             ));
         }
     };
+    let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&ws_lock).await
+    else {
+        return Ok(error_resp(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace not found: {}", workspace),
+        ));
+    };
 
     // 1a. Detached-registration guard: refuse before unlinking snapshots of a
     // subvolume the registered path no longer exposes to the user.
@@ -475,7 +482,7 @@ pub async fn delete_snapshot(
         return Ok(resp);
     }
 
-    // 2. Write lock
+    // 2. Write lock after the mutation mutex.
     let mut ws = ws_lock.write().await;
 
     // 2a. Resolve snapshot by prefix within this workspace
@@ -580,19 +587,19 @@ pub async fn recover_workspace(
         }
     };
 
-    // 2. read lock to get ws_id and original_path
-    let (ws_id, original_path) = {
-        let ws = ws_lock.read().await;
-        (ws.ws_id.clone(), ws.path.to_string_lossy().to_string())
+    // Block every mutation of this workspace through unregister, index removal,
+    // and manifest persistence.
+    let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&ws_lock).await
+    else {
+        return Ok(error_resp(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace not found: {}", workspace),
+        ));
     };
+    let original_path = ws_lock.read().await.path.to_string_lossy().to_string();
 
     // Intentionally no cwd guard: recover is a terminal "tear out" operation
     // gated by CLI ConfirmationRequired. The CLI prompt is the contract.
-
-    // Block a concurrent init on the same path (ws_id is SHA256(path), so it
-    // would target the same workspaces slot and index_dir we're about to
-    // unregister + wipe). Held until save_manifest finishes.
-    let _wsid_guard = state.lock_wsid(&ws_id).await;
 
     // 3. call backend recover
     state
@@ -1389,7 +1396,11 @@ mod tests {
         ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
             unimplemented!()
         }
-        async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
             unimplemented!()
         }
         async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {

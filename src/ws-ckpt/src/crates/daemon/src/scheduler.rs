@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::snapshot_mgr::{delete_snapshots_locked, ensure_index_dir, persist_index_after_cleanup};
 use crate::state::DaemonState;
+use ws_ckpt_common::backend::StorageBackend;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 
 /// Start background scheduler tasks: periodic auto-cleanup and health checks.
@@ -96,40 +97,24 @@ async fn health_check_loop(state: Arc<DaemonState>) {
 /// - `Count(n)`: keep n newest per workspace.
 /// - `Age { secs, .. }`: delete if older than `secs` (strict, no count floor).
 ///
-/// Locking: P1 read-lock probe; P2a read-lock plan (P2b rechecks per-snap);
-/// P2b unlocked deletes with short per-snap write to drop index entry.
+/// Each workspace pass holds its mutation mutex from planning through persistence;
+/// workspace `RwLock` guards are acquired only inside that serialized region.
 async fn auto_cleanup(state: &DaemonState) {
     info!("Running auto-cleanup pass (per-ws effective retention)...");
     let all_ws = state.all_workspaces();
     let now = chrono::Utc::now();
 
     for ws_arc in &all_ws {
-        // Phase 1: cheap read-only probe — exact list is recomputed in Phase 2.
-        let has_potential_work = {
-            let ws = ws_arc.read().await;
-            let cfg = state.config_snapshot();
-            let eff: EffectivePolicy = ws.policy.effective_for(&cfg);
-            if eff.is_disabled() {
-                false
-            } else {
-                // Any unpinned snapshot exists; Phase 2 decides the final set.
-                // `any` short-circuits on large indexes.
-                ws.index.snapshots.values().any(|m| !m.pinned)
-            }
-        };
-        if !has_potential_work {
+        let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(ws_arc).await
+        else {
             continue;
-        }
+        };
 
-        // P2a: plan under read lock (pure compute; P2b rechecks pin per snap).
-        let (ws_id, to_remove, index_dir) = {
+        let (to_remove, index_dir) = {
             let ws = ws_arc.read().await;
-            let ws_id = ws.ws_id.clone();
-
             let cfg = state.config_snapshot();
             let eff: EffectivePolicy = ws.policy.effective_for(&cfg);
             if eff.is_disabled() {
-                // Policy flipped to disabled while awaiting the read lock — skip.
                 continue;
             }
             let retention = eff.auto_cleanup_keep.clone();
@@ -138,7 +123,7 @@ async fn auto_cleanup(state: &DaemonState) {
                 .index
                 .snapshots
                 .iter()
-                .filter(|(_, meta)| !meta.pinned)
+                .filter(|(_, meta)| !meta.pinned && !meta.missing)
                 .map(|(id, meta)| (id.clone(), meta.created_at))
                 .collect();
             unpinned.sort_by_key(|(_, ts)| *ts);
@@ -165,25 +150,19 @@ async fn auto_cleanup(state: &DaemonState) {
                 }
             };
 
-            if to_remove.is_empty() {
-                continue;
-            }
-
-            let index_dir = state.index_dir(&ws_id);
-            (ws_id, to_remove, index_dir)
+            (to_remove, state.index_dir(&ws_id))
         };
-
-        if !ensure_index_dir(&index_dir, "auto-cleanup").await {
+        if to_remove.is_empty() || !ensure_index_dir(&index_dir, "auto-cleanup").await {
             continue;
         }
 
-        // P2b: shared detach-then-delete + persist. Background loop swallows
-        // partial failures (already warn!'d inside the helper) — we never
-        // bail the whole loop on a single snap, the next tick retries.
+        // Failed entries remain indexed for a later cleanup pass.
         let outcome =
             delete_snapshots_locked(state, ws_arc, &ws_id, &to_remove, "auto-cleanup").await;
-        if !outcome.removed.is_empty() {
+        if outcome.index_changed {
             persist_index_after_cleanup(state, ws_arc, &index_dir, "auto-cleanup").await;
+        }
+        if !outcome.removed.is_empty() {
             info!(
                 "auto-cleanup: removed {} snapshots from {}",
                 outcome.removed.len(),
@@ -196,37 +175,102 @@ async fn auto_cleanup(state: &DaemonState) {
 /// Health check: verify filesystem usage.
 ///
 /// Skipped when no workspace is registered. WARN on usage above threshold;
-/// ERROR when get_usage fails (umount, fs crash, etc.) so upstream monitors can catch it.
+/// ERROR when get_usage fails (umount, fs crash, etc.) so upstream monitors
+/// can catch it. Message building lives in [`assess_usage_health`] so the
+/// branches are coverable with stub backends (#3053 review P2).
 async fn health_check(state: &DaemonState) {
     if state.all_workspaces().is_empty() {
         debug!("Health check skipped: no workspace registered");
         return;
     }
-
-    match state.backend.get_usage().await {
-        Ok((total, used)) => {
-            if total > 0 {
-                let usage_pct = (used as f64 / total as f64) * 100.0;
-                const FS_WARN_THRESHOLD_PERCENT: f64 = 90.0;
-                if usage_pct > FS_WARN_THRESHOLD_PERCENT {
-                    warn!(
-                        "Filesystem usage critical: {:.1}% ({} / {} bytes)",
-                        usage_pct, used, total
-                    );
-                } else {
-                    info!("Health check OK: filesystem usage {:.1}%", usage_pct);
-                }
-            }
+    for line in assess_usage_health(state.backend.as_ref()).await {
+        match line {
+            UsageHealthLine::Info(msg) => info!("{}", msg),
+            UsageHealthLine::Warn(msg) => warn!("{}", msg),
+            UsageHealthLine::Error(msg) => error!("{}", msg),
         }
+    }
+}
+
+/// Severity-tagged log line produced by [`assess_usage_health`].
+#[derive(Debug)]
+enum UsageHealthLine {
+    Info(String),
+    Warn(String),
+    Error(String),
+}
+
+/// Filesystem-usage health probe.
+///
+/// The dead-list query result is kept as a raw `Result`: a FAILED
+/// `deleted_subvolume_ids()` becomes its own warning instead of collapsing
+/// into "no zombies" via `unwrap_or_default()` — the diagnostic must not
+/// silently die (permissions, missing btrfs binary, fs errors) exactly in
+/// the degraded regime where it matters most (#3053 review P2).
+async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLine> {
+    let (total, used) = match backend.get_usage().await {
+        Ok(pair) => pair,
         Err(e) => {
             // `{:#}` prints the full anyhow cause chain (e.g. outer
             // `with_context` + inner `bail!`), not just the outermost message.
-            error!(
+            return vec![UsageHealthLine::Error(format!(
                 "Health check failed on backend {}: {:#}",
-                state.backend.backend_type(),
+                backend.backend_type(),
                 e
-            );
+            ))];
         }
+    };
+    if total == 0 {
+        return Vec::new();
+    }
+    let usage_pct = (used as f64 / total as f64) * 100.0;
+    const FS_WARN_THRESHOLD_PERCENT: f64 = 90.0;
+    if usage_pct <= FS_WARN_THRESHOLD_PERCENT {
+        return vec![UsageHealthLine::Info(format!(
+            "Health check OK: filesystem usage {:.1}%",
+            usage_pct
+        ))];
+    }
+
+    // High usage is exactly the regime where the btrfs cleaner stalls and
+    // deleted subvolumes turn into zombies that pin all backend space
+    // (#3053). Surface them so operators know cleanup/restart alone cannot
+    // reclaim the space.
+    match backend.deleted_subvolume_ids().await {
+        Ok(zombies) if zombies.is_empty() => vec![UsageHealthLine::Warn(format!(
+            "Filesystem usage critical: {:.1}% ({} / {} bytes)",
+            usage_pct, used, total
+        ))],
+        Ok(zombies) => {
+            // The count comes from `subvolume list -d`, which is
+            // FILESYSTEM-WIDE: on a shared host partition (btrfs-base)
+            // entries may belong to other tools. The guidance resolves the
+            // real mount point — btrfs-base's data root is a subdirectory of
+            // the partition, and on a root-fs backend it becomes reboot
+            // advice instead of an impossible `umount /` (review P1-a).
+            let guidance =
+                crate::backends::btrfs_common::recovery_guidance(backend.data_root()).await;
+            vec![UsageHealthLine::Warn(format!(
+                "Filesystem usage critical: {:.1}% ({} / {} bytes); {} deleted subvolume(s) \
+                 {:?} not yet reclaimed by the btrfs cleaner — the listing is FILESYSTEM-WIDE, \
+                 so on a shared partition entries may belong to other tools. They pin space \
+                 that ws-ckpt cleanup and daemon restarts cannot free (mount is reused by \
+                 design). Manual recovery: {}; the cleaner drains zombies within minutes of a \
+                 fresh mount cycle (#3053)",
+                usage_pct,
+                used,
+                total,
+                zombies.len(),
+                zombies,
+                guidance
+            ))]
+        }
+        Err(e) => vec![UsageHealthLine::Warn(format!(
+            "Filesystem usage critical: {:.1}% ({} / {} bytes); deleted-subvolume query FAILED \
+             ({:#}) — cannot tell whether zombie subvolumes are pinning the remaining space \
+             (#3053)",
+            usage_pct, used, total, e
+        ))],
     }
 }
 
@@ -277,5 +321,176 @@ mod tests {
         // auto_cleanup is inherited from global (true), keep is overridden.
         assert!(eff.auto_cleanup);
         assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
+    }
+
+    // ── Filesystem-usage health probe (#3053 review P1-a / P2) ──
+    //
+    // Stub-backend coverage of every assess_usage_health branch: healthy,
+    // high-usage with/without zombies, FAILED dead-list query (must stay
+    // visible, never collapse into "no zombies"), and failed usage probe.
+
+    struct UsageProbeBackend {
+        usage: Result<(u64, u64), String>,
+        zombies: Result<Vec<u64>, String>,
+        data_root: std::path::PathBuf,
+    }
+
+    impl UsageProbeBackend {
+        fn new(usage: Result<(u64, u64), String>, zombies: Result<Vec<u64>, String>) -> Self {
+            Self {
+                usage,
+                zombies,
+                data_root: std::env::temp_dir(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ws_ckpt_common::backend::StorageBackend for UsageProbeBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            self.usage
+                .clone()
+                .map_err(|e| anyhow::anyhow!("injected usage failure: {}", e))
+        }
+        async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+            self.zombies
+                .clone()
+                .map_err(|e| anyhow::anyhow!("injected query failure: {}", e))
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<std::path::PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+    }
+
+    /// Concatenate all line messages (one probe run yields 0..=1 lines).
+    async fn probe_text(backend: &UsageProbeBackend) -> String {
+        super::assess_usage_health(backend)
+            .await
+            .iter()
+            .map(|l| match l {
+                super::UsageHealthLine::Info(m)
+                | super::UsageHealthLine::Warn(m)
+                | super::UsageHealthLine::Error(m) => m.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn usage_probe_ok_below_threshold() {
+        let b = UsageProbeBackend::new(Ok((1000, 500)), Ok(vec![]));
+        let text = probe_text(&b).await;
+        assert!(text.contains("Health check OK"), "{}", text);
+        assert!(!text.contains("deleted subvolume"), "{}", text);
+    }
+
+    #[tokio::test]
+    async fn usage_probe_zero_total_is_silent() {
+        let b = UsageProbeBackend::new(Ok((0, 0)), Ok(vec![]));
+        assert!(probe_text(&b).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_probe_high_usage_no_zombies() {
+        let b = UsageProbeBackend::new(Ok((1000, 950)), Ok(vec![]));
+        let text = probe_text(&b).await;
+        assert!(text.contains("usage critical"), "{}", text);
+        assert!(!text.contains("deleted subvolume"), "{}", text);
+    }
+
+    #[tokio::test]
+    async fn usage_probe_high_usage_with_zombies_is_labeled_fs_wide() {
+        let b = UsageProbeBackend::new(Ok((1000, 950)), Ok(vec![259, 260]));
+        let text = probe_text(&b).await;
+        assert!(
+            text.contains("2 deleted subvolume(s) [259, 260]"),
+            "{}",
+            text
+        );
+        // Shared-partition labeling (review P1-a): the count is fs-wide and
+        // may include other tools' subvolumes.
+        assert!(text.contains("FILESYSTEM-WIDE"), "{}", text);
+        // Guidance is present and never suggests umounting a non-mountpoint
+        // data root verbatim without the "filesystem containing" phrasing.
+        assert!(text.contains("Manual recovery:"), "{}", text);
+    }
+
+    #[tokio::test]
+    async fn usage_probe_zombie_query_failure_stays_visible() {
+        // Review P2: a failed dead-list query must NOT collapse into the
+        // plain "no zombies" warning.
+        let b = UsageProbeBackend::new(Ok((1000, 950)), Err("permission denied".to_string()));
+        let text = probe_text(&b).await;
+        assert!(text.contains("usage critical"), "{}", text);
+        assert!(text.contains("query FAILED"), "{}", text);
+        assert!(text.contains("injected query failure"), "{}", text);
+    }
+
+    #[tokio::test]
+    async fn usage_probe_usage_failure_is_error_line() {
+        let b = UsageProbeBackend::new(Err("device gone".to_string()), Ok(vec![]));
+        let lines = super::assess_usage_health(&b).await;
+        assert_eq!(lines.len(), 1);
+        match &lines[0] {
+            super::UsageHealthLine::Error(m) => {
+                assert!(m.contains("Health check failed"), "{}", m);
+                assert!(m.contains("injected usage failure"), "{}", m);
+            }
+            other => panic!("expected Error line, got {:?}", other),
+        }
     }
 }
