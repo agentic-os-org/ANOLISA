@@ -28,19 +28,45 @@ sudo yum install agent-memory
 
 ### OpenClaw adapter
 
-The bundled plugin (`memory-anolisa`) is deployed by
-`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh`, which
-grants the plugin's declared capabilities by default. Set
+**Recommended** — the adapter entry point deploys the bundled plugin
+(`memory-anolisa`) *and* performs the tool-name hand-off:
+
+```bash
+anolisa adapter enable agent-memory openclaw
+anolisa adapter status agent-memory
+```
+
+OpenClaw's bundled `memory-core` plugin owns the `memory_get` and
+`memory_search` tool names, and OpenClaw's plugin tool registry is first-wins:
+while `memory-core` stays loaded it keeps those names, so this plugin's own
+same-named tools are dropped and `memory_get` answers from `memory-core` instead
+of from agent-memory. `adapter enable` disables it and records the transition in
+the adapter receipt; `anolisa adapter disable agent-memory` restores it from that
+receipt. Disabling `memory-core` costs more than the two colliding tool names —
+see *What disabling `memory-core` costs* in the user guide.
+
+Or deploy the plugin with the bundled script:
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw plugins disable memory-core   # the script does NOT do this
+openclaw gateway restart
+```
+
+`install.sh` deliberately does **not** touch `memory-core`, so after installing
+that way the collision is still there until you disable the plugin yourself
+(`openclaw plugins enable memory-core` undoes it). Only the adapter path records
+the hand-off in a receipt, previews it under `--dry-run`, and reports through
+`adapter status` when the collision later comes back. If your OpenClaw is
+configured not to hot-reload plugin config, run `openclaw gateway restart` after
+enabling or disabling; a hot-reloading host applies both by itself.
+
+The script grants the plugin's declared capabilities by default. Set
 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold consent — on hosts that gate
 consent the install then fails until consent is granted interactively. Set
 `AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
 that would still receive one. Full reference:
 [user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
-
-```bash
-bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
-openclaw gateway restart
-```
 
 Both optional installer flags are negotiated from `openclaw plugins install
 --help`, but the two switches are not symmetric. `--accept-capabilities` is

@@ -40,9 +40,9 @@ use super::claim::{
     AdapterClaim, AdapterSourceRevision, ClaimResourceKind, ClaimStatus, DriverPayload,
 };
 use super::driver::{
-    AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
-    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
-    FrameworkCommand, FrameworkRpcSession, HostEnv,
+    AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport,
+    AdapterSummary, CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan,
+    EnableProgress, FrameworkCommand, FrameworkRpcSession, HostEnv,
 };
 use super::managed_files::{
     ManagedInventory, ManagedMatch, cleanup_replaced_materialized_files,
@@ -888,12 +888,24 @@ impl AdapterManager {
         let config = declared_config(&manifest, &framework);
         let framework_version_req = declared_framework_version_req(&manifest, &framework);
         let bundle_entry = declared_bundle_entry(&manifest, &framework);
+        let displaces = declared_displaces(&manifest, &framework);
         let all_notices = declared_all_notices(&manifest, &framework);
         if adapter_type.as_deref() == Some("skill_bundle") && !config.is_empty() {
             return Err(AdapterError::InvalidAdapterInput {
                 component: component.to_string(),
                 framework: framework.clone(),
                 reason: "skill_bundle adapters do not support framework config entries".to_string(),
+            });
+        }
+        // A skill bundle installs no plugin, so it can displace nothing: the
+        // declaration would silently no-op. Reject it rather than accept a
+        // contract that promises a hand-off it cannot perform.
+        if adapter_type.as_deref() == Some("skill_bundle") && !displaces.is_empty() {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: "skill_bundle adapters do not support displaced framework plugins"
+                    .to_string(),
             });
         }
 
@@ -924,6 +936,69 @@ impl AdapterManager {
                 }
                 err
             })?;
+        }
+        // Displaced plugin ids reach `plugins disable`/`plugins enable` argv,
+        // and a declared slot becomes the `plugins.slots.<slot>` config key
+        // read back on disable — so both go through the same whitelist
+        // validation as the values they resemble, here rather than in the
+        // driver, so a bad contract fails before any host probing.
+        //
+        // Uniqueness is part of that, and only this loop can check it: each entry
+        // is well-formed on its own, and nothing downstream sees two of them at
+        // once until the receipt is already on disk. A repeated id would build two
+        // resources with the same id, and the receipt would pass the generic claim
+        // validation, get persisted, and get its own plugin installed before
+        // `claim_displaced_plugins` rejected it — leaving a `cleanup_failed`
+        // receipt that neither status nor disable can consume. A repeated slot is
+        // worse and stays silent: the slot is exclusive, so on disable the first
+        // restore makes that plugin the slot's owner and the guard then reads it as
+        // a *third* owner for the second one, stepping aside and removing the
+        // receipt while the second plugin stays disabled by this adapter.
+        let mut declared_displaced_ids: BTreeSet<&str> = BTreeSet::new();
+        let mut declared_displaced_slots: BTreeSet<&str> = BTreeSet::new();
+        for displaced in &displaces {
+            let invalid = |reason: String| AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason,
+            };
+            super::claim::validate_plugin_id(&displaced.id)
+                .map_err(|err| invalid(format!("displaced plugin id: {err}")))?;
+            if displaced.id == declared_plugin_id.as_deref().unwrap_or_default() {
+                return Err(invalid(
+                    "displaced plugin id must differ from the adapter's own plugin id".to_string(),
+                ));
+            }
+            if !declared_displaced_ids.insert(displaced.id.as_str()) {
+                return Err(invalid(format!(
+                    "displaced plugin id '{}' is declared more than once; one adapter cannot \
+                     own the same transition twice",
+                    displaced.id
+                )));
+            }
+            if let Some(slot) = displaced.slot.as_deref() {
+                // `validate_config_key` only rejects an empty *whole key*, and
+                // `plugins.slots.` is not empty — so an empty suffix would slip
+                // through and quietly degrade this entry to a restore with no slot
+                // guard. Omitting `slot` is how a contract says there is no
+                // exclusive slot to guard; spelling it empty is a mistake and is
+                // rejected as one.
+                if slot.is_empty() {
+                    return Err(invalid(format!(
+                        "displaced plugin '{}' declares an empty slot; omit `slot` when there \
+                         is no exclusive slot to guard rather than naming `plugins.slots.`",
+                        displaced.id
+                    )));
+                }
+                super::claim::validate_config_key(&format!("plugins.slots.{slot}"))
+                    .map_err(|err| invalid(format!("displaced plugin slot '{slot}': {err}")))?;
+                if !declared_displaced_slots.insert(slot) {
+                    return Err(invalid(format!(
+                        "displaced plugin slot '{slot}' is declared by more than one plugin; \
+                         the slot is exclusive, so disable could not hand both back"
+                    )));
+                }
+            }
         }
 
         let driver =
@@ -988,6 +1063,7 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run,
@@ -1030,6 +1106,7 @@ impl AdapterManager {
             declared_skills: skills,
             declared_config: config,
             declared_bundle_entry: bundle_entry,
+            declared_displaces: displaces,
             framework_version_req,
             allow_unsafe_plugin_install: options.allow_unsafe_plugin_install,
             dry_run,
@@ -1038,8 +1115,13 @@ impl AdapterManager {
 
         if dry_run {
             let bundle = driver.read_bundle(&ctx)?;
-            let mut plan = driver.plan_enable(&bundle, &ctx)?;
-            if let Some(prior) = state.find_adapter_claim(component, &framework) {
+            validate_displacements_not_self(&bundle, &ctx)?;
+            // Validate the receipt a dry-run would replace *before* handing it to
+            // `plan_enable`: a driver that carries facts across a re-enable plans
+            // from that receipt, and a forged one must not shape the plan any more
+            // than it may shape the real re-enable below.
+            let prior = state.find_adapter_claim(component, &framework);
+            if let Some(prior) = prior {
                 let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
                 trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
                 prior.validate_with_trust(
@@ -1048,6 +1130,9 @@ impl AdapterManager {
                     &trust.target_roots,
                     trust.exact_targets(),
                 )?;
+            }
+            let mut plan = driver.plan_enable(&bundle, prior, &ctx)?;
+            if let Some(prior) = prior {
                 let mappings = driver.materialized_mappings(
                     &resource_root,
                     ctx.adapter_type.as_deref(),
@@ -1066,12 +1151,14 @@ impl AdapterManager {
                     })?
                 };
                 let next_roots = driver.materialized_destination_roots(&bundle, &ctx)?;
-                let mut cleanup_actions = driver.plan_reenable_cleanup(prior, &ctx)?;
-                cleanup_actions.extend(plan_replaced_materialized_files(
-                    prior,
-                    &next_files,
-                    &next_roots,
-                )?);
+                // Same order the real re-enable runs them in — prune, then the
+                // driver's release. A preview that lists them the other way round
+                // describes a transaction the operation does not perform, which is
+                // the divergence the rest of this driver's previews are built to
+                // avoid.
+                let mut cleanup_actions =
+                    plan_replaced_materialized_files(prior, &next_files, &next_roots)?;
+                cleanup_actions.extend(driver.plan_reenable_cleanup(prior, &ctx)?);
                 plan.actions.splice(0..0, cleanup_actions);
             }
             let notices = declared_notices(
@@ -1098,15 +1185,15 @@ impl AdapterManager {
         // pure preparation, immediately before replacement cleanup or apply
         // can mutate framework state.
         let bundle = driver.read_bundle(&ctx)?;
-        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx)?;
-        claim.bundle_digest = None;
-        // Persist the manifest's static notices in the receipt so a later
-        // disable can show `post_disable` notices from the receipt alone.
-        // Inert text — never expanded or executed.
-        claim.notices = all_notices;
+        validate_displacements_not_self(&bundle, &ctx)?;
         let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
         trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
-        let prior = state.find_adapter_claim(component, &framework).cloned();
+        // Validate the receipt this enable would replace *before* handing it to
+        // `prepare_enable`, mirroring the dry-run branch above: a driver that
+        // inherits ownership across a re-enable decides there what it may later
+        // re-confirm, and a forged prior must not shape the real enable any more
+        // than it may shape the plan.
+        let mut prior = state.find_adapter_claim(component, &framework).cloned();
         if let Some(prior) = &prior {
             // A forged prior receipt must not gain authority merely because a
             // driver preserves facts from it during re-enable.
@@ -1116,7 +1203,15 @@ impl AdapterManager {
                 &trust.target_roots,
                 trust.exact_targets(),
             )?;
-            driver.preserve_reenable_facts(prior, &mut claim)?;
+        }
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, prior.as_ref(), &ctx)?;
+        claim.bundle_digest = None;
+        // Persist the manifest's static notices in the receipt so a later
+        // disable can show `post_disable` notices from the receipt alone.
+        // Inert text — never expanded or executed.
+        claim.notices = all_notices;
+        if let Some(prior) = &prior {
+            driver.preserve_reenable_facts(prior, &mut claim, &ctx)?;
         }
         let mappings = driver.materialized_mappings(
             &resource_root,
@@ -1163,13 +1258,103 @@ impl AdapterManager {
             }
         }
 
-        if let Some(prior) = &prior {
+        if let Some(prior) = &mut prior {
+            // Prune stale materialized output *before* the driver releases
+            // anything on the host, so no fallible step sits between that release
+            // and the receipt swap below.
+            //
+            // The ordering is pinned from both ends. The driver's cleanup must run
+            // while the prior receipt is still the durable one, because a restore
+            // that fails has to stay retryable from it — swapping first would
+            // strand a plugin nobody owns any more. And once a restore has
+            // *succeeded*, the swap must be the very next durable action, because
+            // the prior receipt is then the only record of an ownership that no
+            // longer exists: keep it and a working adapter reports a tool-name
+            // collision it does not have, and a later disable re-enables a plugin
+            // the operator closed themselves.
+            //
+            // This prune used to sit between the two, and it is not exotic — it
+            // removes a stale materialized *directory* with a non-recursive
+            // `remove_dir`, so a single runtime-created file inside it is enough
+            // to fail the re-enable after `plugins enable` has already run. The
+            // two steps are independent: this one only touches ANOLISA's own
+            // materialized output under the datadir, the driver's only runs
+            // framework CLI verbs. So moving it changes nothing about what either
+            // does, only what a failure of each leaves behind — a prune failure
+            // now happens with the host untouched, and a restore failure still
+            // happens with the prune done and the prior receipt intact, as before.
+            //
+            // What remains is a `state.save` failure right after a successful
+            // restore. That window is not closable from here: recording the
+            // release *before* performing it would strand the host if the process
+            // died in between, which this codebase consistently ranks as the worse
+            // error. It is the same residual window `apply_displacements` accepts
+            // around its own write-ahead mark.
+            cleanup_replaced_materialized_files(prior, &claim, &ops).map_err(|err| {
+                AdapterError::ReenableCleanupIncomplete {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason: format!("failed to prune stale materialized output: {err}"),
+                }
+            })?;
             // Do not overwrite the only durable ownership record until the
             // driver has released resources the replacement cannot describe.
             // A failed cleanup leaves the validated prior receipt untouched,
             // so disable or a later re-enable can retry safely.
-            let report = driver.cleanup_replaced_claim(prior, &claim, &ctx)?;
+            let pristine_prior = prior.clone();
+            let report = match driver.cleanup_replaced_claim(prior, &claim, &ctx) {
+                Ok(report) => report,
+                Err(err) => {
+                    // An error is not the same as "the driver got nowhere": it
+                    // can arrive from the middle of its restore loop, after
+                    // earlier entries were handed back on the host and struck
+                    // from `prior`. Propagating it bare would drop exactly those
+                    // mutations and leave the durable receipt claiming ownership
+                    // that no longer exists, which the retry then performs a
+                    // second time. So record what the driver released before
+                    // failing — and only what it released: an error before its
+                    // first mutation must leave the prior receipt byte-for-byte
+                    // as it was.
+                    if *prior != pristine_prior {
+                        state.upsert_adapter_claim(prior.clone());
+                        if let Err(save_err) = state.save(&self.state_path) {
+                            self.log_operation(
+                                &label,
+                                component,
+                                LogStatus::Partial,
+                                "re-enable cleanup failed; released-ownership update not persisted",
+                                Some(format!(
+                                    "cleanup failed ({err}); failed to record the ownership the \
+                                     driver released: {save_err}"
+                                )),
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            };
             if !report.cleanup_complete {
+                // The driver may already have handed some of this receipt's
+                // ownership back on the host before cleanup failed, and it says so
+                // the only way it can — by striking those entries from `prior`.
+                // Persist that before failing, or the receipt kept for the retry
+                // still claims a transition that has been undone, and the retry
+                // performs it a second time over whatever the operator did in
+                // between. Nothing else about the prior receipt is touched, so the
+                // retry stays as safe as it was.
+                state.upsert_adapter_claim(prior.clone());
+                if let Err(save_err) = state.save(&self.state_path) {
+                    self.log_operation(
+                        &label,
+                        component,
+                        LogStatus::Partial,
+                        "re-enable cleanup incomplete; released-ownership update not persisted",
+                        Some(format!(
+                            "cleanup incomplete; failed to record the ownership the driver \
+                             released: {save_err}"
+                        )),
+                    );
+                }
                 let reason = if report.messages.is_empty() {
                     "driver reported incomplete cleanup without details".to_string()
                 } else {
@@ -1181,13 +1366,6 @@ impl AdapterManager {
                     reason,
                 });
             }
-            cleanup_replaced_materialized_files(prior, &claim, &ops).map_err(|err| {
-                AdapterError::ReenableCleanupIncomplete {
-                    component: component.to_string(),
-                    framework: framework.clone(),
-                    reason: format!("failed to prune stale materialized output: {err}"),
-                }
-            })?;
         }
 
         state.upsert_adapter_claim(claim.clone());
@@ -1311,7 +1489,7 @@ impl AdapterManager {
             }
         };
 
-        let claim = match state.find_adapter_claim(component, &framework) {
+        let mut claim = match state.find_adapter_claim(component, &framework) {
             Some(c) => c.clone(),
             None => {
                 // Idempotent: nothing to disable.
@@ -1369,6 +1547,7 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run,
@@ -1401,6 +1580,7 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run,
@@ -1417,8 +1597,27 @@ impl AdapterManager {
             trust.exact_targets(),
         )?;
 
+        // The generic pass above checks paths and trust, not the driver's own
+        // payload cross-references. Ask the driver before branching, so a receipt
+        // it cannot consume is rejected identically by `disable --dry-run` and by
+        // the real disable — a plan that succeeds for a receipt the operation
+        // will refuse misreports whether the disable is available at all.
+        driver.validate_claim(&claim)?;
+
         if dry_run {
-            let report = plan_disable_report(&claim);
+            // The driver describes its own restores: only it knows which of the
+            // claimed resources it would hand back, and which host state would
+            // veto that. `None` keeps the generic wording for a driver that
+            // describes nothing.
+            let restores = driver.plan_disable_restores(&claim, &ctx)?;
+            let report = plan_disable_report(
+                &claim,
+                if restores.is_empty() {
+                    None
+                } else {
+                    Some(&restores)
+                },
+            );
             let notices = post_disable_notices(&claim);
             return Ok(DisableOutcome {
                 component: component.to_string(),
@@ -1430,7 +1629,52 @@ impl AdapterManager {
             });
         }
 
-        let report = driver.disable(&claim, &ctx)?;
+        // Mutable because a driver whose cleanup can partially fail strikes the
+        // ownership it has already handed back out of the receipt as it goes; the
+        // `else` branch below persists that mutated claim, which is what keeps a
+        // kept-for-retry receipt describing the host as it actually is.
+        //
+        // The error path needs the same persistence, and used to skip it: a bare
+        // `?` returns before either branch runs, so a driver that errored out
+        // *after* handing ownership back — a CLI that stops being spawnable
+        // halfway through the restore loop, say — left those releases in memory
+        // only and the receipt on disk still naming them. The retry then re-enables
+        // a plugin it already gave back, over whatever the operator did since.
+        let pristine = claim.clone();
+        let report = match driver.disable(&mut claim, &ctx) {
+            Ok(report) => report,
+            Err(err) => {
+                // Only when the driver actually changed something: an error
+                // before its first mutation must leave the receipt exactly as it
+                // was, status included, so a disable that got nowhere keeps
+                // behaving as if this branch did not exist.
+                if claim != pristine {
+                    claim.status = ClaimStatus::CleanupFailed;
+                    state.upsert_adapter_claim(claim);
+                    if let Err(save_err) = state.save(&self.state_path) {
+                        self.log_operation(
+                            &label,
+                            component,
+                            LogStatus::Partial,
+                            "adapter disable failed; released-ownership update not persisted",
+                            Some(format!(
+                                "disable failed ({err}); failed to record the ownership the \
+                                 driver released: {save_err}"
+                            )),
+                        );
+                    } else {
+                        self.log_operation(
+                            &label,
+                            component,
+                            LogStatus::Failed,
+                            "adapter disable failed; released ownership recorded, receipt kept",
+                            Some(err.to_string()),
+                        );
+                    }
+                }
+                return Err(err);
+            }
+        };
         let claim_removed = report.cleanup_complete;
         // Extract before the branch below moves `claim` into the kept receipt.
         let disable_notices = post_disable_notices(&claim);
@@ -1546,6 +1790,7 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                declared_displaces: Vec::new(),
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
                 dry_run: false,
@@ -1577,6 +1822,7 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                declared_displaces: Vec::new(),
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
                 dry_run: false,
@@ -3993,6 +4239,34 @@ fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Optio
     adapter.bundle.entry.clone()
 }
 
+/// Framework plugins an adapter declares as displaced while it is enabled.
+///
+/// Only the OpenClaw contract carries the declaration today
+/// (`[adapters.openclaw].displaces`); every other framework returns an empty
+/// list, so their drivers never see the field. The ids and slot keys are
+/// validated by the caller before they reach a driver — the driver alone
+/// decides what to do with them.
+fn declared_displaces(
+    manifest: &ComponentManifest,
+    framework: &str,
+) -> Vec<crate::manifest::DisplacedPluginSpec> {
+    let Some(adapter) = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework))
+    else {
+        return Vec::new();
+    };
+    match framework {
+        "openclaw" => adapter
+            .openclaw
+            .as_ref()
+            .map(|oc| oc.displaces.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// The `post_disable` notices persisted in a receipt, verbatim. Notices are
 /// inert display text — never expanded, substituted, or executed.
 fn post_disable_notices(claim: &AdapterClaim) -> Vec<crate::manifest::AdapterNotice> {
@@ -4002,6 +4276,44 @@ fn post_disable_notices(claim: &AdapterClaim) -> Vec<crate::manifest::AdapterNot
         .filter(|notice| notice.when == crate::manifest::NoticeWhen::PostDisable)
         .cloned()
         .collect()
+}
+
+/// Reject a contract that displaces the adapter's own plugin, using the plugin
+/// id the driver actually resolved from the bundle.
+///
+/// The declaration check in [`AdapterManager::enable_with_options`] can only
+/// compare against the manifest's `plugin_id`, and that key is optional: when it
+/// is omitted the real id comes from the bundle entry (`openclaw.plugin.json`) or
+/// from the component name, neither of which is known until `read_bundle` runs.
+/// Without this second gate such a contract would install and verify the
+/// adapter's own plugin, then disable it, and still report success with an
+/// `Enabled` receipt — an adapter that is enabled, verified, and unable to
+/// answer a single tool call.
+///
+/// Runs before any mutation on both the dry-run and the real path, so a bad
+/// contract is rejected identically whether or not the caller asked for a plan.
+fn validate_displacements_not_self(
+    bundle: &AdapterBundle,
+    ctx: &DriverCtx,
+) -> Result<(), AdapterError> {
+    let Some(own_plugin_id) = bundle.plugin_id.as_deref() else {
+        // A skill bundle has no plugin id of its own, and the Manager already
+        // rejects a displacement declaration on one.
+        return Ok(());
+    };
+    for displaced in &ctx.declared_displaces {
+        if displaced.id == own_plugin_id {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: ctx.component.clone(),
+                framework: ctx.framework.clone(),
+                reason: format!(
+                    "displaced plugin id '{own_plugin_id}' must differ from the adapter's own \
+                     plugin id resolved from the bundle"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Build a non-mutating [`DisableReport`] from a validated receipt,
@@ -4014,7 +4326,7 @@ fn post_disable_notices(claim: &AdapterClaim) -> Vec<crate::manifest::AdapterNot
 /// planned cleanup description is complete, not that real cleanup ran.
 /// Callers must check [`DisableOutcome::dry_run`] to distinguish planned
 /// output from actual framework cleanup.
-fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
+fn plan_disable_report(claim: &AdapterClaim, restores: Option<&[String]>) -> DisableReport {
     use super::claim::{ClaimResourceKind, DriverPayload};
     let mut messages = Vec::new();
 
@@ -4026,12 +4338,22 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     // directory, so their dry-run plan needs the extra CLI line that
     // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
+    // Resource ids of framework plugins a real disable *re-enables* rather than
+    // removes. Kept apart from `cleanup_ids` because the verb is the opposite:
+    // the generic branch below would announce "unregister" for a plugin disable
+    // actually hands back.
+    let mut restore_ids: Vec<(&str, Option<&str>)> = Vec::new();
     let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
         DriverPayload::OpenClaw(oc) => {
             cleanup_ids.extend(oc.skill_resources.iter().map(String::as_str));
             if !oc.plugin_resource.is_empty() {
                 cleanup_ids.push(&oc.plugin_resource);
             }
+            restore_ids.extend(
+                oc.displaced_plugins
+                    .iter()
+                    .map(|d| (d.resource.as_str(), d.slot.as_deref())),
+            );
             None
         }
         DriverPayload::Hermes(h) => {
@@ -4105,6 +4427,53 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     };
 
     for resource in &claim.resources {
+        if restore_ids
+            .iter()
+            .any(|(id, _)| *id == resource.id.as_str())
+        {
+            // A resource disable hands *back* rather than removes. When the driver
+            // described those restores itself, its lines are authoritative and this
+            // generic wording is dropped: two descriptions of one mutation, one of
+            // them composed here without the driver's veto logic, is exactly the
+            // divergence the `plan_disable_restores` hook exists to remove.
+            if restores.is_some() {
+                continue;
+            }
+            let slot = restore_ids
+                .iter()
+                .find(|(id, _)| *id == resource.id.as_str())
+                .and_then(|(_, slot)| *slot);
+            // A real disable hands this one back through
+            // `restore_displaced_plugins`, which is a host mutation the preview
+            // must not hide — and it is conditional, so say what it depends on.
+            if let ClaimResourceKind::FrameworkPlugin {
+                framework,
+                plugin_id,
+            } = &resource.kind
+            {
+                // A fallback for a driver that records displaced resources but
+                // does not implement `plan_disable_restores`. It can only describe
+                // the slot veto, because which host state releases an ownership is
+                // the driver's business — so it deliberately under-promises rather
+                // than claim the restore is unconditional, which is what an earlier
+                // version did for the slotless case. A driver with more vetoes must
+                // describe its own restores through the hook; OpenClaw does, and
+                // this branch is not reached for it.
+                let slot_note = match slot {
+                    Some(slot) => format!(
+                        " unless plugins.slots.{slot} has been given to another plugin or \
+                         explicitly closed by then, or the driver's own restore checks step \
+                         aside"
+                    ),
+                    None => " unless the driver's own restore checks step aside".to_string(),
+                };
+                messages.push(format!(
+                    "would re-enable {framework} plugin '{plugin_id}', which this adapter \
+                     displaced{slot_note}"
+                ));
+            }
+            continue;
+        }
         if !cleanup_ids.contains(&resource.id.as_str()) {
             // Not a resource that disable actually touches (e.g. the
             // framework home/state directory).
@@ -4150,6 +4519,9 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
             }
             _ => {}
         }
+    }
+    if let Some(restores) = restores {
+        messages.extend(restores.iter().cloned());
     }
     messages.push("would remove adapter receipt".to_string());
 
@@ -5345,12 +5717,26 @@ source = "adapters/openclaw"
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
-            resources: Vec::new(),
+            // The payload references `openclaw_plugin`, so the resource has to
+            // exist: the driver resolves its own plugin through that reference
+            // and rejects a receipt that dangles, on the dry-run path as well as
+            // the real one. These cases are about a missing adapter *source*, not
+            // about receipt shape, so the fixture has to be well-formed.
+            resources: vec![crate::adapter::claim::ClaimResource {
+                id: "openclaw_plugin".to_string(),
+                purpose: "openclaw_plugin".to_string(),
+                kind: crate::adapter::claim::ClaimResourceKind::FrameworkPlugin {
+                    framework: "openclaw".to_string(),
+                    plugin_id: component.to_string(),
+                },
+            }],
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "openclaw_state".to_string(),
                 plugin_resource: "openclaw_plugin".to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+
+                displaced_plugins: Vec::new(),
             }),
         }
     }
@@ -8601,6 +8987,8 @@ dest = "{datadir}/skills"
                 plugin_resource: "plugin".to_string(),
                 skill_resources: payload_skill_ids,
                 config_resources: payload_config_ids,
+
+                displaced_plugins: Vec::new(),
             }),
         }
     }
@@ -8633,7 +9021,7 @@ dest = "{datadir}/skills"
             Vec::new(),
         );
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(report.cleanup_complete);
         assert!(
             report
@@ -8689,7 +9077,7 @@ dest = "{datadir}/skills"
             Vec::new(),
         );
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(report.cleanup_complete);
         // plugin resource "plugin" has no matching ClaimResource so
         // plugin unregister must NOT appear.
@@ -8748,7 +9136,7 @@ dest = "{datadir}/skills"
             vec!["config:0".to_string()],
         );
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(
             report
                 .messages
@@ -8805,7 +9193,7 @@ dest = "{datadir}/skills"
             }),
         };
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(report.cleanup_complete);
         assert!(
             report
@@ -8877,7 +9265,7 @@ dest = "{datadir}/skills"
             }),
         };
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(
             report
                 .messages
@@ -8949,7 +9337,7 @@ dest = "{datadir}/skills"
             }),
         };
 
-        let report = plan_disable_report(&claim);
+        let report = plan_disable_report(&claim, None);
         assert!(
             !report
                 .messages

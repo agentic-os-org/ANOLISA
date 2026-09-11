@@ -130,6 +130,7 @@ impl FrameworkDriver for HermesDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let home = require_home(ctx)?;
@@ -173,6 +174,7 @@ impl FrameworkDriver for HermesDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let home = require_home(ctx)?;
@@ -413,7 +415,7 @@ impl FrameworkDriver for HermesDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
@@ -996,6 +998,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,
@@ -1028,6 +1031,7 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: false,
@@ -1092,6 +1096,7 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,
@@ -1103,7 +1108,9 @@ mod tests {
             plugin_id: Some("test-plugin".to_string()),
         };
 
-        let plan = driver.plan_enable(&bundle, &ctx).expect("plan_enable");
+        let plan = driver
+            .plan_enable(&bundle, None, &ctx)
+            .expect("plan_enable");
         assert!(
             plan.actions.iter().any(|a| a.contains("sec-audit")),
             "declared skill must appear in plan"
@@ -1114,7 +1121,7 @@ mod tests {
         );
 
         let (claim, _prepared) = driver
-            .prepare_enable(&bundle, &ctx)
+            .prepare_enable(&bundle, None, &ctx)
             .expect("prepare_enable");
         let skill_resources: Vec<&str> = claim
             .resources
@@ -1160,6 +1167,7 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,
@@ -1168,7 +1176,7 @@ mod tests {
         let bundle = driver.read_bundle(&ctx).expect("read bundle");
         assert!(bundle.plugin_id.is_none());
 
-        let plan = driver.plan_enable(&bundle, &ctx).expect("plan");
+        let plan = driver.plan_enable(&bundle, None, &ctx).expect("plan");
         assert!(plan.register_command.is_none());
         assert!(
             plan.actions
@@ -1176,7 +1184,7 @@ mod tests {
                 .all(|action| !action.contains("enable hermes plugin")),
         );
 
-        let (claim, _prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (claim, _prepared) = driver.prepare_enable(&bundle, None, &ctx).expect("claim");
         assert!(claim.plugin_id.is_none());
         assert_eq!(claim.adapter_type.as_deref(), Some("skill_bundle"));
         let plugin_paths = claim

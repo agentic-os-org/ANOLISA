@@ -1462,6 +1462,8 @@ mod tests {
                 plugin_resource: "plugin".to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+
+                displaced_plugins: Vec::new(),
             }),
         }
     }

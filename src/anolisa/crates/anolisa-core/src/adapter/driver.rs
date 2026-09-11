@@ -82,6 +82,12 @@ pub struct DriverCtx<'a> {
     /// should use this to locate the framework-native manifest inside
     /// the resource root instead of hardcoding a filename.
     pub declared_bundle_entry: Option<String>,
+    /// Framework plugins declared by the component's adapter manifest as
+    /// displaced by this adapter (OpenClaw: `[adapters.openclaw].displaces`).
+    /// The driver disables each one while the adapter is enabled and records
+    /// the transition in the receipt, so disable can reverse exactly what
+    /// enable claimed. Empty for every framework that has no such concept.
+    pub declared_displaces: Vec<crate::manifest::DisplacedPluginSpec>,
     /// Adapter-level framework version requirement resolved from the
     /// component manifest. The Manager derives it with
     /// `[adapters.compat].framework_version` taking precedence over the
@@ -169,6 +175,16 @@ pub enum PreparedEnable {
         /// detected host version. Apply uses this transient intent to avoid
         /// claiming an entry until its `config set` command succeeds.
         selected_config_indices: Vec<usize>,
+        /// Plugin ids whose displacement this enable's own probe claimed, i.e.
+        /// the ones it is about to turn off itself.
+        ///
+        /// `apply_enable` re-confirms *only* these before mutating. A displacement
+        /// carried over from a prior receipt by
+        /// [`FrameworkDriver::preserve_reenable_facts`] is deliberately absent:
+        /// that plugin is already off *because of this adapter*, so re-probing it
+        /// would read "somebody else turned it off" and release ownership the
+        /// receipt legitimately holds.
+        freshly_claimed_displacements: Vec<String>,
     },
     /// Qoder native-plugin capabilities resolved before installation.
     QoderNative {
@@ -203,6 +219,13 @@ impl EnableProgress for () {
 pub struct DisableReport {
     /// True when every claimed resource was successfully released. When
     /// false, the Manager keeps the receipt and marks it `cleanup_failed`.
+    ///
+    /// A false here does **not** mean nothing was released: cleanup can be
+    /// partial, and the two fields cannot express that split, since `messages` is
+    /// prose. So a driver that releases anything while `cleanup_complete` ends up
+    /// false must also strike that ownership from the claim it was handed — the
+    /// Manager re-persists the claim it kept, and a receipt still claiming a
+    /// release that already happened makes the retry perform it a second time.
     pub cleanup_complete: bool,
     /// Human-readable notes (e.g. "openclaw CLI not found; assuming
     /// registry absent").
@@ -282,6 +305,11 @@ pub enum AdapterConditionKind {
     PluginRegistered,
     /// The framework reports the plugin's declared resources as loaded.
     PluginResourcesLoaded,
+    /// The framework plugins this adapter displaced are still displaced, so the
+    /// tool names the adapter registered are still the ones answering. A host
+    /// that re-enabled one of them has the original first-wins collision back
+    /// even though the adapter's own plugin still lists and loads fine.
+    DisplacedPluginsReleased,
     /// The framework-native activation policy currently enables the plugin.
     ActivationEnabled,
     /// A marketplace source is still registered (future drivers).
@@ -595,12 +623,21 @@ pub trait FrameworkDriver: Send + Sync {
     /// Describe what [`Self::apply_enable`] would do, for dry-run and
     /// confirmation.
     ///
+    /// `prior` is the validated receipt this enable would replace, when there is
+    /// one — i.e. the operation is a re-enable. A driver that carries facts
+    /// across a re-enable (see [`Self::preserve_reenable_facts`]) must plan from
+    /// those facts and not from a fresh host probe: by re-enable time the host
+    /// already reflects the prior enable's mutations, so a probe can report the
+    /// exact opposite of what the real lifecycle will do. Drivers that fully
+    /// supersede their prior receipt ignore it.
+    ///
     /// # Errors
     ///
     /// Propagates bundle/validation errors encountered while planning.
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError>;
 
@@ -629,6 +666,15 @@ pub trait FrameworkDriver: Send + Sync {
     /// probing) that [`Self::apply_enable`] should reuse instead of
     /// re-probing.
     ///
+    /// `prior` is the validated receipt this enable would replace, when there is
+    /// one — the same argument [`Self::plan_enable`] receives, and validated by
+    /// the Manager *before* this hook runs so a forged receipt cannot shape the
+    /// real enable any more than it may shape the plan. A driver that inherits
+    /// ownership across a re-enable (see [`Self::preserve_reenable_facts`]) needs
+    /// it for the same reason: what the prior receipt already owns is what this
+    /// enable must not later treat as its own doing. Drivers that fully supersede
+    /// their prior receipt ignore it.
+    ///
     /// The Manager validates and persists this claim before
     /// [`Self::apply_enable`] runs, so a later framework-side failure stays
     /// visible to status/disable. The returned [`PreparedEnable`] is **not**
@@ -642,6 +688,7 @@ pub trait FrameworkDriver: Send + Sync {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError>;
 
@@ -652,6 +699,13 @@ pub trait FrameworkDriver: Send + Sync {
     /// Drivers whose mutations are not reversed by re-enable can override
     /// this hook so an early re-enable failure does not erase cleanup facts.
     ///
+    /// `ctx` carries the contract being enabled *now*. A driver that inherits
+    /// ownership must filter it through that contract: the prior receipt records
+    /// what an older version of the component claimed, and a declaration the new
+    /// version dropped is exactly the fact that must not survive. Whatever this
+    /// hook declines to carry over, [`Self::cleanup_replaced_claim`] is then
+    /// responsible for releasing before the prior receipt stops being durable.
+    ///
     /// # Errors
     ///
     /// Returns a driver-specific receipt consistency error.
@@ -659,6 +713,7 @@ pub trait FrameworkDriver: Send + Sync {
         &self,
         _prior: &AdapterClaim,
         _next: &mut AdapterClaim,
+        _ctx: &DriverCtx,
     ) -> Result<(), AdapterError> {
         Ok(())
     }
@@ -673,12 +728,21 @@ pub trait FrameworkDriver: Send + Sync {
     /// default keeps existing re-enable behavior for drivers whose new receipt
     /// fully supersedes the old one in place.
     ///
+    /// `prior` is mutable for the same reason [`Self::disable`]'s claim is: a
+    /// driver that hands something back on the host while cleanup is still
+    /// incomplete must be able to strike that ownership from the receipt the
+    /// Manager is about to keep, or the kept receipt describes a host state
+    /// that no longer exists and a retry undoes whatever the operator did in
+    /// between. The Manager persists the mutation before reporting the failure,
+    /// whether that failure is an incomplete report or an error returned
+    /// partway through the cleanup.
+    ///
     /// # Errors
     ///
     /// Returns a driver-specific cleanup error.
     fn cleanup_replaced_claim(
         &self,
-        _prior: &AdapterClaim,
+        _prior: &mut AdapterClaim,
         _next: &AdapterClaim,
         _ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
@@ -686,6 +750,53 @@ pub trait FrameworkDriver: Send + Sync {
             cleanup_complete: true,
             messages: Vec::new(),
         })
+    }
+
+    /// Describe what [`Self::disable`] would hand back to the framework, for
+    /// `disable --dry-run`.
+    ///
+    /// The Manager can list the resources a receipt claims, but only the driver
+    /// knows which of them it would actually restore and under what condition —
+    /// a restore can be vetoed by host state the receipt does not record. Letting
+    /// the Manager compose that text is how a preview comes to promise a mutation
+    /// the real disable then declines to perform, and because a declined restore
+    /// still counts as completed cleanup the receipt disappears afterwards,
+    /// leaving the operator nothing to notice the divergence with.
+    ///
+    /// Implementations must be **read-only**: probing the host is fine, mutating
+    /// it or the receipt is not. The default is empty, for drivers whose disable
+    /// hands nothing back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific receipt consistency error.
+    fn plan_disable_restores(
+        &self,
+        _claim: &AdapterClaim,
+        _ctx: &DriverCtx,
+    ) -> Result<Vec<String>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    /// Validate a persisted receipt the Manager is about to act on, beyond the
+    /// generic [`AdapterClaim::validate_with_trust`] pass.
+    ///
+    /// Called on **both** the real and the `--dry-run` path of `disable`, before
+    /// either one does anything. The generic pass checks paths and trust; it does
+    /// not know that a driver's payload cross-references its own resource list,
+    /// so a receipt whose references dangle, are mistyped, or are duplicated
+    /// passes it and then fails the moment the driver tries to consume it. Running
+    /// this hook on the dry-run path too is what keeps a preview honest: a plan
+    /// that succeeds for a receipt the real operation will refuse tells the
+    /// operator the disable is available when it is not.
+    ///
+    /// The default accepts, for drivers whose payload carries no such references.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific receipt consistency error.
+    fn validate_claim(&self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
+        Ok(())
     }
 
     /// Validate the final prepared receipt after re-enable facts have been
@@ -775,12 +886,32 @@ pub trait FrameworkDriver: Send + Sync {
     /// Idempotently disable the adapter, removing only what the receipt
     /// declares ANOLISA took over.
     ///
+    /// The claim is mutable so a driver whose cleanup can *partially* fail can
+    /// keep the receipt in step with the host. When cleanup completes the
+    /// Manager removes the receipt and the mutation is moot; when it does not,
+    /// the Manager keeps and re-persists this claim, and any ownership the
+    /// driver already handed back must have been struck from it first. A
+    /// driver that cannot report that per resource — because the release is
+    /// only visible as prose in [`DisableReport::messages`] — leaves the kept
+    /// receipt claiming a transition it no longer owns, and a retry then
+    /// performs it a second time, over whatever the operator did in between.
+    /// Drivers that release nothing the receipt tracks may ignore the mutability.
+    ///
+    /// Returning an error is not a way out of that duty either. The Manager
+    /// persists the claim as the driver left it before propagating the error, so
+    /// a release already performed on the host is recorded even when the cleanup
+    /// never got to report on it — but only the mutations actually made: an
+    /// error raised before the first one leaves the receipt untouched.
+    ///
     /// # Errors
     ///
     /// [`AdapterError::FrameworkCli`] when de-registration fails in a way
     /// that is not simply "framework absent".
-    fn disable(&self, claim: &AdapterClaim, ctx: &DriverCtx)
-    -> Result<DisableReport, AdapterError>;
+    fn disable(
+        &self,
+        claim: &mut AdapterClaim,
+        ctx: &DriverCtx,
+    ) -> Result<DisableReport, AdapterError>;
 }
 
 /// Scan candidate directories of `PATH` for an executable named `name`,

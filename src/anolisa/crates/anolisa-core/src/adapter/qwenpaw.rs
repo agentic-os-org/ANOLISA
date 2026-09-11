@@ -159,6 +159,7 @@ impl FrameworkDriver for QwenPawDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let home = require_home(ctx)?;
@@ -180,6 +181,7 @@ impl FrameworkDriver for QwenPawDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let home = require_home(ctx)?;
@@ -367,7 +369,7 @@ impl FrameworkDriver for QwenPawDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
         let Some(plugin_id) = claim.plugin_id.clone() else {
@@ -871,6 +873,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: Some(MANIFEST.to_string()),
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,
@@ -885,7 +888,7 @@ mod tests {
         let bundle = QwenPawDriver::new().read_bundle(&ctx).expect("bundle");
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
         let plan = QwenPawDriver::new()
-            .plan_enable(&bundle, &ctx)
+            .plan_enable(&bundle, None, &ctx)
             .expect("plan");
         let expected_home = dir.path().join("home").join(".qwenpaw");
         assert_eq!(
@@ -900,7 +903,7 @@ mod tests {
             )
         );
         let (claim, _) = QwenPawDriver::new()
-            .prepare_enable(&bundle, &ctx)
+            .prepare_enable(&bundle, None, &ctx)
             .expect("claim");
         assert_eq!(
             plugin_dir(&claim),

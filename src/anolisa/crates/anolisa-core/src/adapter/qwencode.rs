@@ -157,6 +157,7 @@ impl FrameworkDriver for QwenCodeDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let plugin = bundle_plugin(bundle)?;
@@ -185,6 +186,7 @@ impl FrameworkDriver for QwenCodeDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = bundle_plugin(bundle)?;
@@ -410,7 +412,7 @@ impl FrameworkDriver for QwenCodeDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
         let layout = QwenLayout::from_claim(claim)?;
@@ -1461,6 +1463,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: false,
@@ -1474,7 +1477,7 @@ mod tests {
     ) -> Result<AdapterClaim, AdapterError> {
         let bundle = driver.read_bundle(ctx)?;
         driver
-            .prepare_enable(&bundle, ctx)
+            .prepare_enable(&bundle, None, ctx)
             .map(|(claim, _prepared)| claim)
     }
 
@@ -1667,9 +1670,9 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx).expect("disable");
         assert!(report.cleanup_complete, "{:?}", report.messages);
         assert!(!home.join("extensions").join("tokenless").exists());
         assert_eq!(
@@ -1698,14 +1701,14 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
         std::fs::write(
             resource.join(QWEN_MANIFEST),
             br#"{"name":"tokenless-v2","version":"2.0.0"}"#,
         )
         .expect("replace manifest");
 
-        let report = driver.disable(&claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(
             report
@@ -1743,9 +1746,9 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(
             report
@@ -1772,9 +1775,9 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(ops.commands().is_empty());
     }
@@ -1795,9 +1798,9 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(ops.commands().is_empty());
         assert!(home.join("extensions").join("tokenless").exists());

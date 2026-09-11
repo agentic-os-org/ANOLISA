@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anolisa_core::adapter::AdapterError;
-use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus, DriverPayload};
+use anolisa_core::adapter::claim::{
+    ClaimResourceKind, ClaimStatus, DRIVER_SCHEMA_VERSION, DriverPayload,
+};
 use anolisa_core::adapter::driver::{AdapterConditionKind, AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOutcome};
 use anolisa_core::domain::{PackageIdentity, ProviderBinding};
@@ -1917,7 +1919,10 @@ fn qoder_native_enable_status_disable_uses_cli_lifecycle() {
         EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
 
-    assert_eq!(claim.driver_schema, 3);
+    // Not a Qoder-specific contract: every driver writes the shared
+    // payload schema version, so assert against the constant rather than a
+    // literal that every future bump would have to chase.
+    assert_eq!(claim.driver_schema, DRIVER_SCHEMA_VERSION);
     let log_text = std::fs::read_to_string(&log).expect("qoder log");
     for command in [
         "plugins validate --help".to_string(),
@@ -2404,6 +2409,128 @@ fn qoder_native_v2_preapply_receipt_never_claims_later_user_plugin() {
             .lines()
             .any(|line| line == "plugins uninstall tokenless --scope user"),
         "disable must not uninstall the later user registration: {log_text}"
+    );
+}
+
+/// Rewrite the persisted Qoder receipt so it reads as one written by an
+/// ANOLISA whose shared `DRIVER_SCHEMA_VERSION` was still 3 — i.e. before an
+/// unrelated driver's payload grew a field and the shared number moved on —
+/// while keeping the install confirmation that version already recorded.
+fn downgrade_qoder_receipt_to_schema_v3(world: &World) {
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT && claim.framework == "qoder")
+        .expect("qoder claim");
+    claim.driver_schema = 3;
+    let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(
+        payload.plugin_install_confirmed,
+        "fixture must start from a confirmed install"
+    );
+    state.save(&state_path).expect("save v3 receipt fixture");
+}
+
+/// A receipt written at schema 3 already proved ANOLISA installed the Native
+/// plugin. Gating that proof on the *shared* write-time version instead of the
+/// version that introduced the field would revoke it the moment OpenClaw's
+/// payload added `displaced_plugins` and the shared constant moved to 4 —
+/// disable would then refuse to uninstall a plugin ANOLISA owns and keep the
+/// receipt forever.
+#[test]
+fn qoder_native_v3_confirmed_receipt_still_owns_its_plugin_on_disable() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial enable");
+    assert!(cache.join("tokenless").exists(), "plugin installed");
+
+    downgrade_qoder_receipt_to_schema_v3(&world);
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("a v3 confirmed receipt still authorizes cleanup");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !cache.join("tokenless").exists(),
+        "ANOLISA-owned plugin must be uninstalled, not stranded behind a kept receipt"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must run the uninstall a confirmed receipt authorizes: {log_text}"
+    );
+}
+
+/// The same revoked-ownership bug on the re-enable side: with the v3 proof
+/// ignored, `prior_owned` is false, the still-registered plugin is re-recorded
+/// as somebody else's pre-existing one, and a later disable removes the receipt
+/// while leaving the plugin installed.
+#[test]
+fn qoder_native_v3_confirmed_receipt_carries_ownership_across_reenable() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial enable");
+
+    downgrade_qoder_receipt_to_schema_v3(&world);
+
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("re-enable over a v3 confirmed receipt")
+    {
+        EnableOutcome::Enabled(claim) => *claim,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(
+        !payload.plugin_preexisting,
+        "ownership crosses the re-enable; the plugin is not re-recorded as somebody else's"
+    );
+    assert!(payload.plugin_install_confirmed);
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable after re-enable");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !cache.join("tokenless").exists(),
+        "the receipt must not be removed while the plugin it owns stays behind"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must still own the uninstall: {log_text}"
     );
 }
 

@@ -70,6 +70,19 @@ const HOOKS_PLACEHOLDER: &str = "${QODER_TOKENLESS_HOOKS}";
 const RES_PLUGIN: &str = "qoder_plugin";
 const RES_SETTINGS: &str = "qoder_settings";
 
+/// Driver-payload schema version that introduced
+/// [`QoderClaim::plugin_install_confirmed`].
+///
+/// [`native_install_confirmed`] gates on this Qoder-local constant, *not* on
+/// the shared [`DRIVER_SCHEMA_VERSION`]. The shared constant is the version
+/// every driver stamps into a receipt it writes; reusing it as a read gate
+/// would silently revoke the install ownership of every Qoder receipt already
+/// on disk the moment an unrelated driver's payload grew a field and the
+/// shared number moved on. A receipt's `driver_schema` says which version
+/// *wrote* it, so the only correct question is whether that version already
+/// had this field.
+const QODER_INSTALL_CONFIRMED_MIN_SCHEMA: u32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QoderBundleKind {
     Native,
@@ -187,6 +200,7 @@ impl FrameworkDriver for QoderDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let plugin = plugin_name(bundle, ctx);
@@ -247,6 +261,7 @@ impl FrameworkDriver for QoderDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = plugin_name(bundle, ctx);
@@ -398,6 +413,7 @@ impl FrameworkDriver for QoderDriver {
         &self,
         prior: &AdapterClaim,
         next: &mut AdapterClaim,
+        _ctx: &DriverCtx,
     ) -> Result<(), AdapterError> {
         let prior_native = native_claim(prior)?;
         let next_native = native_claim(next)?;
@@ -452,6 +468,13 @@ impl FrameworkDriver for QoderDriver {
             }
         }
         Ok(())
+    }
+
+    fn validate_claim(&self, claim: &AdapterClaim) -> Result<(), AdapterError> {
+        // `disable` and `status` already refuse an inconsistent Qoder receipt
+        // through `native_claim`; running it here too stops `disable --dry-run`
+        // from planning a cleanup the real run would reject.
+        native_claim(claim).map(|_| ())
     }
 
     fn validate_prepared_enable(&self, claim: &AdapterClaim) -> Result<(), AdapterError> {
@@ -718,7 +741,7 @@ impl FrameworkDriver for QoderDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
         if native_claim(claim)? {
@@ -982,8 +1005,13 @@ fn qoder_payload_mut(claim: &mut AdapterClaim) -> Option<&mut QoderClaim> {
 /// Only the explicit schema-v3 checkpoint proves ANOLISA installed a Native
 /// plugin. Older receipts were written as `Enabled` before mutation, so
 /// their status cannot safely imply ownership.
+///
+/// The gate is [`QODER_INSTALL_CONFIRMED_MIN_SCHEMA`], the version that
+/// introduced the field, so a later shared [`DRIVER_SCHEMA_VERSION`] bump for
+/// another driver leaves an existing v3 confirmed receipt just as authoritative
+/// as it was when written.
 fn native_install_confirmed(claim: &AdapterClaim, payload: &QoderClaim) -> bool {
-    claim.driver_schema >= DRIVER_SCHEMA_VERSION && payload.plugin_install_confirmed
+    claim.driver_schema >= QODER_INSTALL_CONFIRMED_MIN_SCHEMA && payload.plugin_install_confirmed
 }
 
 /// Native receipts omit legacy settings ownership and hook specs.
@@ -1921,6 +1949,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,

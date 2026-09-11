@@ -149,6 +149,7 @@ impl FrameworkDriver for DshDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let package = bundle_package_name(bundle)?;
@@ -187,6 +188,7 @@ impl FrameworkDriver for DshDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let package = bundle_package_name(bundle)?;
@@ -267,7 +269,7 @@ impl FrameworkDriver for DshDriver {
 
     fn cleanup_replaced_claim(
         &self,
-        prior: &AdapterClaim,
+        prior: &mut AdapterClaim,
         next: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
@@ -456,7 +458,7 @@ impl FrameworkDriver for DshDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
         let payload = dsh_claim(claim)?;
@@ -1089,6 +1091,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: false,
@@ -1190,13 +1193,13 @@ mod tests {
             vec!["headless".to_string(), "web".to_string()],
         );
         let bundle = driver.read_bundle(&context).unwrap();
-        let plan = driver.plan_enable(&bundle, &context).unwrap();
+        let plan = driver.plan_enable(&bundle, None, &context).unwrap();
         assert_eq!(plan.actions.len(), 2);
         assert!(
             plan.register_command.is_none(),
             "a singular command must not hide additional profile mutations"
         );
-        let (mut claim, prepared) = driver.prepare_enable(&bundle, &context).unwrap();
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, None, &context).unwrap();
         driver
             .apply_enable(&mut claim, &prepared, &context, &mut ())
             .unwrap();
@@ -1250,7 +1253,7 @@ mod tests {
         let context = ctx(dir.path(), &ops, vec!["web".to_string()]);
         let bundle = driver.read_bundle(&context).unwrap();
 
-        let plan = driver.plan_enable(&bundle, &context).unwrap();
+        let plan = driver.plan_enable(&bundle, None, &context).unwrap();
 
         assert!(plan.register_command.is_some());
     }
@@ -1271,7 +1274,11 @@ mod tests {
         };
         let context = ctx(dir.path(), &ops, Vec::new());
         let err = DshDriver::new()
-            .prepare_enable(&DshDriver::new().read_bundle(&context).unwrap(), &context)
+            .prepare_enable(
+                &DshDriver::new().read_bundle(&context).unwrap(),
+                None,
+                &context,
+            )
             .expect_err("profile selection is mandatory");
         assert!(err.to_string().contains("--profile"));
     }
@@ -1329,7 +1336,7 @@ mod tests {
         let driver = DshDriver::new();
         let context = ctx(dir.path(), &ops, vec!["web".to_string()]);
         let bundle = driver.read_bundle(&context).unwrap();
-        let (mut claim, _) = driver.prepare_enable(&bundle, &context).unwrap();
+        let (mut claim, _) = driver.prepare_enable(&bundle, None, &context).unwrap();
         let allowed_home = dir.path().join(".dsh");
         claim
             .validate(context.layout, std::slice::from_ref(&allowed_home))
@@ -1374,7 +1381,7 @@ mod tests {
         let driver = DshDriver::new();
         let context = ctx(dir.path(), &ops, vec!["web".to_string()]);
         let bundle = driver.read_bundle(&context).unwrap();
-        let (prior, _) = driver.prepare_enable(&bundle, &context).unwrap();
+        let (prior, _) = driver.prepare_enable(&bundle, None, &context).unwrap();
         std::fs::write(dir.path().join(PACKAGE_JSON), "not json\n").unwrap();
 
         assert!(driver.plan_reenable_cleanup(&prior, &context).is_err());
@@ -1404,17 +1411,17 @@ mod tests {
             vec!["retained".to_string(), "stale".to_string()],
         );
         let bundle = driver.read_bundle(&prior_ctx).unwrap();
-        let (prior, _) = driver.prepare_enable(&bundle, &prior_ctx).unwrap();
+        let (mut prior, _) = driver.prepare_enable(&bundle, None, &prior_ctx).unwrap();
         let next_ctx = ctx_with_user_home(
             dir.path(),
             first_home.path(),
             &ops,
             vec!["retained".to_string()],
         );
-        let (next, _) = driver.prepare_enable(&bundle, &next_ctx).unwrap();
+        let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
 
         let report = driver
-            .cleanup_replaced_claim(&prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
             .unwrap();
 
         assert!(report.cleanup_complete);
@@ -1465,7 +1472,7 @@ mod tests {
             vec!["retained".to_string()],
         );
         let bundle = driver.read_bundle(&prior_ctx).unwrap();
-        let (prior, _) = driver.prepare_enable(&bundle, &prior_ctx).unwrap();
+        let (mut prior, _) = driver.prepare_enable(&bundle, None, &prior_ctx).unwrap();
         let next_ctx = ctx_with_user_home(
             dir.path(),
             later_home.path(),
@@ -1478,9 +1485,9 @@ mod tests {
             ["remove prior dsh plugin '@anolisa/dsh-tokenless' from profile 'retained'"]
         );
 
-        let (next, _) = driver.prepare_enable(&bundle, &next_ctx).unwrap();
+        let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
         let report = driver
-            .cleanup_replaced_claim(&prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
             .unwrap();
 
         assert!(report.cleanup_complete);
@@ -1528,12 +1535,12 @@ mod tests {
         let driver = DshDriver::new();
         let prior_ctx = ctx(dir.path(), &ops, vec!["stale".to_string()]);
         let bundle = driver.read_bundle(&prior_ctx).unwrap();
-        let (prior, _) = driver.prepare_enable(&bundle, &prior_ctx).unwrap();
+        let (mut prior, _) = driver.prepare_enable(&bundle, None, &prior_ctx).unwrap();
         let next_ctx = ctx(dir.path(), &ops, vec!["retained".to_string()]);
-        let (next, _) = driver.prepare_enable(&bundle, &next_ctx).unwrap();
+        let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
 
         let report = driver
-            .cleanup_replaced_claim(&prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
             .unwrap();
 
         assert!(!report.cleanup_complete);
@@ -1557,7 +1564,7 @@ mod tests {
         let driver = DshDriver::new();
         let context = ctx(dir.path(), &ops, vec!["web".to_string()]);
         let bundle = driver.read_bundle(&context).unwrap();
-        let (claim, _) = driver.prepare_enable(&bundle, &context).unwrap();
+        let (claim, _) = driver.prepare_enable(&bundle, None, &context).unwrap();
 
         driver.status(&claim, &context).unwrap();
 
