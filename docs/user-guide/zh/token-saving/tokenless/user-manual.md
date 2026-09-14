@@ -71,13 +71,18 @@ DeepSeek Harness。Codex 和 Qwen Code 当前宿主契约不能替换工具后�
 
 ### 安装不等于启用
 
-无论通过 anolisa CLI、npm、curl 还是 Skill 安装 Tokenless，都只是安装组件和 Adapter 资源。要让某个 Agent 自动使用 Tokenless，还需要：
+无论通过 anolisa CLI、npm、curl 还是 Skill 安装 Tokenless，安装都只是把组件和 Adapter 资源放到磁盘上，不会把 Tokenless 注册给任何 Agent。三条生产路径留下的内容不同，因此启用步骤也不同：
 
-```bash
-anolisa adapter enable tokenless <framework>
-```
+| 安装方式 | Adapter 资源 | 启用步骤 |
+|----------|--------------|----------|
+| anolisa CLI | 随组件一起安装，并生成 anolisa 组件记录 | `anolisa adapter enable tokenless <framework>` |
+| npm，或 curl 走 npm 路径 | 由包的 postinstall 复制到 `~/.local/share/anolisa/adapters/tokenless/`；不存在 anolisa 组件记录 | 运行对应框架自带的脚本，例如 `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`。这条路径无法使用 `anolisa adapter enable` |
+| curl 走源码构建路径 | 无 —— 源码构建只安装 `tokenless` CLI | 不适用。这是 CLI-only 安装，请直接使用 `tokenless` 子命令；需要 Agent 接入能力时改用 anolisa CLI 或 npm 安装 |
+| Skill | 取决于 Skill 实际采用的方式 | 按对应方式的行处理 |
 
 CLI-only 用法不需要 Adapter。
+
+关闭也遵循同样的划分：`anolisa adapter disable tokenless <framework>` 只适用于 anolisa CLI 安装；npm 安装需要通过对应框架自带的卸载脚本，或移除安装脚本写入的 Hook 注册来关闭。
 
 ### “关闭压缩”只影响压缩操作
 

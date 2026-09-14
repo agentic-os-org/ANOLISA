@@ -17,7 +17,7 @@ Agent 的方式。
 |------|----------|------|
 | [anolisa CLI](#方式-aanolisa-cli推荐) | 完整 ANOLISA 组件管理 | 统一管理所有组件和 Adapter |
 | [npm](#方式-bnpm) | 独立安装 CLI 和 Adapter | 面向开发者，预编译二进制 + Adapter 资源 |
-| [curl](#方式-ccurl-独立安装) | 一键安装，无需前置依赖 | 自动选择 npm 或源码构建 |
+| [curl](#方式-ccurl-独立安装) | Linux 或 macOS 上的一键安装 | 有 npm 时走 npm（需要 Node.js 16+），否则源码构建（需要 Rust 工具链） |
 | [Skill](#方式-dskill面向-agent) | Agent 自动安装 | 面向 Agent 框架的 Skill 安装方式 |
 
 ### 方式 A：anolisa CLI（推荐）
@@ -40,14 +40,14 @@ anolisa adapter enable tokenless claude-code
 
 ### 方式 B：npm
 
-需要 Node.js 16+。自动安装适合当前平台的预编译二进制（`tokenless`、`rtk`、`toon`）和框架 Adapter 资源：
+需要 Node.js 16+。自动安装适合当前平台的预编译二进制（`tokenless`、`rtk`）和框架 Adapter 资源：
 
 ```bash
 npm install -g anolisa-tokenless
 tokenless --version
 ```
 
-安装完成后，Adapter 资源位于 `~/.local/share/anolisa/adapters/tokenless/`，可按需为 Agent 框架启用。
+安装完成后，Adapter 资源位于 `~/.local/share/anolisa/adapters/tokenless/`。npm 安装不会生成 anolisa 组件记录，因此 `anolisa adapter enable` 不适用于这条路径，请按[按安装方式启用 Adapter](#按安装方式启用-adapter)启用。
 
 支持的平台：
 
@@ -60,17 +60,34 @@ tokenless --version
 
 ### 方式 C：curl 独立安装
 
-一键安装脚本，优先使用 npm，npm 不可用时回退到源码构建：
+一键安装脚本，优先使用 npm；npm 缺失、安装失败或当前平台没有预编译二进制时回退到源码构建：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
 
-可指定版本或安装目录：
+前置依赖取决于脚本实际走哪条路径：
+
+| 路径 | 触发条件 | 依赖 | 安装内容 |
+|------|----------|------|----------|
+| npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16+（含 `npm`） | `tokenless`、`rtk` 以及 Adapter 资源 |
+| 源码构建 | 无 npm、npm 安装失败、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1` | `curl`、`tar`、Rust 工具链（`cargo`） | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
+
+脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。
+
+可指定版本或安装目录。变量要传给 `bash`，不要传给 `curl`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+```
+
+指定版本是强约束：源码构建只下载对应的 `tokenless/v<VERSION>` tag。该 tag 不存在时安装直接失败，不会静默改用 `main` 分支构建。
+
+安装脚本会把本次创建的文件记录到 `~/.local/share/tokenless/install-receipt`。之后可以只删除这些记录的路径：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
 ```
 
 ### 方式 D：Skill（面向 Agent）
@@ -81,12 +98,20 @@ Skill 文件位于仓库的 `src/os-skills/ai/install-tokenless/SKILL.md`。加�
 
 使用时，将 Skill 文件路径指向 Agent 框架，或将其内容直接传给 Agent。Skill 包含完整的安装、验证和框架集成指引。
 
-安装 Tokenless 后，还需要为对应的 Agent 框架启用 Adapter（Skill 会自动引导此步骤）：
+安装 Tokenless 后，还需要为对应的 Agent 框架启用 Adapter。Skill 会自动引导此步骤，并按它实际采用的安装方式执行，因此对照[按安装方式启用 Adapter](#按安装方式启用-adapter)中对应的一行即可。
 
-```bash
-anolisa adapter scan
-anolisa adapter enable tokenless <agent>
-```
+### 按安装方式启用 Adapter {#按安装方式启用-adapter}
+
+安装只是把文件放到磁盘上，并不会把 Tokenless 注册给 Agent。启用方式取决于安装方式：
+
+| 安装方式 | Adapter 资源 | 启用方式 |
+|----------|--------------|----------|
+| anolisa CLI（方式 A） | 随组件一起安装 | `anolisa adapter scan`，再执行 `anolisa adapter enable tokenless <framework>` |
+| npm（方式 B），或 curl（方式 C）走 npm 路径 | 由包的 postinstall 复制到 `~/.local/share/anolisa/adapters/tokenless/` | 运行对应框架自带的脚本，例如 `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`。这条路径不能用 `anolisa adapter enable`，因为 npm 安装不会生成 anolisa 组件记录 |
+| curl（方式 C）走源码构建路径 | 无 | 不适用 —— 这是 CLI-only 安装。请直接使用 `tokenless` 子命令，或改用方式 A／方式 B 安装以获得 Agent 接入能力 |
+| Skill（方式 D） | 取决于 Skill 实际采用的方式 | 按对应方式的行处理 |
+
+启用后请重启 Agent CLI、IDE 或 Gateway。
 
 ## 2. 运行一次真实任务
 
@@ -220,12 +245,20 @@ tokenless stats list --limit 1
 
 | 平台 | anolisa CLI | npm | curl | Skill |
 |------|-------------|-----|------|-------|
-| Linux x86_64/aarch64 | 支持 | 支持 | 支持 | 支持 |
-| macOS Apple Silicon | 支持 | 支持 | 支持 | 支持 |
-| macOS x86_64 | 暂不支持 | 支持 | 支持 | 支持 |
-| Windows 或使用 musl 的 Linux（例如 Alpine） | 暂不支持 | 暂不支持 | 仅源码构建 | 仅源码构建 |
+| Linux x86_64/aarch64（glibc） | 支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
+| 使用 musl 的 Linux（例如 Alpine） | 暂不支持 | 暂不支持 | 仅源码构建，需要 Rust 工具链 | 仅源码构建，需要 Rust 工具链 |
+| macOS Apple Silicon | 支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
+| macOS x86_64 | 暂不支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
+| Windows | 暂不支持 | 暂不支持 | 暂不支持，请使用 WSL2 | 暂不支持，请使用 WSL2 |
 
-npm 和 curl 方式在 macOS x86_64 上提供预编译二进制。anolisa CLI 暂不支持 macOS x86_64。需要从源码构建独立 CLI 时，请参阅[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
+上述边界的补充说明：
+
+- npm 和 curl 方式在 macOS x86_64 上提供预编译二进制；anolisa CLI 暂不支持 macOS x86_64。
+- macOS 上的 curl 依赖 npm 路径。其源码构建回退只在 Linux 上验证过，因此没有 npm 的 macOS 机器没有受支持的 curl 路径。
+- npm 包声明了 `os: linux, darwin`，所以本页所有方式都不支持 Windows。在 WSL2 内按 Linux 各行处理。
+- Skill 方式会委托给 anolisa CLI、npm 或 curl，其支持范围跟随实际选中的方式。
+
+需要从源码构建独立 CLI 时，请参阅[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
 
 ## 下一步
 

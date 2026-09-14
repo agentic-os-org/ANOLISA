@@ -12,10 +12,21 @@ Tokenless is the token optimization component of ANOLISA. It compresses tool sch
 
 ## System Requirements
 
-- **OS**: Linux (glibc) or macOS
+- **OS**: Linux or macOS. Windows is not supported by any method below; use WSL2 there.
 - **Architecture**: x86_64 or arm64
 - **Network**: Internet access required
 - **Shell**: Bash
+
+Per-method prerequisites:
+
+| Method | Requires | Installs |
+|--------|----------|----------|
+| A — anolisa CLI | `curl` | full component suite including adapters |
+| B — npm | Node.js 16+ with `npm`, glibc Linux or macOS | `tokenless`, `rtk`, adapter resources |
+| C — curl | `curl`, `tar`, plus Node.js 16+ **or** a Rust toolchain (`cargo`) depending on the path taken | npm path: as Method B. Source-build path: the `tokenless` CLI only |
+| D — Skill | whichever of A/B/C the agent runs | as that method |
+
+The source-build fallback is validated on Linux only. On musl Linux (Alpine) it is the only available path, because prebuilt binaries are glibc-linked.
 
 ## Installation Workflow
 
@@ -50,17 +61,19 @@ Requires Node.js 16+. Installs prebuilt binaries for your platform:
 npm install -g anolisa-tokenless
 ```
 
-This automatically installs `tokenless`, `rtk`, and `toon` binaries plus framework adapters.
+This automatically installs the `tokenless` and `rtk` binaries plus the framework adapter resources. (`toon` is no longer a standalone binary — TOON encoding is a `tokenless` subcommand.)
+
+The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
 
 **Method C: Standalone curl Install**
 
-One-liner that tries npm first, falls back to source build:
+One-liner that tries npm first and falls back to a source build when npm is unavailable, fails, or the platform is musl Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
 
-Options via environment variables:
+Options via environment variables. Pass them to `bash`, not to `curl`, otherwise the installer never sees them:
 
 ```bash
 # Pin a specific version
@@ -68,7 +81,16 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 
 # Custom install directory
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+
+# Force the source build even when npm is available (needs cargo)
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_FORCE_BUILD=1 bash
 ```
+
+A pinned version is a hard pin: the source build downloads only the matching `tokenless/v<VERSION>` tag, and fails if that tag does not exist. It never falls back to the `main` branch.
+
+The source-build path installs the `tokenless` CLI only — no `rtk` and no adapter resources. Treat it as a CLI-only install (see Step 3).
+
+The installer records every path it created in `~/.local/share/tokenless/install-receipt`, which the uninstall step below relies on.
 
 ### Step 2: Verify Installation
 
@@ -84,34 +106,38 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### Step 3: Enable for an Agent Framework (Optional)
 
-Tokenless can integrate with agent frameworks via adapters. Find available agents and enable:
+Pick the enable path that matches how Step 1 installed Tokenless. Installation only places files on disk; it never registers Tokenless with an agent.
+
+**Installed via Method A (anolisa CLI)** — the component is recorded, so use the adapter commands:
 
 ```bash
-# If installed via anolisa CLI
 anolisa adapter scan
 anolisa adapter enable tokenless <agent>
 anolisa adapter status tokenless
+```
 
-# If installed via npm, adapters are at:
-ls ~/.local/share/anolisa/adapters/tokenless/
+**Installed via Method B, or via Method C's npm path** — the package postinstall copied the adapters to `~/.local/share/anolisa/adapters/tokenless/`, but there is **no anolisa component record**, so `anolisa adapter enable` is not available. Run the framework's bundled script instead:
 
-# Run a framework-specific install script, e.g. for Claude Code:
+```bash
+ls ~/.local/share/anolisa/adapters/tokenless/          # confirm the directory exists
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ```
 
-Supported frameworks:
+**Installed via Method C's source-build path** — CLI-only. No `rtk` and no adapter resources were installed, so no adapter can be enabled. Use the `tokenless` subcommands directly, or reinstall through Method A or B for agent integration.
 
-> **Note:** The script paths below are examples for npm-installed adapters. Not all frameworks ship a standalone install script, and directory names may differ. The recommended integration path is `anolisa adapter enable tokenless <framework>` (for anolisa CLI installs) or check `ls ~/.local/share/anolisa/adapters/tokenless/` to confirm the adapter directory exists before running a script directly.
+> **Note:** The script paths below are examples for npm-installed adapters. Not all frameworks ship a standalone install script, and directory names may differ. Always check `ls ~/.local/share/anolisa/adapters/tokenless/` first. For anolisa CLI installs, `anolisa adapter enable tokenless <framework>` is the recommended path.
 
-| Agent | Adapter install script |
-|-------|----------------------|
-| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` |
-| OpenClaw | `bash ~/.local/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh` |
-| Hermes | `bash ~/.local/share/anolisa/adapters/tokenless/hermes/scripts/install.sh` |
-| Qoder | `bash ~/.local/share/anolisa/adapters/tokenless/qoder/scripts/install.sh` |
-| Claude Code | `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh` |
-| Codex | `bash ~/.local/share/anolisa/adapters/tokenless/codex/scripts/install.sh` |
-| Qwen Code | `bash ~/.local/share/anolisa/adapters/tokenless/qwencode/scripts/install.sh` |
+| Agent | anolisa CLI install | npm-based install |
+|-------|---------------------|-------------------|
+| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` | no bundled script — cosh integrates through the ANOLISA cosh extension, so use the anolisa CLI path |
+| OpenClaw | `anolisa adapter enable tokenless openclaw` | `bash ~/.local/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh` |
+| Hermes | `anolisa adapter enable tokenless hermes` | `bash ~/.local/share/anolisa/adapters/tokenless/hermes/scripts/install.sh` |
+| Qoder | `anolisa adapter enable tokenless qoder` | `bash ~/.local/share/anolisa/adapters/tokenless/qoder/scripts/install.sh` |
+| Claude Code | `anolisa adapter enable tokenless claude-code` | `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh` |
+| Codex | `anolisa adapter enable tokenless codex` | `bash ~/.local/share/anolisa/adapters/tokenless/codex/scripts/install.sh` |
+| Qwen Code | `anolisa adapter enable tokenless qwencode` | `bash ~/.local/share/anolisa/adapters/tokenless/qwencode/scripts/install.sh` |
+
+Each bundled adapter also ships a matching `scripts/uninstall.sh` next to its `install.sh`; use it to disable that framework again.
 
 Restart the agent CLI, IDE, or gateway after enabling.
 
@@ -144,19 +170,43 @@ tokenless stats summary
 
 ## Uninstall
 
-**npm installation:**
-```bash
-npm uninstall -g anolisa-tokenless
-```
+Uninstall must match how Tokenless was installed, and must only remove files that
+installation created. Do not run a blanket `rm` across `~/.local/bin` or the
+adapter tree — those paths may belong to another method.
 
-**anolisa CLI installation:**
+**anolisa CLI installation (Method A):**
 ```bash
 anolisa uninstall tokenless
 ```
 
-**Standalone curl installation:**
+**Standalone curl installation (Method C):** the installer recorded its method,
+npm prefix, install directory, and every file it created in
+`~/.local/share/tokenless/install-receipt`. Remove exactly those:
+
 ```bash
-rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon
-rm -rf ~/.tokenless
-rm -rf ~/.local/share/anolisa/adapters/tokenless
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+
+# Preview first, or also delete the runtime data directory:
+#   ... | bash -s -- --dry-run
+#   ... | bash -s -- --purge
 ```
+
+The receipt-driven uninstaller removes the recorded binaries from the recorded
+install directory (including a custom `TOKENLESS_INSTALL_DIR`), uninstalls the
+global npm package from the recorded prefix when the npm path was used, removes
+the adapter directory only when that npm run created it, strips only the PATH
+line the installer appended, and leaves `~/.tokenless` (stats and stash data)
+in place unless `--purge` is passed. A source-build install recorded no adapters,
+so none are removed.
+
+**Direct npm installation (Method B), not through the curl script:** no receipt
+exists, so clean up both places npm wrote to:
+
+```bash
+npm uninstall -g anolisa-tokenless
+rm -rf ~/.local/share/anolisa/adapters/tokenless   # created by the package postinstall
+```
+
+If the receipt is missing (for example after a manual cleanup), the uninstaller
+exits with an error rather than guessing; remove `<install-dir>/tokenless` and
+`<install-dir>/rtk` yourself, using the directory you actually installed into.

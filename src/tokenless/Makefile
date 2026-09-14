@@ -241,7 +241,7 @@ uninstall:
 # Run tests
 test: test-tokenless test-hooks test-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup
+      test-npm-package test-toon-cleanup test-install-methods
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -352,6 +352,14 @@ test-npm-package:
 
 test-toon-cleanup:
 	@bash tests/test-toon-cleanup.sh
+
+# Standalone curl installer/uninstaller behaviour plus the install-method docs
+# that describe it. Offline: curl, npm and cargo are stubbed by the test.
+test-install-methods:
+	@echo "==> Testing standalone install/uninstall scripts..."
+	@bash tests/test-install-script.sh
+	@echo "==> Testing install-method documentation consistency..."
+	@bash tests/test-install-docs.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
