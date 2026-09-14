@@ -49,7 +49,7 @@ pub struct DispatchControl {
 }
 
 impl DispatchControl {
-    pub(crate) fn new(deadline: Instant) -> Self {
+    pub fn new(deadline: Instant) -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline,

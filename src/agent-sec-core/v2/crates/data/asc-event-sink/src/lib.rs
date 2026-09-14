@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod configured;
 pub mod error;
 pub mod observability;
 pub mod security_events;
@@ -25,6 +26,7 @@ pub mod singletons;
 #[cfg(test)]
 mod test_support;
 
+pub use configured::ConfiguredSecurityEventSinks;
 pub use error::SinkError;
 pub use observability::record_observability;
 pub use security_events::log_event;

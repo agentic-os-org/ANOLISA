@@ -422,8 +422,13 @@ v2 正常渲染。这条**不是**按等价性复刻的，而是写成差分矩�
 
 ### 11.2 composition root 的责任
 
-- 启动时构造 sink 并注入路径（不要依赖读环境变量的默认构造，见 §13.1）；
-- 退出时调 `shutdown_sinks()`（§10.1）；
+- 启动时解析 JSONL / SQLite 的绝对路径，构造
+  `ConfiguredSecurityEventSinks` 并注入 `EventSinkAdapter`；不得让 daemon 走进程级
+  `writer()` / `sqlite_writer()` 的默认环境路径单例（见 §13.1）；
+- 启动时分别 warm 两条路径，任一侧失败只告警、另一侧继续可用；事件写入仍按 v1 双写的
+  fail-open 语义独立重试；
+- `run_with_shutdown_timeout` 返回后才调 `ConfiguredSecurityEventSinks::close()`：先让 Tokio
+  排空 blocking dispatch，再跑保留期维护与 WAL checkpoint；
 - 决定 `DropSink` 的落点。v1 把丢弃诊断写进 `cli.jsonl`，v2 默认写 stderr，注入式。
   这一条是**尚未定案的差异**，需要 daemon 侧确定诊断落点。
 
@@ -492,9 +497,9 @@ home，**谁扫的代码进谁的库**；daemon 通常以 root 运行、落 tier
 
 ## 12. 测试工具定性
 
-v1↔v2 差分探针只用于迁移期间验证，**不随仓库交付**。它保留在本地 `my_data/db_to_rust/`
-目录，不进入制品、RPM 清单或 CI；已提交的验收证据是 crate 内的 API 台账、冻结 v1 fixture
-和迁移测试账本。这样产品面不出现直读 SQLite 的 CLI 或 TUI，仍符合
+v1↔v2 差分探针只用于迁移期间验证，**不随仓库交付**，也不进入制品、RPM 清单或 CI；
+已提交的验收证据是 crate 内的 API 台账、冻结 v1 fixture 和迁移测试账本。这样产品面不出现
+直读 SQLite 的 CLI 或 TUI，仍符合
 [`DAEMON_PROTOCOL_V1_zh.md`](DAEMON_PROTOCOL_V1_zh.md) DPV1-019。
 
 ## 13. 测试并行隔离契约

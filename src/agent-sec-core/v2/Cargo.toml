@@ -5,6 +5,8 @@ resolver = "3"
 members = [
     "apps/asc-cli",
     "apps/asc-daemon",
+    "crates/action/asc-action-runtime",
+    "crates/action/asc-action-types",
     "crates/action/capabilities/asc-capability-code-scan",
     "crates/daemon/asc-daemon-client",
     "crates/daemon/asc-daemon-core",
@@ -41,6 +43,8 @@ publish = false
 
 [workspace.dependencies]
 asc-policy-runtime = { path = "crates/policy/asc-policy-runtime" }
+asc-action-runtime = { path = "crates/action/asc-action-runtime" }
+asc-action-types = { path = "crates/action/asc-action-types" }
 asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
 asc-capability-code-scan = { path = "crates/action/capabilities/asc-capability-code-scan" }
 asc-daemon = { path = "apps/asc-daemon" }

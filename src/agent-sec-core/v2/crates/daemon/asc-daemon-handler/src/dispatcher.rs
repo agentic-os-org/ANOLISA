@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use asc_action_runtime::{Finalizer, SecurityEventSink};
 use asc_daemon_core::{
     PeerCredentials, PolicyAdministration, Principal, PrincipalPolicy, PrincipalRole,
 };
@@ -27,9 +28,18 @@ impl DaemonDispatcher {
         application: impl PolicyAdministration + 'static,
         principal_policy: Arc<dyn PrincipalPolicy>,
     ) -> Self {
+        Self::new_with_finalizer(application, principal_policy, default_finalizer())
+    }
+
+    /// Composes dispatch with an explicitly configured action finalizer.
+    pub fn new_with_finalizer(
+        application: impl PolicyAdministration + 'static,
+        principal_policy: Arc<dyn PrincipalPolicy>,
+        finalizer: Finalizer,
+    ) -> Self {
         Self {
             pap: PapHandler::new(application),
-            code_scan: CodeScanHandler::new(),
+            code_scan: CodeScanHandler::new(finalizer),
             principal_policy,
         }
     }
@@ -39,6 +49,22 @@ impl DaemonDispatcher {
         &self,
         request_id: RequestId,
         peer: PeerCredentials,
+        request: DaemonRequest,
+    ) -> DaemonResponse {
+        self.handle_with_control(
+            request_id,
+            peer,
+            &asc_daemon_service::DispatchControl::new(std::time::Instant::now()),
+            request,
+        )
+    }
+
+    /// Handles one request with its transport-owned control state.
+    pub fn handle_with_control(
+        &self,
+        request_id: RequestId,
+        peer: PeerCredentials,
+        control: &asc_daemon_service::DispatchControl,
         request: DaemonRequest,
     ) -> DaemonResponse {
         let Some(method_id) = method::resolve(&request.method) else {
@@ -64,7 +90,10 @@ impl DaemonDispatcher {
                     .handle(request_id, &principal, method, request.params)
             }
             MethodId::Action(method) => match method {
-                method::ActionMethod::CodeScan => self.code_scan.handle(request_id, request.params),
+                method::ActionMethod::CodeScan => {
+                    self.code_scan
+                        .handle(request_id, peer, control, request.params)
+                }
             },
         }
     }
@@ -109,8 +138,21 @@ impl RequestDispatcher for DaemonDispatcher {
                 ),
             );
         };
-        write_response(response, &self.handle(request_id, peer, decoded))
+        write_response(
+            response,
+            &self.handle_with_control(request_id, peer, &request.control, decoded),
+        )
     }
+}
+
+struct NoopEventSink;
+
+impl SecurityEventSink for NoopEventSink {
+    fn write(&self, _: &asc_security_events::SecurityEvent) {}
+}
+
+fn default_finalizer() -> Finalizer {
+    Finalizer::new(Arc::new(NoopEventSink))
 }
 
 pub(crate) fn new_request_id() -> RequestId {
