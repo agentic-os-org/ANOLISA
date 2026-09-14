@@ -30,7 +30,7 @@ pub(crate) fn approval_action_set_for(
     if request.kind == ApprovalRequestKind::TurnExtension {
         return ApprovalActionSet::TurnExtension;
     }
-    if request.subject.contains("HOOK:") {
+    if request.subject.starts_with("HOOK:") {
         return ApprovalActionSet::Hook;
     }
     // High-risk requests never offer AlwaysTrust (issue #2064): an
