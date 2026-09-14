@@ -554,6 +554,37 @@ mod tests {
         }
     }
 
+    /// Timeout values use Rust numeric syntax, not Python's.
+    ///
+    /// V1 parses with Python `int`/`float`, which also accept underscore
+    /// separators and non-ASCII decimal digits, and prints small floats in
+    /// Python's `repr` form. V2 keeps Rust semantics on purpose: such a value
+    /// falls back to the documented default with a visible diagnostic instead
+    /// of being silently reinterpreted. This test pins that choice so it is not
+    /// mistaken for a defect later.
+    #[test]
+    fn timeouts_reject_python_only_numeric_syntax() {
+        for raw in ["2_0", "\u{ff12}\u{ff10}"] {
+            let (values, diagnostics) =
+                resolve_pair("qoder", "code-scan", &[("CODE_SCANNER_TIMEOUT", raw)]);
+            assert_eq!(timeout("qoder", "code-scan", &values), "10", "raw={raw}");
+            assert_eq!(
+                diagnostics,
+                vec!["CODE_SCANNER_TIMEOUT has an invalid value; using '10'"],
+                "raw={raw}"
+            );
+        }
+    }
+
+    /// Small floats keep Rust's decimal form rather than Python's `repr`.
+    #[test]
+    fn small_float_timeouts_are_reported_in_decimal_form() {
+        let (values, diagnostics) =
+            resolve_pair("qoder", "skill-ledger", &[("SKILL_LEDGER_TIMEOUT", "1e-7")]);
+        assert_eq!(timeout("qoder", "skill-ledger", &values), "0.0000001");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
     #[test]
     fn float_timeouts_keep_fractions_and_clamp_to_the_agent_maximum() {
         let (values, diagnostics) =

@@ -7,14 +7,14 @@
 //!
 //! Migration contract, the two gaps that a future capability migration must
 //! close (G1, G4) and the items that follow from V1's design, the rolling
-//! migration itself or an accepted trade-off (G2, G3, G5, G6, G7) are recorded
-//! in `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
+//! migration itself or an accepted trade-off (G2, G3, G5, G6, G7, G8) are
+//! recorded in `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
 
 pub(crate) mod manifest;
 pub(crate) mod render;
 pub(crate) mod resolve;
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeStruct as _, Serializer};
@@ -22,6 +22,67 @@ use serde::ser::{SerializeMap, SerializeStruct as _, Serializer};
 use manifest::{AGENTS, CANONICAL_CAPABILITIES};
 pub use resolve::Environment;
 use resolve::{EnvValue, ResolvedEnv};
+
+/// Reads the variables this view can report from the current process.
+///
+/// `std::env::vars` panics on a value that is not valid UTF-8, which would let
+/// an unrelated variable both break a read-only view and push its own value
+/// into the panic message on stderr. Reading through `vars_os` and keeping only
+/// the manifest names avoids both.
+///
+/// A value that is not valid UTF-8 is decoded the way `CPython` decodes the
+/// environment on Unix: every undecodable byte becomes the escape text V1 would
+/// print for its surrogate. The value therefore stays invalid for every parsed
+/// variable (falling back to the documented default with a diagnostic) and is
+/// reported identically to V1 for the one variable echoed close to verbatim.
+#[must_use]
+pub fn process_environment() -> Environment {
+    let names = manifest::env_names();
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.into_string().ok()?;
+            names
+                .contains(&name.as_str())
+                .then(|| (name, decode_value(&value)))
+        })
+        .collect()
+}
+
+/// Decodes an environment value, escaping bytes `CPython` would surrogate-escape.
+#[cfg(unix)]
+fn decode_value(value: &std::ffi::OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut bytes = value.as_bytes();
+    let mut text = String::new();
+    loop {
+        match std::str::from_utf8(bytes) {
+            Ok(valid) => {
+                text.push_str(valid);
+                return text;
+            }
+            Err(error) => {
+                let (valid, rest) = bytes.split_at(error.valid_up_to());
+                text.push_str(&String::from_utf8_lossy(valid));
+                // `error_len` is `None` when the value ends mid-sequence, in
+                // which case every remaining byte is undecodable as well.
+                let undecodable = error.error_len().unwrap_or(rest.len());
+                for byte in &rest[..undecodable] {
+                    // CPython maps byte `b` to U+DC00 + b, and V1 prints that
+                    // surrogate as `\udcXX`.
+                    let _ = write!(text, "\\udc{byte:02x}");
+                }
+                bytes = &rest[undecodable..];
+            }
+        }
+    }
+}
+
+/// Decodes an environment value on platforms without byte-oriented values.
+#[cfg(not(unix))]
+fn decode_value(value: &std::ffi::OsStr) -> String {
+    value.to_string_lossy().into_owned()
+}
 
 /// Resolved configuration of one agent/capability pair.
 #[derive(Debug)]

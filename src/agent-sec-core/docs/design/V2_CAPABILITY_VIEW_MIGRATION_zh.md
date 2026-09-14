@@ -53,7 +53,10 @@ E2E 用例 `test_capabilities_never_depends_on_a_daemon_endpoint` 锁定。
 CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json）、mode 别名与 allowlist
 回退、int/float timeout 全部边界、legacy PII 开关优先级、broad boolean 词表、`XDG_DATA_HOME`
 合法与非法、L2 值转义与截断、大小写与空格归一化、三类参数校验错误、以及 6×5 单对矩阵。
-除下文 G1 掩码的两个字段外，其余输出**逐字节一致**，包括表格最后一列的补齐空格。
+在这些场景内，除下文 G1 掩码的两个字段外输出**逐字节一致**，包括表格最后一列的补齐空格。
+
+注意该结论的边界：它覆盖的是上述场景集合，**不是全部可能取值**。已知落在集合之外的取值差异见
+3.1 节 G8（Python 专有的数字字面量语法与浮点 `repr` 形态）。
 
 ### 2.3 V2 单元测试
 
@@ -79,7 +82,7 @@ CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json�
 
 ### 3.1 非缺口：沿用 V1 设计 / 迁移方式决定的形态 / 已接受的取舍
 
-以下五项不是待办、不需要补全。记录它们只为两个目的：说明视图的语义边界，以及避免后人误以为
+以下六项不是待办、不需要补全。记录它们只为两个目的：说明视图的语义边界，以及避免后人误以为
 迁移遗漏而去「补」V1 本来就没有的行为、或把既定的实现 fork 与已接受的取舍当成缺陷。
 
 | ID | 内容 | 为什么不是缺口 | 维护约定 |
@@ -89,6 +92,7 @@ CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json�
 | **G5** | `enabled` 只反映环境变量意图，不代表 Hook 已在 Agent 进程加载 | V1 的 `capabilities` 从设计上就是 environment-only 视图，从不探测目标 Agent 进程；V2 照搬。若将来确实需要「已加载」证明，那是一个新增的运行期探测能力，不是改本视图语义 | 命令 `--help` 长文本已声明该边界 |
 | **G6** | 非打印字符判定用 Rust 的 control/whitespace 类别近似 Python `str.isprintable()` | 已接受的实现取舍：控制字符与常见空白字符行为与 V1 一致，终端注入风险面已覆盖；仅 Cf/Co/Cn 等罕见类别上 V2 保留而 V1 转义。与其他能力迁移无关 | 无。若将来出现真实场景要求严格一致，再引入 Unicode 类别表 |
 | **G7** | V1 `CapabilityRecord` 的 `hooks`/`source`/`config`/`config_path` 字段未实现 | 这些字段在 V1 的 `to_dict()` 里本就不进入 JSON，也不进入表格，属于内部中间态；V2 不实现即为等价 | 无 |
+| **G8** | timeout 采用 Rust 数字语义：`2_0`、全角 `２０` 等 Python 专有字面量判为非法值；小浮点按十进制输出（`1e-7` → `0.0000001`），V1 按 Python `repr` 输出 `1e-07` | 已接受的实现取舍：这些差异源自 Python `int()`/`float()` 与 `repr` 的语言特性，不是视图语义。V2 的行为是安全的——非法值回落到文档化默认值并给出可见诊断，不会被静默重新解释，也不会崩溃；`  20  `、`+20`、`1E5`、`0.5`、`3.0` 等常规形态两代一致 | 无。该取舍由 `resolve.rs` 的 `timeouts_reject_python_only_numeric_syntax` 与 `small_float_timeouts_are_reported_in_decimal_form` 两个单测钉住；这些取值**不得**加入两代共用的差分 e2e（会在其中一侧必然失败） |
 
 ## 4. 缺口识别方法
 

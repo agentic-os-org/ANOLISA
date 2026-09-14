@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use asc_cli::{
     Cli, InputError, Plan,
-    capabilities::Environment,
+    capabilities::process_environment,
     output::{render_policy, render_scan_code},
 };
 
@@ -39,7 +39,7 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         Plan::Local(command) => {
             return command
                 .render(
-                    &std::env::vars().collect::<Environment>(),
+                    &process_environment(),
                     &mut io::stdout().lock(),
                     &mut io::stderr().lock(),
                 )

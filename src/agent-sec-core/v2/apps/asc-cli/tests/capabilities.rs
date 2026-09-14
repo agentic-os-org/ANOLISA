@@ -118,3 +118,55 @@ fn unknown_filter_values_are_reported_without_echoing_control_characters() {
         "{message}"
     );
 }
+
+/// A value that is not valid UTF-8 must not break the view or reach stderr.
+///
+/// This has to spawn the real binary: the resolution tests inject an
+/// `Environment` directly and therefore never exercise `std::env`, which is
+/// exactly where the panic used to come from.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_environment_never_aborts_the_view_or_echoes_its_value() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::process::Command;
+
+    let hostile = OsString::from_vec(b"secret-prefix-\xff-suffix".to_vec());
+
+    // An unrelated variable must be ignored outright.
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .args(["capabilities", "--agent", "cosh"])
+        .env("UNRELATED_NON_UTF8", &hostile)
+        .output()
+        .expect("the capability view binary should run");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert!(!output.stdout.is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A reported variable stays invalid, so the documented default wins and the
+    // value itself is never printed.
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .args([
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "code-scan",
+            "--output",
+            "json",
+        ])
+        .env("CODE_SCANNER_TIMEOUT", &hostile)
+        .output()
+        .expect("the capability view binary should run");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    let rendered = String::from_utf8(output.stdout).expect("json output should be utf-8");
+    assert!(
+        rendered.contains("CODE_SCANNER_TIMEOUT has an invalid value; using '10'"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("secret-prefix"), "{rendered}");
+}

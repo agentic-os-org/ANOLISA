@@ -296,6 +296,24 @@ pub(crate) fn static_default_timeout(agent: &str, capability: &str) -> Option<&'
     Some(timeout)
 }
 
+/// Every variable name the view can report, deduplicated.
+///
+/// Callers use it to read only the relevant part of the process environment,
+/// which keeps an unrelated variable from influencing the view at all.
+pub(crate) fn env_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for agent in AGENTS {
+        for capability in CANONICAL_CAPABILITIES {
+            for entry in spec(agent, capability).env {
+                if !names.contains(&entry.name) {
+                    names.push(entry.name);
+                }
+            }
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
