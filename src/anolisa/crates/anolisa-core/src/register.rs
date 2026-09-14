@@ -392,9 +392,17 @@ impl RegistrationManager {
     /// unregistered or managed by sysom, serving as a defensive guard against
     /// non-CLI callers bypassing validation.
     pub fn do_unregister(&self, operator: &str) -> Result<(), SubscriptionError> {
+        self.do_unregister_with(operator, || self.is_sysom_registered())
+    }
+
+    fn do_unregister_with(
+        &self,
+        operator: &str,
+        is_sysom_registered: impl FnOnce() -> bool,
+    ) -> Result<(), SubscriptionError> {
         let _lock = self.acquire_lock()?;
         // Check sysom inside the lock to prevent TOCTOU races
-        if self.is_sysom_registered() {
+        if is_sysom_registered() {
             return Err(SubscriptionError::SysomManaged);
         }
         let (current, existing) = self.read_state_and_record();
@@ -527,7 +535,11 @@ impl RegistrationManager {
     /// Detect whether sysom services are active (sysak_meta active).
     /// When both services are running, the system has been registered via the sysom platform.
     pub fn is_sysom_registered(&self) -> bool {
-        Self::is_service_running("sysak_meta") && Self::is_service_running("sysak_agentsight")
+        Self::is_sysom_registered_with(Self::is_service_running)
+    }
+
+    fn is_sysom_registered_with(mut is_running: impl FnMut(&str) -> bool) -> bool {
+        is_running("sysak_meta") && is_running("sysak_agentsight")
     }
 
     /// Detect whether the agentsight service is running.
@@ -541,19 +553,22 @@ impl RegistrationManager {
     /// 1. If systemd is available, use `systemctl is-active --quiet <unit>`
     /// 2. Otherwise fall back to `service <name> status` (SysVinit / OpenRC compatible)
     fn is_service_running(unit: &str) -> bool {
-        if Self::has_systemd() {
-            return std::process::Command::new("systemctl")
-                .args(["is-active", "--quiet", unit])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-        }
-        // fallback: `service <name> status` returns exit 0 when running
-        std::process::Command::new("service")
-            .args([unit, "status"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        Self::is_service_running_with(unit, Self::has_systemd, |program, args| {
+            std::process::Command::new(program).args(args).status()
+        })
+    }
+
+    fn is_service_running_with(
+        unit: &str,
+        has_systemd: impl FnOnce() -> bool,
+        mut run: impl FnMut(&str, &[&str]) -> io::Result<std::process::ExitStatus>,
+    ) -> bool {
+        let result = if has_systemd() {
+            run("systemctl", &["is-active", "--quiet", unit])
+        } else {
+            run("service", &[unit, "status"])
+        };
+        result.map(|s| s.success()).unwrap_or(false)
     }
 
     /// Detect whether the current system runs systemd (via presence of /run/systemd/system).
@@ -713,7 +728,7 @@ mod tests {
         let m = mgr(&dir);
         m.do_register("admin", RegisterSource::Cli).unwrap();
 
-        m.do_unregister("bob").unwrap();
+        m.do_unregister_with("bob", || false).unwrap();
         assert_eq!(m.read_state(), ConsentState::Unregistered);
 
         let rec = m.read_record().unwrap();
@@ -724,11 +739,175 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn service_probe_preserves_routing_and_exit_policy() {
+        use std::cell::RefCell;
+        use std::os::unix::process::ExitStatusExt;
+
+        for systemd in [true, false] {
+            for unit in ["sysak_meta", "sysak_agentsight", "agentsight"] {
+                // Raw Unix statuses: success, non-zero exits, and SIGTERM.
+                for raw_status in [Some(0), Some(1 << 8), Some(3 << 8), Some(15), None] {
+                    let events = RefCell::new(Vec::new());
+                    let running = RegistrationManager::is_service_running_with(
+                        unit,
+                        || {
+                            events.borrow_mut().push("environment".to_string());
+                            systemd
+                        },
+                        |program, args| {
+                            events.borrow_mut().push("command".to_string());
+                            if systemd {
+                                assert_eq!(program, "systemctl");
+                                assert_eq!(args, ["is-active", "--quiet", unit]);
+                            } else {
+                                assert_eq!(program, "service");
+                                assert_eq!(args, [unit, "status"]);
+                            }
+                            match raw_status {
+                                Some(raw) => Ok(std::process::ExitStatus::from_raw(raw)),
+                                None => Err(io::Error::from(io::ErrorKind::NotFound)),
+                            }
+                        },
+                    );
+                    assert_eq!(running, raw_status == Some(0));
+                    assert_eq!(*events.borrow(), ["environment", "command"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sysom_probe_short_circuits_and_rechecks_environment() {
+        use std::cell::RefCell;
+        use std::os::unix::process::ExitStatusExt;
+
+        for first in [false, true] {
+            for second in [false, true] {
+                let events = RefCell::new(Vec::new());
+                let mut probes = 0;
+                let active = RegistrationManager::is_sysom_registered_with(|unit| {
+                    probes += 1;
+                    let expected_unit = if probes == 1 {
+                        "sysak_meta"
+                    } else {
+                        "sysak_agentsight"
+                    };
+                    assert_eq!(unit, expected_unit);
+                    RegistrationManager::is_service_running_with(
+                        unit,
+                        || {
+                            events.borrow_mut().push(format!("env:{unit}"));
+                            probes == 1
+                        },
+                        |program, args| {
+                            events.borrow_mut().push(format!("run:{unit}"));
+                            if probes == 1 {
+                                assert_eq!(program, "systemctl");
+                                assert_eq!(args, ["is-active", "--quiet", unit]);
+                            } else {
+                                assert_eq!(program, "service");
+                                assert_eq!(args, [unit, "status"]);
+                            }
+                            let success = if probes == 1 { first } else { second };
+                            Ok(std::process::ExitStatus::from_raw(if success {
+                                0
+                            } else {
+                                256
+                            }))
+                        },
+                    )
+                });
+                assert_eq!(active, first && second);
+                assert_eq!(probes, if first { 2 } else { 1 });
+                let mut expected = vec!["env:sysak_meta", "run:sysak_meta"];
+                if first {
+                    expected.extend(["env:sysak_agentsight", "run:sysak_agentsight"]);
+                }
+                assert_eq!(*events.borrow(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn unregister_lock_failure_skips_probe() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        fs::create_dir(dir.path().join(".register.lock")).unwrap();
+        assert!(matches!(
+            m.do_unregister_with("admin", || panic!("lock failure must skip service probes")),
+            Err(SubscriptionError::Io(_))
+        ));
+        assert!(!m.register_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unregister_probes_under_lock_and_releases_it_on_every_outcome() {
+        use nix::fcntl::{Flock, FlockArg};
+
+        for (registered, sysom) in [(true, true), (true, false), (false, false)] {
+            let dir = TempDir::new().unwrap();
+            let m = mgr(&dir);
+            write_register_file(
+                &m.register_path,
+                if registered {
+                    r#"{"schema_version":"2","state":"registered","history":[]}"#
+                } else {
+                    r#"{"schema_version":"2","state":"unregistered","history":[]}"#
+                },
+            );
+            let before = fs::read(&m.register_path).unwrap();
+            let mut calls = 0;
+            let result = m.do_unregister_with("admin", || {
+                calls += 1;
+                let file = File::open(dir.path().join(".register.lock")).unwrap();
+                match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+                    Err((_, error)) => assert_eq!(error, nix::errno::Errno::EWOULDBLOCK),
+                    Ok(_) => panic!("sysom guard must run while holding the registration lock"),
+                }
+                sysom
+            });
+            assert_eq!(calls, 1);
+            if sysom {
+                assert!(matches!(result, Err(SubscriptionError::SysomManaged)));
+            } else if !registered {
+                assert!(matches!(result, Err(SubscriptionError::NotRegistered)));
+            } else {
+                result.unwrap();
+                assert_eq!(m.read_state(), ConsentState::Unregistered);
+                assert_eq!(m.read_record().unwrap().history.len(), 1);
+            }
+            if sysom || !registered {
+                assert_eq!(fs::read(&m.register_path).unwrap(), before);
+            }
+            let file = File::open(dir.path().join(".register.lock")).unwrap();
+            assert!(Flock::lock(file, FlockArg::LockExclusiveNonblock).is_ok());
+        }
+    }
+
+    #[test]
+    fn unregister_reads_state_after_probe() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        m.do_register("admin", RegisterSource::Cli).unwrap();
+        let replacement = r#"{"schema_version":"2","state":"unregistered","history":[]}"#;
+        let result = m.do_unregister_with("admin", || {
+            // Model a changed record at the guard boundary to prove read ordering.
+            write_register_file(&m.register_path, replacement);
+            false
+        });
+        assert!(matches!(result, Err(SubscriptionError::NotRegistered)));
+        assert_eq!(fs::read_to_string(&m.register_path).unwrap(), replacement);
+    }
+
+    #[test]
     fn test_history_preserved_across_register_cycles() {
         let dir = TempDir::new().unwrap();
         let m = mgr(&dir);
         m.do_register("alice", RegisterSource::Cli).unwrap();
-        m.do_unregister("alice").unwrap();
+        m.do_unregister_with("alice", || false).unwrap();
         m.do_register("carol", RegisterSource::Cli).unwrap();
 
         let rec = m.read_record().unwrap();
@@ -762,7 +941,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = mgr(&dir);
         m.do_register("admin", RegisterSource::Cli).unwrap();
-        m.do_unregister("admin").unwrap();
+        m.do_unregister_with("admin", || false).unwrap();
         m.do_register("admin", RegisterSource::Cli).unwrap();
         assert_eq!(m.read_state(), ConsentState::Registered);
     }

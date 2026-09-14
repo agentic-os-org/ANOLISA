@@ -176,9 +176,17 @@ fn decommission_legacy_ilogtail() {
 // ── status ────────────────────────────────────────────────────────────────────
 
 fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> {
+    handle_status_with(mgr, json, || mgr.is_sysom_registered())
+}
+
+fn handle_status_with(
+    mgr: &RegistrationManager,
+    json: bool,
+    is_sysom_registered: impl FnOnce() -> bool,
+) -> Result<(), CliError> {
     let (state, rec) = mgr.read_state_and_record();
     let product_type = mgr.detect_product_type();
-    let sysom_active = mgr.is_sysom_registered();
+    let sysom_active = is_sysom_registered();
 
     if json {
         return print_status_json(&state, &rec, &product_type, sysom_active);
@@ -341,5 +349,184 @@ fn prompt_yn(prompt: &str, default: bool) -> bool {
         "n" | "no" => false,
         "" => default,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    const STATUS_ENV: &str = "ANOLISA_TEST_REGISTER_STATUS";
+
+    #[test]
+    fn status_output_matrix() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for state in ["init", "registered", "unregistered"] {
+            for source in ["none", "cli", "console"] {
+                for active in [false, true] {
+                    for json in [false, true] {
+                        let output = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args([
+                                format!("{module}::status_output_child"),
+                                "--exact".into(),
+                                "--nocapture".into(),
+                            ])
+                            .env(STATUS_ENV, format!("{state},{source},{active},{json}"))
+                            .output()
+                            .unwrap();
+                        assert!(output.status.success(), "{output:?}");
+                        assert!(output.stderr.is_empty(), "{output:?}");
+                        let stdout = String::from_utf8(output.stdout).unwrap();
+                        let rendered = stdout
+                            .split_once("REGISTER_OUTPUT_BEGIN\n")
+                            .unwrap()
+                            .1
+                            .split_once("REGISTER_OUTPUT_END\n")
+                            .unwrap()
+                            .0;
+                        if json {
+                            let mut data = serde_json::json!({
+                                "product_type": "ECS",
+                                "consent_state": if active { "registered" } else { state },
+                                "upload_active": active || state == "registered",
+                                "registration_time": "2026-01-10T09:00:00Z",
+                                "operator": "fixture-operator",
+                            });
+                            if source != "none" {
+                                data["source"] = source.into();
+                            }
+                            if active {
+                                data["effective_source"] = "sysom".into();
+                                data["sysom_services_active"] = true.into();
+                            }
+                            let value: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                            assert_eq!(
+                                value,
+                                serde_json::json!({"ok": true, "command": "register status", "data": data, "schema_version": 1, "warnings": []})
+                            );
+                        } else {
+                            assert!(
+                                rendered.contains("'anolisa register status' is deprecated"),
+                                "{rendered}"
+                            );
+                            assert!(
+                                rendered.contains("ANOLISA Registration Status"),
+                                "{rendered}"
+                            );
+                            let effective = if active {
+                                "REGISTERED"
+                            } else if state == "init" {
+                                "INIT (not yet decided)"
+                            } else if state == "registered" {
+                                "REGISTERED"
+                            } else {
+                                "UNREGISTERED"
+                            };
+                            assert!(
+                                rendered.contains(&format!("Consent State: {effective}")),
+                                "{rendered}"
+                            );
+                            assert!(
+                                rendered.contains(if active || state == "registered" {
+                                    "Data Reporting: active"
+                                } else {
+                                    "Data Reporting: disabled (local only)"
+                                }),
+                                "{rendered}"
+                            );
+                            if active && (state != "registered" || source == "console") {
+                                assert!(rendered.contains("Source:        console"), "{rendered}");
+                            }
+                            if state == "registered" || active {
+                                assert!(rendered.contains("fixture-operator"), "{rendered}");
+                            }
+                        }
+                        assert!(stdout.contains("test result: ok."));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_output_child() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        if std::env::args().skip(1).collect::<Vec<_>>()
+            != [
+                format!("{module}::status_output_child"),
+                "--exact".into(),
+                "--nocapture".into(),
+            ]
+        {
+            return;
+        }
+        let case = std::env::var(STATUS_ENV).unwrap();
+        let parts: Vec<_> = case.split(',').collect();
+        let [state, source, active, json] = parts.as_slice() else {
+            panic!("invalid status fixture")
+        };
+        let active: bool = active.parse().unwrap();
+        let json: bool = json.parse().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = RegistrationManager::with_paths(
+            dir.path().join("register.json"),
+            dir.path().join("anolisa-release"),
+        );
+        let mut record = serde_json::json!({
+            "schema_version": "2", "state": state,
+            "history": [{"action": "register", "operator": "fixture-operator", "timestamp": "2026-01-10T09:00:00Z"}],
+        });
+        if *source != "none" {
+            record["source"] = (*source).into();
+        }
+        fs::write(&mgr.register_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&mgr.register_path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::write(&mgr.release_path, "PRODUCT_TYPE=ecs\n").unwrap();
+        let before = fs::read(&mgr.register_path).unwrap();
+        let permissions = fs::metadata(&mgr.register_path).unwrap().permissions();
+        let mut calls = 0;
+        println!("REGISTER_OUTPUT_BEGIN");
+        handle_status_with(&mgr, json, || {
+            calls += 1;
+            active
+        })
+        .unwrap();
+        println!("REGISTER_OUTPUT_END");
+        assert_eq!(calls, 1);
+        assert_eq!(fs::read(&mgr.register_path).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&mgr.register_path).unwrap().permissions(),
+            permissions
+        );
+        assert_eq!(
+            fs::read_to_string(&mgr.release_path).unwrap(),
+            "PRODUCT_TYPE=ecs\n"
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn status_capture_environment_does_not_redirect_suite() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for value in ["registered,cli,true,true", "invalid"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    format!("{module}::status_output_child"),
+                    "--nocapture".into(),
+                ])
+                .env(STATUS_ENV, value)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("status_output_child ... ok"), "{stdout}");
+            assert!(!stdout.contains("REGISTER_OUTPUT_BEGIN"), "{stdout}");
+            assert!(!stdout.contains("status_output_matrix ..."), "{stdout}");
+        }
     }
 }
