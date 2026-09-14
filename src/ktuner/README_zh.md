@@ -89,3 +89,31 @@ sudo ktuner rollback
 - **代码执行拒绝列表**：`kernel.core_pattern`、`kernel.modprobe`、`kernel.hotplug`、`kernel.poweroff_cmd`、`kernel.modules_disabled`、`kernel.kexec_load_disabled`、`kernel.usermodehelper.*`、`fs.binfmt_misc.*` 在任何写路径（tune/fix/rollback）中都被无条件阻止。匹配基于解析后的文件系统路径而非参数拼写，因此 slash/dot/traversal 变体均会被拦截。
 - **回滚安全**：部分失败时保留回滚账本；原始值不会丢失。
 - **无自主 root 执行**：ktuner 检查 `euid == 0`，若非 root 则报错退出。cosh 的 sandbox-guard 加上权限提示确保人类在任何 `sudo ktuner tune` 执行前批准操作。
+
+## 安装
+
+通过 ANOLISA 组件管理器（RPM 后端）安装 ktuner：
+
+```bash
+sudo anolisa install ktuner --backend rpm
+```
+
+ktuner 仅以 RPM 形式发布。需显式传入 `--backend rpm`：默认后端解析的是 raw 工件，其中没有 ktuner 的发布版本，且不存在跨后端回退。
+
+也可以通过 yum/dnf 安装：
+
+```bash
+sudo yum install ktuner
+```
+
+安装内容：
+- `/usr/local/bin/ktuner` — CLI 二进制文件
+- `/usr/share/anolisa/components/ktuner/component.toml` — 组件契约
+
+或从源码构建：
+
+```bash
+cd src/ktuner
+cargo build --release
+sudo install -m 0755 target/release/ktuner /usr/local/bin/ktuner
+```
