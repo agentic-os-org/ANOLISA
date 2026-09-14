@@ -96,6 +96,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
 pub struct Registry {
     validators: BTreeMap<String, jsonschema::Validator>,
     references: BTreeMap<String, (String, String)>,
+    evidence: jsonschema::Validator,
 }
 
 impl Registry {
@@ -123,6 +124,13 @@ impl Registry {
         let resources = resources
             .prepare()
             .map_err(|_| Error::InvalidSchema("registry".into()))?;
+        let evidence = jsonschema::draft202012::options()
+            .offline()
+            .with_registry(&resources)
+            .build(&serde_json::json!({
+                "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+            }))
+            .map_err(|_| Error::InvalidSchema("common-v1 evidence".into()))?;
         let mut validators = BTreeMap::new();
         for (name, schema) in documents {
             let validator = jsonschema::draft202012::options()
@@ -135,6 +143,7 @@ impl Registry {
         Ok(Self {
             validators,
             references,
+            evidence,
         })
     }
 
@@ -152,6 +161,19 @@ impl Registry {
         validator
             .validate(value)
             .map_err(|_| Error::SchemaMismatch(name.into()))
+    }
+
+    /// Checks an acknowledgement against the existing common/v1 evidence shape.
+    ///
+    /// This validates the reference, not the referenced record or its durability.
+    ///
+    /// # Errors
+    /// Rejects invalid encoding, missing fields or a malformed evidence reference.
+    pub fn validate_evidence(&self, value: &Value) -> Result<(), Error> {
+        canonical::bytes(value)?;
+        self.evidence
+            .validate(value)
+            .map_err(|_| Error::SchemaMismatch("common-v1 evidence".into()))
     }
 
     /// Returns a schema URI and exact resource digest for negotiation.
