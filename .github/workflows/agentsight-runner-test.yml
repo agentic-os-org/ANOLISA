@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - chore/test_sight
+      - main
+    paths:
+      - 'src/agentsight/**'
+      - '.github/workflows/agentsight-runner-test.yml'
+  pull_request:
     paths:
       - 'src/agentsight/**'
       - '.github/workflows/agentsight-runner-test.yml'
@@ -64,7 +69,11 @@ jobs:
 
       - name: Lint
         working-directory: src/agentsight
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Mirror ci.yaml's agentsight clippy invocation: the vendored
+        # ActPlane crates are excluded (pre-existing lint debt tracked
+        # separately); enforcement-e2e test targets are linted by the
+        # kernel-runner jobs with --no-deps.
+        run: cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
 
       - name: Test raw packaging
         working-directory: src/agentsight
@@ -72,9 +81,16 @@ jobs:
 
       - name: Run tests with coverage
         working-directory: src/agentsight
+        # Mirror ci.yaml's agentsight coverage invocation exactly: excluding
+        # the vendored ActPlane crates from instrumentation and capping
+        # parallelism is load-bearing — full-core instrumented builds of the
+        # whole workspace OOM-kill this self-hosted runner mid-step (the
+        # runner then reports "lost communication with the server").
         run: |
-          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/)'
+          JOBS=$(( ($(nproc) + 1) / 2 ))
+          cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
 
       - name: Upload coverage artifact
         if: always()
@@ -90,12 +106,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 5.10/5.15 runners have no BPF-LSM: the enforcement e2e preflight
+          # can never be satisfied there, so those matrix entries are
+          # explicitly optional (skip) while 6.6 — the only kernel with
+          # BPF-LSM — runs it as a required gate.
           - kernel: '5.10'
             runner: anolisa-agentsight-kernel510-x64
+            enforcement: optional
           - kernel: '5.15'
             runner: anolisa-agentsight-kernel515-x64
+            enforcement: optional
           - kernel: '6.6'
             runner: anolisa-agentsight-kernel66-x64
+            enforcement: required
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -142,7 +165,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -165,6 +188,38 @@ jobs:
         run: |
           set -euo pipefail
           cd src/agentsight
+          # Lint the feature-gated test target: the default clippy pass does
+          # not enable enforcement-e2e, so warnings there would otherwise stay
+          # invisible until the kernel job compiles it. --no-deps keeps
+          # pre-existing vendored-crate lint debt out of scope; the test
+          # target itself is fully denied.
+          cargo clippy -p agentsight --tests --features enforcement-e2e \
+            --no-deps -- -D warnings
+          # aya resolves tracepoints through /sys/kernel/tracing (or
+          # /sys/kernel/debug/tracing) and requires a non-empty directory:
+          # container runners may have neither mounted, which fails the
+          # engine's tracepoint attach with "tracefs not found".
+          sudo mkdir -p /sys/kernel/tracing 2>/dev/null || true
+          mountpoint -q /sys/kernel/tracing 2>/dev/null || \
+            sudo mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+          # Fresh, job-private bpffs mount as the pin root (BPF_OBJ_PIN
+          # requires bpffs, and /sys/fs/bpf may not be bpffs in container
+          # runners): a reused self-hosted runner must not silently accept
+          # a stale /sys/fs/bpf/actplane/v1 pin — the current build's
+          # objects have to be installed and verified every run.
+          pin_root="/tmp/actplane-e2e-pin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir -p "$pin_root"
+          sudo mount -t bpf bpf "$pin_root"
+          cleanup_pin_root() {
+            sudo umount "$pin_root" || true
+            sudo rm -rf "$pin_root"
+          }
+          trap cleanup_pin_root EXIT
+          if [ "${{ matrix.enforcement }}" = "optional" ]; then
+            enforcement_optional=1
+          else
+            enforcement_optional=0
+          fi
           cargo_bin=$(command -v cargo)
           sudo env \
             HOME="$HOME" \
@@ -173,9 +228,12 @@ jobs:
             PATH="$PATH" \
             RUST_BACKTRACE="$RUST_BACKTRACE" \
             RUST_LOG="$RUST_LOG" \
+            ACTPLANE_BPF_PIN_ROOT="$pin_root" \
+            AGENTSIGHT_ENFORCEMENT_E2E_OPTIONAL="$enforcement_optional" \
+            ACTPLANE_PINNED_PROFILE=agent-file-guard \
             CARGO_BIN="$cargo_bin" \
             bash -c '
               ulimit -l unlimited
-              exec "$CARGO_BIN" test --test bpf_load -- \
+              exec "$CARGO_BIN" test --features enforcement-e2e --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
             '
