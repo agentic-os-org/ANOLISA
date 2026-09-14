@@ -19,7 +19,6 @@ import {
   fetchTraces,
   fetchAgentNames,
   fetchTimeseries,
-  fetchTraceDetail,
   fetchInterruptionCount,
   fetchInterruptionStats,
   fetchInterruptionSessionCounts,
@@ -32,7 +31,6 @@ import {
   TraceSummary,
   TimeseriesBucket,
   ModelTimeseriesBucket,
-  TraceEventDetail,
   InterruptionCountResponse,
   InterruptionTypeStat,
   SessionInterruptionCount,
@@ -98,204 +96,6 @@ function fallbackCopy(text: string, done: () => void) {
 function fmtTokens(n: number): string {
   return n.toLocaleString();
 }
-
-// ─── Trace Detail Modal ───────────────────────────────────────────────────────
-
-interface TraceDetailModalProps {
-  traceId: string;
-  onClose: () => void;
-}
-
-const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose }) => {
-  const { t } = useI18n();
-  const locale = useLocaleTag();
-  const [events, setEvents] = useState<TraceEventDetail[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    fetchTraceDetail(traceId)
-      .then(setEvents)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [traceId]);
-
-  const parseMessages = (raw: string | null): any[] => {
-    if (!raw) return [];
-    try { return JSON.parse(raw); } catch { return []; }
-  };
-
-  /** Extract display text from a parts-based message (new format) or legacy content field */
-  const renderMsgContent = (msg: any): React.ReactNode => {
-    // New format: { role, parts: [{text:{content}}, {tool_call:{...}}, ...] }
-    if (Array.isArray(msg.parts) && msg.parts.length > 0) {
-      return (
-        <div className="space-y-1">
-          {msg.parts.map((part: any, pi: number) => {
-            if (part.text) {
-              return (
-                <pre key={pi} className="text-xs text-gray-700 whitespace-pre-wrap break-words bg-gray-50 rounded p-2 max-h-64 overflow-y-auto">
-                  {part.text.content}
-                </pre>
-              );
-            }
-            if (part.reasoning) {
-              return (
-                <pre key={pi} className="text-xs text-purple-700 whitespace-pre-wrap break-words bg-purple-50 rounded p-2 max-h-48 overflow-y-auto">
-                  💭 {part.reasoning.content}
-                </pre>
-              );
-            }
-            if (part.tool_call) {
-              return (
-                <pre key={pi} className="text-xs text-orange-700 whitespace-pre-wrap break-words bg-orange-50 rounded p-2 max-h-48 overflow-y-auto">
-                  🔧 {part.tool_call.name}({JSON.stringify(part.tool_call.arguments, null, 2)})
-                </pre>
-              );
-            }
-            if (part.tool_call_response) {
-              return (
-                <pre key={pi} className="text-xs text-teal-700 whitespace-pre-wrap break-words bg-teal-50 rounded p-2 max-h-48 overflow-y-auto">
-                  📤 {JSON.stringify(part.tool_call_response.response, null, 2)}
-                </pre>
-              );
-            }
-            return (
-              <pre key={pi} className="text-xs text-gray-500 whitespace-pre-wrap break-words bg-gray-50 rounded p-2">
-                {JSON.stringify(part, null, 2)}
-              </pre>
-            );
-          })}
-        </div>
-      );
-    }
-    // Legacy format: { role, content: string | object }
-    const content = msg.content ?? msg.message;
-    return (
-      <pre className="text-xs text-gray-700 whitespace-pre-wrap break-words bg-gray-50 rounded p-2 max-h-48 overflow-y-auto">
-        {typeof content === 'string' ? content : JSON.stringify(content, null, 2)}
-      </pre>
-    );
-  };
-
-  const roleStyle = (role: string): string => {
-    switch (role) {
-      case 'user':      return 'bg-blue-100 text-blue-700';
-      case 'system':    return 'bg-purple-100 text-purple-700';
-      case 'assistant': return 'bg-green-100 text-green-700';
-      case 'tool':      return 'bg-orange-100 text-orange-700';
-      default:          return 'bg-gray-100 text-gray-600';
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div>
-            <h2 className="text-lg font-bold text-gray-900">{t('cl.traceDetails')}</h2>
-            <p className="text-xs text-gray-400 font-mono mt-0.5">{traceId}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors"
-          >
-            ✕
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {loading && (
-            <div className="flex items-center justify-center py-12 text-gray-400">
-              {t('common.loading')}
-            </div>
-          )}
-          {error && (
-            <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
-              ⚠️ {error}
-            </div>
-          )}
-          {!loading && !error && events.length === 0 && (
-            <div className="text-center py-12 text-gray-400">{t('cl.noDataForTrace')}</div>
-          )}
-          {events.map((ev, idx) => {
-            const inputMsgs = parseMessages(ev.input_messages);
-            const outputMsgs = parseMessages(ev.output_messages);
-            // Merge all messages in order: input first, then output
-            const allMsgs = [
-              ...inputMsgs.map((m: any) => ({ ...m, _src: 'input' })),
-              ...outputMsgs.map((m: any) => ({ ...m, _src: 'output' })),
-            ];
-            const isExpanded = expandedIdx === idx;
-
-            return (
-              <div
-                key={ev.id}
-                className="mb-4 border border-gray-200 rounded-lg overflow-hidden"
-              >
-                {/* Event summary row */}
-                <button
-                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-                  onClick={() => setExpandedIdx(isExpanded ? null : idx)}
-                >
-                  <div className="flex items-center gap-4">
-                    <span className="text-xs text-gray-400 font-mono w-4">{idx + 1}</span>
-                    <div>
-                      <span className="text-sm font-medium text-gray-900">
-                        {ev.model ?? t('cl.unknownModel')}
-                      </span>
-                      <span className="ml-3 text-xs text-gray-400">
-                        {nsToDate(ev.start_timestamp_ns, locale)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <span className="text-xs text-blue-600">
-                      {t('common.input')} {fmtTokens(ev.input_tokens)}
-                    </span>
-                    <span className="text-xs text-green-600">
-                      {t('common.output')} {fmtTokens(ev.output_tokens)}
-                    </span>
-                    <span className="text-xs text-gray-500">
-                      {t('common.total')} {fmtTokens(ev.total_tokens)}
-                    </span>
-                    <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
-                  </div>
-                </button>
-
-                {/* Expanded messages */}
-                {isExpanded && (
-                  <div className="p-4 space-y-2">
-                    {allMsgs.length === 0 && (
-                      <p className="text-xs text-gray-400">{t('cl.noMessageData')}</p>
-                    )}
-                    {allMsgs.map((msg: any, mi: number) => (
-                      <div key={mi} className="flex gap-3 items-start">
-                        <span
-                          className={`flex-shrink-0 mt-1 px-2 py-0.5 rounded text-xs font-medium ${roleStyle(msg.role)}`}
-                        >
-                          {msg.role ?? 'unknown'}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          {renderMsgContent(msg)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-};
 
 // ─── Trace sub-table ──────────────────────────────────────────────────────────
 
@@ -576,7 +376,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                         bySeverity={ic.by_severity}
                         types={ic.types}
                         onClick={() => setExpandedTracePanel(
-                          expandedTracePanel === tr.trace_id ? null : tr.trace_id
+                          expandedTracePanel === tr.conversation_id ? null : tr.conversation_id
                         )}
                       />
                     );
@@ -602,7 +402,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
             </tr>
           )}
           {/* Trace interruption panel */}
-          {expandedTracePanel === tr.trace_id && (
+          {expandedTracePanel === tr.conversation_id && (
             <tr className="bg-blue-50">
               <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
                 <div className="border border-gray-200 rounded-lg overflow-hidden">

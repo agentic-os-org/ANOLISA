@@ -43,7 +43,6 @@ pub struct ToolCallTurnInfo {
 /// Summary of a single conversation (user query) within a session
 #[derive(Debug, serde::Serialize)]
 pub struct TraceSummary {
-    pub trace_id: String,
     pub conversation_id: String,
     pub call_count: i64,
     pub total_input_tokens: i64,
@@ -457,7 +456,6 @@ impl GenAISqliteStore {
         fn map_row(row: &rusqlite::Row) -> rusqlite::Result<TraceSummary> {
             let cid: String = row.get(0)?;
             Ok(TraceSummary {
-                trace_id: cid.clone(),
                 conversation_id: cid,
                 call_count: row.get(1)?,
                 total_input_tokens: row.get(2)?,

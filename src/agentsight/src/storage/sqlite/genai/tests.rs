@@ -757,6 +757,16 @@ fn test_get_trace_events() {
     cleanup_db(&path);
 }
 
+/// trace_id (per-call response id) and conversation_id are distinct
+/// namespaces: the trace-detail query must never match a conversation id.
+#[test]
+fn test_get_trace_events_never_matches_conversation_id() {
+    let (store, path) = create_populated_store("trace_ns_separation");
+    assert!(!store.get_trace_events("trace-1").unwrap().is_empty());
+    assert!(store.get_trace_events("conv-1").unwrap().is_empty());
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_events_by_conversation() {
     let (store, path) = create_populated_store("conv_events");

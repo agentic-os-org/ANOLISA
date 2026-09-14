@@ -299,8 +299,6 @@ const enUSMessages = {
   'atif.loadFailed': 'Load failed',
 
   // ── ConversationList ──
-  'cl.traceDetails': 'Trace Details',
-  'cl.noDataForTrace': 'No data for this trace',
   'cl.loadingTraces': 'Loading traces...',
   'cl.noTraces': 'No traces in this session',
   'cl.noMessageData': 'No message data',
@@ -1317,8 +1315,6 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'atif.loadFailed': '加载失败',
 
     // ── ConversationList ──
-    'cl.traceDetails': 'Trace 详情',
-    'cl.noDataForTrace': '该 Trace 暂无数据',
     'cl.loadingTraces': '加载 traces...',
     'cl.noTraces': '该 session 暂无 traces',
     'cl.noMessageData': '无消息数据',

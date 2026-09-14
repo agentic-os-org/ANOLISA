@@ -100,7 +100,7 @@ Endpoint groups in 0.11:
 |---|---|---|
 | Service | `GET /health`, `GET /metrics`, `GET /api/docs` | Liveness, Prometheus metrics, route list (`/health` and `/metrics` are loopback-only) |
 | Authentication | `GET /api/auth/status`, `GET /api/auth/verify`, `POST /api/auth/login` | Auth state, capability list, token → cookie exchange |
-| Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/sessions/{id}/resources`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session traces and process resources, single call detail, semantic search |
+| Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/sessions/{id}/resources`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session conversation summaries (keyed by `conversation_id`) and process resources, per-call detail by response id, semantic search |
 | Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
