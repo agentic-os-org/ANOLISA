@@ -171,12 +171,32 @@ Installing the CLI from the same YUM repository makes it available on sudo's
 system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
-Current public packages support Linux x86_64/aarch64 and macOS Apple Silicon.
-Intel macOS does not currently have a published package. The repository's npm
-packaging sources are for release construction and are not a public
-`anolisa-tokenless` installation route. The retained
-`@anolisa/tokenless-darwin-x64` optional-dependency entry describes a release
-build target; it does not indicate registry availability.
+Two further public routes install the CLI on their own, without an anolisa
+component record. The npm route ships the prebuilt `tokenless` and `rtk`
+binaries plus the bundled Agent adapters and needs Node.js 16+. The curl route
+is a standalone installer that prefers npm and falls back to a source build:
+
+```bash
+npm install -g anolisa-tokenless
+
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Because neither registers the component, `anolisa adapter enable` does not
+apply to them; enable a framework with its bundled script under
+`~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
+instead. The curl installer records what it created in
+`~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
+consumes to remove exactly those paths; its source-build path is CLI-only
+(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+`install-tokenless` OS Skill. The full method matrix lives in
+`docs/user-guide/en/token-saving/tokenless/QUICKSTART.md`.
+
+Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
+macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
+optional-dependency entry describes a release build target, not a registry
+artifact, so the npm route cannot deliver a binary there. Use the source-build
+path (`TOKENLESS_FORCE_BUILD=1`) or build from source.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands

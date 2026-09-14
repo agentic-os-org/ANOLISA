@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Uninstall a Tokenless CLI installation created by scripts/install.sh.
 #
-# The installer records every path it created in a receipt file. This script
-# removes exactly those recorded paths and nothing else, so it stays symmetric
-# with the install and never deletes binaries, adapters, or data that belong to
-# another installation method (anolisa CLI, a manual `npm install -g`, or a
-# custom TOKENLESS_INSTALL_DIR you manage yourself).
+# The installer records every path it created in a receipt file, together with
+# the sha256 of each recorded file. This script removes exactly those recorded
+# paths and nothing else, so it stays symmetric with the install and never
+# deletes binaries, adapters, or data that belong to another installation
+# method (anolisa CLI, a manual `npm install -g`, or a custom
+# TOKENLESS_INSTALL_DIR you manage yourself). A recorded path whose content no
+# longer matches its digest was taken over by another installer after the
+# receipt was written, and is left alone.
 #
 # Usage:
 #   bash scripts/uninstall.sh [--dry-run] [--purge] [--receipt <path>]
@@ -29,6 +32,9 @@ DEFAULT_DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
 RECEIPT="${TOKENLESS_RECEIPT:-${DEFAULT_DATA_DIR}/tokenless/install-receipt}"
 RUNTIME_DATA_DIR="${TOKENLESS_DATA_DIR:-${HOME}/.tokenless}"
 MARKER="# Added by tokenless installer"
+# Identity anchor inside the npm-owned adapter tree, stamped with the release
+# version by npm/scripts/package-npm.js.
+ADAPTERS_IDENTITY_FILE="manifest.json"
 
 DRY_RUN=0
 PURGE=0
@@ -66,13 +72,57 @@ run() {
   fi
 }
 
+# sha256 of a file's content, following symlinks. Prints nothing when the file
+# is unreadable or no sha256 tool exists, which callers treat as "no identity".
+file_digest() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    { sha256sum "$f" 2>/dev/null || true; } | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    { shasum -a 256 "$f" 2>/dev/null || true; } | cut -d' ' -f1
+  fi
+  return 0
+}
+
+# Frameworks register the adapter tree by reference — plugin directories, hook
+# entries and symlinks that point into it. Deleting the tree first leaves those
+# registrations dangling against a path that no longer exists, and the CLI they
+# call is already gone, so each bundled adapter's own uninstall.sh runs before
+# its resources are removed. Failures are warnings, not errors: the resources
+# are going away either way, and a framework CLI the user already removed
+# cannot be deregistered.
+deregister_framework_adapters() {
+  local adapters_dir="$1" script framework output status
+  [ -d "$adapters_dir" ] || return 0
+  for script in "$adapters_dir"/*/scripts/uninstall.sh; do
+    [ -f "$script" ] || continue
+    framework=$(basename "$(dirname "$(dirname "$script")")")
+    if [ "$DRY_RUN" = "1" ]; then
+      info "[dry-run] would deregister the ${framework} adapter via ${script}"
+      continue
+    fi
+    output=$(bash "$script" 2>&1) && status=0 || status=$?
+    if [ "$status" -ne 0 ]; then
+      warn "Could not deregister the ${framework} adapter (exit ${status}); remove its registration manually:"
+      warn "  bash ${script}"
+      printf '%s\n' "$output" | sed 's/^/    /' >&2 || true
+    else
+      info "Deregistered the ${framework} adapter"
+    fi
+  done
+  return 0
+}
+
+SCHEMA=""
 METHOD=""
 TL_VERSION=""
 INSTALL_DIR=""
 NPM_PREFIX=""
 ADAPTERS_DIR=""
+ADAPTERS_DIR_DIGEST=""
 PATH_RC=""
 FILES=()
+DIGESTS=()
 
 if [ ! -f "$RECEIPT" ]; then
   err "No install receipt found at ${RECEIPT}"
@@ -91,13 +141,16 @@ while IFS= read -r line || [ -n "$line" ]; do
   key="${line%%=*}"
   value="${line#*=}"
   case "$key" in
-    method)        METHOD="$value" ;;
-    version)       TL_VERSION="$value" ;;
-    install_dir)   INSTALL_DIR="$value" ;;
-    npm_prefix)    NPM_PREFIX="$value" ;;
-    adapters_dir)  ADAPTERS_DIR="$value" ;;
-    path_rc_file)  PATH_RC="$value" ;;
-    file)          FILES+=("$value") ;;
+    schema)              SCHEMA="$value" ;;
+    method)              METHOD="$value" ;;
+    version)             TL_VERSION="$value" ;;
+    install_dir)         INSTALL_DIR="$value" ;;
+    npm_prefix)          NPM_PREFIX="$value" ;;
+    adapters_dir)        ADAPTERS_DIR="$value" ;;
+    adapters_dir_digest) ADAPTERS_DIR_DIGEST="$value" ;;
+    path_rc_file)        PATH_RC="$value" ;;
+    file)                FILES+=("$value") ;;
+    file_digest)         DIGESTS+=("$value") ;;
   esac
 done < "$RECEIPT"
 
@@ -106,11 +159,21 @@ info "Receipt      : ${RECEIPT}"
 info "Method       : ${METHOD:-unknown}"
 info "Version      : ${TL_VERSION:-unknown}"
 info "Install dir  : ${INSTALL_DIR:-unknown}"
+if [ "$SCHEMA" != "2" ]; then
+  warn "Receipt schema is '${SCHEMA:-1}', which records no file identity."
+  warn "Recorded paths are removed on path alone; files another installer"
+  warn "placed at the same path afterwards cannot be told apart."
+fi
 
 # 1. Recorded binaries in the install directory. Nothing else in that directory
 #    is touched, so a foreign `rtk`/`toon` or an anolisa-managed CLI survives.
+#    The recorded digest is checked first: when anolisa or a manual npm install
+#    later replaced the file at that path, it is no longer ours to delete.
 if [ "${#FILES[@]}" -gt 0 ]; then
+  idx=0
   for f in "${FILES[@]}"; do
+    digest="${DIGESTS[$idx]:-}"
+    idx=$((idx + 1))
     if [ ! -e "$f" ] && [ ! -L "$f" ]; then
       warn "Already gone, skipping: ${f}"
       continue
@@ -118,6 +181,14 @@ if [ "${#FILES[@]}" -gt 0 ]; then
     if [ -d "$f" ] && [ ! -L "$f" ]; then
       warn "Refusing to remove directory not owned by this installer: ${f}"
       continue
+    fi
+    if [ -n "$digest" ]; then
+      current="$(file_digest "$f")"
+      if [ "$current" != "$digest" ]; then
+        warn "Skipping ${f}: its content no longer matches the receipt,"
+        warn "  so another installation has taken over that path."
+        continue
+      fi
     fi
     if [ "$DRY_RUN" = "1" ]; then
       info "[dry-run] would remove ${f}"
@@ -142,11 +213,25 @@ fi
 
 # 3. Adapter resources — recorded only when the npm postinstall placed them.
 #    A source build installs no adapters, so this step is skipped for it and an
-#    adapter tree owned by the anolisa CLI is left alone.
+#    adapter tree owned by the anolisa CLI is left alone. Frameworks that were
+#    enabled against this tree are deregistered first, so no plugin directory,
+#    hook entry or symlink is left pointing at a deleted path.
 if [ -n "$ADAPTERS_DIR" ]; then
   if [ -d "$ADAPTERS_DIR" ]; then
-    run rm -rf "$ADAPTERS_DIR"
-    info "Removed adapter resources ${ADAPTERS_DIR}"
+    adapters_owned=1
+    if [ -n "$ADAPTERS_DIR_DIGEST" ]; then
+      current="$(file_digest "${ADAPTERS_DIR}/${ADAPTERS_IDENTITY_FILE}")"
+      if [ "$current" != "$ADAPTERS_DIR_DIGEST" ]; then
+        adapters_owned=0
+        warn "Skipping ${ADAPTERS_DIR}: it no longer matches the receipt,"
+        warn "  so another installation has taken over that adapter tree."
+      fi
+    fi
+    if [ "$adapters_owned" = "1" ]; then
+      deregister_framework_adapters "$ADAPTERS_DIR"
+      run rm -rf "$ADAPTERS_DIR"
+      info "Removed adapter resources ${ADAPTERS_DIR}"
+    fi
   else
     warn "Already gone, skipping: ${ADAPTERS_DIR}"
   fi

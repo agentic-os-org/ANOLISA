@@ -385,13 +385,15 @@ Run this only after confirming that the directory belongs to this Tokenless npm 
 
 ### curl standalone installation
 
-The standalone installer records every path it created in a receipt at `~/.local/share/tokenless/install-receipt`: the method it ended up taking (npm or source build), the version, the install directory, the npm prefix, the adapter directory, the rc file it appended a PATH line to, and each installed file.
+The standalone installer records every path it created in a receipt at `~/.local/share/tokenless/install-receipt`: the method it ended up taking (npm or source build), the version, the install directory, the npm prefix, the adapter directory, the rc file it appended a PATH line to, and each installed file together with its sha256.
 
 Upgrade by re-running the installer. It overwrites the recorded paths and rewrites the receipt, so the record stays accurate:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
+
+Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — first retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. A recorded path whose content no longer matches its digest was taken over by another installer and is left alone.
 
 Restart the agent afterwards. When the run took the npm path, the plugin registered with a framework may still be an older copy — run that framework's `scripts/install.sh` again as described in [npm installation](#npm-installation).
 
@@ -410,7 +412,7 @@ bash src/tokenless/scripts/uninstall.sh --purge
 
 `--dry-run` prints what would be removed and changes nothing. `--purge` additionally deletes the runtime data directory `~/.tokenless`, which holds `stats.db` and `stash.db`; without it that data is kept. `--receipt <path>` reads a non-default receipt and mirrors `TOKENLESS_RECEIPT`.
 
-What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it. After a source build it removes only the `tokenless` CLI, because that path installs no `rtk` and no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
+What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it — running each bundled framework's own `scripts/uninstall.sh` first, so an enabled OpenClaw, Hermes or Qwen Code registration is removed instead of being left pointing at a deleted directory. After a source build it removes only the `tokenless` CLI, because that path installs no `rtk` and no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
 
 Do not substitute a fixed `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` list. It misses a custom `TOKENLESS_INSTALL_DIR` and the npm global package, and after a source-build install it deletes `rtk` and adapter resources that install path never created.
 

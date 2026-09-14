@@ -43,6 +43,9 @@ source = "{datadir}/skills/install-hermes/"
 [[adapters.openclaw.skills]]
 name = "install-openclaw"
 source = "{datadir}/skills/install-openclaw/"
+[[adapters.openclaw.skills]]
+name = "install-tokenless"
+source = "{datadir}/skills/install-tokenless/"
 
 [[adapters.openclaw.skills]]
 name = "setup-mcp"
@@ -157,6 +160,9 @@ source = "{datadir}/skills/install-hermes/"
 [[adapters.hermes.skills]]
 name = "install-openclaw"
 source = "{datadir}/skills/install-openclaw/"
+[[adapters.hermes.skills]]
+name = "install-tokenless"
+source = "{datadir}/skills/install-tokenless/"
 
 [[adapters.hermes.skills]]
 name = "setup-mcp"

@@ -20,11 +20,28 @@ DOC_ZH_MANUAL="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/user-manual.
 DOC_SKILL="$REPO_ROOT/src/os-skills/ai/install-tokenless/SKILL.md"
 DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/troubleshooting.md"
 DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/troubleshooting.md"
+DOC_README_EN="$TOKENLESS_ROOT/README.md"
+DOC_README_ZH="$TOKENLESS_ROOT/README_zh.md"
+PACKAGE_NPM_JS="$TOKENLESS_ROOT/npm/scripts/package-npm.js"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
+# Managed Skill bundle. `anolisa adapter enable os-skills <framework>` deploys
+# only the skills a component manifest declares, and the RPM flattens
+# src/os-skills/<category>/<skill>/ into {datadir}/skills/<skill>/, so a
+# SKILL.md that is missing from the bundle lists ships but is never deployed.
+OS_SKILLS_ROOT="$REPO_ROOT/src/os-skills"
+BUNDLE_COMPONENT="$OS_SKILLS_ROOT/component.toml"
+BUNDLE_DISTRIBUTION="$REPO_ROOT/src/anolisa/manifests/components/os-skills/component.toml"
+OS_SKILLS_INDEX_EN="$OS_SKILLS_ROOT/README.md"
+OS_SKILLS_INDEX_ZH="$OS_SKILLS_ROOT/README_zh.md"
+SKILL_NAME="install-tokenless"
+
 for f in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART" "$DOC_EN_MANUAL" "$DOC_ZH_MANUAL" \
-         "$DOC_SKILL" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$INSTALL_SH" "$UNINSTALL_SH"; do
+         "$DOC_SKILL" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$INSTALL_SH" "$UNINSTALL_SH" \
+         "$DOC_README_EN" "$DOC_README_ZH" "$PACKAGE_NPM_JS" \
+         "$BUNDLE_COMPONENT" "$BUNDLE_DISTRIBUTION" \
+         "$OS_SKILLS_INDEX_EN" "$OS_SKILLS_INDEX_ZH" "$DOC_SKILL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
 
@@ -105,6 +122,85 @@ for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
   hasnt "$doc" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon" "$name drops the blanket bin rm list"
 done
 
+# --- component README: the public install routes it advertises are real -------
+# npm/scripts/package-npm.js copies this README straight into the published npm
+# package, so a README that denies the npm route contradicts the installation
+# the reader just completed.
+has "$PACKAGE_NPM_JS" "join(rootPkgDir, 'README.md')" \
+  "package-npm.js still ships the component README inside the npm package"
+for doc in "$DOC_README_EN" "$DOC_README_ZH"; do
+  name=$(basename "$doc")
+  has "$doc" "npm install -g anolisa-tokenless" "$name documents the public npm install route"
+  has "$doc" "src/tokenless/scripts/install.sh" "$name documents the standalone curl installer"
+  has "$doc" ".local/share/tokenless/install-receipt" "$name documents the install receipt"
+  has "$doc" "scripts/uninstall.sh" "$name points at the receipt-driven uninstaller"
+  has "$doc" "$SKILL_NAME" "$name names the Agent-facing install Skill"
+  has "$doc" "@anolisa/tokenless-darwin-x64" "$name keeps the Intel macOS boundary explicit"
+done
+hasnt "$DOC_README_EN" "are not a public" "en README no longer denies the npm route"
+hasnt "$DOC_README_ZH" "目前不能通过公开的" "zh README no longer denies the npm route"
+has "$DOC_README_EN" "still has no published package" "en README keeps the accurate Intel macOS caveat"
+has "$DOC_README_ZH" "Intel Mac" "zh README keeps the accurate Intel macOS caveat"
+has_re "$DOC_EN_QUICKSTART" 'tokenless-darwin-x64`.*not published yet' \
+  "en QUICKSTART marks the darwin-x64 platform package as unpublished"
+has_re "$DOC_ZH_QUICKSTART" 'tokenless-darwin-x64`.*尚未发布' \
+  "zh QUICKSTART marks the darwin-x64 platform package as unpublished"
+has "$DOC_SKILL" "Intel macOS (x86_64) has no published platform package" \
+  "SKILL states the Intel macOS boundary for the npm method"
+
+# --- Skill bundle: the new Skill must be deployable through the managed path --
+# declared_skills <manifest> <framework> prints one declared skill name per line.
+declared_skills() {
+  awk -v fw="$2" '
+    $0 == "[[adapters." fw ".skills]]" { want = 1; next }
+    want == 1 && /^name = "/ {
+      sub(/^name = "/, ""); sub(/".*$/, ""); print; want = 0
+    }
+  ' "$1"
+}
+
+check_bundle() {
+  local label="$1" bundle="$2" fw="$3" name found
+  declared_skills "$bundle" "$fw" | grep -qxF "$SKILL_NAME" \
+    || fail "$label [$fw] does not declare the $SKILL_NAME skill"
+  pass "$label [$fw] declares the $SKILL_NAME skill"
+  # A declared skill that has no SKILL.md deploys nothing at all.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    found=$(find "$OS_SKILLS_ROOT" -mindepth 3 -maxdepth 3 -type f -name SKILL.md \
+              -path "*/$name/SKILL.md" | head -1)
+    [ -n "$found" ] || fail "$label [$fw] declares '$name', which has no SKILL.md under src/os-skills"
+  done < <(declared_skills "$bundle" "$fw")
+  pass "$label [$fw] declares only skills that exist on disk"
+}
+
+for fw in openclaw hermes; do
+  check_bundle "src/os-skills/component.toml" "$BUNDLE_COMPONENT" "$fw"
+  check_bundle "manifests os-skills component.toml" "$BUNDLE_DISTRIBUTION" "$fw"
+done
+
+# The component manifest is the authoritative bundle: every skill on disk must be
+# reachable through it, or the RPM installs a directory no agent ever loads.
+missing_bundle_entries=0
+while IFS= read -r skill_md; do
+  name=$(basename "$(dirname "$skill_md")")
+  for fw in openclaw hermes; do
+    declared_skills "$BUNDLE_COMPONENT" "$fw" | grep -qxF "$name" || {
+      echo "FAIL src/os-skills/component.toml [$fw] is missing the on-disk skill '$name'" >&2
+      missing_bundle_entries=1
+    }
+  done
+done < <(find "$OS_SKILLS_ROOT" -mindepth 3 -maxdepth 3 -type f -name SKILL.md | sort)
+[ "$missing_bundle_entries" = "0" ] || exit 1
+pass "every on-disk OS Skill is declared in both bundle lists of the component manifest"
+
+has "$BUNDLE_COMPONENT" 'source = "{datadir}/skills/install-tokenless/"' \
+  "the component bundle points at the flattened RPM skill path"
+has "$BUNDLE_DISTRIBUTION" 'source = "{datadir}/skills/install-tokenless/"' \
+  "the distribution bundle points at the flattened RPM skill path"
+has "$OS_SKILLS_INDEX_EN" "**install-tokenless**" "en OS Skills index lists the new skill"
+has "$OS_SKILLS_INDEX_ZH" "**install-tokenless**" "zh OS Skills index lists the new skill"
+
 # --- installer script: the documented contracts are the implemented ones ------
 has_re "$INSTALL_SH" '-maxdepth ([4-9]|[1-9][0-9]+) ' "install.sh searches deep enough for src/tokenless/Cargo.toml"
 hasnt "$INSTALL_SH" "archive/refs/heads/main" "install.sh never downloads the main branch archive"
@@ -114,5 +210,16 @@ has "$INSTALL_SH" "write_receipt" "install.sh records what it created"
 has "$INSTALL_SH" "Windows is not supported" "install.sh rejects Windows as documented"
 hasnt "$INSTALL_SH" "for bin in tokenless rtk toon" "install.sh does not link the retired toon binary"
 has "$UNINSTALL_SH" "No install receipt found" "uninstall.sh refuses to guess without a receipt"
+
+# --- scripts: write failures and ownership are checked, not assumed -----------
+has "$INSTALL_SH" "install_status" "install.sh checks the install(1) exit status explicitly"
+has "$INSTALL_SH" "verify_cli" "install.sh verifies the binary before recording it"
+has "$INSTALL_SH" "retire_previous_receipt" "install.sh retires the previous method's artefacts"
+has "$INSTALL_SH" "file_digest" "install.sh records a verifiable file identity"
+has "$INSTALL_SH" "deregister_framework_adapters" "install.sh deregisters frameworks before dropping an adapter tree"
+has "$UNINSTALL_SH" "deregister_framework_adapters" "uninstall.sh deregisters frameworks before deleting adapter resources"
+has "$UNINSTALL_SH" "another installation has taken over that path" \
+  "uninstall.sh refuses a recorded path another installer replaced"
+has "$UNINSTALL_SH" "file_digest" "uninstall.sh verifies the recorded file identity"
 
 echo "install-docs test passed"

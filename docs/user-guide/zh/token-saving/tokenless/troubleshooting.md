@@ -378,13 +378,15 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 ### curl 独立安装
 
-独立安装脚本会把创建的每一个路径记录到 `~/.local/share/tokenless/install-receipt`：最终走的方式（npm 或源码构建）、版本、安装目录、npm prefix、Adapter 目录、追加过 PATH 的 rc 文件，以及每个安装的文件。
+独立安装脚本会把创建的每一个路径记录到 `~/.local/share/tokenless/install-receipt`：最终走的方式（npm 或源码构建）、版本、安装目录、npm prefix、Adapter 目录、追加过 PATH 的 rc 文件，以及每个安装的文件及其 sha256。
 
 升级就是重新执行安装脚本。它会覆盖记录在案的路径并重写 receipt，因此记录始终准确：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
+
+在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会先回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。若某个记录路径的内容已与其 sha256 不一致，说明它已被另一种安装接管，脚本会保留它。
 
 随后重启 Agent。如果走的是 npm 路径，框架中已注册的 Plugin 可能仍是旧副本——按照 [npm 安装](#npm-安装)重新执行该框架的 `scripts/install.sh`。
 
@@ -403,7 +405,7 @@ bash src/tokenless/scripts/uninstall.sh --purge
 
 `--dry-run` 只打印将要删除的内容，不做任何改动。`--purge` 会额外删除运行时数据目录 `~/.tokenless`（其中包含 `stats.db` 和 `stash.db`）；不加该参数时数据保留。`--receipt <path>` 读取非默认的 receipt，与 `TOKENLESS_RECEIPT` 等价。
 
-删除范围取决于记录的方式。走 npm 路径时，脚本会从记录的安装目录删除记录的启动器二进制（包括自定义的 `TOKENLESS_INSTALL_DIR`），对记录的 prefix 执行 `npm uninstall -g anolisa-tokenless`，并且只在该次 npm 安装创建了 Adapter 资源副本时才删除它。走源码构建时只删除 `tokenless` CLI，因为这条路径不安装 `rtk`，也不安装 Adapter 资源。两种方式下，共享同一目录的 anolisa CLI 安装或手动 npm 安装都不会受影响。
+删除范围取决于记录的方式。走 npm 路径时，脚本会从记录的安装目录删除记录的启动器二进制（包括自定义的 `TOKENLESS_INSTALL_DIR`），对记录的 prefix 执行 `npm uninstall -g anolisa-tokenless`，并且只在该次 npm 安装创建了 Adapter 资源副本时才删除它——删除前会先执行每个内置框架自己的 `scripts/uninstall.sh`，因此已启用的 OpenClaw、Hermes 或 Qwen Code 注册会被解除，而不是留下指向已删除目录的引用。走源码构建时只删除 `tokenless` CLI，因为这条路径不安装 `rtk`，也不安装 Adapter 资源。两种方式下，共享同一目录的 anolisa CLI 安装或手动 npm 安装都不会受影响。
 
 不要改用固定的 `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` 列表：它会漏掉自定义的 `TOKENLESS_INSTALL_DIR` 和 npm 全局包，而在源码构建安装之后，它删除的正是那条路径从未创建过的 `rtk` 和 Adapter 资源。
 

@@ -55,8 +55,10 @@ tokenless --version
 |------|------|--------|
 | Linux (glibc) | x86_64 | `@anolisa/tokenless-linux-x64` |
 | Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
-| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
+| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` —— 仅为发布构建目标，**尚未发布** |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+
+`@anolisa/tokenless-darwin-x64` 只是发布构建目标：registry 中并没有该包，因此 npm 路径无法在 Intel Mac 上提供二进制。该平台请使用方式 C 并设置 `TOKENLESS_FORCE_BUILD=1`。
 
 ### 方式 C：curl 独立安装
 
@@ -95,6 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 当 Agent 框架（如 cosh、OpenClaw、Hermes 等）需要自行安装和管理 Tokenless 时，可以使用 Skill 方式。
 
 Skill 文件位于仓库的 `src/os-skills/ai/install-tokenless/SKILL.md`。加载此文件的 Agent 可自动完成安装和配置。
+
+它同时属于受管的 `os-skills` Skill Bundle：`os-skills` RPM 会把它安装到 `/usr/share/anolisa/skills/install-tokenless/`，`anolisa adapter enable os-skills openclaw`（或 `hermes` adapter）会把它部署到对应框架的 Skill 目录。
 
 使用时，将 Skill 文件路径指向 Agent 框架，或将其内容直接传给 Agent。Skill 包含完整的安装、验证和框架集成指引。
 

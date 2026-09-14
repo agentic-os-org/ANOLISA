@@ -13,6 +13,14 @@
 #   4. install.sh writes a receipt; uninstall.sh removes only the recorded
 #      paths, so the npm / source / custom-install-dir scenarios each keep
 #      files they do not own.
+#   5. A failed write (install(1), ln, mkdir) fails the run instead of being
+#      swallowed by the `||`/`elif` condition that disables errexit, and never
+#      records a receipt or a pre-existing foreign binary.
+#   6. Re-running with another method retires the previous receipt's artefacts
+#      (rtk link, npm global package, adapter tree), and uninstall.sh refuses a
+#      recorded path whose content another installer has since replaced.
+#   7. uninstall.sh deregisters an enabled framework adapter (real qwencode
+#      scripts, link-type registration) before deleting the adapter resources.
 
 set -euo pipefail
 
@@ -118,8 +126,18 @@ case "$1" in
     done
     # Mimic npm/scripts/postinstall.js: bundled adapters are copied into the
     # user data dir, replacing whatever was there.
-    mkdir -p "$HOME/.local/share/anolisa/adapters/tokenless/claude-code/scripts"
-    printf '#!/usr/bin/env bash\n' > "$HOME/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh"
+    adapters="$HOME/.local/share/anolisa/adapters/tokenless"
+    rm -rf "$adapters"
+    mkdir -p "$adapters/claude-code/scripts"
+    printf '#!/usr/bin/env bash\n' > "$adapters/claude-code/scripts/install.sh"
+    # package-npm.js stamps adapters/tokenless/manifest.json with the release
+    # version; install.sh uses its digest as the adapter tree's identity.
+    printf '{"component":"tokenless","version":"%s"}\n' "${FAKE_VERSION:-0.7.9}" > "$adapters/manifest.json"
+    # Optionally ship a real adapter payload so the enable/disable chain can be
+    # exercised against the repository's own scripts.
+    if [ -n "${NPM_STUB_ADAPTER_SRC:-}" ] && [ -d "${NPM_STUB_ADAPTER_SRC}/qwencode" ]; then
+      cp -R "${NPM_STUB_ADAPTER_SRC}/qwencode" "$adapters/qwencode"
+    fi
     echo "added 1 package"; exit 0 ;;
   uninstall)
     prefix="$(pkg_prefix "$@")"
@@ -133,13 +151,72 @@ STUB
 cat > "$STUB_DIR/cargo" <<'STUB'
 #!/usr/bin/env bash
 # `cargo build --release --locked -p tokenless-cli`, run from src/tokenless.
+if [ "${CARGO_STUB_FAIL:-0}" = "1" ]; then
+  echo "error: could not compile \`tokenless-cli\`" >&2; exit 101
+fi
 mkdir -p target/release
 printf '#!/usr/bin/env bash\necho "tokenless %s-src"\n' "${FAKE_VERSION:-0.7.9}" > target/release/tokenless
 chmod +x target/release/tokenless
 exit 0
 STUB
 
-chmod +x "$STUB_DIR/curl" "$STUB_DIR/npm" "$STUB_DIR/cargo"
+# install(1) and ln pass through to the real binaries unless a scenario asks
+# for a write failure. Both are called from functions that main() uses as
+# `||`/`elif` conditions, where Bash disables errexit, so their status has to be
+# checked explicitly by the installer — these stubs prove that it is.
+cat > "$STUB_DIR/install" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${INSTALL_STUB_STATUS:-}" ]; then
+  echo "install: cannot create regular file: Permission denied" >&2
+  exit "${INSTALL_STUB_STATUS}"
+fi
+real="${REAL_INSTALL_BIN:-}"
+if [ -z "$real" ]; then
+  for c in /usr/bin/install /bin/install; do [ -x "$c" ] && real="$c" && break; done
+fi
+[ -n "$real" ] || { echo "install stub: no real install(1) found" >&2; exit 127; }
+exec "$real" "$@"
+STUB
+
+cat > "$STUB_DIR/ln" <<'STUB'
+#!/usr/bin/env bash
+if [ "${LN_STUB_FAIL:-0}" = "1" ]; then
+  echo "ln: failed to create symbolic link: Permission denied" >&2
+  exit 1
+fi
+real="${REAL_LN_BIN:-}"
+if [ -z "$real" ]; then
+  for c in /usr/bin/ln /bin/ln; do [ -x "$c" ] && real="$c" && break; done
+fi
+[ -n "$real" ] || { echo "ln stub: no real ln found" >&2; exit 127; }
+exec "$real" "$@"
+STUB
+
+# Minimal `qwen` CLI so the real qwencode adapter scripts can link and unlink
+# an extension that points into the adapter tree.
+cat > "$STUB_DIR/qwen" <<'STUB'
+#!/usr/bin/env bash
+ext_dir="$HOME/.qwen/extensions"
+case "$1 $2" in
+  "extensions link")
+    mkdir -p "$ext_dir"
+    ln -sfn "$3" "$ext_dir/tokenless"
+    echo "linked $3" ;;
+  "extensions list")
+    [ -e "$ext_dir/tokenless" ] && echo "tokenless" ;;
+  "extensions uninstall")
+    rm -rf "$ext_dir/tokenless"
+    echo "uninstalled tokenless" ;;
+esac
+exit 0
+STUB
+
+REAL_INSTALL_BIN="$(command -v install || true)"
+REAL_LN_BIN="$(command -v ln || true)"
+[ -n "$REAL_INSTALL_BIN" ] && [ -n "$REAL_LN_BIN" ] \
+  || { echo "FAIL the host provides no install(1) or ln" >&2; exit 1; }
+chmod +x "$STUB_DIR/curl" "$STUB_DIR/npm" "$STUB_DIR/cargo" \
+         "$STUB_DIR/install" "$STUB_DIR/ln" "$STUB_DIR/qwen"
 
 # --- harness -----------------------------------------------------------------
 # run_script <script> <scenario> [ENV=VAL ...] [-- <script-arg> ...]
@@ -170,6 +247,8 @@ run_script() {
       CURL_MAIN_TARBALL="$DIST_DIR/main.tar.gz" \
       FAKE_VERSION="$FAKE_VERSION" \
       NPM_STUB_PREFIX="$TEST_DIR/$scenario/npm-prefix" \
+      REAL_INSTALL_BIN="$REAL_INSTALL_BIN" \
+      REAL_LN_BIN="$REAL_LN_BIN" \
       ${envs[@]+"${envs[@]}"} \
       bash "$script" ${script_args[@]+"${script_args[@]}"} 2>&1
   )" && RUN_STATUS=0 || RUN_STATUS=$?
@@ -341,5 +420,206 @@ printf 'stash\n' > "$TEST_DIR/purge/home/.tokenless/stash.db"
 run_script "$UNINSTALL_SH" purge -- "--purge"
 assert_eq "purge uninstall exits 0" "$RUN_STATUS" "0"
 assert_no_file "--purge removes runtime data" "$TEST_DIR/purge/home/.tokenless/stash.db"
+
+# =============================================================================
+# Scenario 7 — a failed install(1) must fail the run, not report success
+# =============================================================================
+# main() calls try_source_build as an `||`/`elif` condition, so errexit is off
+# inside it: without an explicit status check, `install` exiting 73 used to be
+# swallowed and the run still wrote a receipt and claimed success.
+run_script "$INSTALL_SH" install-write-failure \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1" \
+  "INSTALL_STUB_STATUS=73"
+[ "$RUN_STATUS" -ne 0 ] || fail "install(1) exit 73: expected a non-zero exit"
+pass "a failed install(1) fails the run"
+assert_contains "reports the install(1) exit status" "$RUN_OUTPUT" "install(1) failed with exit 73"
+assert_not_contains "never claims a successful install" "$RUN_OUTPUT" "installed successfully"
+assert_no_file "writes no binary" "$TEST_DIR/install-write-failure/home/.local/bin/tokenless"
+assert_no_file "writes no receipt" "$(receipt_of install-write-failure)"
+
+# Same contract on the automatic npm -> source chain: neither method may report
+# success when the write fails.
+run_script "$INSTALL_SH" install-write-failure-fallback \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "NPM_STUB_FAIL=1" \
+  "INSTALL_STUB_STATUS=73"
+[ "$RUN_STATUS" -ne 0 ] || fail "npm failure + install(1) exit 73: expected a non-zero exit"
+pass "a failed install(1) also fails the npm fallback chain"
+assert_no_file "npm fallback writes no receipt" "$(receipt_of install-write-failure-fallback)"
+
+# =============================================================================
+# Scenario 8 — an install directory that cannot be created fails loudly
+# =============================================================================
+BLOCKED_DIR="$TEST_DIR/blocked-dir/blocked"
+mkdir -p "$TEST_DIR/blocked-dir"
+printf 'not a directory\n' > "$BLOCKED_DIR"
+run_script "$INSTALL_SH" blocked-dir \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_INSTALL_DIR=$BLOCKED_DIR" \
+  "CARGO_STUB_FAIL=1"
+[ "$RUN_STATUS" -ne 0 ] || fail "uncreatable install dir: expected a non-zero exit"
+pass "an uncreatable install directory fails the run"
+assert_contains "reports the mkdir failure" "$RUN_OUTPUT" "Cannot create the install directory"
+assert_no_file "uncreatable install dir writes no receipt" "$(receipt_of blocked-dir)"
+
+# =============================================================================
+# Scenario 9 — a failed ln must not adopt a pre-existing foreign binary
+# =============================================================================
+S9_DIR="$TEST_DIR/stale-link/home/.local/bin"
+mkdir -p "$S9_DIR"
+printf '#!/bin/sh\necho foreign-tokenless\n' > "$S9_DIR/tokenless"
+chmod +x "$S9_DIR/tokenless"
+run_script "$INSTALL_SH" stale-link \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "LN_STUB_FAIL=1" \
+  "CARGO_STUB_FAIL=1"
+[ "$RUN_STATUS" -ne 0 ] || fail "failed ln: expected a non-zero exit"
+pass "a failed ln fails the run"
+assert_contains "reports the failed link" "$RUN_OUTPUT" "Cannot write"
+assert_file "leaves the pre-existing binary alone" "$S9_DIR/tokenless"
+assert_contains "the pre-existing binary was not overwritten" \
+  "$(cat "$S9_DIR/tokenless")" "foreign-tokenless"
+assert_no_file "failed ln writes no receipt" "$(receipt_of stale-link)"
+assert_not_contains "never claims a successful install" "$RUN_OUTPUT" "installed successfully"
+
+# =============================================================================
+# Scenario 10 — switching method retires the previous receipt's artefacts
+# =============================================================================
+run_script "$INSTALL_SH" switch-method "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "npm install exits 0 before the switch" "$RUN_STATUS" "0"
+S10_DIR="$TEST_DIR/switch-method/home/.local/bin"
+S10_NPM="$TEST_DIR/switch-method/npm-prefix/lib/node_modules/anolisa-tokenless"
+S10_ADAPTERS="$TEST_DIR/switch-method/home/.local/share/anolisa/adapters/tokenless"
+assert_file "npm path linked rtk" "$S10_DIR/rtk"
+assert_file "npm path installed the global package" "$S10_NPM"
+assert_file "npm path placed the adapter tree" "$S10_ADAPTERS/manifest.json"
+assert_eq "receipt records the npm method before the switch" "$(receipt_value switch-method method)" "npm"
+
+run_script "$INSTALL_SH" switch-method \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1"
+assert_eq "source reinstall over an npm install exits 0" "$RUN_STATUS" "0"
+assert_eq "receipt now records the source method" "$(receipt_value switch-method method)" "source"
+assert_eq "receipt records only the CLI" "$(receipt_files switch-method)" "$S10_DIR/tokenless"
+assert_file "the CLI itself survives the switch" "$S10_DIR/tokenless"
+assert_no_file "removes the rtk link the npm method left behind" "$S10_DIR/rtk"
+assert_no_file "removes the npm global package the previous method installed" "$S10_NPM"
+assert_no_file "removes the adapter tree the previous method owned" "$S10_ADAPTERS"
+assert_contains "reports what it retired" "$RUN_OUTPUT" "left behind by the previous npm install"
+
+# The retired tree must also be gone for a later uninstall.sh run, and the new
+# receipt must not claim artefacts this run never created.
+run_script "$UNINSTALL_SH" switch-method
+assert_eq "uninstall after the switch exits 0" "$RUN_STATUS" "0"
+assert_no_file "removes the source-built CLI" "$S10_DIR/tokenless"
+assert_no_file "no adapter tree is left to clean" "$S10_ADAPTERS"
+
+# =============================================================================
+# Scenario 11 — a recorded path taken over by another installer is kept
+# =============================================================================
+run_script "$INSTALL_SH" taken-over \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1"
+assert_eq "taken-over scenario install exits 0" "$RUN_STATUS" "0"
+S11_CLI="$TEST_DIR/taken-over/home/.local/bin/tokenless"
+assert_file "records the CLI it installed" "$S11_CLI"
+# anolisa (or a manual npm install) later replaces the very same path.
+printf '#!/bin/sh\necho "anolisa-managed tokenless"\n' > "$S11_CLI"
+chmod +x "$S11_CLI"
+run_script "$UNINSTALL_SH" taken-over
+assert_eq "uninstall with a replaced file exits 0" "$RUN_STATUS" "0"
+assert_file "keeps the file another installer put at the recorded path" "$S11_CLI"
+assert_contains "the surviving file is the foreign one" "$(cat "$S11_CLI")" "anolisa-managed"
+assert_contains "explains why the path was skipped" "$RUN_OUTPUT" "another installation has taken over that path"
+assert_no_file "still removes the receipt" "$(receipt_of taken-over)"
+
+# Same protection for the adapter tree.
+run_script "$INSTALL_SH" adapters-taken-over "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "adapters-taken-over install exits 0" "$RUN_STATUS" "0"
+S11_ADAPTERS="$TEST_DIR/adapters-taken-over/home/.local/share/anolisa/adapters/tokenless"
+printf '{"component":"tokenless","version":"99.0.0-replaced"}\n' > "$S11_ADAPTERS/manifest.json"
+run_script "$UNINSTALL_SH" adapters-taken-over
+assert_eq "uninstall with a replaced adapter tree exits 0" "$RUN_STATUS" "0"
+assert_file "keeps an adapter tree another installer replaced" "$S11_ADAPTERS/manifest.json"
+assert_contains "explains why the adapter tree was skipped" "$RUN_OUTPUT" \
+  "another installation has taken over that adapter tree"
+
+# A schema-1 receipt carries no identity, so the uninstaller says so instead of
+# silently deleting by path.
+S11_LEGACY="$TEST_DIR/legacy-receipt/home"
+mkdir -p "$S11_LEGACY/.local/share/tokenless" "$S11_LEGACY/.local/bin"
+printf '#!/bin/sh\necho legacy\n' > "$S11_LEGACY/.local/bin/tokenless"
+cat > "$S11_LEGACY/.local/share/tokenless/install-receipt" <<LEGACY
+# Tokenless installer receipt (schema 1).
+schema=1
+method=source
+version=$FAKE_VERSION
+install_dir=$S11_LEGACY/.local/bin
+file=$S11_LEGACY/.local/bin/tokenless
+LEGACY
+run_script "$UNINSTALL_SH" legacy-receipt
+assert_eq "schema-1 uninstall exits 0" "$RUN_STATUS" "0"
+assert_contains "warns that a schema-1 receipt has no identity" "$RUN_OUTPUT" "records no file identity"
+assert_no_file "still removes the recorded path" "$S11_LEGACY/.local/bin/tokenless"
+
+# =============================================================================
+# Scenario 12 — adapter install -> enable -> uninstall, with a link-type adapter
+# =============================================================================
+run_script "$INSTALL_SH" adapter-lifecycle \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "NPM_STUB_ADAPTER_SRC=$TOKENLESS_ROOT/adapters/tokenless"
+assert_eq "install with a bundled adapter payload exits 0" "$RUN_STATUS" "0"
+S12_ADAPTERS="$TEST_DIR/adapter-lifecycle/home/.local/share/anolisa/adapters/tokenless"
+assert_file "postinstall placed the real qwencode adapter" "$S12_ADAPTERS/qwencode/scripts/uninstall.sh"
+
+# Enable: run the repository's own adapter install script, which links the
+# extension into the framework home.
+S12_HOME="$TEST_DIR/adapter-lifecycle/home"
+RUN_OUTPUT="$(
+  env -i \
+    PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" \
+    HOME="$S12_HOME" \
+    SHELL=/bin/bash \
+    REAL_INSTALL_BIN="$REAL_INSTALL_BIN" \
+    REAL_LN_BIN="$REAL_LN_BIN" \
+    bash "$S12_ADAPTERS/qwencode/scripts/install.sh" 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "adapter enable exits 0" "$RUN_STATUS" "0"
+S12_LINK="$S12_HOME/.qwen/extensions/tokenless"
+assert_file "enable linked the extension into the framework home" "$S12_LINK"
+assert_eq "the framework link points into the adapter tree" \
+  "$(readlink "$S12_LINK")" "$S12_ADAPTERS/qwencode"
+
+run_script "$UNINSTALL_SH" adapter-lifecycle -- "--dry-run"
+assert_eq "dry run exits 0" "$RUN_STATUS" "0"
+assert_contains "dry run announces the deregistration" "$RUN_OUTPUT" \
+  "[dry-run] would deregister the qwencode adapter"
+assert_file "dry run keeps the framework link" "$S12_LINK"
+assert_file "dry run keeps the adapter tree" "$S12_ADAPTERS/qwencode/scripts/uninstall.sh"
+
+run_script "$UNINSTALL_SH" adapter-lifecycle
+assert_eq "uninstall after enable exits 0" "$RUN_STATUS" "0"
+assert_contains "deregisters the framework adapter" "$RUN_OUTPUT" "Deregistered the qwencode adapter"
+assert_no_file "leaves no dangling framework link behind" "$S12_LINK"
+assert_no_file "removes the adapter resources after deregistering" "$S12_ADAPTERS"
+assert_no_file "removes the npm-owned CLI link" "$TEST_DIR/adapter-lifecycle/home/.local/bin/tokenless"
+
+# =============================================================================
+# Scenario 13 — re-running must not stack PATH entries uninstall.sh cannot strip
+# =============================================================================
+run_script "$INSTALL_SH" path-idempotent "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "first install exits 0" "$RUN_STATUS" "0"
+S13_RC="$TEST_DIR/path-idempotent/home/.bashrc"
+run_script "$INSTALL_SH" path-idempotent "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "second install exits 0" "$RUN_STATUS" "0"
+assert_eq "the rc file carries exactly one installer marker" \
+  "$(grep -cF "# Added by tokenless installer" "$S13_RC")" "1"
+assert_contains "the second run reports the entry it already owns" "$RUN_OUTPUT" "already adds"
+assert_eq "receipt records the rc file once" \
+  "$(sed -n 's/^path_rc_file=//p' "$(receipt_of path-idempotent)" | wc -l | tr -d ' ')" "1"
+run_script "$UNINSTALL_SH" path-idempotent
+assert_eq "uninstall after the re-run exits 0" "$RUN_STATUS" "0"
+assert_not_contains "no PATH entry survives the uninstall" "$(cat "$S13_RC")" "tokenless installer"
 
 echo "install-script test passed"

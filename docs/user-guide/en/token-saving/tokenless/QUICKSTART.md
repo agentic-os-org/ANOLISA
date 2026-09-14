@@ -57,8 +57,10 @@ Supported platforms:
 |----------|-------------|-------------|
 | Linux (glibc) | x86_64 | `@anolisa/tokenless-linux-x64` |
 | Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
-| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
+| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` — declared build target, **not published yet** |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+
+`@anolisa/tokenless-darwin-x64` is a release build target only: it is not on the registry, so the npm route cannot deliver an Intel macOS binary. Use Method C with `TOKENLESS_FORCE_BUILD=1` there.
 
 ### Method C: curl standalone install
 
@@ -97,6 +99,8 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 When an agent framework (cosh, OpenClaw, Hermes, etc.) needs to install and manage Tokenless on its own, use the Skill method.
 
 The Skill file is at `src/os-skills/ai/install-tokenless/SKILL.md` in the repository. An agent that loads this file can complete installation and configuration automatically.
+
+It is also part of the managed `os-skills` bundle: the `os-skills` RPM installs it to `/usr/share/anolisa/skills/install-tokenless/`, and `anolisa adapter enable os-skills openclaw` (or the `hermes` adapter) deploys it into that framework's skill directory.
 
 To use it, point your agent framework at the Skill file path, or pass its contents directly to the agent. The Skill contains complete installation, verification, and framework integration guidance.
 

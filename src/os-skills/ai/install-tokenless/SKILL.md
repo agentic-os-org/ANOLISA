@@ -64,6 +64,8 @@ npm install -g anolisa-tokenless
 This automatically installs the `tokenless` and `rtk` binaries plus the framework adapter resources. (`toon` is no longer a standalone binary — TOON encoding is a `tokenless` subcommand.)
 
 The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
+Intel macOS (x86_64) has no published platform package yet either: `@anolisa/tokenless-darwin-x64` is a
+release build target, not a registry artifact, so use Method A or Method C with `TOKENLESS_FORCE_BUILD=1` there.
 
 **Method C: Standalone curl Install**
 
@@ -198,6 +200,17 @@ the adapter directory only when that npm run created it, strips only the PATH
 line the installer appended, and leaves `~/.tokenless` (stats and stash data)
 in place unless `--purge` is passed. A source-build install recorded no adapters,
 so none are removed.
+
+Each recorded file also carries its sha256, and the adapter directory carries the
+digest of its stamped `manifest.json`. A path whose content no longer matches was
+taken over by another installer (anolisa, a manual `npm install -g`) and is kept.
+Before deleting the adapter directory the uninstaller runs each bundled
+framework's own `scripts/uninstall.sh`, so an enabled framework registration is
+removed rather than left pointing at a deleted directory.
+
+Re-running the installer with a different method retires the previous receipt
+first, so switching npm → source does not orphan the `rtk` launcher, the npm
+global package or the adapter tree.
 
 **Direct npm installation (Method B), not through the curl script:** no receipt
 exists, so clean up both places npm wrote to:
