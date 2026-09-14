@@ -539,6 +539,37 @@ pub(super) fn apply_owned(
     prior: OwnedArtifact,
     command: &str,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
+    apply_owned_with_hydration(
+        target,
+        ctx,
+        layout,
+        state_path,
+        journal_dir,
+        scope,
+        now,
+        steps,
+        resolution,
+        prior,
+        command,
+        common::hydrate_owned_file_contracts,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(super) fn apply_owned_with_hydration(
+    target: &str,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    state_path: &Path,
+    journal_dir: &Path,
+    scope: InstallationScope,
+    now: &str,
+    steps: Vec<Step>,
+    resolution: RawResolution,
+    prior: OwnedArtifact,
+    command: &str,
+    hydrate: impl FnOnce(&mut StateStore, &FsLayout) -> usize,
+) -> Result<ApplicationOutcome, ApplicationFailure> {
     // A user prefix may be writable without root; permission failures belong
     // to the exact owned-executor step so compensation remains honest.
     let resolve_warnings = resolution.warnings.clone();
@@ -558,7 +589,7 @@ pub(super) fn apply_owned(
     // Hydrate a disposable view so legacy required capabilities participate
     // in rollback without persisting inferred metadata for other components.
     let mut prior_view = store.clone();
-    common::hydrate_owned_file_contracts(&mut prior_view, layout);
+    hydrate(&mut prior_view, layout);
     let prior = match prior_view
         .find(ObjectKind::Component, target)
         .map(|record| &record.binding)

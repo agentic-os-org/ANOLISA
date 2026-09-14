@@ -4211,72 +4211,118 @@ sha256 = "{sha}"
     /// grant succeeded. The locked update must hydrate that contract before
     /// building the rollback snapshot, while keeping the inference in-memory
     /// when the update fails.
+    /// Hydration support is injected independently of the user-mode executor,
+    /// which never invokes setcap, so both host policies are deterministic.
     #[test]
     fn raw_update_rollback_hydrates_legacy_required_capability() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
-        seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
-        let layout = common::resolve_layout(&c);
-        let bin = layout.bin_dir.join("foo");
+        for (supported, optional) in [(true, false), (false, false), (true, true), (false, true)] {
+            let inferred = supported && !optional;
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().join("home"), InstallMode::User, false);
+            seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
+            let layout = common::resolve_layout(&c);
+            let bin = layout.bin_dir.join("foo");
 
-        let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
-            .expect("manifest path");
-        let with_required_capability = format!(
-            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\n",
-            raw_manifest("foo", "0.1.0")
-        );
-        std::fs::write(&manifest_path, with_required_capability)
-            .expect("rewrite installed manifest");
+            let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
+                .expect("manifest path");
+            let with_required_capability = format!(
+                "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\noptional = {optional}\n",
+                raw_manifest("foo", "0.1.0")
+            );
+            std::fs::write(&manifest_path, with_required_capability)
+                .expect("rewrite installed manifest");
 
-        publish_raw_repo(
-            &tmp.path().join("repo"),
-            &layout,
-            "foo",
-            "0.2.0",
-            &raw_artifact_missing_binary("foo", "0.2.0"),
-        );
-        let rpm = FakeRpm::new("unused", None);
+            publish_raw_repo(
+                &tmp.path().join("repo"),
+                &layout,
+                "foo",
+                "0.2.0",
+                &raw_artifact_missing_binary("foo", "0.2.0"),
+            );
+            let rpm = FakeRpm::new("unused", None);
 
-        update_component_with_deps("foo", &c, &rpm, &rpm, false)
-            .expect_err("install of the new version must fail");
+            let planned = plan_component_update("foo", &c, &rpm, &rpm).expect("plan update");
+            let Plan::Execute { steps, .. } = planned.plan else {
+                panic!("expected an executable raw update");
+            };
+            let (resolution, prior) = planned.owned_execution.expect("owned resolution");
+            let mut hydration_calls = 0;
+            let err = application::apply_owned_with_hydration(
+                &planned.target,
+                &c,
+                &layout,
+                &layout.state_dir.join("installed.toml"),
+                &rpm_install::journal_dir(&layout),
+                planned.scope,
+                &planned.now,
+                steps,
+                resolution,
+                prior,
+                &planned.command,
+                |store, layout| {
+                    hydration_calls += 1;
+                    common::hydrate_owned_file_contracts_with_capability_support(
+                        store, layout, supported,
+                    )
+                },
+            )
+            .err()
+            .expect("install of the new version must fail")
+            .into_cli_error();
+            assert_eq!(hydration_calls, 1);
+            assert!(
+                err.reason().contains("the previous files were restored"),
+                "{}",
+                err.reason()
+            );
 
-        let log = std::fs::read_to_string(&layout.central_log).expect("read central log");
-        let applied: Vec<serde_json::Value> = log
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|record| record["command"] == "capability:apply")
-            .collect();
-        assert_eq!(
-            applied.len(),
-            1,
-            "rollback must attempt the hydrated required grant exactly once: {log}"
-        );
-        assert_eq!(applied[0]["details"]["path"], bin.display().to_string());
-        assert_eq!(applied[0]["details"]["caps"][0], "cap_net_bind_service");
+            let log = match std::fs::read_to_string(&layout.central_log) {
+                Ok(log) => log,
+                Err(err) if !inferred && err.kind() == std::io::ErrorKind::NotFound => {
+                    String::new()
+                }
+                Err(err) => panic!("read central log: {err}"),
+            };
+            let applied: Vec<serde_json::Value> = log
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|record| record["command"] == "capability:apply")
+                .collect();
+            assert_eq!(
+                applied.len(),
+                usize::from(inferred),
+                "rollback must only attempt a supported inferred grant: {log}"
+            );
+            if inferred {
+                assert_eq!(applied[0]["details"]["path"], bin.display().to_string());
+                assert_eq!(applied[0]["details"]["caps"][0], "cap_net_bind_service");
+            }
 
-        let state_path = layout.state_dir.join("installed.toml");
-        let store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
-            .expect("reload state");
-        let ProviderBinding::Owned { artifact } = &store
-            .find(ObjectKind::Component, "foo")
-            .expect("component")
-            .binding
-        else {
-            panic!("expected owned record");
-        };
-        let binary_row = artifact
-            .files
-            .iter()
-            .find(|file| file.path == bin)
-            .expect("binary row");
-        assert!(
-            binary_row.capabilities.is_empty(),
-            "failed update must not persist inferred legacy metadata"
-        );
-        assert_eq!(
-            std::fs::read(&bin).expect("read restored binary"),
-            b"original v1 binary\n"
-        );
+            let state_path = layout.state_dir.join("installed.toml");
+            let store =
+                StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+                    .expect("reload state");
+            let ProviderBinding::Owned { artifact } = &store
+                .find(ObjectKind::Component, "foo")
+                .expect("component")
+                .binding
+            else {
+                panic!("expected owned record");
+            };
+            let binary_row = artifact
+                .files
+                .iter()
+                .find(|file| file.path == bin)
+                .expect("binary row");
+            assert!(
+                binary_row.capabilities.is_empty(),
+                "failed update must not persist inferred legacy metadata"
+            );
+            assert_eq!(
+                std::fs::read(&bin).expect("read restored binary"),
+                b"original v1 binary\n"
+            );
+        }
     }
 
     /// resolve_raw always selects the highest published version; if the index
