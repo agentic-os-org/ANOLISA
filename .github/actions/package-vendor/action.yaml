@@ -1,8 +1,8 @@
 name: Package Vendor
 description: >
-  Auto-detect Rust projects in the build tree left by package-source,
-  run cargo vendor, and upload a pure vendor archive.
-  Skips silently if no Rust projects (Cargo.toml + Cargo.lock) are found.
+  Auto-detect Rust projects in the build tree left by package-source, run cargo
+  vendor, and upload a dependency archive. Agent-sec-core additionally vendors
+  its locked OpenClaw npm cache for the V2 offline RPM build.
 
 inputs:
   component:
@@ -42,12 +42,28 @@ runs:
         fi
 
         CARGO_ROOTS=()
-        while IFS= read -r toml; do
-          dir=$(dirname "$toml")
-          if [ -f "${dir}/Cargo.lock" ]; then
+        if [ "${{ inputs.component }}" = "agent-sec-core" ]; then
+          # V2 packages these two workspaces only; V1 agent-sec-cli is not part
+          # of the V2 RPM and must not inflate Source1.
+          for dir in "$BUILD_DIR/v2" "$BUILD_DIR/linux-sandbox"; do
+            if [ ! -f "${dir}/Cargo.toml" ] || [ ! -f "${dir}/Cargo.lock" ]; then
+              echo "ERROR: missing locked V2 Cargo workspace: ${dir}" >&2
+              exit 1
+            fi
             CARGO_ROOTS+=("$dir")
+          done
+          if [ ! -f "$BUILD_DIR/openclaw-plugin/package-lock.json" ]; then
+            echo "ERROR: missing locked OpenClaw npm project" >&2
+            exit 1
           fi
-        done < <(find "$BUILD_DIR" -name 'Cargo.toml' -not -path '*/vendor/*')
+        else
+          while IFS= read -r toml; do
+            dir=$(dirname "$toml")
+            if [ -f "${dir}/Cargo.lock" ]; then
+              CARGO_ROOTS+=("$dir")
+            fi
+          done < <(find "$BUILD_DIR" -name 'Cargo.toml' -not -path '*/vendor/*')
+        fi
 
         if [ ${#CARGO_ROOTS[@]} -eq 0 ]; then
           echo "No Rust projects detected (no Cargo.toml + Cargo.lock pairs found), skipping vendor."
@@ -64,8 +80,20 @@ runs:
     # Step 2: Setup Rust toolchain
     # -----------------------------------------------------------------
     - name: Setup Rust toolchain
-      if: env.VENDOR_SKIP != 'true'
+      if: env.VENDOR_SKIP != 'true' && inputs.component != 'agent-sec-core'
       uses: dtolnay/rust-toolchain@stable
+
+    - name: Setup Agent-Sec-Core Rust toolchain
+      if: env.VENDOR_SKIP != 'true' && inputs.component == 'agent-sec-core'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: '1.93.1'
+
+    - name: Setup Agent-Sec-Core Node.js
+      if: env.VENDOR_SKIP != 'true' && inputs.component == 'agent-sec-core'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
 
     # -----------------------------------------------------------------
     # Step 3: Cargo vendor + create vendor archive
@@ -100,6 +128,19 @@ runs:
           mv vendor/ "$DEST/"
           mv .cargo/ "$DEST/"
         done < /tmp/cargo-roots.txt
+
+        if [ "${{ inputs.component }}" = "agent-sec-core" ]; then
+          NPM_ROOT="$BUILD_DIR/openclaw-plugin"
+          NPM_CACHE="$VENDOR_STAGING/openclaw-plugin/.npm-cache"
+          mkdir -p "$NPM_CACHE"
+          cd "$NPM_ROOT"
+          rm -rf node_modules
+          npm ci --include=dev --ignore-scripts --cache "$NPM_CACHE" --no-audit --no-fund
+          rm -rf node_modules
+          npm ci --offline --include=dev --ignore-scripts --cache "$NPM_CACHE" --no-audit --no-fund
+          npm cache verify --cache "$NPM_CACHE"
+          rm -rf node_modules
+        fi
 
         TOTAL_HUMAN=$(du -sh "$VENDOR_STAGING" | cut -f1)
         echo "VENDOR_SIZE_HUMAN=${TOTAL_HUMAN}" >> $GITHUB_ENV

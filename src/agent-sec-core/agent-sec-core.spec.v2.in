@@ -2,30 +2,16 @@
 %define anolis_release 1
 %global debug_package %{nil}
 
-# Disable stripping of ELF binaries.  Bundled .so files (the crate-backed
-# agent_sec_cli._native extension and prebuilt wheel extensions such as
-# cryptography and pydantic-core) have precise ELF segment alignment that
-# `strip` breaks, causing "ELF load command address/offset not page-aligned"
-# at runtime.
-%global __strip /bin/true
+# V2 contains native Rust binaries only. Keep the standard stripping pipeline;
+# the V1 Python wheel and its prebuilt extension modules are not packaged here.
 
-# Use default zstd compression (level 3) instead of -19 to speed up packaging
-# of bundled native extensions; -19 takes noticeably longer with no real gain.
+# Use default zstd compression (level 3) instead of -19 to speed up packaging.
 %define _binary_payload w.zstdio
 %define _source_payload w.zstdio
 %{!?_userunitdir:%global _userunitdir /usr/lib/systemd/user}
 
 # Preserve original shebang (#!/usr/bin/env bash) for cross-platform compatibility
 %undefine __brp_mangle_shebangs
-
-# Exclude bundled site-packages from RPM auto-dependency scanning.
-# Prebuilt wheel .so files reference host system libraries or use hash-named
-# internal libraries, neither of which must become hard RPM
-# Requires/Provides.
-# Using path-based exclusion instead of AutoReqProv:no so that other subpackages
-# (e.g. linux-sandbox in agent-sec-cosh-hook) retain proper auto-dependency detection.
-%global __requires_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
-%global __provides_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
 
 Name:           agent-sec-core
 Version:        @VERSION@
@@ -35,16 +21,18 @@ Summary:        Agent Security Core Package (metapackage)
 License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
 
-# Build dependencies
-# NOTE: The following build tools are required but NOT declared as BuildRequires
-# because they are provided by the CI environment (GitHub Actions):
-#   - Rust toolchain >= 1.93.0  (dtolnay/rust-toolchain)
-#   - Python 3.11.6 + uv        (astral-sh/setup-uv)
-#   - Node.js >= 20              (actions/setup-node)
-#   - gcc, clang, llvm, openssl-devel, libseccomp-devel, bubblewrap
-# If building outside CI, ensure these are installed manually.
+# Build dependencies. Source1 supplies Cargo crates and npm packages; the
+# compiler, system headers and package managers remain Alinux build roots.
+BuildRequires:  cargo = 1.93.1
+BuildRequires:  rust = 1.93.1
+BuildRequires:  gcc
+BuildRequires:  gcc-c++
 BuildRequires:  make
+BuildRequires:  nodejs >= 20
+BuildRequires:  npm
+BuildRequires:  python3
 BuildRequires:  systemd-rpm-macros
 
 %{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}
@@ -70,12 +58,7 @@ This metapackage installs all agent-sec-core components including CLI, hooks, an
 # =============================================================================
 %package -n agent-sec-cli
 Summary:        Agent Security CLI tool (Rust, daemon client)
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-Requires:       gnupg2 >= 2.0
-Requires:       loongshield >= 1.2.0
 Requires:       systemd
-Recommends:     python3-pgpy >= 0.5
 
 %description -n agent-sec-cli
 Agent-sec-cli provides Policy, Scope and Binding administration commands.
@@ -246,10 +229,16 @@ Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
 # Build & Install
 # =============================================================================
 %prep
-%setup -q
+# Source1 overlays the two Cargo vendor trees and the OpenClaw npm cache at
+# their project-relative paths before the offline build starts.
+%setup -q -a 1
 
 %build
-make build-all-v2
+# The build may retain CI network access for logs and artifact upload, but both
+# dependency managers are constrained to the vendored Source1 contents.
+export CARGO_NET_OFFLINE=true
+export npm_config_offline=true
+make build-all-v2-offline
 
 %install
 rm -rf $RPM_BUILD_ROOT

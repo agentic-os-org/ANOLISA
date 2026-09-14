@@ -7,6 +7,9 @@ on:
       - 'release/agent-sec-core/**'
     paths:
       - 'src/agent-sec-core/**'
+      - '.github/actions/package-source/**'
+      - '.github/actions/package-vendor/**'
+      - '.github/workflows/_rpm-build.yaml'
       - '.github/workflows/sec-core-rpmbuild.yaml'
   workflow_dispatch:       # 手动触发不受 paths 限制
 
@@ -246,58 +249,112 @@ jobs:
           path: scripts/rpmbuild/RPMS/**/*.rpm
           retention-days: 7
 
-  # Runs in parallel with build-rpm (no `needs`): the V2 Rust CLI/daemon RPM
-  # plus its dedicated e2e suite. Either job failing fails the PR.
+  package-rpm-v2:
+    name: Package agent-sec-core V2 source and vendor
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      source-artifact: agent-sec-core-${{ steps.version.outputs.value }}
+      vendor-artifact: agent-sec-core-${{ steps.version.outputs.value }}-vendor
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve V2 version
+        id: version
+        run: |
+          value=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$value"
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/package-source
+        id: source
+        with:
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          retention-days: 7
+
+      - uses: ./.github/actions/package-vendor
+        id: vendor
+        with:
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          retention-days: 7
+
+      - name: Create source and vendor manifest
+        run: |
+          set -euo pipefail
+          cd /tmp/archives
+          sha256sum *.tar.gz > agent-sec-core-v2-artifacts.sha256
+          for archive in *.tar.gz; do
+            tar -tzf "$archive" | sort > "${archive}.contents"
+          done
+
+      - name: Upload source and vendor manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-v2-source-vendor-manifest
+          path: |
+            /tmp/archives/agent-sec-core-v2-artifacts.sha256
+            /tmp/archives/*.contents
+          retention-days: 7
+
+  offline-build-rpm-v2:
+    name: Offline build agent-sec-core V2 RPM
+    needs: package-rpm-v2
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: agent-sec-core
+      version: ${{ needs.package-rpm-v2.outputs.version }}
+      arch: amd64
+      source-artifact: ${{ needs.package-rpm-v2.outputs.source-artifact }}
+      vendor-artifact: ${{ needs.package-rpm-v2.outputs.vendor-artifact }}
+      spec-template: agent-sec-core.spec.v2.in
+      offline-build: true
+
+  # The installed-package E2E remains separate from the offline build job so it
+  # can consume only the produced RPM artifact.
   build-rpm-v2:
-    name: Build agent-sec-core V2 RPM
+    name: Test offline-built agent-sec-core V2 RPM
+    needs: [package-rpm-v2, offline-build-rpm-v2]
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:
-      - name: Configure mirrors and install dependencies
+      - name: Configure mirrors and install test dependencies
         run: |
           sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git rpm-build systemd-rpm-macros gcc make clang llvm \
-                         openssl-devel libseccomp-devel bubblewrap \
-                         python3-pip
+          dnf install -y tar git make bubblewrap python3 python3-pip
 
       - uses: actions/checkout@v4
 
-      # V2 daemon/CLI are pinned to 1.93.1; linux-sandbox also builds on it.
-      # The V1 job stays on 1.93.0.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Download offline-built RPMs
+        uses: actions/download-artifact@v4
         with:
-          toolchain: '1.93.1'
-
-      - uses: astral-sh/setup-uv@v8.0.0
-        with:
-          python-version: '3.11.6'
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build V2 RPM
-        run: ./scripts/rpm-build.sh agent-sec-core-v2
+          name: rpm-agent-sec-core-amd64
+          path: /tmp/rpms
 
       - name: List RPM contents
         run: |
-          echo "=== RPM files built ==="
-          find scripts/rpmbuild/RPMS -name '*.rpm' | sort
-          echo ""
-          for rpm in scripts/rpmbuild/RPMS/**/*.rpm; do
-            echo "========================================"
-            echo ">>> $rpm"
-            echo "========================================"
+          echo "=== Offline-built RPM files ==="
+          find /tmp/rpms -name '*.rpm' -print | sort
+          for rpm in /tmp/rpms/*.rpm; do
             rpm -qlvp "$rpm"
-            echo ""
           done
 
       - name: Test RPM installation
         run: |
-          dnf makecache
-          dnf install -y scripts/rpmbuild/RPMS/**/*.rpm
+          dnf install -y /tmp/rpms/*.rpm
           echo "=== Verify CLI (Rust) ==="
           agent-sec-cli --help
           echo "=== Verify daemon (Rust) ==="
@@ -433,11 +490,6 @@ jobs:
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
           fi
-
-      - name: Upload V2 RPM artifacts
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-sec-core-v2-rpms-${{ github.run_number }}-${{ github.sha }}
-          path: scripts/rpmbuild/RPMS/**/*.rpm
-          retention-days: 7
+          # Cleanup is best-effort so an earlier test failure remains visible.
+          :
+# End of workflow
