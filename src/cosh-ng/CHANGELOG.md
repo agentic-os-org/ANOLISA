@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-09-10
+
+### Added
+- Managed Tasks are now end-to-end in cosh-shell: submit persistent Core or Codex Tasks, choose a checkpoint policy, reconnect to inspect progress, and safely switch Task-owned snapshots through a Gateway-backed recovery flow (#2911)
+
+### Fixed
+- Lexical path-traversal spellings that resolve into `/proc`, `/dev`, or `/sys` are now blocked by the readonly safety check, closing a bypass where variants like `/../proc/version` slipped through (#2708)
+- Quoted `/dev/null` redirection targets such as `2>"/dev/null"` are now classified as null redirections instead of redirection-write, so the approval card shows the correct reason (#2710)
+
 ## [0.24.1] — 2026-09-09
 
 ### Fixed

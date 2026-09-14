@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.0"
 
 [component]
 name = "cosh-ng"
-version = "0.24.1"
+version = "0.25.0"
 layer = "runtime"
 domain = "tools"
 description = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
