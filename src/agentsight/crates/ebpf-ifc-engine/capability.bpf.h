@@ -101,6 +101,18 @@ struct {
 	__type(value, __u64);
 } cap_stats SEC(".maps");
 
+/* The pid that declared the next drain: userspace writes its own pid before
+ * submitting to cap_req. The drain hook refuses to run for any other pid, so
+ * a foreign syscall on the trigger tracepoint cannot consume the submitter's
+ * records in a foreign capability context.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __s32);
+} cap_pending_submitter SEC(".maps");
+
 static __always_inline void cap_count(__u32 slot)
 {
 	__u64 *v = bpf_map_lookup_elem(&cap_stats, &slot);
@@ -473,8 +485,15 @@ static long cap_request_cb(struct bpf_dynptr *dynptr, void *data)
 
 static __always_inline void cap_drain_current(void)
 {
+	__u32 slot = 0;
+	__s32 *pending = bpf_map_lookup_elem(&cap_pending_submitter, &slot);
+	__s32 current = bpf_get_current_pid_tgid() >> 32;
+
+	if (!pending || *pending != current)
+		return;
+
 	struct cap_drain_ctx ctx = {
-		.current_pid = bpf_get_current_pid_tgid() >> 32,
+		.current_pid = current,
 	};
 	bpf_user_ringbuf_drain(&cap_req, cap_request_cb, &ctx, 0);
 	cap_count(CAP_STAT_DRAIN);

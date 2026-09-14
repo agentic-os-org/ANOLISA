@@ -1,0 +1,198 @@
+--- a/bpf/src/lib.rs	2026-09-16 10:00:00.000000000 +0800
++++ b/bpf/src/lib.rs	2026-09-16 10:00:00.000000000 +0800
+@@ -69,14 +69,19 @@
+ const FEAT_BLOCK_EXEC: u32 = 1 << 7;
+ const FEAT_BLOCK_FILE: u32 = 1 << 8;
+ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
++// Pin-name identity for the singleton engine. The version digit is bumped
++// whenever a patch-stack change alters pinned-engine behavior (e.g. the
++// drain-trigger event moved to sys_enter_membarrier): an old pin then fails
++// the marker check loudly instead of being silently reused with mismatched
++// links.
+ const PINNED_FILE_PROFILE_MARKER: &str =
+-    "agentsight_profile_file_v1_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_file_v2_a62e5d9d96f91101cda019519053e950d532380a";
+ const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
+-    "agentsight_profile_credential_exfiltration_v2_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_credential_exfiltration_v3_a62e5d9d96f91101cda019519053e950d532380a";
+ const PINNED_FULL_PROFILE_MARKER: &str =
+-    "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_full_v2_a62e5d9d96f91101cda019519053e950d532380a";
+ const PINNED_AGENT_FILE_GUARD_MARKER: &str =
+-    "agentsight_profile_agent_file_guard_v1_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_agent_file_guard_v2_a62e5d9d96f91101cda019519053e950d532380a";
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ struct PinnedEnginePaths {
+     root: PathBuf,
+@@ -531,6 +536,28 @@
+     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
+ }
+ 
++/// Declare to the BPF drain gate that THIS pid is about to submit to `cap_req`.
++/// The gate (`cap_pending_submitter`) makes the drain hook refuse to run in any
++/// other pid's context, so a foreign syscall on the trigger tracepoint cannot
++/// consume the submitter's records in a foreign capability context
++/// (#3021 follow-up 3).
++fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
++    let slot: u32 = 0;
++    let pid: i32 = std::process::id() as i32;
++    let rc = unsafe {
++        libbpf_sys::bpf_map_update_elem(
++            fd,
++            &slot as *const u32 as *const std::ffi::c_void,
++            &pid as *const i32 as *const std::ffi::c_void,
++            BPF_ANY,
++        )
++    };
++    if rc != 0 {
++        return Err(io::Error::last_os_error());
++    }
++    Ok(())
++}
++
+ fn open_append_lock() -> io::Result<std::fs::File> {
+     std::fs::OpenOptions::new()
+         .read(true)
+@@ -559,6 +586,7 @@
+     for name in [
+         "rb",
+         "cap_req",
++        "cap_pending_submitter",
+         "cap_task",
+         "cap_state",
+         "cap_policy",
+@@ -567,6 +595,7 @@
+         "ts_proc_domains",
+         "ts_root",
+         "te_protected_pids",
++        "te_inode_guard",
+     ] {
+         if !paths.map(name).try_exists()? {
+             return Ok(false);
+@@ -1168,7 +1197,7 @@
+     TracepointSpec {
+         name: "cap_drain_tick",
+         category: "syscalls",
+-        event: "sys_enter_getpid",
++        event: "sys_enter_membarrier",
+         need: TracepointNeed::Core,
+     },
+ ];
+@@ -1979,6 +2008,7 @@
+     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
+         Ok(ReloadHandle {
+             cap_req_fd: dup_pinned_map_fd(&self.paths, "cap_req")?,
++            cap_pending_fd: dup_pinned_map_fd(&self.paths, "cap_pending_submitter")?,
+             cap_task_fd: dup_pinned_map_fd(&self.paths, "cap_task")?,
+             cap_state_fd: dup_pinned_map_fd(&self.paths, "cap_state")?,
+             cap_policy_fd: dup_pinned_map_fd(&self.paths, "cap_policy")?,
+@@ -2411,6 +2441,7 @@
+         let dup = dup_cloexec_fd(raw)?;
+         Ok(ReloadHandle {
+             cap_req_fd: dup,
++            cap_pending_fd: dup_array_map_fd(&self.bpf, "cap_pending_submitter")?,
+             cap_task_fd: dup_hash_map_fd(&self.bpf, "cap_task")?,
+             cap_state_fd: dup_hash_map_fd(&self.bpf, "cap_state")?,
+             cap_policy_fd: dup_hash_map_fd(&self.bpf, "cap_policy")?,
+@@ -2570,7 +2601,9 @@
+     /// The BPF side admits the request only if `caller_pid` maps to a state with
+     /// the needed authority masks, and then applies a monotonic delta to
+     /// `cap_state`. The caller normally sets `caller_pid` to its own pid; this
+-    /// method triggers a `getpid` syscall so the BPF drain hook runs.
++    /// submission first declares the drain intent so the BPF gate only lets
++    /// OUR pid drain, then self-triggers the drain hook with a
++    /// `membarrier(QUERY)`.
+     pub fn submit_delta(&self, req: DeltaRequest) -> io::Result<()> {
+         let map = self
+             .bpf
+@@ -2580,9 +2613,19 @@
+             Map::Unsupported(data) => data,
+             _ => return Err(err("cap_req is not a user ringbuf map")),
+         };
+-        let fd = map_data.fd().as_fd().as_raw_fd();
++        let ring_fd = map_data.fd().as_fd().as_raw_fd();
++        let pending = self
++            .bpf
++            .map("cap_pending_submitter")
++            .ok_or_else(|| err("cap_pending_submitter missing"))?;
++        let pending_data = match pending {
++            Map::Array(data) => data,
++            Map::Unsupported(data) => data,
++            _ => return Err(err("cap_pending_submitter is not an array map")),
++        };
++        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd())?;
+         unsafe {
+-            let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
++            let rb = libbpf_sys::user_ring_buffer__new(ring_fd, std::ptr::null());
+             if rb.is_null() {
+                 return Err(io::Error::last_os_error());
+             }
+@@ -2602,7 +2645,11 @@
+             );
+             libbpf_sys::user_ring_buffer__submit(rb, sample);
+             libbpf_sys::user_ring_buffer__free(rb);
+-            libc::syscall(libc::SYS_getpid);
++            // Self-trigger the drain in OUR pid context; the BPF-side
++            // submitter gate makes foreign triggers harmless regardless of
++            // which syscall they ride (#3021 follow-up 3). QUERY has no side
++            // effects.
++            libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
+         }
+         Ok(())
+     }
+@@ -2771,6 +2818,7 @@
+ /// `Send + Sync` — safe to share across threads and the async MCP server.
+ pub struct ReloadHandle {
+     cap_req_fd: std::os::fd::OwnedFd,
++    cap_pending_fd: std::os::fd::OwnedFd,
+     cap_task_fd: std::os::fd::OwnedFd,
+     cap_state_fd: std::os::fd::OwnedFd,
+     cap_policy_fd: std::os::fd::OwnedFd,
+@@ -2805,6 +2853,7 @@
+     }
+ 
+     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
++        declare_drain_intent_fd(self.cap_pending_fd.as_raw_fd())?;
+         let fd = self.cap_req_fd.as_raw_fd();
+         unsafe {
+             let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
+@@ -2820,7 +2869,11 @@
+             std::ptr::copy_nonoverlapping(data.as_ptr(), sample as *mut u8, data.len());
+             libbpf_sys::user_ring_buffer__submit(rb, sample);
+             libbpf_sys::user_ring_buffer__free(rb);
+-            libc::syscall(libc::SYS_getpid);
++            // Self-trigger the drain in OUR pid context; the BPF-side
++            // submitter gate makes foreign triggers harmless regardless of
++            // which syscall they ride (#3021 follow-up 3). QUERY has no side
++            // effects.
++            libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
+         }
+         Ok(())
+     }
+@@ -3592,7 +3645,7 @@
+     #[test]
+     fn pinned_profile_marker_captures_revision_profile_and_schema() {
+         let marker = HookReserve::file_enforcement().profile_marker();
+-        assert!(marker.contains("file_v1"));
++        assert!(marker.contains("file_v2"));
+         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
+         assert_ne!(marker, HookReserve::full_profile().profile_marker());
+     }
+@@ -3628,7 +3681,7 @@
+     #[test]
+     fn agent_file_guard_profile_marker_is_distinct() {
+         let marker = HookReserve::agent_file_guard().profile_marker();
+-        assert!(marker.contains("agent_file_guard_v1"));
++        assert!(marker.contains("agent_file_guard_v2"));
+         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
+         assert_ne!(marker, HookReserve::full_profile().profile_marker());
+         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
+@@ -3678,7 +3731,7 @@
+             .expect("credential exfiltration profile");
+         let marker = reserve.profile_marker();
+ 
+-        assert!(marker.contains("credential_exfiltration_v2"));
++        assert!(marker.contains("credential_exfiltration_v3"));
+         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
+         assert_ne!(marker, HookReserve::full_profile().profile_marker());
+     }
