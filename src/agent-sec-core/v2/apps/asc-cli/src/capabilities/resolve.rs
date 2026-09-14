@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
+
 use super::manifest::{self, EnvKind, EnvSpec};
 
 /// Process environment as seen by the CLI, keyed by variable name.
@@ -287,12 +289,10 @@ fn format_number(value: f64) -> String {
 
 /// Escapes non-printable characters and caps the length of a reported value.
 ///
-/// Only one variable reaches output close to verbatim (the L2 backend name), so
-/// this keeps a hostile environment from injecting control sequences into a
-/// terminal. Item G6: the printable test is approximated by Rust's control and
-/// whitespace classes because `std` exposes no Unicode category table, so a few
-/// exotic categories stay unescaped here while V1 escapes them. Accepted as-is
-/// since the terminal-injection surface is covered.
+/// Only one variable reaches output close to verbatim (the L2 backend name), and
+/// one more is echoed in the unknown-agent error, so this keeps a hostile
+/// environment or argv from reaching a terminal with characters that rewrite how
+/// the rest of the line reads.
 pub(crate) fn safe_value(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -317,8 +317,25 @@ pub(crate) fn safe_value(value: &str) -> String {
     escaped
 }
 
+/// Mirrors Python's `str.isprintable`, which V1 relies on for the same values.
+///
+/// The rejected groups are exactly the categories `CPython` rejects: `Other`
+/// (`Cc`, `Cf`, `Cs`, `Co`, `Cn`) and `Separator` (`Zs`, `Zl`, `Zp`), with ASCII
+/// space kept printable. `Cf` is the reason a general-category table is required
+/// rather than `std`'s `is_control`/`is_whitespace` pair: bidirectional overrides
+/// (U+202A..U+202E, U+2066..U+2069) and zero-width characters (U+200B..U+200F)
+/// are neither control nor whitespace, yet they let an attacker-controlled value
+/// reorder or hide what an operator reads in the very output used to audit it.
+///
+/// Item G6: the rule matches V1, but the two sides carry different Unicode data
+/// (this table is 17.0, `CPython` 3.11.6 is 14.0.0), so a code point unassigned
+/// in 14.0 and assigned later is escaped by V1 and kept here.
 fn printable(character: char) -> bool {
-    character == ' ' || !(character.is_control() || character.is_whitespace())
+    character == ' '
+        || !matches!(
+            character.general_category_group(),
+            GeneralCategoryGroup::Other | GeneralCategoryGroup::Separator
+        )
 }
 
 /// Reports whether the hook runs, applying the PII enable-switch precedence.
@@ -652,6 +669,33 @@ mod tests {
         let capped = safe_value(&long);
         assert_eq!(capped.chars().count(), VALUE_LIMIT);
         assert!(capped.ends_with('…'));
+    }
+
+    /// Characters that rewrite how a line reads must not survive to a terminal.
+    ///
+    /// These are neither control nor whitespace, so they were reported verbatim
+    /// until the printable test switched to general categories. A bidirectional
+    /// override reverses the text after it, and a zero-width character makes two
+    /// different names render identically — in the one output an operator uses to
+    /// audit the configuration.
+    #[test]
+    fn bidi_and_zero_width_characters_are_escaped() {
+        assert_eq!(
+            safe_value("gpt\u{202e}4\u{200b}-evil"),
+            "gpt\\u202e4\\u200b-evil"
+        );
+        // Every bidirectional control, not just the override.
+        for character in ['\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}'] {
+            let escaped = safe_value(&character.to_string());
+            assert_eq!(escaped, format!("\\u{:04x}", u32::from(character)));
+        }
+        for character in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+            let escaped = safe_value(&character.to_string());
+            assert_eq!(escaped, format!("\\u{:04x}", u32::from(character)));
+        }
+        // Byte-order mark and private use, which V1 escapes as well.
+        assert_eq!(safe_value("a\u{feff}b"), "a\\ufeffb");
+        assert_eq!(safe_value("a\u{e000}b"), "a\\ue000b");
     }
 
     #[test]
