@@ -233,12 +233,12 @@ runtime shutdown timeout，避免残留 `spawn_blocking` 让前台进程永久�
 是 best-effort，不构成持久化交付保证；这不改变 daemon 正常运行时 caller timeout 不使 work
 无主的规则。
 
-security-event 存储是启动前置条件：daemon 只接受 systemd/DaemonSet 显式设置的
+security-event 存储使用 system-owned 目录：daemon 只接受 systemd/DaemonSet 显式设置的
 `AGENT_SEC_DATA_DIR`，未设置时固定为 `/var/log/agent-sec`，不回退到 `HOME` 或 `/tmp`。
 目录必须由 daemon 有效用户拥有且为 `0700`，主 JSONL/SQLite 文件为 `0600`；SQLite
-WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL、打开并初始化 SQLite，任一
-失败即非零退出。成功启动后单侧瞬时写失败仍保持独立
-fail-open，不改变 capability 的业务结果。
+WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL、打开并初始化 SQLite：SQLite
+失败即非零退出；JSONL 失败只输出告警，daemon 仍启动并对该副本保持 best-effort 写入。成功
+启动后单侧瞬时写失败仍保持独立 fail-open，不改变 capability 的业务结果。
 
 该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
 但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer

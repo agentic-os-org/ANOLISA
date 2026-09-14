@@ -15,6 +15,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -262,7 +263,10 @@ impl JsonlEventWriter {
 
     fn notify_error(&self, err: &EventLogError) {
         if let Some(handler) = &self.on_error {
-            handler(err);
+            // Error reporting is secondary to the write path. Match v1's nested
+            // `try/except`: a faulty callback cannot turn best-effort logging
+            // into a business-operation failure.
+            let _ = catch_unwind(AssertUnwindSafe(|| handler(err)));
         }
     }
 
@@ -831,6 +835,20 @@ mod tests {
         fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
             Err(serde::ser::Error::custom("record is not serializable"))
         }
+    }
+
+    #[test]
+    fn write_swallows_panicking_error_handlers() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.jsonl");
+        fs::create_dir(&path).expect("seed directory");
+        let writer = JsonlEventWriter::new(&path).with_error_handler(Box::new(|_| {
+            panic!("error handler failure");
+        }));
+
+        assert!(
+            std::panic::catch_unwind(AssertUnwindSafe(|| writer.write(&json!({"a": 1})))).is_ok()
+        );
     }
 
     #[test]

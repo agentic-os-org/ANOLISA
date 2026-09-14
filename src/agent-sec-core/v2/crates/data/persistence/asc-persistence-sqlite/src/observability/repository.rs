@@ -6,6 +6,8 @@
 //! direct reason this crate links a bundled `SQLite` instead of relying on the
 //! host library.
 
+use std::collections::HashMap;
+
 use asc_observability::{
     ObservabilityRecord, RunSummary, SessionSummary, USER_INPUT_PREVIEW_LIMIT,
 };
@@ -289,12 +291,12 @@ impl ObservabilityEventRepository {
              FROM observability_events{filter} AND hook = 'before_agent_run') WHERE rn = 1"
         );
 
-        let mut previews: Vec<(String, Option<String>)> = Vec::new();
+        let mut previews: HashMap<String, Option<String>> = HashMap::new();
         {
             let mut statement = conn.prepare(&preview_sql)?;
             let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
             while let Some(row) = rows.next()? {
-                previews.push((row.get(0)?, row.get(1)?));
+                previews.insert(row.get(0)?, row.get(1)?);
             }
         }
 
@@ -304,9 +306,8 @@ impl ObservabilityEventRepository {
         while let Some(row) = rows.next()? {
             let run_id: String = row.get(0)?;
             let preview = previews
-                .iter()
-                .find(|(candidate, _)| *candidate == run_id)
-                .and_then(|(_, metrics)| metrics.as_deref())
+                .get(&run_id)
+                .and_then(|metrics| metrics.as_deref())
                 .and_then(extract_user_input_preview);
             runs.push(RunSummary {
                 run_id,

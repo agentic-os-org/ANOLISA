@@ -15,7 +15,7 @@ use asc_security_events::{
 use asc_sqlite_kernel::{KernelError, ReadOnlySource, SqliteStore};
 
 use crate::security_events::repository::{
-    CorrelationRequest, EventFilters, GroupCounts, SecurityEventRepository,
+    CorrelationRequest, EventFilters, GroupCounts, SecurityEventRepository, validate_group_field,
 };
 use crate::security_events::table::SECURITY_EVENTS_TABLES;
 use crate::security_events::writer::{LOG_PREFIX, WriterError};
@@ -28,8 +28,9 @@ pub const DEFAULT_LATEST_LIMIT: u32 = 5;
 
 /// Read-only access to the security-event index.
 ///
-/// Every method degrades to an empty result rather than failing: a database that
-/// does not exist yet is the normal state before the first write.
+/// Database availability failures degrade to empty results because a missing
+/// database is normal before the first write. Invalid caller input still returns
+/// an error.
 #[derive(Debug)]
 pub struct SqliteEventReader {
     source: ReadOnlySource<SecurityEventRepository>,
@@ -114,13 +115,20 @@ impl SqliteEventReader {
 
     /// Counts matching events grouped by `group_field`.
     ///
-    /// A field outside the allowlist yields an empty result here rather than an
-    /// error, because this facade never fails; call the repository directly when
-    /// the rejection message matters.
-    #[must_use]
-    pub fn count_by(&self, group_field: &str, filters: &EventFilters, offset: u32) -> GroupCounts {
-        self.source
-            .query_or_default(|repo, conn| repo.count_by(conn, group_field, filters, offset))
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Malformed`] when `group_field` is outside the V1
+    /// allowlist. Database availability failures still degrade to an empty result.
+    pub fn count_by(
+        &self,
+        group_field: &str,
+        filters: &EventFilters,
+        offset: u32,
+    ) -> Result<GroupCounts, KernelError> {
+        validate_group_field(group_field)?;
+        Ok(self
+            .source
+            .query_or_default(|repo, conn| repo.count_by(conn, group_field, filters, offset)))
     }
 
     /// Returns the dashboard aggregates and the newest rows.
@@ -173,6 +181,7 @@ mod tests {
         assert!(
             reader
                 .count_by("category", &EventFilters::default(), 0)
+                .expect("valid group field")
                 .is_empty()
         );
         assert_eq!(reader.summary(&EventFilters::default(), 5).total, 0);
@@ -203,16 +212,15 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_group_field_degrades_to_empty() {
+    fn an_invalid_group_field_is_rejected() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("events.db");
         seed(&path);
 
         let reader = SqliteEventReader::new(&path).expect("reader");
-        assert!(
-            reader
-                .count_by("details", &EventFilters::default(), 0)
-                .is_empty()
-        );
+        let error = reader
+            .count_by("details", &EventFilters::default(), 0)
+            .expect_err("invalid group field must be rejected");
+        assert!(matches!(error, KernelError::Malformed(_)));
     }
 }

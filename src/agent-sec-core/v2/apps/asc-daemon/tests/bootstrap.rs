@@ -83,14 +83,15 @@ async fn dproc_configured_administrator_can_query_without_root() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_refuses_to_bind_when_event_storage_is_unusable() {
+async fn daemon_refuses_to_bind_when_sqlite_event_storage_is_unusable() {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
     let socket_path = directory.join("daemon.sock");
-    let data_path = directory.join("not-a-directory");
-    std::fs::write(&data_path, b"blocked").unwrap();
+    let data_dir = directory.join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::create_dir(data_dir.join("security-events.db")).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
-        .env("AGENT_SEC_DATA_DIR", &data_path)
+        .env("AGENT_SEC_DATA_DIR", &data_dir)
         .args(["serve", "--socket"])
         .arg(&socket_path)
         .stdin(Stdio::null())
@@ -102,6 +103,41 @@ async fn daemon_refuses_to_bind_when_event_storage_is_unusable() {
     assert!(!wait_for_exit(&mut child).await.success());
     assert!(!socket_path.exists());
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
+    let directory = unique_directory();
+    std::fs::create_dir(&directory).unwrap();
+    let socket_path = directory.join("daemon.sock");
+    let data_dir = directory.join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::create_dir(data_dir.join("security-events.jsonl")).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+        .env("AGENT_SEC_DATA_DIR", &data_dir)
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+
+    wait_for_socket(&running.socket_path).await;
+    assert!(data_dir.join("security-events.db").exists());
+
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    assert!(wait_for_exit(&mut running.child).await.success());
 }
 
 async fn run_binary_scenario(configure_admin: bool) {

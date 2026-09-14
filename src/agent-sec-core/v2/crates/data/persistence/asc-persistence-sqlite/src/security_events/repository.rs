@@ -545,7 +545,12 @@ fn renumber_placeholders(sql: &str, per_branch: usize) -> String {
     out
 }
 
-fn validate_group_field(group_field: &str) -> Result<&'static str, KernelError> {
+/// Validates a `count_by` group field against the V1 allowlist.
+///
+/// # Errors
+///
+/// Returns [`KernelError::Malformed`] when `group_field` is not supported.
+pub fn validate_group_field(group_field: &str) -> Result<&'static str, KernelError> {
     VALID_GROUP_FIELDS
         .iter()
         .copied()

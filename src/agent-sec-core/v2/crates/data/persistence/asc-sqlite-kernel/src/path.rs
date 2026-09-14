@@ -16,11 +16,11 @@ pub fn normalize_sqlite_path(path: impl AsRef<Path>) -> PathBuf {
     } else {
         std::env::current_dir().map_or(expanded.clone(), |cwd| cwd.join(&expanded))
     };
-    let lexical = lexically_normalize(&absolute);
-
-    // Canonicalize the longest existing prefix so symlinks resolve like Python.
+    // Canonicalize the longest existing prefix before collapsing `..`: a parent
+    // component following a symlink applies to the symlink target, as it does in
+    // Python's `Path.resolve()`.
     let mut remainder: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut candidate: &Path = &lexical;
+    let mut candidate: &Path = &absolute;
     loop {
         if let Ok(resolved) = candidate.canonicalize() {
             let mut out = resolved;
@@ -34,7 +34,7 @@ pub fn normalize_sqlite_path(path: impl AsRef<Path>) -> PathBuf {
                 remainder.push(name);
                 candidate = parent;
             }
-            _ => return lexical,
+            _ => return lexically_normalize(&absolute),
         }
     }
 }
@@ -101,6 +101,22 @@ mod tests {
         assert_eq!(files[0], Path::new("/tmp/a/events.db"));
         assert_eq!(files[1], Path::new("/tmp/a/events.db-wal"));
         assert_eq!(files[2], Path::new("/tmp/a/events.db-shm"));
+    }
+
+    #[test]
+    fn resolves_a_parent_after_an_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("temp dir");
+        let links = dir.path().join("links");
+        let target_child = dir.path().join("target/child");
+        std::fs::create_dir_all(&links).expect("links directory");
+        std::fs::create_dir_all(&target_child).expect("target directory");
+        symlink(&target_child, links.join("current")).expect("symlink");
+
+        let normalized = normalize_sqlite_path(links.join("current/../events.db"));
+        let expected = dir.path().canonicalize().expect("canonical temp dir");
+        assert_eq!(normalized, expected.join("target/events.db"));
     }
 
     #[test]

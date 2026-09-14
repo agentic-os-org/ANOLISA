@@ -426,8 +426,8 @@ v2 正常渲染。这条**不是**按等价性复刻的，而是写成差分矩�
 - 启动时解析 JSONL / SQLite 的绝对路径，构造
   `ConfiguredSecurityEventSinks` 并注入 `EventSinkAdapter`；不得让 daemon 走进程级
   `writer()` / `sqlite_writer()` 的默认环境路径单例（见 §13.1）；
-- 启动时分别 warm 两条路径，任一侧失败只告警、另一侧继续可用；事件写入仍按 v1 双写的
-  fail-open 语义独立重试；
+- 启动时分别 warm 两条路径：SQLite 失败拒绝启动，JSONL 失败只告警并保持该副本的
+  best-effort 重试；运行时事件写入仍按 v1 双写的独立 fail-open 语义处理；
 - `run_with_shutdown_timeout` 返回后才调 `ConfiguredSecurityEventSinks::close()`：先让 Tokio
   排空 blocking dispatch，再跑保留期维护与 WAL checkpoint；
 - 决定 `DropSink` 的落点。v1 把丢弃诊断写进 `cli.jsonl`，v2 默认写 stderr，注入式。
@@ -502,9 +502,10 @@ systemd/DaemonSet 显式设置的 `AGENT_SEC_DATA_DIR`；未设置时固定使�
 为 `0700`；主 JSONL 与 SQLite 文件为 `0600`，SQLite 的 WAL/SHM sidecar 也受该私有目录
 保护，因此生产 root daemon 的事件仅 root 可读写。
 
-在绑定 UDS 前，daemon 必须实际创建并打开 JSONL、打开并初始化 SQLite；任一目标不可用就
-以非零状态退出，不使用 `NoopEventSink` 掩盖审计存储失效。启动成功后，运行时某一侧的
-瞬时写入失败仍不阻断另一侧或 capability 结果，保持 v1 双写的独立 fail-open 语义。
+在绑定 UDS 前，daemon 必须实际创建并打开 JSONL、打开并初始化 SQLite。SQLite 不可用就
+以非零状态退出，不使用 `NoopEventSink` 掩盖主审计库失效；JSONL 不可用只输出告警，仍绑定
+UDS 并以 best-effort 方式继续尝试该副本。启动成功后，运行时任一侧的瞬时写入失败仍不阻断
+另一侧或 capability 结果，保持 v1 双写的独立 fail-open 语义。
 
 ## 12. 测试工具定性
 

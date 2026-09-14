@@ -137,8 +137,10 @@ fn event_finalizer()
 -> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
     let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
     let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
-    sinks.warm_jsonl()?;
     sinks.warm_sqlite()?;
+    if let Err(error) = sinks.warm_jsonl() {
+        eprintln!("agent-sec-daemon: warning: JSONL security event log unavailable: {error}");
+    }
     Ok((
         Finalizer::new(Arc::new(EventSinkAdapter::new(Arc::clone(&sinks)))),
         sinks,
