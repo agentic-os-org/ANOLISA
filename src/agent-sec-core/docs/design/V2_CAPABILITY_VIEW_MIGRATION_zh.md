@@ -14,9 +14,18 @@
 
 该能力回答的问题是「**当前这个环境**里的 Hook 会怎么做」，因此必须在与 Agent 同一环境变量
 上下文的进程里求值。V2 因此把它实现为本地命令：`Cli::plan()` 返回 `Plan::Local` 时，
-`main` 直接用 `std::env::vars()` 构造环境快照并渲染，完全不解析 daemon socket。这也意味着
-`AGENT_SEC_DAEMON_SOCKET` 缺失、为空或为相对路径时，`capabilities` 仍必须成功——该边界由
-E2E 用例 `test_capabilities_never_depends_on_a_daemon_endpoint` 锁定。
+`main` 调用 `capabilities::process_environment()` 构造环境快照并渲染，完全不解析 daemon socket。
+该函数遍历 `std::env::vars_os()`，只保留 manifest 声明的变量名。这里**不能**用
+`std::env::vars()`：它在进程里任何一个变量的值不是合法 UTF-8 时就会 panic，等于让一个与本视图
+无关的变量既能中断只读命令（exit 101），又能把自己的值写进 stderr 的 panic 文本。不可解码字节
+按 CPython 在 Unix 上的 surrogateescape 方式解码，使这类值对已解析变量保持「非法 → 回落默认 +
+诊断」，对近原样上报的 L2 变量与 V1 输出一致。该行为由下面这个真实进程用例锁定（单测注入
+`Environment`，走不到 `std::env`，因此必须走进程级用例）：
+
+`tests/capabilities.rs::a_non_utf8_environment_never_aborts_the_view_or_echoes_its_value`
+
+这也意味着 `AGENT_SEC_DAEMON_SOCKET` 缺失、为空或为相对路径时，`capabilities` 仍必须成功——
+该边界由 E2E 用例 `test_capabilities_never_depends_on_a_daemon_endpoint` 锁定。
 
 ### 1.1 视图边界（environment-only scope）
 
@@ -77,7 +86,7 @@ CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json�
 
 | ID | 现象 | 影响面 | 处理时机与动作 | 关联位置 |
 |---|---|---|---|---|
-| **G1** | `PROMPT_SCANNER_L2_MODEL` 的 `default` 上报空字符串，且**不产生** `not a supported L2 backend` 诊断 | prompt-scan 的 L2 配置在 V2 上看不到默认值，配错 backend 时不会被提前提示。注意 V1 也有这条降级路径（原生扩展未构建时），但已部署的 V1 RPM 一定带扩展，因此这是与部署态 V1 的真实差异 | **prompt-scan 引擎迁入 V2 时**：改为向真实引擎查询默认 backend 与可选 backend 集合，并恢复 unsupported 诊断。本次不处理 | `capabilities/resolve.rs` 的 `EnvKind::Identifier` 分支；V1 对照 `agent-sec-cli/src/lib.rs::scanner_engine_info` |
+| **G1** | `PROMPT_SCANNER_L2_MODEL` 的 `default` 上报空字符串，且**不产生** `not a supported L2 backend` 诊断 | prompt-scan 的 L2 配置在 V2 上看不到默认值，配错 backend 时不会被提前提示。注意 V1 也有这条降级路径（原生扩展未构建时），但已部署的 V1 RPM 一定带扩展，因此这是与部署态 V1 的真实差异 | **prompt-scan 引擎迁入 V2 时**：改为向真实引擎查询默认 backend 与可选 backend 集合，并恢复 unsupported 诊断。本次不处理。用户文档（组件 README 与 user guide）同样**不加**过渡期说明：V1→V2 的用户面切换以 prompt-scan 引擎在 V2 补齐为前提，届时本缺口已消失、现有描述自然成立 | `capabilities/resolve.rs` 的 `EnvKind::Identifier` 分支；V1 对照 `agent-sec-cli/src/lib.rs::scanner_engine_info` |
 | **G4** | ANOLISA 数据根语法校验（绝对路径、无 `.`/`..` 段）将在 V2 内部出现两份 | 与 V1 的 fork 属预期（见 3.1 节 G2）；真正的待办是 skill-ledger 迁入 V2 后，V2 内部会同时存在本视图的副本与 skill-ledger 自己的实现 | **skill-ledger 迁入 V2 时**：把校验收敛到 V2 内单一实现并让视图复用。该迁移本身不会自动删掉本副本 | `capabilities/resolve.rs::valid_data_home` 与 `agent_sec_cli/skill_ledger/paths.py::valid_anolisa_data_home` |
 
 ### 3.1 非缺口：沿用 V1 设计 / 迁移方式决定的形态 / 已接受的取舍
