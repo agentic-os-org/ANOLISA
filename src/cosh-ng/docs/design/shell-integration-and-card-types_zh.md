@@ -50,13 +50,23 @@ Enhanced 内部的路由子状态，不等同于没有 hook 的 Native 集成。
 | `◆` | Agent | Agent runtime | `/agent` 打开无边框行内 Composer，并在可编辑文本前持续显示 `◆ `；普通文本（包括 `ls`）按 Agent 请求处理；开头的 slash 控制命令在本地分发。 |
 | `/` | Cosh Command | Cosh 控制面 | 明确的斜杠命令，只在 Enhanced Assisted 中拦截。 |
 
-`◇ ` 和 `◌ ` 是锚定在 Enhanced hook 的 `prompt_ready` 边界上的外层终端装饰，不会写入
-PS1/PROMPT。Agent 或面板交互结束并恢复提示符时也使用同一装饰。提示符重放去重
-仍按原始提示符字节工作，因此不会重复显示所有权符号，也能保留任意 ANSI、CJK、
-多行、Bash 和 Zsh 提示符。
+`◇` 和 `◌` 在 PS1/PROMPT 前各占一个独立的外层终端状态行。Enhanced hook 的
+`prompt_ready` 边界发布该行；Agent 或面板返回、路由模式切换也发布当前状态。
+普通 candidate、ghost 和经过认证的 slash-guard 重绘只重画原提示符与输入，
+不能追加状态行。状态行随输出滚动；明确切换路由时，先前状态留在终端历史中，
+不会通过猜测旧状态所在的屏幕行来原地改写。
 
-在 Enhanced 的空主提示符处按 `Shift+Tab` 会把 `◇ ` 替换为 `◌ ` 并关闭 Cosh
-输入拦截，再次按下会恢复 `◇ ` 和路由。Shell 行已有内容时，按键序列原样交给 Shell；
+PS1/PROMPT 和 PTY 尺寸保持原值。子 Shell 从第 0 列绘制提示符，Readline/ZLE
+因此能计算提示符与输入的每一格，包括 ANSI、CJK、组合字符和多行文本。
+状态行不占用保留的终端区域；Shell 自主清屏/重绘可能移除它，直到下次发布或控制权返回。
+
+Bash 既有的历史隐私提交保护仍会在接受经过光标编辑、镜像无法证明不含秘密的草稿时
+添加一个前导空格。这是 accept-line 阶段的显示变化，与编辑区几何分开；参数字节和
+隐私保护逻辑保持原样。
+
+在 Enhanced 的空主提示符处按 `Shift+Tab` 会发布 `◌` 状态行并关闭 Cosh 输入拦截，
+再次按下则发布 `◇` 并恢复路由，不向 Shell 提交空命令，也不重启子 Shell。
+Shell 行已有内容时，按键序列原样交给 Shell；
 prompt ghost 或卡牌处于活动状态时，保留原有的 `Shift+Tab` 行为。提示符边界门禁
 保证快捷键不会误入 PS2、heredoc、前台程序或全屏应用。
 

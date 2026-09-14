@@ -1257,15 +1257,22 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep zsh
 
       - name: Run process and PTY integration tests
         env:
+          # ZLE must decode the Unicode fixtures independently of runner locale.
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
           # Libtest still schedules 16 workers, while the harness gate bounds
           # live PTY sessions to avoid oversubscribing loaded CI runners.
           COSH_RAW_CLI_TEST_PARALLELISM: '8'
         run: |
           cd src/cosh-ng
+          bash --version
+          zsh --version
+          locale
+          test "$(locale charmap)" = UTF-8
           scripts/run-test-gates.sh integration
 
   test-cosh-ng-fast:

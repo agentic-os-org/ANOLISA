@@ -2,10 +2,14 @@
 
 [English](../../../../en/user-entrypoint/cosh-ng/shell/overview.md)
 
-`cosh` 默认启动 Enhanced Assisted 模式。`◇ ` 前缀表示 Cosh 可能在 bash 或
+`cosh` 默认启动 Enhanced Assisted 模式。提示符上方的 `◇` 状态行表示 Cosh 可能在 bash 或
 zsh 执行前路由自然语言输入。在空提示符按 `Shift+Tab` 可进入 Enhanced
 Shell-only（`◌ `）。如果要求不加载 Cosh Hook、不观察也不提供洞察，需要在
 启动时选择 Native。
+
+新提示符出现、卡片返回或路由模式切换时会输出状态行，它随终端输出滚动。
+Shell 提示符从下一行开始，保留正常的换行与光标移动；编辑重绘不会追加状态行。
+Native 会话没有 Cosh 状态行。
 
 ## 典型工作流
 

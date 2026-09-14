@@ -74,13 +74,10 @@ fn raw_cli_failure_insight_keeps_assisted_ownership_of_shift_tab() {
         "{output}"
     );
     assert!(
-        visible.contains("◇ insight-owner$ printf '__SHELL_ONLY__\\n'"),
+        visible.contains("insight-owner$ printf '__SHELL_ONLY__\\n'"),
         "{output}"
     );
-    assert!(
-        !visible.contains("◌ insight-owner$ printf '__SHELL_ONLY__\\n'"),
-        "{output}"
-    );
+    assert!(!visible.contains("◌ "), "{output}");
 }
 
 #[test]

@@ -56,14 +56,28 @@ infer routing from the first character of user text.
 | `◆` | Agent | Agent runtime | `/agent` opens a borderless inline Composer that continuously shows `◆ ` before editable text. Ordinary text, including `ls`, is an Agent request; leading slash controls dispatch locally. |
 | `/` | Cosh Command | Cosh control plane | Explicit slash command, intercepted only in Enhanced Assisted. |
 
-`◇ ` and `◌ ` are outer-terminal decorations anchored to the Enhanced hook's
-`prompt_ready` boundary. They are not added to PS1/PROMPT and are also applied when
-Cosh restores the prompt after an Agent or panel interaction. Prompt replay
-deduplication tracks the original prompt bytes, preventing duplicate ownership
-symbols while preserving arbitrary ANSI, CJK, multiline, Bash, and Zsh prompts.
+`◇` and `◌` occupy a separate outer-terminal status line before PS1/PROMPT.
+The Enhanced hook's `prompt_ready` boundary publishes that line. Returning
+from an Agent or panel and changing routing also publish the current state;
+ordinary candidate, ghost, and authenticated slash-guard redraws repaint only
+the original prompt and input. These redraws must not append another status
+line. Status lines scroll with output, and an explicit routing change leaves
+the earlier state in terminal history rather than guessing its screen row.
 
-At an empty Enhanced main prompt, `Shift+Tab` replaces `◇ ` with `◌ ` and
-disables Cosh input interception. Pressing it again restores `◇ ` and routing.
+PS1/PROMPT and PTY dimensions remain unchanged. The child Shell starts its
+prompt at column zero, so its own Readline/ZLE model accounts for every cell
+of the prompt and input, including ANSI, CJK, combining and multiline text.
+The status is not a reserved terminal row: a Shell-owned clear-screen/redraw
+may remove it until the next publication or control return.
+
+Bash's existing private-history submission guard still inserts one leading
+blank when accepting a cursor-edited draft whose mirror cannot prove it is
+non-secret. This is an accept-line display change, separate from editable
+geometry; argument bytes and the privacy guard remain intact.
+
+At an empty Enhanced main prompt, `Shift+Tab` publishes a `◌` status line and
+disables Cosh input interception. Pressing it again publishes `◇` and restores
+routing, without submitting an empty command or restarting the child Shell.
 A non-empty
 Shell line receives the key sequence unchanged, and an active prompt ghost or
 card keeps its existing `Shift+Tab` behavior. This prompt-boundary gate keeps

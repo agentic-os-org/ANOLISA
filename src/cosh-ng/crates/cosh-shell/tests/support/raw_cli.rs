@@ -844,12 +844,12 @@ struct RawCliRunGateState {
     exclusive_waiting: usize,
 }
 
-struct RawCliRunGuard {
+pub(crate) struct RawCliRunGuard {
     gate: &'static RawCliRunGate,
     mode: RawCliRunMode,
 }
 
-fn raw_cli_shared_run_guard() -> RawCliRunGuard {
+pub(crate) fn raw_cli_shared_run_guard() -> RawCliRunGuard {
     raw_cli_run_guard(RawCliRunMode::Shared)
 }
 

@@ -465,7 +465,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
 }
 
 #[test]
-fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
+fn isolated_candidate_repaints_do_not_add_status_lines() {
     let mut parser = parser_for_test("candidate-prompt-owner");
     let (_generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -501,7 +501,7 @@ fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
 
     assert_eq!(
         String::from_utf8(output).expect("utf8 output"),
-        "\r\x1b[2K◇ prompt> 你好\r\x1b[2K◇ prompt> 你好\n\r\x1b[2K◇ prompt> "
+        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\n\r\x1b[2Kprompt> "
     );
 }
 

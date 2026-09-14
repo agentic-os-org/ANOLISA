@@ -35,3 +35,6 @@ regex.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+
+[dev-dependencies]
+vt100 = { workspace = true }

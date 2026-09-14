@@ -253,7 +253,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::AssistanceToggled => {
                 write!(output, "\r\x1b[2K")?;
-                prompt_presentation.write_replayed_prompt(output, parser.last_prompt_display())?;
+                prompt_presentation.write_restored_prompt(output, parser.last_prompt_display())?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostIntercept {

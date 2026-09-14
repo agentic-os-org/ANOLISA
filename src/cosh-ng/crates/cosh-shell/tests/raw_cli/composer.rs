@@ -248,9 +248,9 @@ fn raw_cli_bash_agent_composer_submits_multiline_request_and_restores_custom_pro
     assert!(output.contains("and @src"), "{output}");
     assert!(output.contains("after-composer"), "{output}");
     assert!(count_occurrences(&output, "alice@remote:") >= 2, "{output}");
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
     assert!(
-        count_occurrences(&visible, "◇ alice@remote:") >= 2,
+        count_occurrences(&visible, "◇ \nalice@remote:") >= 2,
         "Enhanced must identify both the initial and restored Shell prompt: {output}"
     );
     assert!(!output.contains("◇ ◇"), "{output}");
@@ -331,9 +331,9 @@ fn raw_cli_zsh_agent_composer_cancel_restores_custom_prompt() {
     assert!(output.contains("Draft cancelled"), "{output}");
     assert!(output.contains("after-cancel"), "{output}");
     assert!(count_occurrences(&output, "zsh@remote:") >= 2, "{output}");
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
     assert!(
-        count_occurrences(&visible, "◇ zsh@remote:") >= 2,
+        count_occurrences(&visible, "◇ \nzsh@remote:") >= 2,
         "Enhanced must identify both the initial and restored Zsh prompt: {output}"
     );
     assert!(!output.contains("◇ ◇"), "{output}");

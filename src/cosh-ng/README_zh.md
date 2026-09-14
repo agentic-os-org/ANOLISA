@@ -75,15 +75,17 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 Shell 执行前
+Enhanced Assisted 是默认模式。提示符上方的 `◇` 状态行表示 Cosh 可能在前台 Shell 执行前
 分类并路由本次输入。
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ 分析这个服务为什么反复重启
+◇
+user@host:~/project$ git status
+◇
+user@host:~/project$ 分析这个服务为什么反复重启
 ```
 
-在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌ ` 前缀表示普通
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌` 状态行表示普通
 输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
 
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。

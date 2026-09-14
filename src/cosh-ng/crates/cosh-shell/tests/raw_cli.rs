@@ -78,6 +78,15 @@ mod startup;
 mod support;
 #[path = "raw_cli/task.rs"]
 mod task;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_ownership.rs"]
+mod terminal_ownership;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_resize.rs"]
+mod terminal_resize;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_unicode.rs"]
+mod terminal_unicode;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;

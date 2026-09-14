@@ -1,30 +1,41 @@
 use super::*;
 
-fn initial_prompt_line_prefix<'a>(visible: &'a str, prompt: &str) -> &'a str {
+fn initial_prompt_status_line<'a>(visible: &'a str, prompt: &str) -> &'a str {
     let prompt_start = visible.find(prompt).expect("initial enhanced prompt");
     visible[..prompt_start]
-        .rsplit(['\r', '\n'])
-        .next()
+        .trim_end_matches('\r')
+        .strip_suffix('\n')
+        .map(|before| {
+            before
+                .trim_end_matches('\r')
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+        })
         .unwrap_or_default()
 }
 
 #[test]
-fn initial_assisted_prompt_prefix_requires_exactly_one_symbol() {
+fn initial_assisted_status_requires_a_separate_line() {
     let prompt = "enhanced-owner$ ";
 
     assert_eq!(
-        initial_prompt_line_prefix("◇ enhanced-owner$ ", prompt),
+        initial_prompt_status_line("◇ \r\nenhanced-owner$ ", prompt),
         "◇ "
     );
-    assert_ne!(initial_prompt_line_prefix("enhanced-owner$ ", prompt), "◇ ");
+    assert_ne!(initial_prompt_status_line("enhanced-owner$ ", prompt), "◇ ");
     assert_ne!(
-        initial_prompt_line_prefix("◇ ◇ enhanced-owner$ ", prompt),
+        initial_prompt_status_line("◇ enhanced-owner$ ", prompt),
+        "◇ "
+    );
+    assert_ne!(
+        initial_prompt_status_line("◇ ◇ \r\nenhanced-owner$ ", prompt),
         "◇ "
     );
 }
 
 #[test]
-fn raw_cli_isolated_card_and_candidate_redraws_keep_one_assisted_prefix_per_prompt() {
+fn raw_cli_isolated_candidate_redraws_do_not_repeat_assisted_status() {
     let prompt = "isolated-owner$ ";
     let home = temp_shell_home("prompt-owner-isolation-values");
     fs::write(home.join(".bashrc"), format!("PS1='{prompt}'\n")).unwrap();
@@ -62,7 +73,7 @@ fn raw_cli_isolated_card_and_candidate_redraws_keep_one_assisted_prefix_per_prom
                     (b"exit\n".to_vec(), Duration::from_millis(300)),
                 ],
             );
-            let visible = strip_ansi_escape(&output);
+            let visible = strip_ansi_escape(&output).replace('\r', "");
 
             assert!(visible.contains("Agent cancellation requested"), "{output}");
             assert!(visible.contains("ordinary-control-2"), "{output}");
@@ -73,18 +84,12 @@ fn raw_cli_isolated_card_and_candidate_redraws_keep_one_assisted_prefix_per_prom
                 "{isolated}/{width}: {output}"
             );
             assert_eq!(
-                count_occurrences(&visible, &format!("◇ {prompt}")),
-                prompt_count,
-                "{isolated}/{width}: every complete prompt must bind exactly one Assisted prefix: {output}"
+                count_occurrences(&visible, &format!("◇ \n{prompt}")),
+                4,
+                "{isolated}/{width}: only publication and control return may add an Assisted status: {output}"
             );
-            assert!(
-                !visible.contains(&format!("◇ ◇ {prompt}")),
-                "{isolated}/{width}: {output}"
-            );
-            assert!(
-                !visible.contains(&format!("◌ {prompt}")),
-                "{isolated}/{width}: {output}"
-            );
+            assert!(!visible.contains("◇ ◇"), "{isolated}/{width}: {output}");
+            assert!(!visible.contains("◌ "), "{isolated}/{width}: {output}");
         }
     }
     let _ = fs::remove_dir_all(home);
@@ -110,8 +115,8 @@ fn raw_cli_native_keeps_custom_bash_prompt_undecorated() {
     let _ = fs::remove_dir_all(&home);
 
     assert!(output.contains("native-owner$ "), "{output}");
-    assert!(!output.contains("◇ native-owner$ "), "{output}");
-    assert!(!output.contains("◌ native-owner$ "), "{output}");
+    assert!(!output.contains("◇ "), "{output}");
+    assert!(!output.contains("◌ "), "{output}");
 }
 
 #[test]
@@ -135,16 +140,16 @@ fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1(
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert_eq!(
-        initial_prompt_line_prefix(&visible, "enhanced-owner$ "),
+        initial_prompt_status_line(&visible, "enhanced-owner$ "),
         "◇ ",
         "initial prompt must expose the Assisted input owner: {output}"
     );
 
     assert!(
-        count_occurrences(&visible, "◇ enhanced-owner$ ") >= 2,
+        count_occurrences(&visible, "◇ \nenhanced-owner$ ") >= 2,
         "{output}"
     );
     assert!(visible.contains("__PS1__<enhanced-owner$ >"), "{output}");
@@ -174,7 +179,7 @@ fn raw_cli_mode_routing_switches_the_live_enhanced_session() {
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
         ],
     );
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(
         visible.contains("Routing mode set to shell-only."),
@@ -221,10 +226,10 @@ fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(
-        count_occurrences(&visible, "◇ enhanced-zsh> ") >= 2,
+        count_occurrences(&visible, "◇ \nenhanced-zsh> ") >= 2,
         "{output}"
     );
     assert!(visible.contains("__PROMPT__<enhanced-zsh> >"), "{output}");
@@ -262,14 +267,14 @@ fn raw_cli_enhanced_shift_tab_toggles_zsh_routing_in_place() {
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let visible = strip_ansi_escape(&output);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(
         visible.contains("no such file or directory: /help"),
         "{output}"
     );
     assert!(
-        count_occurrences(&visible, "◇ enhanced-zsh> ") >= 2,
+        count_occurrences(&visible, "◇ \nenhanced-zsh> ") >= 2,
         "{output}"
     );
 }

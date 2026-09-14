@@ -43,6 +43,7 @@ tracing-appender = "0.2"
 signal-hook = "0.3"
 uuid = { version = "1", features = ["v4"] }
 wait-timeout = "0.2"
+vt100 = "0.16.2"
 rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 thiserror = "2"
 tempfile = "3"
