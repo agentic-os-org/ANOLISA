@@ -244,6 +244,22 @@ impl JsonlEventWriter {
         self.write_under_flock(&mut state, &line, line_bytes)
     }
 
+    /// Creates and opens the target without appending a synthetic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the parent directory or private target file
+    /// cannot be prepared.
+    pub fn probe(&self) -> Result<(), EventLogError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_parent_dir(&mut state)?;
+        drop(open_private_append(&self.path)?);
+        Ok(())
+    }
+
     fn notify_error(&self, err: &EventLogError) {
         if let Some(handler) = &self.on_error {
             handler(err);
@@ -513,6 +529,18 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BYTES, 100 * 1024 * 1024);
         assert_eq!(DEFAULT_BACKUP_COUNT, 10);
         assert_eq!(DEFAULT_ERROR_PREFIX, "[security_events]");
+    }
+
+    #[test]
+    fn probe_creates_an_empty_private_log() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+
+        writer.probe().expect("probe");
+
+        assert!(writer.path().exists());
+        assert_eq!(fs::metadata(writer.path()).expect("metadata").len(), 0);
+        assert_eq!(mode_of(writer.path()), PRIVATE_FILE_MODE);
     }
 
     #[test]

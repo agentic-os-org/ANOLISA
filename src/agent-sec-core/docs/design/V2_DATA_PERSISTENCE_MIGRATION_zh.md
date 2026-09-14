@@ -103,7 +103,7 @@ async runtime，写路径必须走 `spawn_blocking`（§11.1）。届时 deadlin
 
 理由很直接：**本次没有新增任何列**。两张表的列集、列序、列定义文本、索引名与索引列序
 都与 v1 逐字相同（§4）。既然 schema 没变，bump 只会让 v1 进程把 v2 建的库判成
-「版本超前」而拒绝写入，凭空制造不兼容。
+「版本超前」、跳过自动迁移并进入未承诺兼容的读写路径，凭空制造不兼容风险。
 
 ### 3.2 与「按 schema version 区分 V1/V2 event」的关系
 
@@ -131,8 +131,9 @@ async runtime，写路径必须走 `spawn_blocking`（§11.1）。届时 deadlin
 3. 若新列需要回填，实现或扩展 `SchemaMigrator`，并在回调里加**区间守卫**——现有
    `SecurityEventsMigrator` 只在 `from < 3 <= to` 区间内动作，跨过该区间是 no-op。
 4. 明确旧版本读新库的行为：v1 与 v2 的只读路径都是「版本超前则告警并返回空」，
-   `SELECT` 显式列名因此不会因多出的列而失败；写路径则会因版本超前而拒绝。回滚意味着
-   必须接受「旧进程写不进新库」，需要在发布说明里写清。
+   `SELECT` 显式列名因此不会因多出的列而失败；写路径同样只告警并跳过自动迁移，若既有
+   表结构仍兼容则允许继续 `INSERT`，不兼容则由实际语句失败暴露。回滚不能假定旧进程
+   一定写不进新库，发布说明必须明确该未承诺兼容路径及验证结论。
 
 ## 4. schema 契约
 
@@ -495,6 +496,16 @@ home，**谁扫的代码进谁的库**；daemon 通常以 root 运行、落 tier
 题留待后续 PR 解决；届时的方向与 §11.3 的 owner principal 隔离、`QueryScope` 是同一件
 事，不应在本层单独发明一套隔离机制。
 
+**6. daemon 只使用系统级事件库，并在启动时验证双写目标。** `asc-daemon` 只接受
+systemd/DaemonSet 显式设置的 `AGENT_SEC_DATA_DIR`；未设置时固定使用
+`/var/log/agent-sec`，绝不回退到 `HOME` 或 `/tmp`。目录必须归 daemon 的有效用户所有且
+为 `0700`；主 JSONL 与 SQLite 文件为 `0600`，SQLite 的 WAL/SHM sidecar 也受该私有目录
+保护，因此生产 root daemon 的事件仅 root 可读写。
+
+在绑定 UDS 前，daemon 必须实际创建并打开 JSONL、打开并初始化 SQLite；任一目标不可用就
+以非零状态退出，不使用 `NoopEventSink` 掩盖审计存储失效。启动成功后，运行时某一侧的
+瞬时写入失败仍不阻断另一侧或 capability 结果，保持 v1 双写的独立 fail-open 语义。
+
 ## 12. 测试工具定性
 
 v1↔v2 差分探针只用于迁移期间验证，**不随仓库交付**，也不进入制品、RPM 清单或 CI；
@@ -522,7 +533,8 @@ pytest 默认串行，所以 v1 用 `autouse` fixture 改 `AGENT_SEC_DATA_DIR` �
 `--test-threads=1`**。清单见 `TEST_MIGRATION.md` §Serial cases。
 
 `asc-security-events::config` 是生产代码里唯一从环境解析路径的地方，其测试通过注入
-`DataDirEnv` 结构体驱动纯函数版本，因此连三级降级路径也不需要串行。
+`DataDirEnv` 与 `DaemonDataDirEnv` 驱动纯函数版本，因此连 v1 三级降级路径与 daemon 的
+系统级 fail-close 路径也不需要串行。
 
 ### 13.3 `reset_sinks_for_test()` 为何存在
 

@@ -77,7 +77,8 @@ impl ConfiguredSecurityEventSinks {
     ///
     /// Returns a construction error if the configured path cannot be prepared.
     pub fn warm_jsonl(&self) -> Result<(), SinkError> {
-        self.jsonl_writer().map(|_| ())
+        self.jsonl_writer()?.probe()?;
+        Ok(())
     }
 
     /// Builds the `SQLite` writer at the configured path.
@@ -86,7 +87,8 @@ impl ConfiguredSecurityEventSinks {
     ///
     /// Returns a construction error if the configured path cannot be prepared.
     pub fn warm_sqlite(&self) -> Result<(), SinkError> {
-        self.sqlite_writer().map(|_| ())
+        self.sqlite_writer()?.probe()?;
+        Ok(())
     }
 
     /// Dual-writes one event while isolating the two persistence paths.
@@ -126,19 +128,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uses_explicit_paths_without_creating_an_uninitialized_database() {
+    fn warm_initializes_both_explicit_destinations_without_events() {
         let dir = tempfile::tempdir().expect("temp dir");
         let jsonl = dir.path().join("events.jsonl");
         let sqlite = dir.path().join("events.db");
         let sinks = ConfiguredSecurityEventSinks::new(jsonl.clone(), sqlite.clone());
-        sinks.warm_jsonl().expect("warm jsonl");
-        sinks.close();
 
-        assert!(!jsonl.exists());
-        assert!(!sqlite.exists());
-        sinks.log_event(&SecurityEvent::new("code_scan", "code_scan", Map::new()));
+        sinks.warm_jsonl().expect("warm jsonl");
+        sinks.warm_sqlite().expect("warm sqlite");
+
         assert!(jsonl.exists());
         assert!(sqlite.exists());
+        assert_eq!(
+            fs::read_to_string(&jsonl).expect("jsonl").lines().count(),
+            0
+        );
+        sinks.log_event(&SecurityEvent::new("code_scan", "code_scan", Map::new()));
         assert_eq!(fs::read_to_string(jsonl).expect("jsonl").lines().count(), 1);
+    }
+
+    #[test]
+    fn warm_failures_are_isolated_by_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"blocked").expect("block path");
+        let sqlite = dir.path().join("events.db");
+        let sinks = ConfiguredSecurityEventSinks::new(blocked.join("events.jsonl"), sqlite.clone());
+
+        assert!(sinks.warm_jsonl().is_err());
+        sinks.warm_sqlite().expect("warm independent sqlite");
+        assert!(sqlite.exists());
+
+        let jsonl = dir.path().join("events.jsonl");
+        let sinks = ConfiguredSecurityEventSinks::new(jsonl.clone(), blocked.join("events.db"));
+        sinks.warm_jsonl().expect("warm independent jsonl");
+        assert!(sinks.warm_sqlite().is_err());
+        assert!(jsonl.exists());
     }
 }

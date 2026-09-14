@@ -1,7 +1,7 @@
 //! Shared execution finalization for daemon actions.
 //!
 //! Capability crates execute and sanitize their own domain data; this crate
-//! guarantees that each accepted invocation produces one terminal event.
+//! emits one terminal event whenever an accepted invocation reaches finalization.
 
 #![forbid(unsafe_code)]
 
@@ -59,8 +59,9 @@ impl Finalizer {
 
     /// Emits exactly one v1-compatible event for an accepted invocation.
     ///
-    /// Caller cancellation never suppresses finalization: the blocking work may
-    /// complete after the response timeout, and its audit record remains owned.
+    /// Caller cancellation never suppresses finalization while the host keeps the
+    /// invocation alive: blocking work may complete after the response timeout.
+    /// A bounded daemon shutdown can abort work before it reaches this method.
     pub fn finalize(
         &self,
         action: ActionId,

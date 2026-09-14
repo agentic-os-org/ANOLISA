@@ -307,7 +307,12 @@ Running  -> Completed | ProductFailed | CoreFailed | CallerDetached
 ```
 
 `CallerDetached` 只描述调用方不再等待，不能直接作为 backend 的最终执行结果。如果 work
-可能继续，supervisor 仍拥有它，并在真正完成后进入 `Finalizing`。
+可能继续且 daemon 仍在运行，supervisor 仍拥有它，并在真正完成后进入 `Finalizing`。
+
+SIGTERM/SIGINT 不是 `CallerDetached`：按 V1 兼容的 bounded drain，daemon 停止接收后只在
+配置的 drain deadline 内等待；deadline 后仍未完成的 task 可以被 abort，因而不保证产生
+最终 SecurityEvent。该进程退出边界由
+[`DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md`](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md) 定义。
 
 ### 5.2 唯一 finalizer
 
@@ -334,8 +339,9 @@ route 失败是否产生 SecurityEvent 继续保持当前规则：未知 action 
 ### 5.3 invocation ownership
 
 daemon 中 accepted invocation 应由 supervisor 拥有，而不是由 socket handler future 的生存期
-隐式拥有。这样客户端 EOF、response timeout 或 task cancellation 不会让正在执行的 backend
-和最终 audit 无主。
+隐式拥有。这样**daemon 仍在运行期间**的客户端 EOF、response timeout 或 task cancellation
+不会让正在执行的 backend 和最终 audit 无主。该保证不跨越 V1 兼容的 bounded shutdown：drain
+截止后，尚未完成的 task 可以被 abort，最终 audit 是 best-effort 而非持久化交付保证。
 
 是否允许调用方 timeout 后 operation 继续、是否提供 status recovery、以及哪些 action 可以
 协作取消，必须由 `ActionSpec`/daemon `MethodSpec` 逐 action 冻结。没有 operation status 的
@@ -551,8 +557,9 @@ Tokio [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocki
 - 已开始的 blocking work 只能通过 backend 自己的 cooperative cancellation、外部进程终止
   或等待完成处理；
 - response timeout 后不能声称副作用未发生；
-- supervisor 必须保留 operation ownership 和最终 audit；
-- shutdown 要区分停止接收、等待 cooperative task、处理不可中断 work 和最终超时。
+- daemon 仍在运行时 supervisor 必须保留 operation ownership 和最终 audit；
+- shutdown 要区分停止接收、等待 cooperative task、处理不可中断 work 和最终超时；V1 兼容的
+  bounded drain 截止后允许 abort，不能承诺该边界外仍有最终 audit。
 
 这也是不建议直接把通用 Tower timeout 包在整个 core lifecycle 外的原因：Tower
 [`Service`](https://docs.rs/tower/latest/tower/trait.Service.html) 的 response future 被丢弃不

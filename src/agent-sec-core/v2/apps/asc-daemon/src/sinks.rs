@@ -24,11 +24,3 @@ impl SecurityEventSink for EventSinkAdapter {
         self.sinks.log_event(event);
     }
 }
-
-/// Fail-open fallback when configured event paths cannot be resolved at startup.
-#[derive(Clone, Copy)]
-pub(crate) struct NoopEventSink;
-
-impl SecurityEventSink for NoopEventSink {
-    fn write(&self, _: &SecurityEvent) {}
-}

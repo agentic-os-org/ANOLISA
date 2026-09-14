@@ -72,6 +72,15 @@ impl SecurityEventWriter {
         self.inner.write_or_raise(event)
     }
 
+    /// Creates and opens the target without appending a synthetic event.
+    ///
+    /// # Errors
+    ///
+    /// Propagates filesystem failures while preparing the private event log.
+    pub fn probe(&self) -> Result<(), EventLogError> {
+        self.inner.probe()
+    }
+
     /// Returns the underlying generic writer.
     #[must_use]
     pub const fn inner(&self) -> &JsonlEventWriter {

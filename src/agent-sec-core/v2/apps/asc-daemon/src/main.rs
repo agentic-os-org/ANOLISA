@@ -14,9 +14,9 @@ use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_policy_engine::PolicyTemplateCompiler;
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
-use asc_security_events::config::{get_db_path, get_log_path};
+use asc_security_events::config::daemon_security_event_paths;
 
-use crate::sinks::{EventSinkAdapter, NoopEventSink};
+use crate::sinks::EventSinkAdapter;
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -80,7 +80,13 @@ async fn run() -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let (finalizer, event_sinks) = event_finalizer();
+    let (finalizer, event_sinks) = match event_finalizer() {
+        Ok(sinks) => sinks,
+        Err(error) => {
+            eprintln!("agent-sec-daemon: security event storage unavailable: {error}");
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let dispatcher = Arc::new(DaemonDispatcher::new_with_finalizer(
         pap,
         policy_for_handler,
@@ -124,29 +130,19 @@ async fn run() -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
         eprintln!("asc-daemon: reconciliation drain failed or timed out");
         ExitCode::FAILURE
     };
-    (exit_code, event_sinks)
+    (exit_code, Some(event_sinks))
 }
 
-fn event_finalizer() -> (Finalizer, Option<Arc<ConfiguredSecurityEventSinks>>) {
-    match (get_log_path(), get_db_path()) {
-        (Ok(jsonl_path), Ok(sqlite_path)) => {
-            let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
-            if let Err(error) = sinks.warm_jsonl() {
-                eprintln!("agent-sec-daemon: security event JSONL sink unavailable: {error}");
-            }
-            if let Err(error) = sinks.warm_sqlite() {
-                eprintln!("agent-sec-daemon: security event SQLite sink unavailable: {error}");
-            }
-            (
-                Finalizer::new(Arc::new(EventSinkAdapter::new(Arc::clone(&sinks)))),
-                Some(sinks),
-            )
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            eprintln!("agent-sec-daemon: security event paths unavailable: {error}");
-            (Finalizer::new(Arc::new(NoopEventSink)), None)
-        }
-    }
+fn event_finalizer()
+-> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
+    let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
+    let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
+    sinks.warm_jsonl()?;
+    sinks.warm_sqlite()?;
+    Ok((
+        Finalizer::new(Arc::new(EventSinkAdapter::new(Arc::clone(&sinks)))),
+        sinks,
+    ))
 }
 
 fn report_error(problem: &dyn std::error::Error) {

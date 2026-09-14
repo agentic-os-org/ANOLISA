@@ -63,6 +63,76 @@ impl DataDirEnv {
     }
 }
 
+/// Inputs consumed by system-daemon data-directory resolution.
+///
+/// Daemon storage belongs to the host service, not to a user session. It accepts
+/// only an explicit systemd/DaemonSet override or the system-owned default.
+#[derive(Debug, Clone)]
+pub struct DaemonDataDirEnv {
+    /// Value of `AGENT_SEC_DATA_DIR`; an empty value counts as absent.
+    pub override_dir: Option<PathBuf>,
+    /// System-owned default, normally the parent of [`PRIMARY_LOG_PATH`].
+    pub system_dir: PathBuf,
+    /// Effective user id that must own the directory.
+    pub uid: u32,
+}
+
+impl DaemonDataDirEnv {
+    /// Captures daemon storage inputs from the process environment.
+    #[must_use]
+    pub fn from_process() -> Self {
+        Self {
+            override_dir: non_empty_path("AGENT_SEC_DATA_DIR"),
+            system_dir: Path::new(PRIMARY_LOG_PATH)
+                .parent()
+                .unwrap_or_else(|| Path::new("/var/log/agent-sec"))
+                .to_path_buf(),
+            uid: rustix::process::getuid().as_raw(),
+        }
+    }
+}
+
+/// Resolves the system-owned daemon data directory without user-directory fallbacks.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::DaemonDataDirUnusable`] when the configured or default
+/// directory is relative, cannot be prepared, is a symlink, or is not owned by
+/// the daemon's effective user.
+pub fn resolve_daemon_data_dir_with(env: &DaemonDataDirEnv) -> Result<PathBuf, ConfigError> {
+    let path = env.override_dir.as_deref().unwrap_or(&env.system_dir);
+    if !path.is_absolute() {
+        return Err(daemon_data_dir_error(
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, "path must be absolute"),
+        ));
+    }
+    prepare_daemon_dir(path, env.uid).map_err(|source| daemon_data_dir_error(path, source))?;
+    Ok(path.to_path_buf())
+}
+
+/// Resolves the system-owned daemon data directory from the process environment.
+///
+/// # Errors
+///
+/// Propagates [`resolve_daemon_data_dir_with`] failures.
+pub fn resolve_daemon_data_dir() -> Result<PathBuf, ConfigError> {
+    resolve_daemon_data_dir_with(&DaemonDataDirEnv::from_process())
+}
+
+/// Returns explicit `JSONL` and `SQLite` paths for the daemon security-event sink.
+///
+/// # Errors
+///
+/// Propagates daemon-directory preparation and stream-name validation failures.
+pub fn daemon_security_event_paths() -> Result<(PathBuf, PathBuf), ConfigError> {
+    let data_dir = resolve_daemon_data_dir()?;
+    Ok((
+        stream_log_path_in(&data_dir, DEFAULT_SECURITY_STREAM)?,
+        stream_db_path_in(&data_dir, DEFAULT_SECURITY_STREAM)?,
+    ))
+}
+
 /// Returns the fallback `JSONL` path (`$HOME/.agent-sec-core/security-events.jsonl`).
 ///
 /// v1 computes `FALLBACK_LOG_PATH` once at import time; exposing it as a
@@ -227,6 +297,37 @@ fn non_empty_path(key: &str) -> Option<PathBuf> {
 
 fn prepare_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE))
+}
+
+fn daemon_data_dir_error(path: &Path, source: io::Error) -> ConfigError {
+    ConfigError::DaemonDataDirUnusable {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+fn prepare_daemon_dir(path: &Path, uid: u32) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} is a symlink — refusing to use",
+            path.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::other(format!(
+            "{} is not a directory",
+            path.display()
+        )));
+    }
+    if metadata.uid() != uid {
+        return Err(io::Error::other(format!(
+            "{} is not owned by uid {uid}",
+            path.display()
+        )));
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE))
 }
 
@@ -408,6 +509,91 @@ mod tests {
             !resolved.exists(),
             "last resort must not create the directory"
         );
+    }
+
+    #[test]
+    fn daemon_resolution_uses_the_explicit_override_and_creates_it_0700() {
+        let temp = tempfile::tempdir().unwrap();
+        let override_dir = temp.path().join("daemon-data");
+        let env = DaemonDataDirEnv {
+            override_dir: Some(override_dir.clone()),
+            system_dir: temp.path().join("system-data"),
+            uid: rustix::process::getuid().as_raw(),
+        };
+
+        assert_eq!(resolve_daemon_data_dir_with(&env).unwrap(), override_dir);
+        assert_eq!(mode_of(&override_dir), DIR_MODE);
+    }
+
+    #[test]
+    fn daemon_resolution_uses_only_the_system_default_without_user_fallbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let system_dir = temp.path().join("system-data");
+        let env = DaemonDataDirEnv {
+            override_dir: None,
+            system_dir: system_dir.clone(),
+            uid: rustix::process::getuid().as_raw(),
+        };
+
+        assert_eq!(resolve_daemon_data_dir_with(&env).unwrap(), system_dir);
+        assert_eq!(mode_of(&system_dir), DIR_MODE);
+    }
+
+    #[test]
+    fn daemon_resolution_rejects_an_unusable_system_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let system_dir = temp.path().join("not-a-directory");
+        fs::write(&system_dir, b"blocked").unwrap();
+        let env = DaemonDataDirEnv {
+            override_dir: None,
+            system_dir,
+            uid: rustix::process::getuid().as_raw(),
+        };
+
+        assert!(matches!(
+            resolve_daemon_data_dir_with(&env),
+            Err(ConfigError::DaemonDataDirUnusable { .. })
+        ));
+    }
+
+    #[test]
+    fn daemon_resolution_rejects_relative_or_foreign_owned_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let relative = DaemonDataDirEnv {
+            override_dir: Some(PathBuf::from("relative")),
+            system_dir: temp.path().join("system-data"),
+            uid,
+        };
+        assert!(matches!(
+            resolve_daemon_data_dir_with(&relative),
+            Err(ConfigError::DaemonDataDirUnusable { .. })
+        ));
+
+        let system_dir = temp.path().join("system-data");
+        fs::create_dir_all(&system_dir).unwrap();
+        let foreign = DaemonDataDirEnv {
+            override_dir: None,
+            system_dir,
+            uid: uid.wrapping_add(1),
+        };
+        assert!(matches!(
+            resolve_daemon_data_dir_with(&foreign),
+            Err(ConfigError::DaemonDataDirUnusable { .. })
+        ));
+    }
+
+    #[test]
+    fn daemon_security_paths_share_the_private_system_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("daemon-data");
+        let paths = (
+            stream_log_path_in(&data_dir, DEFAULT_SECURITY_STREAM).unwrap(),
+            stream_db_path_in(&data_dir, DEFAULT_SECURITY_STREAM).unwrap(),
+        );
+
+        assert_eq!(paths.0, data_dir.join("security-events.jsonl"));
+        assert_eq!(paths.1, data_dir.join("security-events.db"));
     }
 
     #[test]

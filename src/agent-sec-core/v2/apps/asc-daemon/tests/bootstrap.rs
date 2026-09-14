@@ -25,7 +25,7 @@ impl Drop for RunningBinary {
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
-        let _ = std::fs::remove_dir(&self.directory);
+        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -82,11 +82,35 @@ async fn dproc_configured_administrator_can_query_without_root() {
     run_binary_scenario(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_refuses_to_bind_when_event_storage_is_unusable() {
+    let directory = unique_directory();
+    std::fs::create_dir(&directory).unwrap();
+    let socket_path = directory.join("daemon.sock");
+    let data_path = directory.join("not-a-directory");
+    std::fs::write(&data_path, b"blocked").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+        .env("AGENT_SEC_DATA_DIR", &data_path)
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    assert!(!wait_for_exit(&mut child).await.success());
+    assert!(!socket_path.exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 async fn run_binary_scenario(configure_admin: bool) {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
     let socket_path = directory.join("daemon.sock");
+    let data_dir = directory.join("data");
     let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));
+    command.env("AGENT_SEC_DATA_DIR", &data_dir);
     if configure_admin {
         let uid = std::fs::metadata(&directory).unwrap().uid();
         command.args(["--policy-admin-uid", &uid.to_string()]);

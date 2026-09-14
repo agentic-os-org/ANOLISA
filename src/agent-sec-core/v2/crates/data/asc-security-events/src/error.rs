@@ -51,6 +51,15 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// The system-owned daemon data directory could not be prepared safely.
+    #[error("cannot use daemon data directory '{path}': {source}")]
+    DaemonDataDirUnusable {
+        /// Directory that could not be created, owned, or secured.
+        path: String,
+        /// Underlying I/O failure.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Failures raised while building a [`crate::SecurityEvent`].

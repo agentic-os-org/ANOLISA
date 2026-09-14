@@ -228,7 +228,17 @@ transport 对 frame read、application dispatch、transport rejection encode、r
 write 和 drain 分别设置显式 deadline。dispatch deadline 到期会释放 connection admission
 并向 handler 发出 cooperative cancellation，但 Rust 不能强制终止已经运行且忽略取消信号的
 blocking call。`asc-daemon` 因此显式拥有 Tokio runtime，并在 service drain 后使用额外的
-runtime shutdown timeout，避免残留 `spawn_blocking` 让前台进程永久不能退出。
+runtime shutdown timeout，避免残留 `spawn_blocking` 让前台进程永久不能退出。该 bounded drain
+保持 V1 语义：deadline 后仍未完成的 admitted task 可以被 abort，终态 audit 在该进程退出边界
+是 best-effort，不构成持久化交付保证；这不改变 daemon 正常运行时 caller timeout 不使 work
+无主的规则。
+
+security-event 存储是启动前置条件：daemon 只接受 systemd/DaemonSet 显式设置的
+`AGENT_SEC_DATA_DIR`，未设置时固定为 `/var/log/agent-sec`，不回退到 `HOME` 或 `/tmp`。
+目录必须由 daemon 有效用户拥有且为 `0700`，主 JSONL/SQLite 文件为 `0600`；SQLite
+WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL、打开并初始化 SQLite，任一
+失败即非零退出。成功启动后单侧瞬时写失败仍保持独立
+fail-open，不改变 capability 的业务结果。
 
 该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
 但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer

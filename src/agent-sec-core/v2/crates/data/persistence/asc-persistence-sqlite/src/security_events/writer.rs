@@ -103,6 +103,18 @@ impl<S: DropSink> SqliteEventWriter<S> {
         self.sink.store().is_disabled()
     }
 
+    /// Opens and initializes the `SQLite` store without inserting a synthetic event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the schema or connection failure that prevents durable event writes.
+    pub fn probe(&self) -> Result<(), KernelError> {
+        self.sink
+            .store()
+            .with_connection(true, |_| Ok(()))?
+            .ok_or(KernelError::Disabled)
+    }
+
     /// Inserts `event`. Never fails, exactly like v1 `write()`.
     pub fn write(&self, event: &SecurityEvent) {
         self.sink.write(event);
@@ -135,6 +147,8 @@ pub enum WriterError {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use serde_json::Map;
     use tempfile::TempDir;
@@ -171,6 +185,50 @@ mod tests {
         assert!(path.exists());
         writer.close_at(1000.0);
         assert!(!writer.sink().store().is_open());
+    }
+
+    #[test]
+    fn probe_opens_and_initializes_a_private_database() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("events.db");
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+
+        writer.probe().expect("probe");
+
+        assert!(path.exists());
+        assert!(writer.sink().store().is_open());
+        assert_eq!(
+            path.metadata().expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn future_schema_version_keeps_compatible_writes_available() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("events.db");
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+        writer.write(&event("before-upgrade"));
+        writer.close();
+
+        let connection = rusqlite::Connection::open(&path).expect("open");
+        connection
+            .pragma_update(
+                None,
+                "user_version",
+                SECURITY_EVENTS_SQLITE_SCHEMA_VERSION + 1,
+            )
+            .expect("mark future schema");
+        drop(connection);
+
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+        writer.write(&event("after-upgrade"));
+
+        let connection = rusqlite::Connection::open(&path).expect("open");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 2);
     }
 
     #[test]
