@@ -376,6 +376,39 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 该命令只应在确认目录属于本次 Tokenless npm 安装后执行。cosh 的手动 Extension 需要单独确认并移除 `~/.copilot-shell/extensions/tokenless`。
 
+### curl 独立安装
+
+独立安装脚本会把创建的每一个路径记录到 `~/.local/share/tokenless/install-receipt`：最终走的方式（npm 或源码构建）、版本、安装目录、npm prefix、Adapter 目录、追加过 PATH 的 rc 文件，以及每个安装的文件。
+
+升级就是重新执行安装脚本。它会覆盖记录在案的路径并重写 receipt，因此记录始终准确：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+随后重启 Agent。如果走的是 npm 路径，框架中已注册的 Plugin 可能仍是旧副本——按照 [npm 安装](#npm-安装)重新执行该框架的 `scripts/install.sh`。
+
+卸载使用配套脚本，它只删除 receipt 中记录的内容：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+```
+
+可以先预览计划，或同时清除已收集的统计数据：
+
+```bash
+bash src/tokenless/scripts/uninstall.sh --dry-run
+bash src/tokenless/scripts/uninstall.sh --purge
+```
+
+`--dry-run` 只打印将要删除的内容，不做任何改动。`--purge` 会额外删除运行时数据目录 `~/.tokenless`（其中包含 `stats.db` 和 `stash.db`）；不加该参数时数据保留。`--receipt <path>` 读取非默认的 receipt，与 `TOKENLESS_RECEIPT` 等价。
+
+删除范围取决于记录的方式。走 npm 路径时，脚本会从记录的安装目录删除记录的启动器二进制（包括自定义的 `TOKENLESS_INSTALL_DIR`），对记录的 prefix 执行 `npm uninstall -g anolisa-tokenless`，并且只在该次 npm 安装创建了 Adapter 资源副本时才删除它。走源码构建时只删除 `tokenless` CLI，因为这条路径不安装 `rtk`，也不安装 Adapter 资源。两种方式下，共享同一目录的 anolisa CLI 安装或手动 npm 安装都不会受影响。
+
+不要改用固定的 `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` 列表：它会漏掉自定义的 `TOKENLESS_INSTALL_DIR` 和 npm 全局包，而在源码构建安装之后，它删除的正是那条路径从未创建过的 `rtk` 和 Adapter 资源。
+
+没有 receipt 时，卸载脚本会拒绝猜测，改为打印按方式区分的手动步骤。请改用实际使用的方式卸载：[anolisa 安装](#anolisa-安装)、[npm 安装](#npm-安装)，或下面的 YUM/RPM 流程。
+
 ### YUM/RPM 安装
 
 优先通过 anolisa 的 system scope 管理。如果安装记录不由 anolisa 拥有，先禁用 Adapter，再执行：

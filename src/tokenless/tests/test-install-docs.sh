@@ -18,11 +18,13 @@ DOC_ZH_QUICKSTART="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/QUICKSTA
 DOC_EN_MANUAL="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/user-manual.md"
 DOC_ZH_MANUAL="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/user-manual.md"
 DOC_SKILL="$REPO_ROOT/src/os-skills/ai/install-tokenless/SKILL.md"
+DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/troubleshooting.md"
+DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/troubleshooting.md"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
 for f in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART" "$DOC_EN_MANUAL" "$DOC_ZH_MANUAL" \
-         "$DOC_SKILL" "$INSTALL_SH" "$UNINSTALL_SH"; do
+         "$DOC_SKILL" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$INSTALL_SH" "$UNINSTALL_SH"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
 
@@ -85,6 +87,23 @@ hasnt "$DOC_SKILL" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/t
 hasnt "$DOC_SKILL" "rm -rf ~/.tokenless" "SKILL no longer deletes runtime data unconditionally"
 has "$DOC_SKILL" "anolisa uninstall tokenless" "SKILL keeps the anolisa CLI uninstall path"
 has "$DOC_SKILL" "Windows is not supported" "SKILL states the Windows boundary"
+
+# --- troubleshooting: the curl method has an upgrade/uninstall story too -------
+# "Upgrade and uninstall" is the reference page the Quick Start links to, and it
+# already carries one subsection per install method. The curl method must be
+# there as well, and it must describe the receipt-driven uninstaller rather than
+# a fixed rm list that ignores TOKENLESS_INSTALL_DIR and the npm global package.
+has "$DOC_EN_TROUBLE" "### curl standalone installation" "en troubleshooting has a curl standalone section"
+has "$DOC_ZH_TROUBLE" "### curl 独立安装" "zh troubleshooting has a curl standalone section"
+for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
+  name=$(basename "$(dirname "$(dirname "$(dirname "$doc")")")")/$(basename "$doc")
+  has "$doc" ".local/share/tokenless/install-receipt" "$name documents the install receipt"
+  has "$doc" "scripts/uninstall.sh" "$name points at the receipt-driven uninstaller"
+  has "$doc" "npm uninstall -g anolisa-tokenless" "$name documents the npm global package removal"
+  has "$doc" "--dry-run" "$name documents the removal preview"
+  has "$doc" "--purge" "$name documents the opt-in runtime-data purge"
+  hasnt "$doc" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon" "$name drops the blanket bin rm list"
+done
 
 # --- installer script: the documented contracts are the implemented ones ------
 has_re "$INSTALL_SH" '-maxdepth ([4-9]|[1-9][0-9]+) ' "install.sh searches deep enough for src/tokenless/Cargo.toml"
