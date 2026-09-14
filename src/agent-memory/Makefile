@@ -119,6 +119,16 @@ build-openclaw-plugin: sync-versions generate-component-contract ## Build opencl
 	# stable plugin-sdk surface), so we keep --legacy-peer-deps until
 	# openclaw publishes a semver-compatible package range.
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
+	# esbuild (what `npm run build` runs) strips types without checking them, so
+	# a type error in src/ or tests/ still produces a dist/index.js. Nothing else
+	# in the pipeline would catch it either: agent-memory.spec.in's %build
+	# deliberately runs no npm and consumes the bundle `make dist` pre-built here,
+	# and the `Test agent-memory` CI job has no Node step. Type-check first so the
+	# bundle that ships is the bundle tsc accepted. `npm run build:check` is
+	# `tsc --project tsconfig.json --noEmit` over the same tsconfig the plugin is
+	# written against, and needs only the devDependencies installed just above.
+	@echo "==> Type-checking $(NAME) OpenClaw plugin (tsc --noEmit)..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build:check
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
 	@test -f $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
 	    || { echo "ERROR: $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js was not produced"; exit 1; }
