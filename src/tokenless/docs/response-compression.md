@@ -437,6 +437,16 @@ echo '{"name":"test","value":42}' | tokenless compress-toon --min-toon-chars 0 |
 tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
 ```
 
+`tests/test-toon-full.sh` 把上面这套契约做成手动 E2E 校验（不是 make 目标）。它驱动
+PATH 上的 `tokenless`，因此要求该二进制与本 checkout 同版本（`TOKENLESS_ALLOW_VERSION_SKEW=1`
+可放行已安装的旧版本）。场景 1/2 只需要仓库树；场景 3 需要一个启用了 tokenless 插件的
+OpenClaw，且必须显式设置 `TOKENLESS_TOON_FULL_LIVE=1` 才会真实调用模型。可选前置条件
+缺失记为 SKIP，不计入失败。
+
+```bash
+PATH="src/tokenless/target/debug:$PATH" bash src/tokenless/tests/test-toon-full.sh
+```
+
 ### 9.2 通过统计数据库验证压缩效果
 
 Tokenless 自动将每次压缩操作记录到 `~/.tokenless/stats.db`（SQLite WAL 模式）。四种操作类型均被追踪：`compress-schema`、`compress-response`、`rewrite-command`、`compress-toon`。
