@@ -164,3 +164,14 @@ dest = "{datadir}/adapters/{component}/qwencode/"
 
 [adapters.bundle]
 entry = "qwen-extension.json"
+
+# Kimi Code adapter. Uses script-based detect/install/uninstall because
+# Kimi Code has no built-in ANOLISA framework driver.
+[[adapters]]
+framework = "kimicode"
+kind = "third-party"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/kimicode"
+dest = "{datadir}/adapters/{component}/kimicode/"
+detect = { binary = "kimi" }

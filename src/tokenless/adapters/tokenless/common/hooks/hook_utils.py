@@ -465,15 +465,15 @@ def is_skill_file(text: str) -> bool:
 def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
     """Resolve the tool call identifier to record for a hook invocation.
 
-    Qwen Code's serialized hook input carries two identifiers: the internal
-    ``tool_use_id`` (``toolu_<ts>_<rand>``, always present) and
+    Qwen Code and Kimi Code's serialized hook input carry two identifiers:
+    the internal ``tool_use_id`` (``toolu_<ts>_<rand>``, always present) and
     ``tool_call_id`` (the LLM provider's original call ID, e.g. ``call_xxx``,
     snake_case — Qwen Code's TS uses camelCase ``toolCallId`` internally but
-    normalizes to ``tool_call_id`` on the wire). For the qwencode agent,
-    prefer the provider call ID and fall back to the internal one; for other
-    agents, keep the existing priority (``tool_use_id`` first).
+    normalizes to ``tool_call_id`` on the wire). For qwencode and kimicode
+    agents, prefer the provider call ID and fall back to the internal one;
+    for other agents, keep the existing priority (``tool_use_id`` first).
     """
-    if agent_id == "qwencode":
+    if agent_id in ("qwencode", "kimicode"):
         return (
             input_data.get("tool_call_id")
             or input_data.get("toolCallId")

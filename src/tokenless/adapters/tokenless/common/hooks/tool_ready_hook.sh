@@ -458,7 +458,7 @@ if [ "$missing_count" -gt 0 ] \
     && [ -n "$FIX_SCRIPT" ] \
     && [ -r "$FIX_SCRIPT" ] \
     && is_trusted_file "$FIX_SCRIPT"; then
-    echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true
+    echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all >/dev/null 2>&1 || true
     hash -r 2>/dev/null || true
 
     # Re-scan to check if fix succeeded

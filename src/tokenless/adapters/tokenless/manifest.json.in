@@ -157,6 +157,19 @@
         "install":   "qwenpaw/scripts/install.sh",
         "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
+    },
+    "kimicode": {
+      "compatibleVersions": ">=0.1.0",
+      "capabilities": {
+        "hooks": [
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "kimicode/scripts/detect.sh",
+        "install":   "kimicode/scripts/install.sh",
+        "uninstall": "kimicode/scripts/uninstall.sh"
+      }
     }
   }
 }
