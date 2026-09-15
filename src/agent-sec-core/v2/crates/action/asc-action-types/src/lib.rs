@@ -8,13 +8,16 @@
 use serde_json::Map;
 use serde_json::Value;
 
-/// Registered action identities.
-///
-/// Add an identity only when its daemon method and capability are implemented.
+mod trace;
+pub use trace::ActionTraceContext;
+
+/// Identities supported by implemented action capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionId {
     /// Scans Bash or Python code before execution.
     CodeScan,
+    /// Detects personal information and credentials in supplied text.
+    PiiScan,
 }
 
 impl ActionId {
@@ -23,6 +26,7 @@ impl ActionId {
     pub const fn event_type(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::PiiScan => "pii_scan",
         }
     }
 
@@ -31,6 +35,7 @@ impl ActionId {
     pub const fn category(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::PiiScan => "pii_scan",
         }
     }
 }
@@ -48,7 +53,7 @@ pub struct CallerIdentity {
 
 /// Optional business-correlation fields carried by an action invocation.
 ///
-/// The current daemon protocol does not transport them, so the default is empty.
+/// These opaque V1 strings are not OpenTelemetry `TraceId` or `SpanId` values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Correlation {
     /// Opaque v1-compatible trace correlation string.

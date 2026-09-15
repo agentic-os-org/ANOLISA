@@ -133,9 +133,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-capability-pii-scan"
+version = "0.12.0"
+dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
+ "asc-event-sink",
+ "asc-persistence-sqlite",
+ "asc-security-events",
+ "base64",
+ "chrono",
+ "fancy-regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "asc-cli"
 version = "0.12.0"
 dependencies = [
+ "asc-action-types",
+ "asc-capability-pii-scan",
  "asc-daemon",
  "asc-daemon-client",
  "asc-daemon-core",
@@ -162,6 +184,7 @@ version = "0.12.0"
 dependencies = [
  "asc-action-runtime",
  "asc-agentsight-client",
+ "asc-capability-pii-scan",
  "asc-daemon-core",
  "asc-daemon-handler",
  "asc-daemon-protocol",
@@ -211,6 +234,7 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-code-scan",
+ "asc-capability-pii-scan",
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",

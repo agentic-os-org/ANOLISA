@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use asc_action_types::{ActionAttribution, ActionId, ActionOutcome, AuditProjection};
+use asc_action_types::{ActionAttribution, ActionId, ActionOutcome, AuditProjection, Failure};
 use asc_security_events::{EventResult, SecurityEvent};
 
 /// Transport-independent execution lifetime controls.
@@ -127,6 +127,29 @@ where
     ) -> ActionOutcome {
         let outcome = self.executor.execute(control, request);
         let projection = self.projector.project(request, &outcome);
+        self.finalizer
+            .finalize(self.action, attribution, &outcome, projection);
+        outcome
+    }
+
+    /// Finalizes an identified, authorized action rejected before request decoding.
+    ///
+    /// The capability supplies only sanitized failure fields and audit data.
+    /// The entrypoint must return after this call instead of invoking execution.
+    /// Envelope, authorization, and transport rejections belong to their ingress.
+    pub fn reject(
+        &self,
+        attribution: &ActionAttribution,
+        failure: Failure,
+        projection: AuditProjection,
+    ) -> ActionOutcome {
+        let outcome = ActionOutcome {
+            success: false,
+            exit_code: failure.exit_code,
+            error: failure.error,
+            error_type: failure.error_type,
+            data: serde_json::Map::new(),
+        };
         self.finalizer
             .finalize(self.action, attribution, &outcome, projection);
         outcome

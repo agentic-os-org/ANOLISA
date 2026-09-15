@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use asc_cli::{
     Cli, InputError, Plan,
     capabilities::process_environment,
-    output::{render_binding_mutation, render_policy, render_scan_code},
+    output::{render_binding_mutation, render_pii_scan, render_policy, render_scan_code},
 };
 
 fn main() -> ExitCode {
@@ -50,7 +50,15 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if cli.is_scan_code() {
+    if let Some(format) = cli.pii_format() {
+        render_pii_scan(
+            &response,
+            format,
+            &mut io::stdout().lock(),
+            &mut io::stderr().lock(),
+        )
+        .map_err(RunError::Output)
+    } else if cli.is_scan_code() {
         render_scan_code(
             &response,
             &mut io::stdout().lock(),

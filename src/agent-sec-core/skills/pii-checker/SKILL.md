@@ -5,7 +5,8 @@ description: 使用 agent-sec-cli 检查文本、UTF-8 文件或日志中的个�
 
 # PII Checker
 
-复用 V1 `agent-sec-cli scan-pii` 的本地检测规则，检查个人信息和凭证。
+复用已安装的 `agent-sec-cli scan-pii` 检测个人信息和凭证。
+V2 需要预先运行的 Rust daemon 和 `AGENT_SEC_DAEMON_SOCKET`；不自动启动或回退到 Python。
 支持邮箱、中国手机号、身份证号、银行卡号、API Key、Bearer Token、JWT、
 私钥及自定义规则。仅检查用户指定的内容，不主动扩大到整个目录或历史会话。
 

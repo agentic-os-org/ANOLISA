@@ -6,10 +6,55 @@ PII Checker detects personal data and credentials in Agent inputs and outputs. I
 structured verdict, produces safe evidence and optional redacted text, and records sanitized
 Security Events for audit and Observability correlation.
 
+## V2 phase 1
+
+The V2 RPM provides Rust `agent-sec-cli` and `agent-sec-daemon`. Use the RPM built by
+`./scripts/rpm-build.sh agent-sec-core-v2` in a dedicated Linux validation environment;
+this migration does not switch existing Agent hosts or their services to V2.
+After installing that RPM, start the daemon with an administrator-managed socket:
+
+```bash
+agent-sec-daemon --socket /run/agent-sec-core/daemon.sock
+```
+
+In another terminal, select the socket and scan through the daemon:
+
+```bash
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
+agent-sec-cli scan-pii --text 'contact alice@company.cn' --source manual
+```
+
+`agent-sec-cli --socket /absolute/path/to/daemon.sock scan-pii ...` overrides the environment.
+The CLI does not start a daemon or fall back to Python. Files and stdin are read by the CLI;
+the daemon receives text, never a caller-selected input file or rules path. Empty text is valid.
+`--text-stdin` aliases `--stdin`. Completed `pass`, `warn`, and `deny` scans exit `0`;
+scan/connection failures exit `1`, and CLI usage errors exit `2`. `deny` is a finding
+classification, not a PDP authorization decision.
+
+Without `--max-bytes`, V2 does not truncate input by default. An explicit positive byte limit
+keeps a valid UTF-8 prefix; malformed UTF-8 fails. Requests and responses must fit the V2
+4 MiB frame limit, including JSON escaping and envelope overhead; oversize input fails explicitly.
+Spans count Unicode characters, matching Python positions, rather than UTF-8 bytes or UTF-16 units.
+
+V2 keeps the existing top-level result fields and adds evidence metadata under `summary`:
+
+| Field | Meaning |
+|-------|---------|
+| `execution_status` | `completed` or `failed` |
+| `coverage.status` | `complete`, `partial`, or `unavailable` |
+| `coverage.reasons` | Safe codes for truncation, invalid rules, matching limits, or scan failure |
+| `input_sha256` | SHA-256 of text received by the detector; never a claim about omitted input |
+| `scanned_input_sha256`, `scanned_bytes` | Digest and byte length of the prefix actually scanned |
+| `ruleset_id` | Identity of the immutable built-in/custom rule configuration |
+
+`bytes_scanned` retains the V1 prefix counter and can include an incomplete UTF-8 tail excluded
+from `scanned_bytes`. A `partial` result may still be `pass`: verdict only aggregates observed
+findings. Check coverage before treating evidence as complete.
+
 ## Use the bundled Skill
 
-With V1 `agent-sec-cli` installed and the `pii-checker` Skill available to the Agent,
-ask it to check a specified file for personal data or credentials, or to generate
+With `agent-sec-cli` installed and the `pii-checker` Skill available to the Agent,
+configure the daemon socket first when using V2. Ask it to check a specified file for personal data or credentials, or to generate
 a redacted copy. The Skill reports redacted evidence and does not rewrite the input
 file unless requested. A completed scan with no findings is not a guarantee that the
 content contains no sensitive information.
@@ -122,11 +167,17 @@ current adapter attempts enforcement.
 
 ## Custom regex rules
 
-PII Checker optionally loads custom business-specific types from one fixed user-level file:
+Built-in rules ship in the binary. Custom rules are separate configuration:
 
-```text
-~/.config/agent-sec/pii-checker/rules.yaml
-```
+| Runtime | Custom file | Reload behavior |
+|---------|-------------|-----------------|
+| V2 | `/etc/agent-sec/pii-checker/rules.yaml` | Validated and compiled once at daemon startup; restart to update |
+| V1 | `~/.config/agent-sec/pii-checker/rules.yaml` | New content is loaded on the next scan |
+
+The administrator may select another absolute V2 file with
+`agent-sec-daemon --pii-rules /absolute/path/rules.yaml --socket /run/agent-sec-core/daemon.sock`.
+All callers share one immutable rule set. V2 never reads the caller's HOME, chooses rules by owner,
+or imports old user directories automatically. The scan RPC cannot override this selection.
 
 The YAML top level is a list. Each rule contains a unique custom type, one regex, and an optional
 severity.
@@ -156,8 +207,8 @@ Custom findings use category `custom`, confidence `1.0`, detector `custom_rule`,
 They are fully redacted with a stable type marker such as `[DOGFOOD_ORDER_NO_REDACTED]` and flow
 through the same verdict, policy, Security Event, and Observability paths as built-in findings.
 
-No CLI option, environment variable, XDG override, system-level file, or multi-file merge is
-supported for the custom rules path.
+V1 has no rules-path override. Neither runtime merges multiple rule files. V2 rules are detector
+configuration; they are not PAP policies and do not themselves authorize operations.
 
 ## Custom rule validation and runtime limits
 
@@ -171,7 +222,7 @@ The complete custom ruleset is accepted or rejected as one unit.
 | Maximum regex group nesting depth | 64 |
 | Type format | `^[a-z][a-z0-9_]{0,63}$` |
 | Allowed severity | `warn` or `deny` |
-| Per-rule matching timeout | 20 ms |
+| Per-rule matching limit | V1: 20 ms; V2: 1,000,000 backtracking steps |
 | Total custom matching budget per scan | 200 ms |
 | Maximum custom findings per scan | 100 |
 
@@ -180,13 +231,20 @@ empty string make the complete custom ruleset invalid. Other zero-length matches
 runtime are ignored.
 
 Rules with `deny` severity run before `warn` rules. File order is preserved within each severity.
-The 100-finding limit caps emitted custom findings but does not stop evaluation of later rules;
-`truncated` becomes `true` only when an additional valid match is omitted. Per-rule or total time
-limits may still stop the remaining custom rules and are reported separately.
+The 100-finding limit sets `truncated` only when an additional valid match is omitted.
+V1 continues evaluating later rules; V2 stops remaining custom matching at that point and reports
+partial coverage. V2 checks its 200 ms budget between matching operations and does not promise to
+interrupt one match after 20 ms. Backtracking and other matching limits preserve earlier findings.
 
-When the file content changes, the next scan validates and compiles the new content automatically.
-If the new version is invalid, the previous valid version is not reused. Built-in detection remains
-active and `scan-pii` still completes successfully.
+V2 uses `fancy-regex`. Unsupported Python `regex` syntax produces `invalid_regex` without rewriting
+patterns; examples include branch-reset groups, named conditionals, and variable-length lookbehind.
+Numeric conditionals and fixed-length lookaround are supported. The engine includes its root frame
+in the depth limit: 63 nested groups are accepted, while 64 can fail compilation. YAML aliases and
+multiple YAML documents are rejected.
+
+V2 keeps the startup rule set for every request until restart. At the next startup, an invalid
+replacement disables the entire custom set; no old valid set is silently reused. V1 reloads on the
+next scan. Built-in detection remains active in both cases; V2 marks coverage as partial.
 
 ## Custom rule status
 
@@ -204,7 +262,7 @@ Every default scan includes sanitized custom rule state in `summary.custom_rules
 }
 ```
 
-`status` is `absent` when the file does not exist, `loaded` when validation succeeds (including an
+`status` is `absent` when the default file does not exist (V2 explicitly selected missing files are `invalid`), `loaded` when validation succeeds (including an
 empty list), and `invalid` when reading, YAML parsing, schema validation, or regex compilation fails.
 An invalid status includes a sanitized `error_code`; loaded or invalid content may include its
 SHA-256 digest. Runtime counters do not contain input text or regex content. A direct `scan-pii`
@@ -225,9 +283,9 @@ The current `error_code` values are:
 | `invalid_rule_type` | A rule type does not match the required naming format |
 | `duplicate_rule_type` | The same custom type appears more than once |
 | `reserved_rule_type` | A custom type conflicts with a built-in PII type |
-| `invalid_regex` | A regex cannot be compiled, exceeds 64 nested groups, or its load-time validation times out |
+| `invalid_regex` | A regex is unsupported, cannot compile, exceeds engine limits, or fails load-time evaluation |
 | `regex_matches_empty_text` | A regex can produce a zero-length match on an empty string |
-| `load_error` | An unexpected loader error was handled in fail-open mode |
+| `load_error` | V1: an unexpected loader error was handled in fail-open mode |
 
 ## Security Events and Observability
 
@@ -241,3 +299,32 @@ hook invocations.
 
 Observability uses the existing trace context and input hash to correlate telemetry with the
 Security Event instead of storing another copy of finding details.
+
+## V2 audit and rule migration
+
+V2 uses the shared Action Runtime and Finalizer. Completed, partial, failed scans and authorized
+requests with invalid scan parameters produce one terminal scan event during normal execution.
+Malformed envelopes, unknown methods, authorization failures, and transport failures are handled
+at their respective entry boundaries. A crash or forced shutdown can prevent finalization.
+
+Audit persists only safe request metadata, digests, rule identifiers, coverage, redacted findings,
+and error codes. Raw text, raw evidence, complete `redacted_text`, rule contents, and input-bearing
+exception messages are excluded. JSONL/SQLite sink health is distinct from scan success; the existing
+daemon startup still requires SQLite initialization. The V2 event-query CLI is not yet available.
+
+Hooks can pass top-level `--trace-context '{"session_id":"session-1"}'` before `scan-pii`.
+V1 snake_case/camelCase aliases are normalized; strings are trimmed and limited to 256 characters.
+These are opaque correlation fields, not OpenTelemetry TraceIds. UID/GID/PID always come from UDS
+peer credentials. `agent_name` is bounded caller metadata and grants no authority.
+
+To migrate rules, review the selected V1 file, resolve conflicting type names, and explicitly place
+the approved YAML in the administrator-managed V2 file. Start/restart the V2 daemon, check
+`summary.custom_rules.status`, `ruleset_id`, and coverage, then run positive and negative samples.
+No automatic collection of per-user files occurs. To revert a rules change, restore the previous
+central file and restart. To roll back the runtime, stop the validation daemon and restore the V1
+RPM/entrypoint and its independently retained user rules; V2 never modifies those V1 files.
+
+The six Hook adapters are tested through fixed events and real Rust PII subprocesses, including
+observability redaction. Unmigrated observability storage is isolated in that test harness. This is
+Hook contract acceptance, not a live-host cutover or full PIP/PDP/PEP integration. See the
+[two-stage design](../../../../../src/agent-sec-core/docs/design/PII_V2_MIGRATION.md).

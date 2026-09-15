@@ -1,5 +1,7 @@
 # AgentSec daemon 协议 V1
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 wire 基线、兼容语料及 V2 asc-daemon-protocol 候选扩展 |
@@ -841,3 +843,27 @@ struct 的构造函数不足以证明 wire compatibility。
 [`ef0d75f27c389434cf6f4361f5dbcdeaff42ab72`](https://github.com/alibaba/anolisa/commit/ef0d75f27c389434cf6f4361f5dbcdeaff42ab72)
 中的 `daemon/handlers/prompt_scan.py`、`prompt_scan_protocol.md`、
 `test_prompt_scan_handler.py` 和 CLI daemon call path。
+
+## PII 第一阶段 V2 协议扩展
+
+**[TARGET V2，已实现]** 新增唯一方法 `action.pii_scan`，角色为 `LocalUser`，保持现有
+V2 顶层信封与 4 MiB framing。本文原有 V1 默认 catalogue 不因此改变。
+
+| `params` 字段 | 类型与默认值 |
+|---------------|----------------|
+| `text` | 必填 string，允许空文本 |
+| `source` | string，默认 `unknown`；允许 user_input/tool_input/tool_output/model_output/observability/manual/unknown |
+| `includeLowConfidence`、`rawEvidence`、`redactOutput` | bool，默认 false |
+| `maxBytes` | 可选正整数或 null |
+| `inputTruncated` | bool，默认 false |
+| `inputBytesScanned` | 可选非负整数或 null；必须等于收到文本字节数，截断时可多出最多 3 个 UTF-8 尾字节 |
+| `traceContext` | 可选 object 或 null；V1 关联字段别名归一化及 256 字符限制 |
+
+拒绝未知字段，不接受输入文件或规则路径，也不接受调用者 UID/GID/PID。
+识别方法并完成授权后，DTO/schema 错误返回 `invalid_request`，无效 source 或语义限制返回
+`invalid_argument`；错误消息固定为 `PII scan parameters are invalid`，通过公共 Finalizer
+记录安全终态。扫描结果（含执行失败报告）置于 daemon success 响应；CLI 对扫描失败退出 1。
+
+可执行契约为 `tests/v2/e2e/test_pii_cli_e2e.py`，实现 DTO 为
+`v2/crates/daemon/asc-daemon-protocol/src/action.rs`。当前/未来链路、兼容性和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
