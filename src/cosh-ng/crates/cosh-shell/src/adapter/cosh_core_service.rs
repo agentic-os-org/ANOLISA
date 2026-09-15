@@ -309,6 +309,10 @@ fn service_loop(
                         }
                     }
                     Err(error) => {
+                        // Choke-point dual-write: every turn-level failure (spawn,
+                        // protocol, stream errors) converges here; one warn covers
+                        // the whole run_turn surface for post-mortem logs.
+                        tracing::warn!(error = %error, "cosh-core turn failed; resetting process");
                         let _ = mark_recovery_failure(
                             &command.session_state,
                             &command.resume_attempt,
@@ -330,6 +334,13 @@ fn service_loop(
                     )),
                 };
                 if matches!(&result, Err(RegistryQueryError::Transport(_))) {
+                    // Transport failure means the live core stopped responding;
+                    // record it before reset so the log explains the reset.
+                    tracing::warn!(
+                        domain = %command.domain,
+                        action = %command.action,
+                        "live registry transport failed; resetting cosh-core process"
+                    );
                     reset_process(&mut process, &live, &active_stdin, &child_pid);
                 }
                 let _ = command.response_tx.send(result);
@@ -371,6 +382,13 @@ fn run_turn(
         let mut spawned = spawn_process(&command.prepared, command.mode)?;
         spawned.session_id = desired_session_id;
         spawned.workspace_scope.clone_from(&command.session_scope);
+        // Process lifecycle event: core spawn is a key diagnostic node
+        // (pid pairs shell and core in logs, run registry, and export).
+        tracing::info!(
+            pid = spawned.child.id(),
+            session_id = %spawned.session_id.as_deref().unwrap_or("default"),
+            "cosh-core spawned"
+        );
         *process = Some(spawned);
         let running = process.as_ref().expect("process was just spawned");
         live.store(true, Ordering::SeqCst);

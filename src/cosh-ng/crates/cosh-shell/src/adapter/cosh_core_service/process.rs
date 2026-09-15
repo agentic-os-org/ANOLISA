@@ -189,6 +189,7 @@ pub(super) fn spawn_process(
         .take()
         .ok_or_else(|| "failed to capture cosh-core stdout".to_string())?;
     let (output_tx, output_rx) = mpsc::channel();
+    let core_pid = child.id();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             match line {
@@ -198,12 +199,19 @@ pub(super) fn spawn_process(
                     }
                 }
                 Err(error) => {
+                    // Dual-write: the error also reaches the UI event channel,
+                    // but tracing keeps it visible in the log file for post-mortem
+                    // diagnosis (doctor logs collector, diagnostics export).
+                    tracing::warn!(pid = core_pid, error = %error, "failed to read cosh-core stream");
                     let _ =
                         output_tx.send(Err(format!("failed to read cosh-core stream: {error}")));
                     return;
                 }
             }
         }
+        // EOF without an explicit exit is the classic "cosh-shell quit with no
+        // error" case: record it so the log explains why the session ended.
+        tracing::warn!(pid = core_pid, "cosh-core output reached EOF");
         let _ = output_tx.send(Err("cosh-core output reached EOF".to_string()));
     });
     let stderr_tail = Arc::new(Mutex::new(Vec::new()));

@@ -560,6 +560,13 @@ pub(in crate::adapter) fn mark_recovery_failure(
     state.recovery.selected_workspace_scope = None;
     state.recovery.last_error = Some(error.clone());
     state.selected_attempt_generation = None;
+    // Session lifecycle event: recovery state transitions are key diagnostic
+    // nodes (the /health live probe reports them from recovery_snapshot).
+    tracing::warn!(
+        code = %error.code,
+        error = %error.message,
+        "session recovery failed"
+    );
     Some(error)
 }
 
