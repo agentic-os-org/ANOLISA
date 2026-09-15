@@ -151,8 +151,11 @@ test-tools: ## Run Tier A file-tool integration tests only
 # The openclaw adapter ships TS unit tests (tests/unit/*-test.ts) that `npm test`
 # runs through tsx. They are deliberately not a prerequisite of `test:` above —
 # that target is cargo-only and must stay runnable without a Node toolchain or
-# registry access. Use this target to exercise the adapter suite (see #3134 for
-# wiring it into the `Test agent-memory` CI job, which has no Node step today).
+# registry access. Use this target to exercise the adapter suite. CI runs it
+# from the `package-source` action, right after `build-openclaw-plugin` has
+# npm-installed the same directory, so the nightly and release packaging paths
+# gate on it. The per-PR `Test agent-memory` job still has no Node step —
+# wiring one there needs the `workflow` token scope (#3255).
 test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
 	@echo "==> Running openclaw adapter unit tests..."
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
