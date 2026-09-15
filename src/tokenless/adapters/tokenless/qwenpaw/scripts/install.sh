@@ -58,12 +58,13 @@ PY
 # Release asset for this exact Tokenless version. A version bump can land on
 # main before the matching `tokenless/vX.Y.Z` release is published, and then
 # `qwenpaw plugin install` dies inside pip with a bare "HTTP error 404" that
-# never says the release is missing. Probe the asset for this host first so the
-# failure names the unpublished tag and how to close the gap.
+# never says which asset is missing. Probe the asset for this host first so the
+# failure names the asset, its release tag, and how to close the gap.
 #
 # The probe is advisory: with no probe tool, no wheel line matching this
 # platform, or an unreachable network it stays out of the way and leaves the
-# verdict to pip. Only an explicit 404 reads as "release not published".
+# verdict to pip. Only an explicit 404 reads as "this asset cannot be
+# downloaded" -- it says nothing about whether the release itself exists.
 # ANOLISA_SKIP_WHEEL_PREFLIGHT=1 turns the probe off for offline mirrors.
 wheel_url_for_host() {
     local pattern
@@ -133,13 +134,17 @@ preflight_wheel() {
     tag="${url#*/tokenless/v}"
     tag="${tag%%/*}"
     cat >&2 <<EOF
-[${COMPONENT}] The Tokenless ${tag} Python SDK wheel is not published yet (HTTP 404):
+[${COMPONENT}] The Tokenless ${tag} Python SDK wheel asset is unavailable (HTTP 404):
 [${COMPONENT}]   ${url}
-[${COMPONENT}] This package was built from a source tree already at ${tag}, but the GitHub
-[${COMPONENT}] Release \`tokenless/v${tag}\` that carries the wheel assets does not exist.
-[${COMPONENT}] A maintainer must push the \`tokenless/v${tag}\` tag and approve the \`release\`
-[${COMPONENT}] environment so the publish workflow uploads the wheels; until then, install a
-[${COMPONENT}] Tokenless package whose version already has a published release.
+[${COMPONENT}] This package was built from a source tree already at ${tag}, but that asset
+[${COMPONENT}] cannot be downloaded. A maintainer must check whether the GitHub Release
+[${COMPONENT}] \`tokenless/v${tag}\` exists:
+[${COMPONENT}]   - it does not: push the \`tokenless/v${tag}\` tag and approve the \`release\`
+[${COMPONENT}]     environment so the publish workflow uploads the wheels;
+[${COMPONENT}]   - it does: the upload was incomplete, so delete that release and re-run
+[${COMPONENT}]     the publish workflow, which refuses to overwrite an existing release.
+[${COMPONENT}] Until the asset is downloadable, install a Tokenless package whose version
+[${COMPONENT}] already has published wheels.
 [${COMPONENT}] Behind an offline or mirrored network, re-run with
 [${COMPONENT}] ANOLISA_SKIP_WHEEL_PREFLIGHT=1 to let pip resolve the wheel itself.
 EOF

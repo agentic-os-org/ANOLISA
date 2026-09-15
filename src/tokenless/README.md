@@ -728,6 +728,14 @@ bundle into `<working dir>/plugins/tokenless/` (`QWENPAW_WORKING_DIR`, else
 the `anolisa_tokenless` wheel listed in `requirements.txt` from the matching
 GitHub Release. Records are written under `<workspace>/.tokenless`.
 
+Before the bundle is handed over, the installer probes that pinned wheel URL and
+stops with an explanatory error when the asset answers `404`. Set
+`ANOLISA_SKIP_WHEEL_PREFLIGHT=1` to skip the probe on offline or mirrored
+networks; `ANOLISA_TOKENLESS_PROBE_TIMEOUT` bounds each probe in seconds
+(default 15). See
+[troubleshooting](../../docs/user-guide/en/token-saving/tokenless/troubleshooting.md#qwenpaw-install-reports-an-unavailable-sdk-wheel)
+for the full reference.
+
 ## DeepSeek Harness Plugin
 
 The native DSH bundle sends replaceable single-text tool results through

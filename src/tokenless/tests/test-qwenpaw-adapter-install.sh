@@ -361,17 +361,29 @@ PYSTUBEOF
 
     status="$(probe_case 404 "$PROBE_BIN")"
     if [ "$status" -ne 0 ] &&
-        grep -q 'is not published yet (HTTP 404)' "$SANDBOX/preflight.out" &&
+        grep -q 'wheel asset is unavailable (HTTP 404)' "$SANDBOX/preflight.out" &&
         grep -q 'tokenless/v0\.0\.0-test' "$SANDBOX/preflight.out" &&
         grep -q 'ANOLISA_SKIP_WHEEL_PREFLIGHT=1' "$SANDBOX/preflight.out"; then
-        pass "installer names the unpublished release tag instead of a bare pip 404"
+        pass "installer names the missing wheel asset and its release tag instead of a bare pip 404"
     else
-        fail "installer did not explain the unpublished release (rc=$status)"
+        fail "installer did not explain the missing wheel asset (rc=$status)"
+    fi
+    # A 404 on one asset URL proves only that the asset is undownloadable: the
+    # publish workflow can leave an existing release with an incomplete asset
+    # set. The message must offer both maintainer paths and must not assert that
+    # the release itself is absent.
+    # The two `.` wildcards stand for the backticks around the release tag.
+    if ! grep -q 'does not exist' "$SANDBOX/preflight.out" &&
+        grep -q 'push the .tokenless/v0\.0\.0-test. tag' "$SANDBOX/preflight.out" &&
+        grep -q 'delete that release and re-run' "$SANDBOX/preflight.out"; then
+        pass "installer reports an unavailable asset without claiming the release is missing"
+    else
+        fail "installer equated an asset 404 with a missing release"
     fi
     if [ ! -d "$PLUGIN_DST" ] && ! grep -q '^plugin install ' "$STUB_LOG"; then
         pass "installer fails before QwenPaw copies a bundle it cannot run"
     else
-        fail "installer mutated QwenPaw state for an unpublished wheel"
+        fail "installer mutated QwenPaw state for an undownloadable wheel"
     fi
 
     status="$(probe_case 200 "$PROBE_BIN")"
@@ -385,7 +397,7 @@ PYSTUBEOF
     if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ]; then
         pass "installer leaves the verdict to pip when the wheel host is unreachable"
     else
-        fail "installer treated an unreachable wheel host as unpublished (rc=$status)"
+        fail "installer treated an unreachable wheel host as undownloadable (rc=$status)"
     fi
 
     status="$(probe_case 403 "$PROBE_BIN")"
@@ -398,10 +410,10 @@ PYSTUBEOF
 
     status="$(probe_case 404 "$PY_BIN")"
     if [ "$status" -ne 0 ] && grep -q '^python3 ' "$PROBE_LOG" &&
-        grep -q 'is not published yet (HTTP 404)' "$SANDBOX/preflight.out"; then
+        grep -q 'wheel asset is unavailable (HTTP 404)' "$SANDBOX/preflight.out"; then
         pass "installer probes the wheel through python3 when curl is absent"
     else
-        fail "python3 wheel probe did not report the unpublished release (rc=$status)"
+        fail "python3 wheel probe did not report the unavailable asset (rc=$status)"
     fi
 
     status="$(probe_case 404 "")"
