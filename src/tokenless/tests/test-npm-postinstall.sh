@@ -26,7 +26,10 @@ POSTINSTALL="$TOKENLESS_ROOT/npm/scripts/postinstall.js"
 
 [ -f "$POSTINSTALL" ] || { echo "FAIL missing $POSTINSTALL" >&2; exit 1; }
 
-if ! command -v node >/dev/null 2>&1; then
+# node is invoked by absolute path: the scenarios below run the script under
+# `env -i` with a minimal PATH, which is not where a CI runner keeps its node.
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+if [ -z "$NODE_BIN" ]; then
   echo "SKIP node is not available; postinstall.js adapter ownership not exercised"
   exit 0
 fi
@@ -38,7 +41,16 @@ FAKE_VERSION="9.9.9"
 PKG="$TEST_DIR/pkg"
 
 pass() { printf 'ok   %s\n' "$1"; }
-fail() { printf 'FAIL %s\n' "$1" >&2; exit 1; }
+# The captured postinstall output goes with the failure: without it a non-zero
+# exit in somebody else's environment is undiagnosable from the CI log alone.
+fail() {
+  printf 'FAIL %s\n' "$1" >&2
+  if [ -n "${OUT:-}" ]; then
+    printf 'node %s said:\n' "$("$NODE_BIN" --version 2>&1)" >&2
+    printf '%s\n' "$OUT" | sed 's/^/    /' >&2
+  fi
+  exit 1
+}
 assert_file() { [ -e "$2" ] || fail "$1: expected file $2"; pass "$1"; }
 assert_no_file() { [ ! -e "$2" ] && [ ! -L "$2" ] || fail "$1: unexpected file $2"; pass "$1"; }
 assert_eq() { [ "$2" = "$3" ] || fail "$1: expected '$3', got '$2'"; pass "$1"; }
@@ -50,7 +62,18 @@ assert_contains() {
 }
 
 # --- a package layout postinstall.js can resolve ----------------------------
-PLATFORM_KEY="$(node -e 'process.stdout.write(`${process.platform}-${process.arch}`)')"
+# Filtered rather than taken verbatim: a node that is a wrapper (nvm, snap, a
+# toolchain shim) can put its own noise on stdout, and a polluted key would make
+# the fake platform package unfindable for reasons that have nothing to do with
+# the behaviour under test.
+PLATFORM_KEY="$("$NODE_BIN" -e 'process.stdout.write(`${process.platform}-${process.arch}`)' 2>/dev/null \
+  | tr -d '\r\n' | grep -oE '(linux|darwin)-(x64|arm64)' | head -1)"
+case "$PLATFORM_KEY" in
+  linux-x64|linux-arm64|darwin-x64|darwin-arm64) ;;
+  *)
+    echo "SKIP cannot determine a supported platform key from $NODE_BIN (got '${PLATFORM_KEY:-}')"
+    exit 0 ;;
+esac
 PLATFORM_PKG="@anolisa/tokenless-${PLATFORM_KEY}"
 
 mkdir -p "$PKG/scripts" "$PKG/adapters/tokenless/claude-code/scripts" \
@@ -71,13 +94,57 @@ done
 # run_postinstall <scenario> [ENV=VAL ...]
 OUT=""
 STATUS=0
+ISOLATED_OUT=""
+NODE_DIR="$(dirname "$NODE_BIN")"
+RUN_MODE="isolated"
 run_postinstall() {
   local scenario="$1"; shift
   local home="$TEST_DIR/$scenario/home"
   mkdir -p "$home"
-  OUT="$(env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$home" "$@" \
-          node "$PKG/scripts/postinstall.js" 2>&1)" && STATUS=0 || STATUS=$?
+  if [ "$RUN_MODE" = "isolated" ]; then
+    OUT="$(env -i PATH="$NODE_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$home" "$@" \
+            "$NODE_BIN" "$PKG/scripts/postinstall.js" 2>&1)" && STATUS=0 || STATUS=$?
+  else
+    # A node that is itself a wrapper script needs the environment it was
+    # installed into. Isolation is then limited to HOME, and the override
+    # variable is pinned empty so an ambient value cannot leak into a scenario.
+    OUT="$(HOME="$home" ANOLISA_TOKENLESS_FORCE_ADAPTERS='' "$@" \
+            "$NODE_BIN" "$PKG/scripts/postinstall.js" 2>&1)" && STATUS=0 || STATUS=$?
+  fi
 }
+
+# Preflight. That the fake package resolves and that this node can run the ESM
+# script at all (cpSync needs >= 16.7) are properties of the environment, not of
+# the ownership behaviour under test, so a failure here is reported with
+# everything needed to tell the two apart instead of as a bare "expected 0, got 1".
+run_postinstall preflight
+if [ "$STATUS" != "0" ]; then
+  # Retry with the inherited environment before blaming the package layout.
+  ISOLATED_OUT="$OUT"
+  RUN_MODE="inherited"
+  rm -rf "$TEST_DIR/preflight"
+  run_postinstall preflight
+fi
+if [ "$STATUS" != "0" ]; then
+  case "$OUT$ISOLATED_OUT" in
+    *"cpSync"*|*"rmSync"*|*"is not a function"*|*"SyntaxError"*|*"Unexpected token"*\
+    |*"ERR_UNKNOWN_BUILTIN_MODULE"*|*"Cannot use import statement"*)
+      echo "SKIP node $("$NODE_BIN" --version 2>&1) cannot run postinstall.js at all:"
+      printf '%s\n' "$OUT" | sed 's/^/    /'
+      exit 0 ;;
+  esac
+  echo "FAIL postinstall.js did not run against the fake package layout" >&2
+  echo "  node: $("$NODE_BIN" --version 2>&1) ($NODE_BIN)" >&2
+  echo "  platform key: ${PLATFORM_KEY} -> ${PLATFORM_PKG}" >&2
+  echo "  isolated env said:" >&2
+  printf '%s\n' "$ISOLATED_OUT" | sed 's/^/    /' >&2
+  echo "  inherited env said:" >&2
+  printf '%s\n' "$OUT" | sed 's/^/    /' >&2
+  echo "  fake package layout:" >&2
+  ( cd "$PKG" && find . -maxdepth 4 | sort | sed 's/^/    /' ) >&2
+  exit 1
+fi
+pass "postinstall.js runs against the fake package layout (${RUN_MODE} env)"
 
 adapters_of() { printf '%s\n' "$TEST_DIR/$1/home/.local/share/anolisa/adapters/tokenless"; }
 contract_of() { printf '%s\n' "$TEST_DIR/$1/home/.local/share/anolisa/components/tokenless/component.toml"; }
