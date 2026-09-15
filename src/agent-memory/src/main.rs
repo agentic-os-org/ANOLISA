@@ -39,6 +39,12 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Before anything below can change the answer: `early_enter_userns`
+    // maps our uid to 0, and the per-user session fallback has to be named
+    // after the *host* uid or every user on the box collides on
+    // `/tmp/anolisa-sessions-0`.
+    agent_memory::host::capture_host_uid();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -130,7 +136,7 @@ async fn run_mcp_server(config: AppConfig) -> Result<()> {
     let svc = Arc::new(MemoryService::new(config)?);
     tracing::info!("mount: {}", svc.mount.root.display());
     if let Some(s) = &svc.session {
-        tracing::info!("session: {} ({})", s.sid(), s.root().display());
+        tracing::info!("session: {} ({})", s.sid(), s.display_root().display());
     }
 
     let server = MemoryMcpServer::new(Arc::clone(&svc));
