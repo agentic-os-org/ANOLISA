@@ -576,6 +576,165 @@ fn replacing_selection_invalidates_every_terminal_from_the_old_attempt() {
     assert_eq!(state.selected_attempt_generation, None);
 }
 
+fn capture_logs<T>(test: impl FnOnce(Arc<Mutex<Vec<u8>>>) -> T) -> T {
+    #[derive(Clone)]
+    struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TestWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let buf = Arc::clone(&buf);
+            move || TestWriter(Arc::clone(&buf))
+        })
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_level(false)
+        .with_target(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    test(buf)
+}
+
+#[test]
+fn fail_selection_logs_recovery_failed() {
+    let state = selected_state();
+    capture_logs(|buf| {
+        state
+            .lock()
+            .expect("session state")
+            .fail_selection(SessionErrorInfo {
+                code: "not_found".to_string(),
+                message: "selected session disappeared".to_string(),
+                recoverable: true,
+                hint: None,
+            });
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("session recovery failed"));
+        assert!(output.contains("not_found"));
+        assert!(output.contains("selection validation failed"));
+    });
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::Failed
+    );
+}
+
+#[test]
+fn selected_load_failure_logs_recovery_failed() {
+    let state = selected_state();
+    let attempt = begin_selected(&state);
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run".to_string(),
+        error: "selected session disappeared".to_string(),
+        error_code: None,
+        max_turns: None,
+    }];
+    capture_logs(|buf| {
+        invalidate_resume_on_session_failure(
+            &attempt,
+            Some("not_found"),
+            Some("load"),
+            &events,
+            &state,
+        );
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("session recovery failed"));
+        assert!(output.contains("session load failed"));
+    });
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::Failed
+    );
+}
+
+#[test]
+fn identity_mismatch_logs_recovery_failed() {
+    let state = selected_state();
+    let attempt = begin_selected(&state);
+    let pending = Arc::new(Mutex::new(Some(NEW_ID.to_string())));
+    let outcome = capture_logs(|buf| {
+        let outcome = commit_pending_session_for_scope(
+            true,
+            false,
+            &state,
+            &pending,
+            SCOPE,
+            Some(true),
+            &attempt,
+        );
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("session recovery failed"));
+        assert!(output.contains("identity mismatch"));
+        outcome
+    });
+    assert!(matches!(outcome, SessionCommitOutcome::RestoreFailed(_)));
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::Failed
+    );
+}
+
+#[test]
+fn fresh_identity_mismatch_preserves_last_error() {
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    let attempt = begin_session_attempt(&state, None, SCOPE);
+    assert!(matches!(attempt, SessionResumeAttempt::Fresh { .. }));
+
+    let outcome = {
+        let mut state = state.lock().expect("session state");
+        reject_resume_identity_mismatch(&mut state, &attempt, ACTIVE_ID, NEW_ID)
+    };
+
+    assert!(matches!(outcome, SessionCommitOutcome::RestoreFailed(_)));
+    let state = state.lock().expect("session state");
+    assert_eq!(state.recovery.state, SessionRecoveryState::None);
+    assert!(state
+        .recovery
+        .last_error
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("identity mismatch"));
+}
+
+#[test]
+fn non_resumable_session_logs_recovery_failed() {
+    let state = selected_state();
+    let attempt = begin_selected(&state);
+    let pending = Arc::new(Mutex::new(Some(SELECTED_ID.to_string())));
+    let outcome = capture_logs(|buf| {
+        let outcome = commit_pending_session_for_scope(
+            true,
+            false,
+            &state,
+            &pending,
+            SCOPE,
+            Some(false),
+            &attempt,
+        );
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("session recovery failed"));
+        assert!(output.contains("session not resumable"));
+        outcome
+    });
+    assert!(matches!(outcome, SessionCommitOutcome::RestoreFailed(_)));
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::Failed
+    );
+}
+
 #[test]
 fn failed_selection_invalidates_the_attempt_it_superseded() {
     let state = selected_state();

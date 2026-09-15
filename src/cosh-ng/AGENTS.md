@@ -104,6 +104,18 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 - **Cross-distro routing**: `Distro::detect()` reads `/etc/os-release` and routes to the correct package manager. Adding a new distro means adding a variant to the `Distro` enum in `cosh-platform/src/detect.rs` and updating the `pkg_manager()` method.
 - **CLI helpers**: `print_success()`, `print_failure()`, `build_meta()` in `cosh-cli/src/main.rs` handle all JSON serialization and exit codes — command modules return `i32` exit codes.
 
+## Diagnostic Logging
+
+Log levels default to `info`; the default level chain is `COSH_LOG` > `RUST_LOG` > TOML `[logging] level` > `info`. `tracing` events land in `~/.copilot-shell/logs/cosh-{shell,core}.log.<date>`.
+
+### Info principle
+
+Log only process/session-level lifecycle and state transitions (start/exit/restart, core spawn, recovery, config/auth fallback, provider switch) — events that occur a handful of times per session. Each entry carries the key identifiers (pid, session_id, reason), never the raw prompt. Per-input and per-iteration events (routing decisions, inner-loop turns, stream chunks) never log at info: they belong at debug.
+
+### Warn/error principle
+
+Log once at the choke-point where a subsystem's errors converge — but that single line must carry the full failure origin: format the error chain (`{:?}`), not just Display. If the origin is not recoverable from the choke-point line, fix the error type to carry context instead of adding more log sites. Intermediate layers log at debug. Errors that only flow into the UI event channel must be dual-written to `tracing` — the TUI owns stderr, so the log file is the only durable post-mortem evidence.
+
 ## Security Heuristics
 
 When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-shell/src/tools/readonly_rules/`.

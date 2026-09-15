@@ -38,4 +38,5 @@ integration target instead of `src`.
 | 2 | `crates/cosh-shell/src/hooks/engine/tests/loader.rs` | hooks | Pre-existing loader temp-dir tests. Migrate to a hook integration target. |
 | 1 | `crates/cosh-shell/src/recommendation/personal_process_tests.rs` | recommendation | Pre-existing `ps` probe in the personal-process unit tests. Migrate to a recommendation integration target. |
 | 1 | `crates/cosh-shell/src/shell_host/raw_runner.rs` | shell_host | Pre-existing `openpty` unit test. Migrate to the `shell_host` target. |
+| 5 | `crates/cosh-shell/src/adapter/cosh_core_service/process/tests.rs` | cosh_core_service | Internal `pub(crate)` persistent cosh-core runtime lifecycle tests. The runtime handle is not exported, so the integration targets cannot exercise these paths. |
 | 1 | `crates/cosh-shell/src/shell_host/bootstrap.rs` | shell_host | Pre-existing `openpty` unit test. Migrate to the `shell_host` target. |

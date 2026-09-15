@@ -2,6 +2,8 @@
 
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Child, ChildStdin};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -15,27 +17,14 @@ use super::super::claude::terminate_process;
 use super::super::cosh_core::question_ingress::{
     protocol_error, CoreQuestionProtocolReason, CoshCoreQuestionGate,
 };
+use super::super::cosh_core_registry::registry_timeout;
+use super::super::RegistryQueryError;
 use super::super::{
     control_protocol, spawn_provider_child, AdapterError, ApprovalChannelMessage, ApprovalDecision,
     ApprovalResponse, AuthResponse, PreparedInvocation, ProviderPromptArgMode, ProviderStdinMode,
 };
-use super::{
-    registry_timeout, PersistentCoshCoreRuntime, RegistryCommand, RegistryQueryError, RunCommand,
-    ServiceCommand,
-};
-
-impl Drop for PersistentCoshCoreRuntime {
-    fn drop(&mut self) {
-        if let Ok(current) = self.command_tx.get_mut() {
-            if let Some(sender) = current.take() {
-                let _ = sender.send(ServiceCommand::Shutdown);
-            }
-        }
-        if let Some(pid) = self.child_pid.lock().ok().and_then(|current| *current) {
-            terminate_process(pid);
-        }
-    }
-}
+use super::command::{RegistryCommand, RunCommand};
+use super::registry::{execute_registry, log_registry_transport_failure};
 
 pub(super) struct PersistentProcess {
     pub(super) child: Child,
@@ -43,6 +32,9 @@ pub(super) struct PersistentProcess {
     pub(super) output_rx: mpsc::Receiver<Result<String, String>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_done: Arc<AtomicBool>,
+    /// Set before an intentional shutdown or reset so the stdout reader does
+    /// not treat the resulting EOF as a failure.
+    pub(super) expected_stop: Arc<AtomicBool>,
     pub(super) initialized: bool,
     pub(super) approval_mode: CoshApprovalMode,
     pub(super) session_id: Option<String>,
@@ -62,6 +54,35 @@ pub(super) struct PersistentProcess {
     /// from the second turn on.
     pub(super) control_capabilities: control_protocol::ControlProtocolCapabilities,
 }
+
+/// Snapshot of the process bindings that must be kept consistent when a
+/// direct-kill path (Drop or forced cancellation) decides which process to
+/// terminate. Holding both the expected-stop flag and the pid under one lock
+/// guarantees the timer cannot pick up a flag from one process and a pid from
+/// another, or miss a process that started after the cancellation was requested.
+#[derive(Debug, Default)]
+pub(super) struct ProcessBindings {
+    /// Expected-stop flag of the currently live process.
+    pub(super) expected_stop: Option<Arc<AtomicBool>>,
+    /// OS pid of the currently live process.
+    pub(super) child_pid: Option<u32>,
+}
+
+/// Test-only hook that slows `spawn_process` so cancellation paths can be
+/// exercised while a child is starting but not yet bound to the runtime.
+#[cfg(test)]
+pub(super) static TEST_SPAWN_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn test_spawn_delay() {
+    let delay = TEST_SPAWN_DELAY_MS.load(Ordering::Relaxed);
+    if delay > 0 {
+        thread::sleep(Duration::from_millis(delay));
+    }
+}
+
+#[cfg(not(test))]
+fn test_spawn_delay() {}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_response_writer(
@@ -169,9 +190,54 @@ fn approval_message(response: &ApprovalResponse) -> String {
     }
 }
 
+fn read_stdout_lines<R: BufRead>(
+    reader: R,
+    output_tx: &mpsc::Sender<Result<String, String>>,
+    core_pid: Option<u32>,
+    expected_stop: &AtomicBool,
+) {
+    for line in reader.lines() {
+        match line {
+            Ok(line) => {
+                if output_tx.send(Ok(line)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                // Dual-write: tracing keeps stream errors visible for post-mortem diagnosis.
+                tracing::warn!(pid = core_pid, error = %error, "failed to read cosh-core stream");
+                let _ = output_tx.send(Err(format!("failed to read cosh-core stream: {error}")));
+                return;
+            }
+        }
+    }
+    // Only warn for unexpected EOF; controlled shutdowns are expected.
+    if expected_stop.load(Ordering::SeqCst) {
+        tracing::debug!(
+            pid = core_pid,
+            "cosh-core output reached EOF after expected stop"
+        );
+    } else {
+        tracing::warn!(pid = core_pid, "cosh-core output reached EOF");
+    }
+    let _ = output_tx.send(Err("cosh-core output reached EOF".to_string()));
+}
+
+fn spawn_stdout_reader<R: Read + Send + 'static>(
+    stdout: R,
+    output_tx: mpsc::Sender<Result<String, String>>,
+    core_pid: Option<u32>,
+    expected_stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        read_stdout_lines(BufReader::new(stdout), &output_tx, core_pid, &expected_stop);
+    })
+}
+
 pub(super) fn spawn_process(
     prepared: &PreparedInvocation,
     approval_mode: CoshApprovalMode,
+    expected_stop: Arc<AtomicBool>,
 ) -> Result<PersistentProcess, String> {
     let mut child = spawn_provider_child(
         prepared,
@@ -180,6 +246,9 @@ pub(super) fn spawn_process(
         ProviderPromptArgMode::None,
     )
     .map_err(|error| error.message)?;
+    // Test hook: simulate a slow spawn so cancellation paths can be verified
+    // while the child exists but has not yet been published to the runtime.
+    test_spawn_delay();
     let stdin = child
         .stdin
         .take()
@@ -189,23 +258,8 @@ pub(super) fn spawn_process(
         .take()
         .ok_or_else(|| "failed to capture cosh-core stdout".to_string())?;
     let (output_tx, output_rx) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if output_tx.send(Ok(line)).is_err() {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    let _ =
-                        output_tx.send(Err(format!("failed to read cosh-core stream: {error}")));
-                    return;
-                }
-            }
-        }
-        let _ = output_tx.send(Err("cosh-core output reached EOF".to_string()));
-    });
+    let core_pid = Some(child.id());
+    spawn_stdout_reader(stdout, output_tx, core_pid, Arc::clone(&expected_stop));
     let stderr_tail = Arc::new(Mutex::new(Vec::new()));
     let stderr_done = Arc::new(AtomicBool::new(false));
     if let Some(mut stderr) = child.stderr.take() {
@@ -230,6 +284,7 @@ pub(super) fn spawn_process(
         output_rx,
         stderr_tail,
         stderr_done,
+        expected_stop,
         initialized: false,
         approval_mode,
         session_id: None,
@@ -271,33 +326,41 @@ pub(super) fn process_error(process: &PersistentProcess, message: &str) -> Strin
 }
 
 // Consumes a pending deferred reload and replays it into the live core.
-// Shared by the pre-turn flush (idle-mutation case) and the end-of-turn
-// check (mutation during a running turn).
+// Shared by the pre-turn flush and the end-of-turn check. Transport errors
+// are surfaced as status events and returned so the caller can reset the
+// broken process; response-level failures only emit the event.
 pub(super) fn flush_pending_reload(
     process: &mut PersistentProcess,
     reload_pending: &Arc<AtomicBool>,
     run_id: &str,
     event_tx: &mpsc::Sender<Result<crate::types::AgentEvent, AdapterError>>,
-) {
-    if reload_pending.swap(false, Ordering::SeqCst) {
-        let deferred = RegistryCommand {
-            request_id: format!("deferred-reload-{}", std::process::id()),
-            domain: "extensions".to_string(),
-            action: "reload".to_string(),
-            params: Value::Null,
-            response_tx: mpsc::channel().0,
-        };
-        if let Err(error) = execute_registry(process, &deferred) {
-            super::super::claude::send_agent_event(
-                event_tx,
-                crate::types::AgentEvent::StatusChanged {
-                    run_id: run_id.to_string(),
-                    phase: "extension_reload_failed".to_string(),
-                    message: error.into_message(),
-                },
-            );
+) -> Option<RegistryQueryError> {
+    if !reload_pending.swap(false, Ordering::SeqCst) {
+        return None;
+    }
+    let deferred = RegistryCommand {
+        request_id: format!("deferred-reload-{}", std::process::id()),
+        domain: "extensions".to_string(),
+        action: "reload".to_string(),
+        params: Value::Null,
+        response_tx: mpsc::channel().0,
+    };
+    let result = execute_registry(process, &deferred);
+    let transport_failed = log_registry_transport_failure(&result, &deferred);
+    if let Err(error) = result {
+        super::super::claude::send_agent_event(
+            event_tx,
+            crate::types::AgentEvent::StatusChanged {
+                run_id: run_id.to_string(),
+                phase: "extension_reload_failed".to_string(),
+                message: error.clone().into_message(),
+            },
+        );
+        if transport_failed {
+            return Some(error);
         }
     }
+    None
 }
 
 pub(super) fn send_user_turn(
@@ -305,8 +368,13 @@ pub(super) fn send_user_turn(
     command: &RunCommand,
     reload_pending: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    // Apply mutations observed while idle before the user turn is admitted.
-    flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx);
+    // Apply mutations observed while idle. A transport failure leaves the core
+    // broken, so fail the turn and let the service loop reset it.
+    if let Some(error) =
+        flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx)
+    {
+        return Err(error.into_message());
+    }
     let session_id = process.session_id.clone();
     send_json(
         &process.stdin,
@@ -319,91 +387,22 @@ pub(super) fn send_user_turn(
     )
 }
 
-pub(super) fn execute_registry(
-    process: &mut PersistentProcess,
-    command: &RegistryCommand,
-) -> Result<Value, RegistryQueryError> {
-    let request = serde_json::json!({
-        "type": "registry_request",
-        "request_id": command.request_id,
-        "domain": command.domain,
-        "action": command.action,
-        "params": command.params,
-    });
-    send_json(&process.stdin, &request.to_string()).map_err(RegistryQueryError::Transport)?;
-    let deadline = Instant::now() + registry_timeout(&command.domain, &command.action);
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RegistryQueryError::Transport(
-                "live registry query timed out".to_string(),
-            ));
-        }
-        let line = match process.output_rx.recv_timeout(remaining) {
-            Ok(Ok(line)) => line,
-            Ok(Err(error)) => return Err(RegistryQueryError::Transport(error)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(RegistryQueryError::Transport(
-                    "live registry query timed out".to_string(),
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(RegistryQueryError::Transport(
-                    "cosh-core output stream disconnected".to_string(),
-                ));
-            }
-        };
-        let response: Value = match serde_json::from_str(line.trim()) {
-            Ok(response) => response,
-            Err(_) => continue,
-        };
-        // The service loop serializes Agent turns and registry commands through one stdout reader.
-        // A line belongs to this command only when both its discriminator and correlation ID match.
-        if !is_registry_response_for(&response, &command.request_id) {
-            continue;
-        }
-        if response
-            .get("success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok(response.get("data").cloned().unwrap_or(Value::Null));
-        }
-        return Err(RegistryQueryError::Response {
-            message: response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown live registry error")
-                .to_string(),
-            code: response
-                .get("data")
-                .and_then(|data| data.get("error_code"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        });
-    }
-}
-
-fn is_registry_response_for(response: &Value, request_id: &str) -> bool {
-    response.get("type").and_then(Value::as_str) == Some("registry_response")
-        && response.get("request_id").and_then(Value::as_str) == Some(request_id)
-}
-
 pub(super) fn reset_process(
     process: &mut Option<PersistentProcess>,
     live: &Arc<AtomicBool>,
     active_stdin: &Arc<Mutex<Option<Arc<Mutex<BufWriter<ChildStdin>>>>>>,
-    child_pid: &Arc<Mutex<Option<u32>>>,
+    current_process: &Arc<Mutex<ProcessBindings>>,
 ) {
     if let Some(mut running) = process.take() {
+        running.expected_stop.store(true, Ordering::SeqCst);
         stop_process(&mut running.child, Duration::ZERO);
     }
     live.store(false, Ordering::SeqCst);
     if let Ok(mut current) = active_stdin.lock() {
         *current = None;
     }
-    if let Ok(mut pid) = child_pid.lock() {
-        *pid = None;
+    if let Ok(mut current) = current_process.lock() {
+        *current = ProcessBindings::default();
     }
 }
 
@@ -421,6 +420,19 @@ pub(super) fn stop_process(child: &mut Child, grace: Duration) {
                 return;
             }
         }
+    }
+}
+
+/// Mark a process as expected to stop and then terminate it.
+///
+/// Used by direct-kill paths (Drop, forced cancellation) so the stdout reader
+/// classifies the resulting EOF as controlled rather than a turn failure.
+pub(super) fn terminate_marked(expected_stop: Option<Arc<AtomicBool>>, pid: Option<u32>) {
+    if let Some(stop) = expected_stop {
+        stop.store(true, Ordering::SeqCst);
+    }
+    if let Some(pid) = pid {
+        terminate_process(pid);
     }
 }
 
@@ -470,42 +482,4 @@ pub(super) fn user_message_with_raw_input(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_registry_response_for, user_message_with_raw_input};
-    use serde_json::Value;
-
-    #[test]
-    fn registry_response_requires_discriminator_and_correlation_id() {
-        let response = serde_json::json!({
-            "type": "registry_response",
-            "request_id": "reg-1",
-            "success": true,
-        });
-        assert!(is_registry_response_for(&response, "reg-1"));
-
-        let future_output = serde_json::json!({
-            "type": "future_output",
-            "request_id": "reg-1",
-        });
-        assert!(!is_registry_response_for(&future_output, "reg-1"));
-
-        let other_request = serde_json::json!({
-            "type": "registry_response",
-            "request_id": "reg-2",
-        });
-        assert!(!is_registry_response_for(&other_request, "reg-1"));
-    }
-
-    #[test]
-    fn user_message_omits_raw_input_for_legacy_payloads() {
-        let with_raw =
-            user_message_with_raw_input("envelope", Some("raw"), Some("session-1"), "/tmp");
-        let value: Value = serde_json::from_str(&with_raw).unwrap();
-        assert_eq!(value["message"]["content"], "envelope");
-        assert_eq!(value["message"]["raw_user_input"], "raw");
-
-        let without_raw = user_message_with_raw_input("legacy", None, None, "/tmp");
-        let value: Value = serde_json::from_str(&without_raw).unwrap();
-        assert!(value["message"].get("raw_user_input").is_none());
-    }
-}
+mod tests;
