@@ -63,6 +63,7 @@ from agent_sec_cli.skill_ledger.scanner.builtins.dispatcher import (
 from agent_sec_cli.skill_ledger.scanner.names import (
     DEFAULT_BUILTIN_SCANNERS,
     canonicalize_scanner_name,
+    validate_scanner_name,
 )
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
 from agent_sec_cli.skill_ledger.scanner.registry import (
@@ -167,7 +168,7 @@ def _build_scan_entry(
 ) -> ScanEntry:
     """Construct a :class:`ScanEntry` from normalised findings."""
     return ScanEntry(
-        scanner=canonicalize_scanner_name(scanner),
+        scanner=validate_scanner_name(scanner),
         version=scanner_version or "unknown",
         status=_determine_scan_status(normalized),
         findings=[f.to_findings_dict() for f in normalized],
@@ -181,7 +182,7 @@ def _resolve_parser_and_normalise(
     registry: ScannerRegistry,
 ) -> list[NormalizedFinding]:
     """Look up the parser for *scanner_name* and normalise raw findings."""
-    canonical_name = canonicalize_scanner_name(scanner_name)
+    canonical_name = validate_scanner_name(scanner_name)
     parser_info = registry.get_parser_for_scanner(canonical_name)
     if parser_info is None:
         logger.debug(
@@ -423,7 +424,7 @@ def _merge_scan_entries(
     scan_entries: list[ScanEntry],
 ) -> None:
     """Replace existing scanner entries with incoming entries and canonical names."""
-    incoming = {canonicalize_scanner_name(entry.scanner) for entry in scan_entries}
+    incoming = {validate_scanner_name(entry.scanner) for entry in scan_entries}
     merged: list[ScanEntry] = []
     seen: set[str] = set()
 
@@ -436,7 +437,7 @@ def _merge_scan_entries(
         seen.add(canonical)
 
     for entry in scan_entries:
-        entry.scanner = canonicalize_scanner_name(entry.scanner)
+        entry.scanner = validate_scanner_name(entry.scanner)
         if entry.scanner in seen:
             continue
         merged.append(entry)
@@ -545,7 +546,7 @@ def scan_skill(
     current_hashes = compute_file_hashes(io_skill_dir)
     registry = ScannerRegistry.from_config()
     requested = [
-        canonicalize_scanner_name(name)
+        validate_scanner_name(name)
         for name in (scanner_names or DEFAULT_BUILTIN_SCANNERS)
     ]
 
@@ -673,6 +674,7 @@ def certify(
     delete_findings: bool = False,
 ) -> dict[str, Any]:
     """Import external scanner findings and record them in a signed manifest."""
+    validate_scanner_name(scanner)
     if findings_path is None:
         raise FindingsFileError(
             "<missing>",
@@ -682,10 +684,10 @@ def certify(
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
+    registry = ScannerRegistry.from_config()
     _remember_skill_dir_best_effort(str(root.canonical_dir))
 
     current_hashes = compute_file_hashes(io_skill_dir)
-    registry = ScannerRegistry.from_config()
     manifest, state, new_version_created = _prepare_manifest_for_update(
         io_skill_dir,
         current_hashes,

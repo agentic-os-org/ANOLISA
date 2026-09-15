@@ -26,6 +26,11 @@ Skills follow the skip contract described under
 [Packaged read-only system Skills](#packaged-read-only-system-skills); key
 initialization still completes.
 
+`init --no-baseline` initializes keys without scanning Skills. Repeated initialization
+reuses the key pair and returns `keyCreated: false` and `key: null`; newly created
+key details are returned in `key` with `keyCreated: true`. `init --force-keys`
+replaces the pair and archives the previous public key for signature verification.
+
 Key locations:
 
 | File | Path | Permissions |
@@ -702,10 +707,11 @@ Per-version verification: schema → hash integrity → signature validity → s
 | `agent-sec-cli skill-ledger audit <dir>` | Deep-verify the version chain |
 | `agent-sec-cli skill-ledger list-scanners` | List registered scanners |
 
-`decide` is the only supported command for recording a per-Skill user decision.
-The former hidden `set-policy` placeholder was never implemented and has been
-removed; invoking it is now an unknown-command usage error with exit code 2.
-`rotate-keys` remains a hidden, reserved interface: invoking it reports
+`activationPolicy` and `show/export --policy` accept `pass_warn_only`. Use
+`list-scanners` to find registered names for `init/scan --scanners` and
+`certify --scanner`; custom scanners can be registered in `config.json`.
+
+`rotate-keys` is visible in help and is not implemented: invoking it reports
 `not implemented` on stderr, exits non-zero, and does not change `key.enc`,
 `key.pub`, or the keyring.
 

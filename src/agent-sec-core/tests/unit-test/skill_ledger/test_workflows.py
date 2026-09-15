@@ -33,6 +33,7 @@ from agent_sec_cli.skill_ledger.core.decision import (
     decide_skill,
     export_skill,
     rollback_skill,
+    show_skill,
 )
 from agent_sec_cli.skill_ledger.core.exposure import build_exposure_summary
 from agent_sec_cli.skill_ledger.core.file_hasher import (
@@ -1258,39 +1259,44 @@ class TestCertifyWorkflow(SkillDirTestCase):
             data = json.load(f)
         self.assertEqual(len(data["scans"]), 1)
 
-    def test_scan_entry_merge_canonicalizes_legacy_scanner_names(self):
-        """Legacy scanner ids are replaced through the public scan workflow."""
-        findings_path = self._write_findings(
-            [
-                {"rule": "legacy", "level": "warn", "message": "legacy"},
-            ]
+    def test_signed_ledger_reads_and_new_scan_preserve_version_files(self):
+        scan_skill(self.skill_dir, self.backend)
+        metadata = Path(self.skill_dir) / ".skill-meta"
+        before = {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in metadata.rglob("*")
+            if path.is_file()
+        }
+
+        self.assertEqual(check(self.skill_dir, self.backend)["status"], "pass")
+        show_skill(self.skill_dir, self.backend)
+        self.assertTrue(
+            audit(self.skill_dir, self.backend, verify_snapshots=True)["valid"]
         )
-        certify(self.skill_dir, self.backend, findings_path=findings_path)
-
-        latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
-        with open(latest, "r") as f:
-            data = json.load(f)
-        data["scans"] = [
-            ScanEntry(scanner="skill-code-scanner", status="warn").model_dump(),
-            ScanEntry(scanner="cisco-static-scanner", status="pass").model_dump(),
-        ]
-        with open(latest, "w") as f:
-            json.dump(data, f)
-
-        scan_skill(
-            self.skill_dir,
-            self.backend,
-            scanner_names=["code-scanner", "static-scanner"],
-            force=True,
-        )
-
-        with open(latest, "r") as f:
-            data = json.load(f)
         self.assertEqual(
-            [scan["scanner"] for scan in data["scans"]],
-            ["code-scanner", "static-scanner"],
+            {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in metadata.rglob("*")
+                if path.is_file()
+            },
+            before,
         )
-        self.assertEqual(data["scanStatus"], "pass")
+
+        self._write_file("run.sh", "echo new version\n")
+        result = scan_skill(self.skill_dir, self.backend)
+        self.assertEqual(result["versionId"], "v000002")
+        self.assertEqual(
+            {entry["scanner"] for entry in self._read_manifest()["scans"]},
+            {"code-scanner", "static-scanner"},
+        )
+        first_version = Path(self._manifest_path("v000001"))
+        self.assertEqual(
+            hashlib.sha256(first_version.read_bytes()).hexdigest(),
+            before[first_version],
+        )
+        self.assertTrue(
+            audit(self.skill_dir, self.backend, verify_snapshots=True)["valid"]
+        )
 
     def test_deny_finding_produces_deny_status(self):
         findings_path = self._write_findings(

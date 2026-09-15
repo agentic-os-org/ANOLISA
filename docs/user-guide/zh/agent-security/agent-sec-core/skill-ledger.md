@@ -24,6 +24,10 @@ agent-sec-cli skill-ledger init
 baseline 是批量写操作。由 host 提供的只读已打包系统 Skill 会遵循
 [只读的已打包系统 Skill](#只读的已打包系统-skill) 中的跳过契约；密钥初始化仍会完成。
 
+`init --no-baseline` 只初始化密钥，不扫描 Skill。重复初始化复用密钥，返回
+`keyCreated: false`、`key: null`；新建密钥时返回 `keyCreated: true`，密钥信息位于
+`key`。`init --force-keys` 更换密钥对，并归档原公钥供签名校验。
+
 密钥存放位置：
 
 | 文件 | 路径 | 权限 |
@@ -663,9 +667,11 @@ agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 | `agent-sec-cli skill-ledger audit <dir>` | 深度验证版本链 |
 | `agent-sec-cli skill-ledger list-scanners` | 查看已注册的扫描器列表 |
 
-`decide` 是记录单个 Skill 用户决策的唯一受支持命令。早期隐藏的 `set-policy`
-占位命令从未实现且现已移除；继续调用会得到 unknown-command 用法错误和退出码 2。
-`rotate-keys` 仍是隐藏的预留接口：调用时会在 stderr 报告 `not implemented`，以非零
+`activationPolicy` 和 `show/export --policy` 接受 `pass_warn_only`。通过
+`list-scanners` 查询 `init/scan --scanners`、`certify --scanner` 可用的注册名称；
+自定义扫描器可在 `config.json` 中注册。
+
+`rotate-keys` 在 help 中可见，尚未实现：调用时会在 stderr 报告 `not implemented`，以非零
 退出码结束，且不会修改 `key.enc`、`key.pub` 或 keyring。
 
 ## 关键路径

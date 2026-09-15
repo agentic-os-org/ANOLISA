@@ -223,6 +223,9 @@ kill。该进程协议和三阶段终止流程是 **[CURRENT]** Python 实现细
 - **[HISTORICAL]** one-shot 未处理异常结束该原型 run，并把状态设为 `error`；
 - **[HISTORICAL]** periodic 未处理异常结束当前原型 run，但不终止后续周期；
 - Skill Ledger 某个变更失败时记录 `last_error/last_processed`，继续处理后续通知；
+- 每次 Skill Ledger 处理在创建密钥、扫描、签名或更新 activation 前加载并校验配置。
+  配置错误以 `ConfigError` 上报，本次处理无上述副作用；修正配置后可处理后续通知，
+  不自动重试已失败变更；
 - Job runtime failure 当前不会自动停止 daemon 或改变 daemon 顶层 `status`；
 - Job 启动阶段抛错则 daemon 启动失败并执行资源回滚。
 

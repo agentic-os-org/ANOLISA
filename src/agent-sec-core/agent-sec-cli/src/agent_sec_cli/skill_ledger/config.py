@@ -9,12 +9,6 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICIES as ACTIVATION_POLICIES,
 )
 from agent_sec_cli.skill_ledger.activation_policy import (
-    ACTIVATION_POLICY_LATEST_SCANNED as ACTIVATION_POLICY_LATEST_SCANNED,
-)
-from agent_sec_cli.skill_ledger.activation_policy import (
-    ACTIVATION_POLICY_PASS_ONLY as ACTIVATION_POLICY_PASS_ONLY,
-)
-from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICY_PASS_WARN_ONLY as ACTIVATION_POLICY_PASS_WARN_ONLY,
 )
 from agent_sec_cli.skill_ledger.activation_policy import (
@@ -35,7 +29,7 @@ from agent_sec_cli.skill_ledger.paths import (
 from agent_sec_cli.skill_ledger.scanner.names import (
     CODE_SCANNER_NAME,
     STATIC_SCANNER_NAME,
-    canonicalize_scanner_name,
+    validate_scanner_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,12 +118,12 @@ def _deep_merge_config(
             by_name: dict[str, dict[str, Any]] = {}
             for s in defaults.get("scanners", []):
                 if isinstance(s, dict) and "name" in s:
-                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    canonical = validate_scanner_name(str(s["name"]))
                     by_name[canonical] = {**s, "name": canonical}
             # User entries override by name
             for s in user_val:
                 if isinstance(s, dict) and "name" in s:
-                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    canonical = validate_scanner_name(str(s["name"]))
                     by_name[canonical] = {**s, "name": canonical}
             merged["scanners"] = list(by_name.values())
         elif key == "parsers" and isinstance(user_val, dict):
@@ -198,6 +192,17 @@ def load_config() -> dict[str, Any]:
             raise ConfigError(
                 f"config.json must be a JSON object, got {type(cfg).__name__}"
             )
+        try:
+            resolve_activation_policy(cfg)
+        except ConfigError as exc:
+            raise ConfigError(f"{path}: {exc.reason}") from exc
+        scanners = cfg.get("scanners", [])
+        for index, scanner in enumerate(scanners if isinstance(scanners, list) else []):
+            if isinstance(scanner, dict) and "name" in scanner:
+                try:
+                    validate_scanner_name(str(scanner["name"]))
+                except ValueError as exc:
+                    raise ConfigError(f"{path}: scanners[{index}].name: {exc}") from exc
         if _DEPRECATED_SKILL_DIRS_KEY in cfg:
             logger.warning(
                 "Ignoring deprecated skill-ledger config key %r in %s; use "

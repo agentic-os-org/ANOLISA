@@ -18,8 +18,6 @@ from unittest.mock import patch
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
-    ACTIVATION_POLICY_LATEST_SCANNED,
-    ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
@@ -100,25 +98,6 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(scanners["static-scanner"]["type"], "builtin")
         self.assertTrue(scanners["code-scanner"]["enabled"])
         self.assertTrue(scanners["static-scanner"]["enabled"])
-
-    def test_legacy_scanner_config_names_merge_into_canonical_defaults(self):
-        merged = _deep_merge_config(
-            _DEFAULT_CONFIG,
-            {
-                "scanners": [
-                    {
-                        "name": "cisco-static-scanner",
-                        "type": "builtin",
-                        "parser": "findings-array",
-                        "enabled": False,
-                    }
-                ]
-            },
-        )
-        scanners = {entry["name"]: entry for entry in merged["scanners"]}
-        self.assertIn("static-scanner", scanners)
-        self.assertNotIn("cisco-static-scanner", scanners)
-        self.assertFalse(scanners["static-scanner"]["enabled"])
 
 
 class TestConfigMerge(unittest.TestCase):
@@ -240,13 +219,6 @@ class TestConfigMerge(unittest.TestCase):
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["otherList"], [3])
 
-    def test_resolve_activation_policy_normalizes_legacy_policies(self):
-        for policy in (ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED):
-            self.assertEqual(
-                resolve_activation_policy({"activationPolicy": policy}),
-                ACTIVATION_POLICY_PASS_WARN_ONLY,
-            )
-
     def test_resolve_activation_policy_accepts_pass_warn_only(self):
         self.assertEqual(
             resolve_activation_policy(
@@ -261,27 +233,29 @@ class TestConfigMerge(unittest.TestCase):
 
     def test_resolve_activation_policy_rejects_non_string_policy(self):
         with self.assertRaisesRegex(ConfigError, "activationPolicy"):
-            resolve_activation_policy({"activationPolicy": ["pass_only"]})
+            resolve_activation_policy({"activationPolicy": ["pass_warn_only"]})
 
-    def test_load_config_normalizes_legacy_activation_policy(self):
-        cfg_dir = Path(tempfile.mkdtemp())
-        try:
+    def test_load_config_rejects_invalid_policy_before_merging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg_dir = Path(directory)
             cfg_path = cfg_dir / "config.json"
             cfg_path.write_text(
-                json.dumps({"activationPolicy": ACTIVATION_POLICY_LATEST_SCANNED}),
-                encoding="utf-8",
+                json.dumps({"activationPolicy": "invalid"}), encoding="utf-8"
             )
-            with patch(
-                "agent_sec_cli.skill_ledger.config.get_config_dir",
-                return_value=cfg_dir,
+            before = cfg_path.read_bytes()
+            with patch.object(config_module, "get_config_dir", return_value=cfg_dir):
+                with patch.object(config_module, "_deep_merge_config") as merge:
+                    with self.assertRaises(ConfigError) as raised:
+                        load_config()
+                    merge.assert_not_called()
+            for expected in (
+                str(cfg_path),
+                "activationPolicy",
+                "invalid",
+                "pass_warn_only",
             ):
-                cfg = load_config()
-            self.assertEqual(
-                resolve_activation_policy(cfg),
-                ACTIVATION_POLICY_PASS_WARN_ONLY,
-            )
-        finally:
-            shutil.rmtree(cfg_dir)
+                self.assertIn(expected, str(raised.exception))
+            self.assertEqual(cfg_path.read_bytes(), before)
 
     def test_load_config_preserves_pass_warn_only_activation_policy(self):
         cfg_dir = Path(tempfile.mkdtemp())

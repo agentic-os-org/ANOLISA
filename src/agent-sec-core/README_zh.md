@@ -375,10 +375,8 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 | `audit <dir>` | 查看版本历史与签名链 |
 | `check --all` / `scan --all` | 对所有已注册 Skill 目录批量执行 |
 
-`decide` 是记录用户决策的受支持入口。早期隐藏的 `set-policy` 占位命令从未实现，
-现在也不是受支持的命令；继续调用会得到 unknown-command 用法错误和退出码 2。
-隐藏的 `rotate-keys` 预留入口同样尚不可用：直接执行会以非零退出码结束，且不会修改
-签名密钥。
+`init --no-baseline` 只初始化密钥，不扫描 Skill。`rotate-keys` 在 help 中可见，
+执行时明确报尚未实现（退出码 1，不修改密钥）。
 
 ### 快速示例
 
