@@ -261,6 +261,69 @@ fn raw_cli_build_failure_respects_analysis_mode_matrix() {
 }
 
 #[test]
+fn raw_cli_zsh_insight_keeps_bare_cjk_natural_language_routing_to_agent() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("zsh unavailable; mandatory coverage runs in the amd64 Anolis gate");
+        return;
+    }
+
+    let fixture = temp_shell_home("zsh-insight-cjk-routing");
+    let bin_dir = fixture.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(
+        &bin_dir.join("make"),
+        "#!/bin/sh\necho 'make: *** [all] Error 2' >&2\nexit 2\n",
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.to_string_lossy(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let insight = "Insight: The build or test command failed";
+    let first_prompt = "测试";
+    let second_prompt = "继续测试";
+    let first_request = format!("Received shell prompt request: {first_prompt}");
+    let second_request = format!("Received shell prompt request: {second_prompt}");
+    let first_line = format!("{first_prompt}\n");
+    let second_line = format!("{second_prompt}\n");
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("COSH_SHELL_LANG", "en-US"),
+            ("COSH_SHELL_ANALYSIS_MODE", "smart"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+            ("PATH", path.as_str()),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"make all\n"),
+            (insight, b""),
+            ("cosh-osc$ ", first_line.as_bytes()),
+            (first_request.as_str(), b""),
+            ("cosh-osc$ ", second_line.as_bytes()),
+            (second_request.as_str(), b""),
+            ("cosh-osc$ ", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&fixture);
+
+    let insight_pos = output.find(insight).expect("insight line missing");
+    let first_pos = output
+        .find(&first_request)
+        .expect("first CJK prompt request missing");
+    let second_pos = output
+        .find(&second_request)
+        .expect("second CJK prompt request missing");
+    assert!(insight_pos < first_pos, "{output}");
+    assert!(insight_pos < second_pos, "{output}");
+    assert!(first_pos < second_pos, "{output}");
+    assert!(!output.contains("command not found"), "{output}");
+}
+
+#[test]
 fn raw_cli_runtime_exception_requires_confirmation_outside_manual_mode() {
     for (mode, expects_insight) in [("smart", true), ("auto", true), ("manual", false)] {
         let fixture = temp_shell_home(&format!("runtime-exception-{mode}"));
