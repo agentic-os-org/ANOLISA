@@ -24,14 +24,30 @@ export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 # fast.
 DETECT_RETRIES="${TOKENLESS_DETECT_RETRIES:-3}"
 DETECT_RETRY_DELAY="${TOKENLESS_DETECT_RETRY_DELAY:-1}"
-# Separate, smaller budget for one result that only looks definitive: a
-# `plugin list` that succeeds but omits the plugin. `claude plugin install`
-# writes marketplace.json/plugin.json, yet the CLI's plugin registry index
-# only picks them up on a later scan, so the very first list right after
-# provisioning can succeed and still omit the just-installed plugin (GH
-# #3082). Kept apart from DETECT_RETRIES so a genuinely absent plugin pays a
-# couple of cheap re-lists rather than the whole settling budget.
-DETECT_PLUGIN_RELISTS="${TOKENLESS_DETECT_PLUGIN_RELISTS:-2}"
+# Separate budget for one result that only looks definitive: a `plugin list`
+# that succeeds but omits the plugin. `claude plugin install` writes
+# marketplace.json/plugin.json, yet the CLI's plugin registry index only picks
+# them up on a later scan, so the very first list right after provisioning can
+# succeed and still omit the just-installed plugin (GH #3082). Kept apart from
+# DETECT_RETRIES so a genuinely absent plugin pays a bounded settle rather than
+# the whole settling budget.
+#
+# That settle is bounded by BOTH a wall-clock window and an attempt count, and
+# whichever runs out first ends the loop. Bounding it by count alone (GH #3085:
+# 2 re-lists, ~2s) recurred as GH #3267 — registry-index lag is a wall-clock
+# phenomenon, so on a host busy with a concurrent full build those same 2
+# re-lists cover far less catch-up time and the false "not installed" verdict
+# comes back. A window covers the lag no matter how slow each individual list
+# call is; the count cap keeps a permanently broken registry from polling
+# forever.
+DETECT_PLUGIN_RELISTS="${TOKENLESS_DETECT_PLUGIN_RELISTS:-5}"
+# Wall-clock seconds the plugin probe may spend settling, the initial
+# `plugin list` included. Set this or DETECT_PLUGIN_RELISTS to 0 to opt out of
+# re-listing entirely; the Makefile's informational pre-install probe does.
+DETECT_PLUGIN_RELIST_WINDOW="${TOKENLESS_DETECT_PLUGIN_RELIST_WINDOW:-20}"
+# Ceiling for a single backoff sleep, so a wide window polls the registry at a
+# widening interval instead of hammering a CLI that is already contended.
+DETECT_PLUGIN_RELIST_MAX_DELAY="${TOKENLESS_DETECT_PLUGIN_RELIST_MAX_DELAY:-4}"
 
 # settle <cmd...> — run cmd once; if it reports a retryable failure (exit
 # status 1), sleep DETECT_RETRY_DELAY and retry, up to DETECT_RETRIES retries
@@ -131,6 +147,22 @@ claude_plugin_listed() {
     return 2
 }
 
+# relist_backoff <attempt> <seconds-left> — how long to wait before re-list
+# <attempt> (1-based): DETECT_RETRY_DELAY doubled per attempt, capped at
+# DETECT_PLUGIN_RELIST_MAX_DELAY and clamped to the time left in the settling
+# window so the probe does not overshoot it. awk does the arithmetic because
+# DETECT_RETRY_DELAY may be fractional, which bash cannot multiply.
+relist_backoff() {
+    awk -v base="$DETECT_RETRY_DELAY" -v attempt="$1" \
+        -v cap="$DETECT_PLUGIN_RELIST_MAX_DELAY" -v left="$2" 'BEGIN {
+            delay = base * (2 ^ (attempt - 1))
+            if (delay > cap)  delay = cap
+            if (delay > left) delay = left
+            if (delay < 0)    delay = 0
+            printf "%.3f\n", delay
+        }'
+}
+
 # settle_plugin_listed — settle() for the plugin probe, extended with a
 # bounded re-list of the "list succeeded but omitted the plugin" case.
 #
@@ -139,19 +171,28 @@ claude_plugin_listed() {
 # 2) without spending any budget. With the manifests staged it is also the
 # shape of the GH #3082 first-run race, where the registry index lags one
 # scan behind the installer and the just-installed plugin is missing from an
-# otherwise successful list. Re-list up to DETECT_PLUGIN_RELISTS times to
-# ride out that refresh window; a genuinely absent plugin still ends up
-# reported as "not installed", only a few cheap calls later.
+# otherwise successful list. Re-list until the plugin shows up, the settling
+# window elapses or the attempt cap is reached, backing off between attempts,
+# so the loop covers that window on a contended host too (GH #3267) and not
+# only on an idle one; a genuinely absent plugin still ends up reported as
+# "not installed", only once the window has run out.
+#
+# This deliberately does NOT degrade to "the CLI and ~/.claude are there, so
+# call it installed": that reports a host whose plugin was never registered as
+# ready, and the caller then skips install.sh. The plugin probe stays a hard
+# negative — it is simply given enough wall-clock time to be right.
 #
 # Like settle(), this must be called in a condition context so that `set -e`
 # stays suppressed while the probe reports a non-zero status.
 settle_plugin_listed() {
-    local relist=0 rc=0
+    local relist=0 rc=0 left=0 started="$SECONDS"
     settle claude_plugin_listed; rc=$?
     while [ "$rc" -eq 2 ] && [ "$relist" -lt "$DETECT_PLUGIN_RELISTS" ] \
+        && [ $((SECONDS - started)) -lt "$DETECT_PLUGIN_RELIST_WINDOW" ] \
         && plugin_manifests_staged; do
         relist=$((relist + 1))
-        sleep "$DETECT_RETRY_DELAY"
+        left=$((DETECT_PLUGIN_RELIST_WINDOW - (SECONDS - started)))
+        sleep "$(relist_backoff "$relist" "$left")"
         settle claude_plugin_listed; rc=$?
     done
     return "$rc"
