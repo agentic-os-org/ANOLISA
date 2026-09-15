@@ -128,6 +128,110 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_host_executed_input_wait_timeout_returns_evidence() {
+    let home = temp_shell_home("qwen-host-executed-input-wait-timeout");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(
+        &bin_dir.join("input-wait-helper"),
+        r#"#!/bin/sh
+trap 'printf "\nINPUT_WAIT_INTERRUPTED\n" >/dev/tty; exit 130' INT TERM HUP
+printf 'Continue input-wait acceptance? ' >/dev/tty
+IFS= read -r _answer </dev/tty
+printf '\nINPUT_WAIT_ANSWERED\n' >/dev/tty
+"#,
+    );
+    let co_path = bin_dir.join("co");
+    write_executable(
+        &co_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-host-executed-input-wait-timeout","model":"qwen-test"}'
+read -r user_message
+case "$user_message" in
+  *provider-host-executed-input-wait-timeout*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-input-wait-timeout","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"input-wait-helper"},"tool_use_id":"toolu-input-wait-timeout"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'"exit_code":130'*'"input_wait":{"detected":true'*'"interrupted":true'*'"reason":"input-wait-timeout"'*'"status":"timed_out"'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-host-executed-input-wait-timeout","message":{"content":[{"type":"text","text":"Host-executed input-wait timeout result received."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-executed-input-wait-timeout","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-host-executed-input-wait-timeout","is_error":true,"result":"missing input-wait timeout result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-executed-input-wait-timeout","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+        "qwen",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("PATH", path.as_str()),
+            ("COSH_SHELL_HANDOFF_TIMEOUT_SECS", "30"),
+            ("COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS", "1"),
+        ],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? provider-host-executed-input-wait-timeout\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            // This accepts the pending approval; the helper cannot own the PTY before it.
+            (b"\n".to_vec(), Duration::from_secs(1)),
+            // Send no answer while the helper owns the PTY; Ctrl+C only bounds failed runs.
+            (b"\x03".to_vec(), Duration::from_secs(12)),
+            (b"exit 0\n".to_vec(), Duration::from_secs(1)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(
+        output.contains("Continue input-wait acceptance?"),
+        "{output}"
+    );
+    assert!(output.contains("INPUT_WAIT_INTERRUPTED"), "{output}");
+    assert!(!output.contains("INPUT_WAIT_ANSWERED"), "{output}");
+    assert!(
+        output.contains(
+            "Foreground command waited for keyboard input over 1s with no answer \
+             (input_wait_timeout_secs)."
+        ),
+        "{output}"
+    );
+    assert!(
+        output.contains("Interrupted the command (like Ctrl+C);"),
+        "{output}"
+    );
+    assert!(output.contains("non-interactively."), "{output}");
+    assert!(
+        output.contains("Host-executed input-wait timeout result received."),
+        "{output}"
+    );
+    assert!(output.contains("Shell: timed_out · req-1"), "{output}");
+    assert!(
+        !output.contains("missing input-wait timeout result"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("Command exceeded configured shell handoff timeout"),
+        "{output}"
+    );
+}
+
 #[test]
 fn raw_cli_host_executed_fullscreen_timeout_defers_notice_until_exit_alt_screen() {
     let home = temp_shell_home("qwen-host-executed-fullscreen-timeout");
