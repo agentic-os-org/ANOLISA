@@ -192,11 +192,17 @@ async fn preflight_model_endpoint(
         }
         return preflight_model_fallback(client, provider, fallback).await;
     }
-    if fallback != ModelFallback::None
+    // The token-plan gateway answers GET /models/{model} with HTTP 400
+    // "Model not exist." even for models its own model list contains and
+    // chat serves. Only fall back on 400 when chat will verify credentials;
+    // a public model list alone cannot establish that the key is valid.
+    if (fallback != ModelFallback::None
         && matches!(
             status,
             StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
-        )
+        ))
+        || (status == StatusCode::BAD_REQUEST
+            && matches!(fallback, ModelFallback::Chat | ModelFallback::ListThenChat))
     {
         return preflight_model_fallback(client, provider, fallback).await;
     }
@@ -1004,7 +1010,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_compat_falls_back_for_ambiguous_model_endpoint_failures() {
-        for status in [404, 405, 501] {
+        for status in [400, 404, 405, 501] {
             let server = MockServer::spawn(vec![
                 Reply::json(status, r#"{"error":{"code":"route_not_found"}}"#),
                 Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
@@ -1121,6 +1127,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieve_bad_request_does_not_accept_a_public_model_list() {
+        for provider_type in ["openai", "generic", "deepseek"] {
+            let server = MockServer::spawn(vec![
+                Reply::json(400, r#"{"error":{"code":"route_not_found"}}"#),
+                Reply::json(
+                    200,
+                    r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#,
+                ),
+            ]);
+            let mut candidate = provider(&server.base_url, provider_type);
+            candidate.api_key = "invalid-key".to_string();
+
+            let result = preflight_auth(&candidate).await;
+            let requests = server.finish();
+            assert_eq!(
+                result,
+                Err(AuthPreflightError::UnsupportedResponse),
+                "provider type {provider_type}"
+            );
+            assert_eq!(requests.len(), 1, "must not trust a public model list");
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieve_bad_request_fallback_rejects_invalid_credentials() {
+        for provider_type in ["dashscope", "coding_plan", "token_plan", "openai_compat"] {
+            let mut replies = vec![Reply::json(
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist."}"#,
+            )];
+            if provider_type != "openai_compat" {
+                replies.push(Reply::json(
+                    200,
+                    r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#,
+                ));
+            }
+            replies.push(Reply::json(401, r#"{"error":{"code":"invalid_api_key"}}"#));
+            let server = MockServer::spawn(replies);
+            let mut candidate = provider(&server.base_url, provider_type);
+            candidate.api_key = "invalid-key".to_string();
+
+            let result = preflight_auth(&candidate).await;
+            let requests = server.finish();
+            assert_eq!(
+                result,
+                Err(AuthPreflightError::InvalidCredentials),
+                "provider type {provider_type}"
+            );
+            assert!(requests
+                .last()
+                .unwrap()
+                .starts_with("POST /v1/chat/completions HTTP/1.1"));
+        }
+    }
+
+    #[tokio::test]
     async fn plan_provider_uses_chat_when_model_list_route_is_unavailable() {
         let server = MockServer::spawn(vec![
             Reply::json(404, r#"{"error":{"code":"route_not_found"}}"#),
@@ -1132,6 +1194,36 @@ mod tests {
             .expect("chat fallback succeeds");
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
+    }
+
+    /// The real token-plan gateway answers GET /models/{model} with HTTP 400
+    /// "Model not exist." even for models its own model list contains and
+    /// chat serves, so the retrieve-route 400 must defer to the list+chat
+    /// chain instead of ending validation.
+    #[tokio::test]
+    async fn token_plan_retrieve_bad_request_defers_to_list_and_chat() {
+        let server = MockServer::spawn(vec![
+            Reply::json(
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist.","request_id":"tp"}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"object":"list","data":[{"id":"qwen3.8-max","object":"model"}]}"#,
+            ),
+            Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
+        ]);
+        let mut token_plan = provider(&server.base_url, "token_plan");
+        token_plan.model = "qwen3.8-max".to_string();
+
+        preflight_auth(&token_plan)
+            .await
+            .expect("list and chat are the authority");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /v1/models/qwen3.8-max HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/models HTTP/1.1"));
         assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
     }
 
