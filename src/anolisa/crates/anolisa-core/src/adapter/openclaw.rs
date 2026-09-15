@@ -443,8 +443,9 @@ impl FrameworkDriver for OpenClawDriver {
         }
 
         let mut actions = Vec::new();
-        if let Some(plugin_id) = claim_own_plugin(prior)? {
-            validate_plugin_id(&plugin_id)?;
+        let prior_own_plugin = claim_own_plugin(prior)?;
+        if let Some(plugin_id) = &prior_own_plugin {
+            validate_plugin_id(plugin_id)?;
             actions.push(format!(
                 "unregister prior openclaw plugin '{plugin_id}' from {}",
                 prior_home.display()
@@ -466,10 +467,12 @@ impl FrameworkDriver for OpenClawDriver {
         actions.extend(self.restore_preview_lines(
             prior,
             &claim_displaced_plugins(prior)?,
-            &prior_home,
             ctx,
             &format!(" in the prior state directory {}", prior_home.display()),
             "which the prior receipt displaced",
+            // That `disable` unregisters the prior plugin first, so the allowlist
+            // the restore reads is the one that uninstall leaves behind.
+            AllowlistReading::AfterOwnUninstall(prior_own_plugin.as_deref()),
         )?);
         Ok(actions)
     }
@@ -559,6 +562,7 @@ impl FrameworkDriver for OpenClawDriver {
                 .then(|| self.read_plugin_inventory(&home, ctx))
                 .flatten();
             let inherited_displacements = inherited_displacement_ids(prior, ctx)?;
+            let unrecorded_prior_handoffs = prior_unrecorded_displacements(prior, ctx)?;
             for spec in &ctx.declared_displaces {
                 // The Manager validates declared ids before a driver sees
                 // them; re-check because `DriverCtx` is public and this id is
@@ -617,11 +621,55 @@ impl FrameworkDriver for OpenClawDriver {
                                 false
                             }
                         }
-                        // Not this adapter's transition to undo: an operator's own
-                        // disable, or a policy that keeps the plugin off and would
-                        // also refuse the restore.
-                        DisplacementProbe::AlreadyOff(_) | DisplacementProbe::FlagDisabled => {
-                            continue;
+                        // Not this adapter's transition to undo: a policy that
+                        // keeps the plugin off and would also refuse the restore.
+                        DisplacementProbe::AlreadyOff(_) => continue,
+                        // A positive `false` is the one probe answer that says
+                        // nothing about *who* turned the plugin off — see the
+                        // variant — so it cannot settle ownership on its own, and
+                        // the host may still hold the corroborating half of this
+                        // adapter's own slot selection. Ask the predicate the three
+                        // existing recovery marks ask, and carry the hand-off into
+                        // the replacement receipt as already performed when it
+                        // answers yes.
+                        //
+                        // Skipping it here lost the hand-off outright, and the loss
+                        // survived a *successful* retry. Nothing else inherits an
+                        // unapplied entry: `preserve_openclaw_displaced_facts`
+                        // declines to, so `dropped_displaced_plugins` picks it up and
+                        // the same-home cleanup hands the plugin back — but this
+                        // enable's own install and enable then switch it off again
+                        // through the very slot selection the recovery just
+                        // attributed, over a replacement receipt with no entry for
+                        // it. The re-enable succeeded, the disable that followed
+                        // reported an unregistered plugin and removed the receipt,
+                        // and the bundled backend stayed off with no operator
+                        // anywhere in the sequence and nothing left recording why.
+                        //
+                        // Positive evidence only, and only for a plugin a prior
+                        // receipt for this same instance already names. Inheriting
+                        // *every* unapplied entry would claim an operator's own
+                        // disable, which is what this branch exists to avoid;
+                        // claiming on the slot reading alone reaches the same
+                        // mistake on a first enable, where there is no older record
+                        // to recover and a slot naming this adapter's plugin can
+                        // mean nothing more than that an operator installed it by
+                        // hand and closed the bundled one themselves.
+                        DisplacementProbe::FlagDisabled => {
+                            match unrecorded_prior_handoffs.get(&spec.id) {
+                                Some(prior_entry)
+                                    if self.handoff_performed_by_slot_selection(
+                                        prior_entry,
+                                        plugin_id.as_deref(),
+                                        SlotReadings::Live,
+                                        &home,
+                                        ctx,
+                                    ) =>
+                                {
+                                    true
+                                }
+                                _ => continue,
+                            }
                         }
                         // A contract naming a plugin this host does not have is a
                         // broken contract, and this is still before the first
@@ -718,14 +766,16 @@ impl FrameworkDriver for OpenClawDriver {
         if displaced.is_empty() {
             return Ok(Vec::new());
         }
-        let home = claim_state_dir(claim)?;
+        // A real disable uninstalls this adapter's own plugin before it restores
+        // anything, and that uninstall is what rewrites `plugins.allow`.
+        let own_plugin_id = claim_own_plugin(claim)?;
         self.restore_preview_lines(
             claim,
             &displaced,
-            &home,
             ctx,
             "",
             "which this adapter displaced",
+            AllowlistReading::AfterOwnUninstall(own_plugin_id.as_deref()),
         )
     }
 
@@ -1438,7 +1488,10 @@ impl OpenClawDriver {
         if inventory_omits_plugin(inventory, &spec.id) {
             return DisplacementProbe::NotOnHost;
         }
-        match self.policy_blocking_plugin(&spec.id, home, ctx) {
+        // No uninstall precedes an enable-side probe, so the key is read as the
+        // host holds it. `Allowlist` is not a verdict here either way — see the
+        // match arm.
+        match self.policy_blocking_plugin(&spec.id, home, ctx, AllowlistReading::Live) {
             PolicyBlock::Denied => {
                 return DisplacementProbe::AlreadyOff("excluded by `plugins.deny`".to_string());
             }
@@ -1526,7 +1579,18 @@ impl OpenClawDriver {
     /// is merely unset. `plugins.enabled` is held to the same rule — only an
     /// explicit `false` counts, because guessing "off" from an unanswerable probe
     /// would skip hand-offs on hosts that are working fine.
-    fn policy_blocking_plugin(&self, plugin_id: &str, home: &Path, ctx: &DriverCtx) -> PolicyBlock {
+    ///
+    /// `allowlist` says which reading of `plugins.allow` to weigh — the host's
+    /// current one, or the one the operation's own uninstall leaves behind. It
+    /// cannot affect the other two keys, which this driver never writes. See
+    /// [`AllowlistReading`].
+    fn policy_blocking_plugin(
+        &self,
+        plugin_id: &str,
+        home: &Path,
+        ctx: &DriverCtx,
+        allowlist: AllowlistReading<'_>,
+    ) -> PolicyBlock {
         if let Some(output) = self.read_config_output("plugins.enabled", home, ctx)
             && config_answer_is_false(&config_answer_token(&output))
         {
@@ -1543,9 +1607,15 @@ impl OpenClawDriver {
         // See the doc above and [`AllowlistMeaning`].
         if let Some(output) = self.read_config_output("plugins.allow", home, ctx)
             && let PolicyIdList::Named(ids) = policy_id_list(&output, "plugins.allow")
-            && !ids.iter().any(|id| id == plugin_id)
         {
-            return PolicyBlock::Allowlist;
+            let surviving = allowlist.surviving_allow_ids(ids);
+            // "Names something" is asked of the projected list, not of the host's
+            // answer, because the projection is what the operation acts on: an
+            // allowlist whose only entry the uninstall removes is a key upstream
+            // drops, and a dropped key restricts nothing.
+            if !surviving.is_empty() && !surviving.iter().any(|id| id == plugin_id) {
+                return PolicyBlock::Allowlist;
+            }
         }
         PolicyBlock::None
     }
@@ -1726,6 +1796,9 @@ impl OpenClawDriver {
                 home,
                 ctx,
                 AllowlistMeaning::DoesNotKeepItOff,
+                // `status` describes the host as it stands, and nothing it reads
+                // is about to be uninstalled by the call itself.
+                AllowlistReading::Live,
             ) {
                 // Not a collision, and — since the same review round that fixed the
                 // policy branch — not a release either. `plugins list` is answered by
@@ -2286,6 +2359,11 @@ impl OpenClawDriver {
     /// question is shared and drifting apart is what this helper exists to
     /// prevent. A restrictive `plugins.allow` that omits the plugin blocks a
     /// restore and does not block loading — see [`AllowlistMeaning`].
+    ///
+    /// `allowlist_reading` is the other half of the same key and is a parameter
+    /// for the same reason: it says whether the reading is the host's current one
+    /// or the one the operation's own uninstall leaves behind, and getting it
+    /// wrong makes a preview contradict the operation — see [`AllowlistReading`].
     fn displacement_block(
         &self,
         plugin_id: &str,
@@ -2293,11 +2371,12 @@ impl OpenClawDriver {
         home: &Path,
         ctx: &DriverCtx,
         allowlist: AllowlistMeaning,
+        allowlist_reading: AllowlistReading<'_>,
     ) -> DisplacementBlock {
         if inventory_omits_plugin(inventory, plugin_id) {
             return DisplacementBlock::Absent;
         }
-        match self.policy_blocking_plugin(plugin_id, home, ctx) {
+        match self.policy_blocking_plugin(plugin_id, home, ctx, allowlist_reading) {
             PolicyBlock::Denied => DisplacementBlock::Denied,
             PolicyBlock::PluginsDisabled => DisplacementBlock::PluginsGloballyDisabled,
             PolicyBlock::Allowlist => match allowlist {
@@ -2332,16 +2411,20 @@ impl OpenClawDriver {
     ///
     /// `slots` is where the two slot readings come from, and a real `disable`
     /// passes the ones it captured before its own `plugins uninstall` rewrote
-    /// them. The policy keys are read live on purpose, including the allowlist:
-    /// that same uninstall drops this adapter's own plugin from `plugins.allow`,
-    /// and whether a restriction survives it is exactly what decides if the host
-    /// would refuse the restore. See [`SlotReadings`].
+    /// them. See [`SlotReadings`].
+    ///
+    /// `allowlist_reading` settles the same ordering question for the one policy
+    /// key that uninstall rewrites, and the two callers stand on opposite sides of
+    /// it. The real restore runs *after* the uninstall, so its live read already is
+    /// the post-uninstall answer. A preview runs *before* the operation it
+    /// describes, so its live read still names this adapter's own plugin and has to
+    /// be projected — otherwise the plan and the operation contradict each other on
+    /// exactly the allowlist this driver's own enable leaves behind. See
+    /// [`AllowlistReading`].
     fn restore_decision(
         &self,
         entry: &DisplacedPlugin,
-        own_plugin_id: Option<&str>,
-        inventory: Option<&str>,
-        slots: SlotReadings<'_>,
+        host: &RestoreHost<'_>,
         home: &Path,
         ctx: &DriverCtx,
     ) -> RestoreDecision {
@@ -2362,16 +2445,23 @@ impl OpenClawDriver {
         // selection having done the work; when it does, the entry is restored like
         // any applied one and the report says so.
         if !entry.applied
-            && !self.handoff_performed_by_slot_selection(entry, own_plugin_id, slots, home, ctx)
+            && !self.handoff_performed_by_slot_selection(
+                entry,
+                host.own_plugin_id,
+                host.slots,
+                home,
+                ctx,
+            )
         {
             return RestoreDecision::SkipNotApplied;
         }
         match self.displacement_block(
             &entry.plugin_id,
-            inventory,
+            host.inventory,
             home,
             ctx,
             AllowlistMeaning::RefusesRestore,
+            host.allowlist,
         ) {
             DisplacementBlock::Absent => return RestoreDecision::SkipAbsent,
             DisplacementBlock::Denied => return RestoreDecision::SkipDenied,
@@ -2399,7 +2489,11 @@ impl OpenClawDriver {
             // target *is* the displaced plugin and `slot_restore_decision` reads
             // that as `Proceed`.
             let answer = self.read_slot_owner(slot, home, ctx);
-            return match slot_restore_decision(answer.as_deref(), own_plugin_id, &entry.plugin_id) {
+            return match slot_restore_decision(
+                answer.as_deref(),
+                host.own_plugin_id,
+                &entry.plugin_id,
+            ) {
                 SlotRestore::Proceed => RestoreDecision::Restore,
                 SlotRestore::ExplicitlyOff(sentinel) => RestoreDecision::SkipSlotClosed {
                     slot: slot.to_string(),
@@ -2415,39 +2509,52 @@ impl OpenClawDriver {
     }
 
     /// Build the dry-run lines for restoring `entries` out of the state directory
-    /// `home`, by asking [`Self::restore_decision`] — the same call the real
+    /// `claim` names, by asking [`Self::restore_decision`] — the same call the real
     /// restore makes — so a preview cannot describe a branch the operation will
     /// not take.
     ///
     /// Read-only: the decision probes `plugins list`, the two policy keys and
     /// `plugins.slots.<slot>`, all of which are reads. Nothing is written and no
     /// receipt is touched.
+    ///
+    /// `allowlist` is the one input the caller has to supply rather than the host,
+    /// because a preview cannot observe the uninstall it has not run: it says
+    /// whether the operation being previewed removes this adapter's own plugin from
+    /// `plugins.allow` before the restore it predicts. Every other reading is taken
+    /// live, and for the slot that is the right answer on both sides — the veto
+    /// asks who owns the slot when the `plugins enable` would run, which a preview
+    /// can no more predict than the operation can, and which the caller's own
+    /// capture therefore does not feed into here. See [`AllowlistReading`].
     fn restore_preview_lines(
         &self,
         claim: &AdapterClaim,
         entries: &[DisplacedPlugin],
-        home: &Path,
         ctx: &DriverCtx,
         scope: &str,
         why: &str,
+        allowlist: AllowlistReading<'_>,
     ) -> Result<Vec<String>, AdapterError> {
+        // Resolved before the empty-entries shortcut, exactly where the callers
+        // used to resolve it themselves: a receipt whose state directory cannot be
+        // named is one a preview must reject rather than describe.
+        let home = claim_state_dir(claim)?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }
         let own_plugin_id = claim_own_plugin(claim)?;
-        let inventory = self.read_plugin_inventory(home, ctx);
+        let inventory = self.read_plugin_inventory(&home, ctx);
+        // A preview mutates nothing, so the host it reads is the host the
+        // operation will find — with the one exception `allowlist` exists for, a
+        // key the operation's own uninstall rewrites before the restore reads it.
+        let host = RestoreHost {
+            own_plugin_id: own_plugin_id.as_deref(),
+            inventory: inventory.as_deref(),
+            slots: SlotReadings::Live,
+            allowlist,
+        };
         let mut lines = Vec::with_capacity(entries.len());
         for entry in entries {
-            // A preview mutates nothing, so the host it reads is the host the
-            // operation will find: live is the same answer the real path captures.
-            let decision = self.restore_decision(
-                entry,
-                own_plugin_id.as_deref(),
-                inventory.as_deref(),
-                SlotReadings::Live,
-                home,
-                ctx,
-            );
+            let decision = self.restore_decision(entry, &host, &home, ctx);
             lines.push(restore_preview_line(
                 &decision,
                 &entry.plugin_id,
@@ -2474,14 +2581,16 @@ impl OpenClawDriver {
                     .any(|spec| spec.id == entry.plugin_id)
             })
             .collect();
-        let home = claim_state_dir(prior)?;
         self.restore_preview_lines(
             prior,
             &dropped,
-            &home,
             ctx,
             "",
             "which the contract being enabled no longer displaces",
+            // A same-home re-enable keeps the prior installation, so nothing
+            // removes this adapter's own plugin from `plugins.allow` ahead of the
+            // restore and the host's current key is the one the operation reads.
+            AllowlistReading::Live,
         )
     }
 
@@ -2529,20 +2638,26 @@ impl OpenClawDriver {
         let mut cleanup_complete = true;
         let own_plugin_id = claim_own_plugin(claim)?;
         let inventory = self.read_plugin_inventory(home, ctx);
+        // Both callers of this method stand on the same side of the uninstall:
+        // `disable` restores in its step 3, after the step-2 `plugins uninstall`
+        // has already rewritten the host, and the same-home `cleanup_replaced_claim`
+        // branch runs no uninstall at all because a same-home re-enable keeps the
+        // prior installation. So the live `plugins.allow` is the answer the restore
+        // really meets, and the slot readings come from whatever capture the caller
+        // took.
+        let host = RestoreHost {
+            own_plugin_id: own_plugin_id.as_deref(),
+            inventory: inventory.as_deref(),
+            slots,
+            allowlist: AllowlistReading::Live,
+        };
         for entry in displaced {
             // Already whitelist-validated when the references were resolved,
             // before any mutation; re-checking here keeps this helper safe to
             // call on its own.
             validate_plugin_id(&entry.plugin_id)?;
             let plugin_id = entry.plugin_id.clone();
-            let decision = self.restore_decision(
-                entry,
-                own_plugin_id.as_deref(),
-                inventory.as_deref(),
-                slots,
-                home,
-                ctx,
-            );
+            let decision = self.restore_decision(entry, &host, home, ctx);
             // The host can also have released this ownership, and recognizing
             // that is what keeps disable convergent. A plugin no longer in the
             // inventory has nothing to hand back; one an explicit policy keeps
@@ -2902,14 +3017,18 @@ impl OpenClawDriver {
     /// naming this adapter's own plugin says its selection ran — `plugins install`
     /// and `plugins enable` both run it — but selection only disables plugins of the
     /// selected kind, so the plugin's own flag reading off is what says *this* entry
-    /// was one of them. One shared predicate, because four callers have to agree:
+    /// was one of them. One shared predicate, because five callers have to agree:
     /// the write-ahead mark in [`Self::record_slot_selection_handoffs`], the one
     /// [`Self::record_recovered_slot_selection_handoffs`] writes when a `disable`
     /// recovers the attribution the mark missed, the restore branch in
-    /// [`Self::restore_decision`], and the bucket `status` files the entry under.
-    /// They disagreed once already, and the disagreement was visible to the
+    /// [`Self::restore_decision`], the bucket `status` files the entry under, and
+    /// the re-enable that has to tell an unperformed hand-off from an unrecorded
+    /// one. They disagreed once already, and the disagreement was visible to the
     /// operator as a report saying "this adapter never disabled it" from the same
-    /// run that was about to re-enable it.
+    /// run that was about to re-enable it. They disagreed a second time across a
+    /// re-enable, where the restore branch handed the plugin back on exactly this
+    /// evidence while the replacement receipt declined to carry it — see
+    /// [`prior_unrecorded_displacements`].
     ///
     /// `slots` is where the slot half comes from, and it is the only thing the
     /// callers do not share: the enable-side mark and `status` read the host live,
@@ -5634,6 +5753,62 @@ enum AllowlistMeaning {
     DoesNotKeepItOff,
 }
 
+/// *When* a decision reads `plugins.allow`: as the host holds it now, or as it
+/// will hold it once the operation's own `plugins uninstall` has run.
+///
+/// Orthogonal to [`AllowlistMeaning`], which asks what weight the reading
+/// carries. This one asks which reading is the right one to weigh, and it exists
+/// because `plugins.allow` is the single key this driver's own cleanup rewrites:
+/// `removePluginFromConfig` drops the uninstalled plugin's id from it and removes
+/// the key entirely once nothing is left in it (v2026.4.14
+/// `src/plugins/uninstall.ts:126-133`). Nothing else the restore reads behaves
+/// that way — `plugins.deny` and `plugins.enabled` are operator keys this driver
+/// never writes, and the inventory and slot readings are *meant* to be taken
+/// after the uninstall.
+///
+/// A decision made after the uninstall therefore reads the key live and gets the
+/// post-uninstall answer for free, while a preview of that same decision runs
+/// before it and reads a key that still names this adapter's own plugin. Feeding
+/// the preview's reading to the preview's verdict is what made the two contradict
+/// each other: for an allowlist naming only this adapter's plugin — the shape a
+/// host is left in once it has admitted this adapter and nothing else — the plan
+/// reported a restriction the operation was about to delete, promised to leave the
+/// bundled plugin disabled, and then re-enabled it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllowlistReading<'a> {
+    /// Read the key as the host holds it.
+    ///
+    /// Correct for every decision taken after the uninstall has already run — the
+    /// real restore in `disable`, and the cross-home `cleanup_replaced_claim`
+    /// branch, which delegates to one — and for every decision no uninstall
+    /// precedes at all: the enable-side probe, `status`, and the same-home
+    /// dropped-displacement cleanup, which restores from the prior receipt while
+    /// this adapter's own plugin stays installed.
+    Live,
+    /// Project the key past the removal of this adapter's own plugin, which the
+    /// operation being described uninstalls before the restore it predicts.
+    ///
+    /// Carries that plugin's id because only its own entry leaves the key;
+    /// `None` is a receipt recording no plugin of its own, which uninstalls
+    /// nothing and so projects to the live reading.
+    AfterOwnUninstall(Option<&'a str>),
+}
+
+impl AllowlistReading<'_> {
+    /// The ids `plugins.allow` still names when this decision is acted on.
+    ///
+    /// An empty result is the projected form of a vacant key, not of a
+    /// restrictive one: upstream drops the key when the filter empties the array,
+    /// so a restriction whose only entry was this adapter's own plugin is gone by
+    /// the time the restore asks.
+    fn surviving_allow_ids(&self, ids: Vec<String>) -> Vec<String> {
+        let AllowlistReading::AfterOwnUninstall(Some(own)) = self else {
+            return ids;
+        };
+        ids.into_iter().filter(|id| id != own).collect()
+    }
+}
+
 /// What a `config get` answer for a plugin-id *list* key names.
 #[derive(Debug, PartialEq, Eq)]
 enum PolicyIdList {
@@ -5832,6 +6007,28 @@ enum SlotReadings<'a> {
     Live,
     /// Reason from readings taken before this operation's own mutation.
     Captured(&'a CapturedSlots),
+}
+
+/// The host readings one [`OpenClawDriver::restore_decision`] is made against.
+///
+/// Bundled because all four are resolved once per operation and then asked about
+/// once per displaced plugin, and because two of them say *when* a reading was
+/// taken rather than what it says: `plugins uninstall` rewrites both
+/// `plugins.slots.<slot>` and `plugins.allow`, so the two sides of that uninstall
+/// do not read the same host. Keeping the two corrections in one type is what stops
+/// a caller from applying one and forgetting the other — which is how a preview
+/// came to promise the opposite of the operation it described.
+#[derive(Debug, Clone, Copy)]
+struct RestoreHost<'a> {
+    /// This adapter's own plugin id, from the receipt being restored. `None` when
+    /// the receipt records no plugin of its own.
+    own_plugin_id: Option<&'a str>,
+    /// `plugins list` stdout, or `None` when the host could not answer.
+    inventory: Option<&'a str>,
+    /// Where the two slot readings come from — see [`SlotReadings`].
+    slots: SlotReadings<'a>,
+    /// Which `plugins.allow` to weigh — see [`AllowlistReading`].
+    allowlist: AllowlistReading<'a>,
 }
 
 /// What the persisted `plugins.entries.<id>.enabled` flag says about a
@@ -6096,24 +6293,93 @@ fn inherited_displacement_ids(
     prior: Option<&AdapterClaim>,
     ctx: &DriverCtx,
 ) -> Result<HashSet<String>, AdapterError> {
-    let Some(prior) = prior else {
+    let Some(prior) = prior_for_this_instance(prior, ctx)? else {
         return Ok(HashSet::new());
     };
-    // A receipt written by another framework owns no OpenClaw plugin.
-    // `claim_state_dir` would reject it; answering "nothing inherited" is the
-    // same verdict without failing an enable over a receipt this driver has no
-    // business reading.
-    if !matches!(prior.driver_payload, DriverPayload::OpenClaw(_)) {
-        return Ok(HashSet::new());
-    }
-    if claim_state_dir(prior)? != require_home(ctx)? {
-        return Ok(HashSet::new());
-    }
     // Applied entries only: see [`claim_applied_displacement_ids`]. An unapplied
     // one is not ownership to protect, and treating it as such is what exempts it
     // from the re-confirmation that would otherwise notice the operator's own
-    // disable.
+    // disable. What an unapplied entry *can* still be is a hand-off the receipt
+    // failed to mark, which is a different question with a different answer — see
+    // [`prior_unrecorded_displacements`].
     Ok(claim_applied_displacement_ids(prior)?.into_iter().collect())
+}
+
+/// The prior receipt when it describes the OpenClaw instance this operation
+/// resolves to, and `None` when there is nothing to inherit from.
+///
+/// One gate rather than a copy per caller, because every ownership question on the
+/// enable side rests on the same fact: ownership does not travel across OpenClaw
+/// state directories. [`preserve_openclaw_displaced_facts`] states why at length
+/// and applies it to the facts it merges; this applies it to the two questions
+/// asked *before* the replacement receipt exists — which claims an unverified probe
+/// may treat as already owned, and which unrecorded hand-offs may be recovered.
+///
+/// # Errors
+///
+/// Propagates an unresolvable state directory, from the prior receipt or from this
+/// operation's own context.
+fn prior_for_this_instance<'a>(
+    prior: Option<&'a AdapterClaim>,
+    ctx: &DriverCtx,
+) -> Result<Option<&'a AdapterClaim>, AdapterError> {
+    let Some(prior) = prior else {
+        return Ok(None);
+    };
+    // A receipt written by another framework owns no OpenClaw plugin.
+    // `claim_state_dir` would reject it; answering "no prior" is the same verdict
+    // without failing an enable over a receipt this driver has no business reading.
+    if !matches!(prior.driver_payload, DriverPayload::OpenClaw(_)) {
+        return Ok(None);
+    }
+    if claim_state_dir(prior)? != require_home(ctx)? {
+        return Ok(None);
+    }
+    Ok(Some(prior))
+}
+
+/// The displaced plugins a prior receipt for **this same OpenClaw instance**
+/// records without having marked the hand-off, keyed by plugin id.
+///
+/// The complement of [`inherited_displacement_ids`], and the reason it exists is
+/// that an unapplied entry is not automatically an unperformed one. Writing the
+/// mark needs a readable `plugins.slots.<slot>`, so a probe the host cannot answer —
+/// or a process killed before the save that follows it — leaves a receipt reading
+/// `applied = false` over a plugin this adapter really did turn off. Three places
+/// already recover it from positive host evidence through
+/// [`OpenClawDriver::handoff_performed_by_slot_selection`]: the enable-side mark,
+/// the one a `disable` writes from its pre-uninstall capture, and the restore
+/// branch that refuses to strand the plugin. This is the set a *fourth* place has
+/// to ask about, because a re-enable is the one path where the receipt the evidence
+/// would be recovered into is itself about to be replaced: `prepare_enable` asks,
+/// and it is the caller that has to, being the only scope holding both the prior
+/// receipt and this round's probe — the same reason [`inherited_displacement_ids`]
+/// gives for itself.
+///
+/// Keyed by plugin id for the reason [`preserve_openclaw_displaced_facts`] gives:
+/// a displacement's identity is the plugin it displaced, not the handle the receipt
+/// chose for it.
+///
+/// Empty for a first enable, and that is the point — with no prior receipt there is
+/// no unrecorded hand-off to recover, and a `false` on the host belongs to whoever
+/// wrote it.
+///
+/// # Errors
+///
+/// Propagates a receipt-consistency error from the prior's own displaced-plugin
+/// references, or an unresolvable state directory.
+fn prior_unrecorded_displacements(
+    prior: Option<&AdapterClaim>,
+    ctx: &DriverCtx,
+) -> Result<BTreeMap<String, DisplacedPlugin>, AdapterError> {
+    let Some(prior) = prior_for_this_instance(prior, ctx)? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(claim_displaced_plugins(prior)?
+        .into_iter()
+        .filter(|entry| !entry.applied)
+        .map(|entry| (entry.plugin_id.clone(), entry))
+        .collect())
 }
 
 /// Carry a prior receipt's displaced-plugin facts into its replacement — but
@@ -6222,6 +6488,17 @@ fn preserve_openclaw_displaced_facts(
         // that changes nothing. `dropped_displaced_plugins` picks it up instead,
         // `cleanup_replaced_claim` reports it as never performed, and this enable's
         // own probe decides whether to claim the plugin afresh.
+        //
+        // "Never ran" is read off the receipt alone here, and that is correct only
+        // because the host has already been asked. An unapplied entry whose hand-off
+        // the host *does* attribute to this adapter — the unreadable slot probe, the
+        // process killed before the save — is recovered in `prepare_enable`, which
+        // holds the prior receipt and this round's probe together and can therefore
+        // tell that state apart from an operator's own disable. Such an entry arrives
+        // here already claimed afresh, so the id match above took it; what reaches
+        // this branch is an entry no evidence anywhere supports, and handing it back
+        // through `dropped_displaced_plugins` is what keeps the plugin from being
+        // stranded by a cleanup that has nothing left to attribute it to.
         if !entry.applied {
             continue;
         }
