@@ -133,6 +133,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-capability-skill-guard"
+version = "0.12.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "asc-cli"
 version = "0.12.0"
 dependencies = [

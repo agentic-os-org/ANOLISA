@@ -497,6 +497,11 @@ redacted text；只保存 text length/SHA-256、扫描选项和 sanitized findin
 [`SKILL_LEDGER_zh.md`](SKILL_LEDGER_zh.md) 定义；SkillFS/daemon 集成由
 [`SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md`](SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md) 定义。
 
+V2 SkillGuard 的分批迁移与已确认的兼容性变更见
+[`SKILL_GUARD_PHASE_ONE_zh.md`](SKILL_GUARD_PHASE_ONE_zh.md)。新 manifest 使用 `version: 2`
+并签署 canonical Skill 身份，使用系统密钥，不导入 V1 历史或保留旧密钥验签。
+此变更不修改本节记录的 V1 oracle，也不改变 SkillFS notify、resolver 和 activation 的协议版本。
+
 ### 10.2 六种 Skill Ledger 状态
 
 Skill Ledger 完整性状态恰好为以下六种，文档和实现不得删减：
