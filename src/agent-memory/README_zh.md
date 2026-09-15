@@ -68,6 +68,10 @@ openclaw gateway restart
 - **Tier C**（7 工具）：治理（快照、版本控制、聚合）
 - **主权**（13 工具）：关于、遗忘、同意、导入导出、任务、梦境合成
 
+Profile 门控（basic/advanced/expert）按部署形态控制工具可见性。OpenClaw 适配器会把该档位
+透传给子进程，但只接受 `basic`/`advanced`：`expert` 会隐藏其 memory 契约所依赖的 Tier B
+工具，插件会拒绝加载。
+
 ## 环境要求
 
 - Linux（x86_64 / aarch64）

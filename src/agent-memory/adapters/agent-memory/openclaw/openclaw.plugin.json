@@ -32,10 +32,9 @@
         "type": "string",
         "enum": [
           "basic",
-          "advanced",
-          "expert"
+          "advanced"
         ],
-        "description": "Memory profile controlling which tools are visible to the agent."
+        "description": "Memory profile forwarded as MEMORY_PROFILE: basic (structured API preferred) or advanced (file tools preferred, default). 'expert' is not offered: it hides the Tier B tools this plugin's memory contract is built on (memory_search, memory_observe, memory_get_context), so the adapter rejects it at load. It is meant for direct MCP clients that drive the Tier A file tools themselves."
       },
       "maxReadBytes": {
         "type": "integer",
@@ -72,7 +71,7 @@
     },
     "profile": {
       "label": "Memory Profile",
-      "help": "Controls which tools are advertised: basic (structured API only), advanced (file + search), expert (file tools only)."
+      "help": "Controls which tools the agent-memory child advertises: basic (structured API preferred) or advanced (file tools preferred, default). expert is unavailable here — it hides the Tier B tools this adapter registers, so the plugin refuses to load with it."
     },
     "maxReadBytes": {
       "label": "Max Read Bytes",

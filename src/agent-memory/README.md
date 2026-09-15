@@ -105,6 +105,9 @@ Single-process Tokio async runtime exposing 37 MCP tools over stdio JSON-RPC 2.0
 - **Sovereignty** (13 tools): about, forget, consent, export/import, tasks, dream
 
 Profile gating (basic/advanced/expert) controls tool visibility per deployment.
+The OpenClaw adapter forwards this profile to the child and accepts `basic`/`advanced`
+only: `expert` hides the Tier B tools its memory contract is built on, so the plugin
+refuses to load with it.
 
 ## Requirements
 

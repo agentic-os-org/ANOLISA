@@ -38,6 +38,7 @@ type SchemaProperty = {
   type?: string;
   description?: string;
   maxLength?: number;
+  enum?: string[];
 };
 
 type Manifest = {
@@ -156,6 +157,34 @@ describe("openclaw.plugin.json configSchema", () => {
     // resolveSessionId() runs explicit config through validateUserId(), so the
     // two schema entries must not drift apart.
     assert.equal(properties.sessionId?.maxLength, properties.userId?.maxLength);
+  });
+
+  it("offers exactly the profiles the resolver can honor", async () => {
+    // Both directions matter. An enum value the resolver rejects sends the
+    // operator to a plugin that fails during register — the Control UI offers
+    // it, the host validates it, and the memory slot still does not come up. A
+    // value the resolver accepts but the enum omits is unreachable from config
+    // the host validates. The resolver's own list is the source of truth, so
+    // this reads it instead of restating it.
+    const { SUPPORTED_PROFILES, resolveConfig } = await import("../../src/config.js");
+    // Typed as string[] on purpose: the deepEqual below narrows the schema's
+    // enum to the resolver's union, and the point of this guard is that
+    // "expert" is *not* in it.
+    const declaredProfiles: string[] = properties.profile?.enum ?? [];
+    assert.ok(
+      !declaredProfiles.includes("expert"),
+      "the schema must not offer 'expert': the child hides the Tier B tools " +
+        "this adapter's memory contract is built on, so resolveConfig rejects it",
+    );
+    assert.deepEqual(declaredProfiles, [...SUPPORTED_PROFILES]);
+    for (const profile of SUPPORTED_PROFILES) {
+      const cfg = resolveConfig({
+        pluginConfig: { ...DOCUMENTED_CONFIG, profile, binaryPath: process.execPath },
+        resolvePath: (p: string) => p,
+        logger: { info: () => {}, warn: () => {}, debug: () => {} },
+      } as never);
+      assert.equal(cfg.profile, profile);
+    }
   });
 });
 

@@ -145,7 +145,7 @@ anolisa adapter status agent-memory
 |---|---|---|
 | `binaryPath` | 自动发现：`$PATH` → `/usr/bin/agent-memory` → `/usr/local/bin/agent-memory` → `~/.local/bin/agent-memory` | 二进制绝对路径 |
 | `userId` | env `USER_ID` → OS `uid` → env `$USER` | 命名空间 `user_id`；校验规则与 Rust 侧一致 |
-| `profile` | `advanced` | profile 门控，以 `MEMORY_PROFILE` env 启动子进程 |
+| `profile` | `advanced` | profile 门控，以 `MEMORY_PROFILE` env 启动子进程；仅支持 `basic` 与 `advanced` —— 插件在加载阶段拒绝 `expert`（见下文 Profile 含义） |
 | `maxReadBytes` | `1048576`（1 MiB） | 单次 `mem_read` 上限，以 `MEMORY_MAX_READ_BYTES` env 传入 |
 | `maxWriteBytes` | `16777216`（16 MiB） | 单次 `mem_write` 上限，以 `MEMORY_MAX_WRITE_BYTES` env 传入 |
 | `sessionId` | env `MEMORY_SESSION_ID` → 新生成 `ses_<random>` | 命名空间挂载会话，必须固定 |
@@ -423,6 +423,13 @@ Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` �
 - **basic** —— 37 个工具全部展示；弱模型也能用 Tier B 的结构化 API。
 - **advanced**（默认）—— 37 个工具全部展示；强模型应优先使用 Tier A 文件操作。
 - **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
+
+`expert` 面向直连 MCP 的客户端——它们自己驱动 Tier A 文件工具。OpenClaw 适配器在插件加载阶段就会拒绝
+`plugins.entries["memory-anolisa"].config.profile = "expert"`：它为宿主 memory 契约注册的 4 个工具有
+3 个属于 Tier B（`memory_search`、`memory_observe`、`memory_get_context`），替 agent 调用
+`memory_search` 的两条路径（每轮 prompt 前的自动召回、`corpus=all` 语料补充）同样属于 Tier B。
+若把该档位透传下去，memory slot 会照常加载，但上述调用全部返回 `METHOD_NOT_FOUND`；因此适配器选择
+在启动时失败并说明原因。
 
 ### Embedding 配置
 

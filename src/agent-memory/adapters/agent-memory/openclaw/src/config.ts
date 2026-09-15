@@ -4,9 +4,10 @@
  * Reads plugin config, falls back to env vars, then to OS defaults.
  * Validation rules are kept in lock-step with the Rust crate
  * (`src/agent-memory/src/ns/mod.rs::validate_user_id`,
- * `src/agent-memory/src/config.rs`) so that a value accepted here is
- * also accepted by the subprocess — failures in the deep child are
- * harder to diagnose than failures at plugin boot.
+ * `src/agent-memory/src/config.rs`, including the `Profile::tool_visible`
+ * gate the child enforces on the profile this module forwards) so that a
+ * value accepted here is also one the subprocess can honor — failures in
+ * the deep child are harder to diagnose than failures at plugin boot.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
@@ -14,10 +15,21 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+/** Profiles this adapter can run the agent-memory child under.
+ *
+ *  `expert` is deliberately absent: the child honors it by hiding the Tier B
+ *  tools this plugin's memory contract is made of (see `resolveProfile`).
+ *  `openclaw.plugin.json`'s `configSchema.properties.profile.enum` must list
+ *  exactly these values — `tests/unit/manifest-config-schema-test.ts` fails
+ *  on drift in either direction. */
+export const SUPPORTED_PROFILES = ["basic", "advanced"] as const;
+
+export type AgentMemoryProfile = (typeof SUPPORTED_PROFILES)[number];
+
 export type AgentMemoryConfig = {
   binaryPath: string;
   userId: string;
-  profile: "basic" | "advanced" | "expert";
+  profile: AgentMemoryProfile;
   maxReadBytes: number;
   maxWriteBytes: number;
   /** Session id pinned for this client's lifetime. Forwarded as
@@ -30,7 +42,7 @@ export type AgentMemoryConfig = {
   sessionDir: string;
 };
 
-const DEFAULT_PROFILE: AgentMemoryConfig["profile"] = "advanced";
+const DEFAULT_PROFILE: AgentMemoryProfile = "advanced";
 const DEFAULT_MAX_READ_BYTES = 1_048_576;
 const DEFAULT_MAX_WRITE_BYTES = 16 * 1_048_576;
 
@@ -103,10 +115,52 @@ function normalizeTrimmedString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function normalizeProfile(value: unknown): AgentMemoryConfig["profile"] {
+/** Tier B tools the child hides under `Profile::Expert`
+ *  (`src/agent-memory/src/config.rs::Profile::tool_visible`) that this plugin
+ *  registers for the host's memory contract. Spelled out in the rejection so
+ *  the operator can tie it to the `METHOD_NOT_FOUND` the child would otherwise
+ *  answer with at call time. */
+export const CONTRACT_TOOLS_HIDDEN_BY_EXPERT = [
+  "memory_search",
+  "memory_observe",
+  "memory_get_context",
+] as const;
+
+/** Resolve `profile`, rejecting the one value the child accepts but this
+ *  adapter cannot honor.
+ *
+ *  `expert` hides Tier B in the child at both `tools/list` and `tools/call`,
+ *  and three of the four tools this plugin registers are Tier B — as are the
+ *  two paths that call `memory_search` behind the agent's back, the
+ *  auto-recall hook and the `corpus=all` supplement. Forwarding it therefore
+ *  does not give the operator "file tools only": it loads a memory slot whose
+ *  search, observe and get_context tools fail every call, whose auto-recall
+ *  fails on every prompt, and whose corpus supplement silently answers
+ *  nothing — the only hint is an error string inside each tool result. The
+ *  adapter exposes exactly one Tier A tool (`memory_get` → `mem_read`) and
+ *  cannot expose the rest without breaking the host's memory contract, so
+ *  `expert` stays a setting for direct MCP clients that drive Tier A
+ *  themselves. Refusing at boot is this module's standing contract for a
+ *  value the subprocess would honor differently than the operator expects.
+ *
+ *  Unrecognized values keep falling back to `DEFAULT_PROFILE`: the manifest
+ *  enum already turns a typo into a host-side config error, and this resolver
+ *  stays permissive for hosts that do not validate. */
+function resolveProfile(value: unknown): AgentMemoryProfile {
   const s = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (s === "basic" || s === "advanced" || s === "expert") {
-    return s;
+  if (s === "expert") {
+    throw new Error(
+      `profile 'expert' cannot run the OpenClaw adapter: the agent-memory child hides ` +
+        `${CONTRACT_TOOLS_HIDDEN_BY_EXPERT.join(", ")} under that profile, and those are ` +
+        `three of the four tools this plugin registers for the host's memory contract ` +
+        `(auto-recall and the corpus=all supplement call memory_search too). Use ` +
+        `'advanced' (the default) or 'basic'; 'expert' is for direct MCP clients that ` +
+        `drive the Tier A file tools themselves.`,
+    );
+  }
+  const supported: readonly string[] = SUPPORTED_PROFILES;
+  if (supported.includes(s)) {
+    return s as AgentMemoryProfile;
   }
   return DEFAULT_PROFILE;
 }
@@ -259,7 +313,7 @@ export function resolveConfig(api: OpenClawPluginApi): AgentMemoryConfig {
   const userId = resolveUserId(normalizeTrimmedString(raw.userId));
   const sessionId = resolveSessionId(normalizeTrimmedString(raw.sessionId));
   const sessionDir = resolveSessionDir(normalizeTrimmedString(raw.sessionDir));
-  const profile = normalizeProfile(raw.profile);
+  const profile = resolveProfile(raw.profile);
   const maxReadBytes = normalizePositiveInt(raw.maxReadBytes, DEFAULT_MAX_READ_BYTES);
   const maxWriteBytes = normalizePositiveInt(raw.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES);
 

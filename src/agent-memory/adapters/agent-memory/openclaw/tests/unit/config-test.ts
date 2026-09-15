@@ -8,6 +8,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const {
   resolveConfig,
@@ -248,5 +250,147 @@ describe("resolveConfig sessionId (R6-1 regression)", () => {
     } catch (err: any) {
       assert.ok(err.message.includes("binary"), err.message);
     }
+  });
+});
+
+describe("resolveConfig profile gate", () => {
+  // `expert` is a valid MEMORY_PROFILE for the child — it hides Tier B at both
+  // `tools/list` and `tools/call` (`src/config.rs::Profile::tool_visible`,
+  // pinned by `tests/profile_test.rs::expert_profile_hides_tier_b`) — but three
+  // of the four tools this plugin registers for the host's memory contract are
+  // exactly that Tier B list, and so are the two paths that call
+  // `memory_search` behind the agent's back (auto-recall, `corpus=all`
+  // supplement). Forwarding it used to load a memory slot whose
+  // memory_search / memory_observe / memory_get_context failed every call with
+  // METHOD_NOT_FOUND, whose auto-recall failed on every prompt and whose
+  // corpus supplement answered nothing — with the reason visible only inside
+  // each tool result, never at boot.
+  it("rejects 'expert' instead of forwarding a profile the child hides contract tools under", () => {
+    assert.throws(
+      () => resolveConfig(mockApi({ profile: "expert" })),
+      /profile 'expert' cannot run the OpenClaw adapter/,
+    );
+  });
+
+  it("names the hidden contract tools and the profiles that do work", () => {
+    assert.throws(
+      () => resolveConfig(mockApi({ profile: "expert" })),
+      (err: Error) => {
+        for (const tool of ["memory_search", "memory_observe", "memory_get_context"]) {
+          assert.ok(err.message.includes(tool), `message should name ${tool}: ${err.message}`);
+        }
+        assert.match(err.message, /'advanced'/);
+        assert.match(err.message, /'basic'/);
+        return true;
+      },
+    );
+  });
+
+  it("normalizes case and surrounding whitespace before rejecting", () => {
+    for (const profile of ["Expert", "EXPERT", "  expert  ", "\tExpert\n"]) {
+      assert.throws(
+        () => resolveConfig(mockApi({ profile })),
+        /cannot run the OpenClaw adapter/,
+        `expected ${JSON.stringify(profile)} to be rejected`,
+      );
+    }
+  });
+
+  it("reports the profile before probing for the binary", () => {
+    // 48d10029 moved identifier validation ahead of the binary probe so a
+    // configuration error is not masked by "agent-memory binary not found" on
+    // a host without the binary; the profile gate keeps that order.
+    assert.throws(
+      () =>
+        resolveConfig(mockApi({ profile: "expert", binaryPath: "/nonexistent/agent-memory" })),
+      (err: Error) => {
+        assert.ok(!err.message.includes("binary"), err.message);
+        assert.match(err.message, /profile 'expert'/);
+        return true;
+      },
+    );
+  });
+
+  it("accepts both supported profiles, normalized", () => {
+    for (const [given, expected] of [
+      ["basic", "basic"],
+      ["advanced", "advanced"],
+      ["  Basic ", "basic"],
+      ["ADVANCED", "advanced"],
+    ]) {
+      const cfg = resolveConfig(mockApi({ profile: given, binaryPath: process.execPath }));
+      assert.equal(cfg.profile, expected);
+    }
+  });
+
+  it("still falls back to advanced for an unrecognized value", () => {
+    // The manifest enum turns a typo into a host-side config error; the
+    // resolver stays permissive for hosts that do not validate.
+    const cfg = resolveConfig(mockApi({ profile: "frontier", binaryPath: process.execPath }));
+    assert.equal(cfg.profile, "advanced");
+  });
+
+  it("does not read the profile off the ambient environment", () => {
+    // resolveConfig reads `profile` from api.pluginConfig only, and
+    // buildChildEnv lets the resolved value win over the ambient one
+    // (mcp-client-test.ts), so an exported MEMORY_PROFILE=expert — valid for a
+    // direct MCP client on the same box — cannot reach this adapter's child.
+    process.env["MEMORY_PROFILE"] = "expert";
+    try {
+      const cfg = resolveConfig(mockApi({ binaryPath: process.execPath }));
+      assert.equal(cfg.profile, "advanced");
+    } finally {
+      delete process.env["MEMORY_PROFILE"];
+    }
+  });
+});
+
+describe("the profile gate's premise, derived from the child", () => {
+  // Rejecting `expert` is only correct while the child's gate hides tools this
+  // plugin actually registers, so both sides are read instead of restated: the
+  // Tier B list from the Rust suite that pins it, the contract tool list from
+  // the manifest the host loads. If `Profile::tool_visible` ever covers another
+  // registered tool — or stops covering one of these — the intersection moves
+  // and this fails, forcing the rejection and its message to be re-derived
+  // rather than quietly going stale.
+  const rustProfileTest = fileURLToPath(
+    new URL("../../../../../tests/profile_test.rs", import.meta.url),
+  );
+  const manifest = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../../openclaw.plugin.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as { contracts?: { tools?: string[] } };
+
+  /** Tier B tool names, read from the `const TIER_B` declaration in the Rust suite. */
+  function rustTierB(): string[] {
+    const source = readFileSync(rustProfileTest, "utf8");
+    const decl = /const\s+TIER_B[^=]*=\s*&\[([\s\S]*?)\];/.exec(source);
+    assert.ok(
+      decl,
+      `could not find the TIER_B list in ${rustProfileTest}; if that suite moved, ` +
+        `point this guard at its new home instead of dropping the derivation`,
+    );
+    const names = [...decl![1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    assert.ok(names.length > 0, "TIER_B parsed as empty");
+    return names;
+  }
+
+  it("rejects 'expert' because the child hides registered contract tools under it", async () => {
+    const { CONTRACT_TOOLS_HIDDEN_BY_EXPERT } = await import("../../src/config.js");
+    const contractTools = manifest.contracts?.tools ?? [];
+    assert.ok(
+      contractTools.length > 0,
+      "openclaw.plugin.json declares no contracts.tools; this guard needs the " +
+        "host-facing tool list to intersect with the child's gate",
+    );
+    const hidden = contractTools.filter((tool) => rustTierB().includes(tool)).sort();
+    assert.ok(
+      hidden.length > 0,
+      "expert hides nothing this plugin registers, so refusing it is no longer " +
+        "justified — drop the rejection in resolveProfile instead of keeping it",
+    );
+    assert.deepEqual(hidden, [...CONTRACT_TOOLS_HIDDEN_BY_EXPERT].sort());
   });
 });

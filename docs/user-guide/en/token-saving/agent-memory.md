@@ -146,7 +146,7 @@ Plugin config (via OpenClaw UI or `openclaw.json` `plugins.entries["memory-anoli
 |---|---|---|
 | `binaryPath` | auto-discovery: `$PATH` → `/usr/bin/agent-memory` → `/usr/local/bin/agent-memory` → `~/.local/bin/agent-memory` | absolute binary path |
 | `userId` | env `USER_ID` → OS `uid` → env `$USER` | namespace `user_id`; same validation as Rust side |
-| `profile` | `advanced` | profile gate, passed as `MEMORY_PROFILE` env |
+| `profile` | `advanced` | profile gate, passed as `MEMORY_PROFILE` env; `basic` or `advanced` only — the plugin rejects `expert` at load (see Profiles below) |
 | `maxReadBytes` | `1048576` (1 MiB) | `mem_read` cap, passed as `MEMORY_MAX_READ_BYTES` |
 | `maxWriteBytes` | `16777216` (16 MiB) | `mem_write` cap, passed as `MEMORY_MAX_WRITE_BYTES` |
 | `sessionId` | env `MEMORY_SESSION_ID` → new `ses_<random>` | namespace session; must be fixed |
@@ -424,6 +424,16 @@ Profiles are UX hints, not security boundaries, but enforced at both `tools/list
 - **basic** — all 37 tools shown; weaker models can use the Tier B structured API.
 - **advanced** (default) — all 37 tools shown; stronger models should prefer Tier A file ops.
 - **expert** — hides Tier B (`memory_search`, `memory_observe`, `memory_get_context`, `mem_consolidate`, `memory_forget`, `memory_consent`); `tools/call` returns `METHOD_NOT_FOUND`. For proficient models that only need Tier A and Tier C.
+
+`expert` is a setting for direct MCP clients, which drive the Tier A file tools
+themselves. The OpenClaw adapter rejects
+`plugins.entries["memory-anolisa"].config.profile = "expert"` when the plugin
+loads: three of the four tools it registers for the host's memory contract
+(`memory_search`, `memory_observe`, `memory_get_context`) are Tier B, and so are
+the two paths that call `memory_search` on the agent's behalf — auto-recall
+before each prompt and the `corpus=all` supplement. Forwarding the profile would
+leave the memory slot loaded while every one of those calls came back
+`METHOD_NOT_FOUND`, so the adapter fails at boot and says why instead.
 
 ### Embedding config
 
