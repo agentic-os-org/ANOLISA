@@ -176,6 +176,6 @@ jobs:
             CARGO_BIN="$cargo_bin" \
             bash -c '
               ulimit -l unlimited
-              exec "$CARGO_BIN" test --test bpf_load -- \
+              exec "$CARGO_BIN" test --features enforcement-e2e --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
             '
