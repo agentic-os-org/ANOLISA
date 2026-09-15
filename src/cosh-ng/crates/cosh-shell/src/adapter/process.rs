@@ -68,12 +68,16 @@ pub(crate) fn spawn_provider_child(
     provider_label: &'static str,
     stdin_mode: ProviderStdinMode,
     prompt_mode: ProviderPromptArgMode,
+    envs: &[(&str, &str)],
 ) -> Result<Child, AdapterError> {
     const MAX_SPAWN_ATTEMPTS: usize = 3;
 
     for attempt in 0..MAX_SPAWN_ATTEMPTS {
         let mut command = Command::new(&prepared.program);
         command.args(&prepared.args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
         match prompt_mode {
             ProviderPromptArgMode::None => {}
             ProviderPromptArgMode::TrailingArgIfNonEmpty => {

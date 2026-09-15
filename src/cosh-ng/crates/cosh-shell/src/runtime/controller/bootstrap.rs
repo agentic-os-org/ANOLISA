@@ -145,6 +145,21 @@ pub(crate) fn run_raw(
     if let Some(control) = assistance_control.clone() {
         config.set_assistance_control(control);
     }
+    // Run registry: reap stale entries first, then publish this session so a
+    // crash or SIGKILL leaves post-mortem evidence for doctor and export.
+    if matches!(shell_kind, RawShellKind::Bash | RawShellKind::Zsh) {
+        crate::diagnostics::run_registry::cleanup_stale();
+        crate::diagnostics::run_registry::record_shell(
+            raw_shell_kind_label(&shell_kind),
+            &config.session_id,
+            cosh_config.ai_enabled,
+            match config.integration {
+                ShellIntegration::Native => "native",
+                ShellIntegration::Enhanced => "enhanced",
+            },
+            enhanced_integration,
+        );
+    }
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
@@ -211,6 +226,7 @@ pub(crate) fn run_raw(
         }
         let snapshot_publisher = inline_state.shell_rewrite.start_worker();
         config.set_shell_environment_observer(move |snapshot| {
+            crate::diagnostics::run_registry::update_marker_generation(snapshot.generation);
             snapshot_publisher.publish(snapshot);
         });
         if startup_health_scan_enabled_for_env(&cosh_config.health) {
@@ -300,6 +316,8 @@ pub(crate) fn run_raw(
     }
     inline_state.shell_rewrite.shutdown();
 
+    crate::diagnostics::run_registry::remove_shell();
+
     match raw_result {
         Ok(output) => output.exit_status.unwrap_or(0),
         Err(err) => {
@@ -315,6 +333,15 @@ fn now_hour_bucket() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() / 3600)
         .unwrap_or_default()
+}
+
+fn raw_shell_kind_label(kind: &RawShellKind) -> &'static str {
+    match kind {
+        RawShellKind::Bash => "bash",
+        RawShellKind::Zsh => "zsh",
+        RawShellKind::MissingShellValue => "unknown",
+        RawShellKind::Unsupported(_) => "unsupported",
+    }
 }
 
 pub(crate) fn run_interactive(adapter_name: &str) -> i32 {

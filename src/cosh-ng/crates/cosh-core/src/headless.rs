@@ -57,6 +57,17 @@ pub async fn run(
             return Ok(0);
         }
     };
+    // Process lifecycle event for the run registry: doctor reads this entry
+    // to pair the persistent core with its owning shell. Removal happens on
+    // clean shutdown in `main`; abnormal exits leave it behind as evidence.
+    crate::run_registry::write_entry(
+        if args.execution_profile.is_brokered() {
+            "brokered"
+        } else {
+            "headless"
+        },
+        session.record.session_id.as_str(),
+    );
 
     // Build and validate the complete runtime before authentication so invalid
     // tool selections fail without entering the interactive auth protocol.
@@ -247,6 +258,15 @@ pub async fn run(
                 session.recommend_auto_compaction(&mut engine, &mut writer);
             }
             Err(failure) => {
+                // Turn-level failure choke-point: keeps the failure visible in
+                // the log file even when the consumer only sees the result line.
+                tracing::error!(
+                    session_id = %engine.session_id,
+                    error_code = failure.error_code.unwrap_or("none"),
+                    session_error_code = failure.session_error_code.unwrap_or("none"),
+                    "turn failed: {}",
+                    failure.message
+                );
                 let err_msg = failure.output_message(&engine.session_id);
                 // Emit the error result before awaiting telemetry so a stalled
                 // metadata probe does not delay the visible turn result.

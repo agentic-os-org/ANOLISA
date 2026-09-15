@@ -24,6 +24,7 @@ mod process;
 mod protocol;
 mod redaction;
 mod registry;
+mod run_registry;
 mod session;
 mod session_control;
 mod skill;
@@ -138,6 +139,9 @@ async fn run_until_sigint() {
         }
         _ = run() => {}
     }
+    // Reached on both SIGINT and clean stdin-EOF shutdown; the entry written
+    // for the persistent session must not survive a controlled exit.
+    run_registry::remove_entry();
 }
 
 async fn run() {
@@ -216,7 +220,9 @@ async fn run() {
             std::process::exit(2);
         };
         match headless::run(&args, config, project_root, session_workspace).await {
-            Ok(0) => {}
+            Ok(0) => {
+                run_registry::remove_entry();
+            }
             Ok(exit_code) => std::process::exit(exit_code),
             Err(error) => {
                 eprintln!("[cosh-core] {error}");

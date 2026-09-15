@@ -389,6 +389,7 @@ fn run_turn(
             session_id = %spawned.session_id.as_deref().unwrap_or("default"),
             "cosh-core spawned"
         );
+        crate::diagnostics::run_registry::update_core_pid(spawned.child.id());
         *process = Some(spawned);
         let running = process.as_ref().expect("process was just spawned");
         live.store(true, Ordering::SeqCst);

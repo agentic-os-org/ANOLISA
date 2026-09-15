@@ -173,11 +173,15 @@ pub(super) fn spawn_process(
     prepared: &PreparedInvocation,
     approval_mode: CoshApprovalMode,
 ) -> Result<PersistentProcess, String> {
+    // The core pairs itself with this shell in the run registry via this env
+    // var, so doctor can report the shell<->core pairing offline.
+    let owner_shell_pid = std::process::id().to_string();
     let mut child = spawn_provider_child(
         prepared,
         "cosh-core",
         ProviderStdinMode::Piped,
         ProviderPromptArgMode::None,
+        &[("COSH_SHELL_PID", owner_shell_pid.as_str())],
     )
     .map_err(|error| error.message)?;
     let stdin = child
