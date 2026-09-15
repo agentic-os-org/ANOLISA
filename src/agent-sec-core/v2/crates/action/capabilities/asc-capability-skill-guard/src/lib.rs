@@ -8,6 +8,7 @@ mod filesystem;
 pub mod identity;
 pub mod integrity;
 pub mod models;
+pub mod scanner;
 
 pub use config::GuardConfig;
 pub use identity::SkillIdentity;
@@ -38,6 +39,20 @@ pub enum GuardError {
     /// Cryptographic key generation or decoding failed without exposing secrets.
     #[error("SkillGuard signing key operation failed")]
     Key,
+    /// A request exhausted its execution deadline before completing.
+    #[error("SkillGuard execution deadline exceeded")]
+    Timeout,
+    /// A scanner could not initialize or finish its requested operation.
+    #[error("SkillGuard scanner failed: {0}")]
+    Scanner(String),
+}
+
+pub(crate) fn check_deadline(deadline: std::time::Instant) -> Result<(), GuardError> {
+    if std::time::Instant::now() >= deadline {
+        Err(GuardError::Timeout)
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn io_error(

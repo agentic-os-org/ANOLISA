@@ -136,8 +136,10 @@ dependencies = [
 name = "asc-capability-skill-guard"
 version = "0.12.0"
 dependencies = [
+ "asc-capability-code-scan",
  "base64",
  "chrono",
+ "fancy-regex",
  "ring",
  "rustix",
  "serde",
@@ -145,6 +147,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "yaml-rust2",
 ]
 
 [[package]]

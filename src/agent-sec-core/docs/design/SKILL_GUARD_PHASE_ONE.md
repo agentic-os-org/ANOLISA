@@ -18,7 +18,7 @@ Phase-two policy integration is outside this PR.
 | Batch | Responsibility | Implementation | Acceptance required before the next batch |
 | --- | --- | --- | --- |
 | 1 | Types, canonical identity, system keys, Integrity | Implemented; Linux gates passed | Signature/tamper/replay checks, key permissions, source/snapshot path rules |
-| 2 | Scanner and analyze | Planned | V1 result comparison, selection/aliases, incomplete coverage, errors, no Ledger writes |
+| 2 | Scanner and analyze | Implemented; Linux gates passed | V1 result comparison, selection/aliases, incomplete coverage, errors, no Ledger writes |
 | 3 | Ledger and Service | Planned | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
 | 4 | Activation | Planned | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
 | 5 | daemon, CLI and audit | Planned | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
@@ -120,3 +120,43 @@ Batch one has no daemon registration, installation change or live migration side
 the crate and workspace registration removes it. For the completed migration, retain V1 state
 separately when replacing deployment; V1 cannot consume V2 manifests or system keys. A deployment
 rollback must restore its matching state and configuration, never mix both writers on one Ledger.
+
+## Scanner boundary in batch two
+
+`ScannerRegistry` runs `code-scanner` and `static-scanner` in process, in that order. Code Scan
+reuses the V2 capability for Python, shell and recognized suffixless shebangs. Static Scan embeds
+the existing ten rules and checks metadata, links, hidden/credential-like files, binary assets and
+undeclared networking. A symlink contributes a finding; its target bytes are never scanned.
+Registered custom scanners remain import-only, as in V1; `cli`/`api` metadata never executes a
+caller-supplied command in the root daemon. Findings-array import retains unknown evidence fields
+and returns visible normalization warnings. Retired scanner names are rejected on new input.
+
+`analyze` is independent of keys and managed registration and never writes a Ledger. Complete
+`pass`/`warn`/`deny` analyses return exit 0. Incomplete coverage returns `error` and exit 1; invalid
+root/manifest inputs return exit 2. A consumed deadline is an execution timeout. Physical source,
+HOME and configured temporary/XDG roots are redacted from nested analysis evidence. The later CLI
+adapter must expand user paths before sending its absolute request.
+
+The V1 analyze limits (2,000 regular files, 50 MiB total, directory depth 32) also bound built-in
+Ledger scans; exceeding them fails the scan rather than certifying a partial inventory. Per-file
+limits remain 1 MiB for Code Scan and configurable `maxFileBytes` (default 1,000,000) for Static
+Scan. Metadata decoding uses the existing YAML tokenizer, preserves V1 unquoted booleans,
+duplicate-key replacement and ordinary anchors/merges, and rejects recursive or excessive metadata
+(depth 32, 10,000 expanded nodes, 8 MiB scalar content). These resource limits protect the shared
+daemon. Scanner diagnostic wording may change with the implementation language; rule identifiers,
+risk levels, evidence and coverage outcomes remain the tested business contract.
+
+Inventory stops on the first limit and retains at most 20,000 enumerated names across the tree,
+including directories, links and special files. Excluded directories count as one name and are not
+traversed. Limit metadata reports the observed prefix with `truncated: true`, not a full-tree total.
+Analyze checks for a regular `SKILL.md` before traversal on the same directory descriptor; signing,
+content comparisons and rollback reject incomplete inventories. Quoted or explicitly string-tagged
+YAML `<<` keys remain ordinary keys, including aliases to those keys; only merge keys combine maps.
+
+`tests/reference_scanners.py` freezes V1 results with source revision and SHA-256 file hashes into
+`tests/fixtures/scanners.json`. Its 50 cases compare both built-ins and analyze, including false
+positive suppression, Unicode, metadata, symlinks, excluded directories and incomplete coverage.
+Only elapsed time, engine version and language/platform diagnostic wording are normalized; risk
+results and evidence are compared. Rust tests also cover scanner selection, disabled/import-only
+entries, parser fallback, aliases, invalid input, resource limits, deadlines and absence of state
+writes. Fixture generation is a developer tool; the deployed Rust binary never invokes Python.
