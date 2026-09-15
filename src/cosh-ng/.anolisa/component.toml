@@ -1,6 +1,6 @@
 [component]
 name = "cosh-ng"
-version = "0.24.1"
+version = "0.25.0"
 layer = "runtime"
 domain = "tools"
 display_name = "cosh-ng"
