@@ -414,7 +414,9 @@ impl MemoryService {
 }
 
 /// Monotonic suffix for the writability probe file so two servers probing
-/// the same candidate concurrently never collide on the name.
+/// the same candidate concurrently never collide on the name. Each probe
+/// reserves a whole `PROBE_ATTEMPTS` block, so a retry cannot step onto a
+/// name another prober was just handed either.
 static PROBE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Session base directories to try, in preference order.
@@ -508,19 +510,94 @@ fn resolve_session_base(config: &AppConfig) -> Result<PathBuf> {
     Ok(base)
 }
 
+/// How many distinct probe names one `probe_writable` call may burn before
+/// it gives up on the candidate. Only a stale probe left by a killed server
+/// can occupy a name (a symlink ends the attempt immediately), so a handful
+/// is plenty; the whole block is reserved out of `PROBE_SEQ` at once so two
+/// concurrent probers can never be handed the same name.
+const PROBE_ATTEMPTS: usize = 8;
+
+/// Whether a session base *we* chose may be used given the uid that owns it.
+///
+/// There is deliberately no root exemption. `/tmp/anolisa-sessions-0` is a
+/// predictable name in a world-writable directory, so "the owner is not me
+/// but I am root, so it is fine" lets any local user pre-create the base and
+/// then own every session root a root server builds inside it — scratch
+/// files, `log.jsonl` and the `mem_promote` source tree — including swapping
+/// a known `MEMORY_SESSION_ID` entry for a symlink that the server's own
+/// `create_dir_all` / chmod / metadata writes then follow.
+fn fallback_owner_is_us(owner: u32, me: u32) -> bool {
+    owner == me
+}
+
+/// Prove `dir` is writable by creating and removing a scratch file in it.
+///
+/// `seq_base` is the first of `PROBE_ATTEMPTS` reserved probe names.
+///
+/// The name is predictable, so on a base another local user can write to —
+/// which includes an operator-configured one, since a group- or
+/// world-writable `MEMORY_SESSION_DIR` is explicitly allowed — it can be
+/// pre-planted. `std::fs::write` follows symlinks and truncates the target,
+/// so probing with it turned the writability check itself into a
+/// file-clobber primitive against anything the server uid can write.
+/// `create_new` is `O_CREAT|O_EXCL`, which refuses to open, let alone
+/// follow, whatever already occupies the name.
+fn probe_writable(dir: &Path, seq_base: usize) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let pid = std::process::id();
+    for offset in 0..PROBE_ATTEMPTS {
+        let probe = dir.join(format!(".anolisa-probe-{pid}-{}", seq_base + offset));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A symlink means somebody is actively squatting on this
+                // base, so refuse the candidate rather than unlink their
+                // file. A regular file is a stale probe from a killed
+                // server: not ours to delete, so take the next name.
+                if std::fs::symlink_metadata(&probe).is_ok_and(|md| md.file_type().is_symlink()) {
+                    return Err(MemoryError::Other(format!(
+                        "{} holds a symlink at {}; refusing it as a session dir",
+                        dir.display(),
+                        probe.display()
+                    )));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Err(MemoryError::Other(format!(
+        "no free .anolisa-probe-* name under {} after {PROBE_ATTEMPTS} attempts",
+        dir.display()
+    )))
+}
+
 /// Create `dir` if needed and prove it is writable.
 ///
 /// Existence alone is not enough: a pre-existing read-only directory
 /// passes `create_dir_all` and then fails on the first session, so the
 /// probe does a real create-and-remove.
 ///
-/// For directories *we* chose (`ours`), additionally refuse a symlink and
-/// a different owner. Without that, any local user could plant
-/// `/tmp/anolisa-sessions-<victim uid>` as a symlink and redirect both the
-/// probe and every session root — scratch files, `log.jsonl` and the
-/// `mem_promote` source tree — into a directory of their choosing. The
-/// operator-configured directory is exempt: a symlink or a group-shared
-/// mount there is the operator's own decision.
+/// For directories *we* chose (`ours`), additionally refuse a symlink, an
+/// owner other than our effective uid (root included), and a base that
+/// cannot be tightened to `0700`. Without that, any local user could plant
+/// `/tmp/anolisa-sessions-<victim uid>` as a symlink — or, against a root
+/// server, own the directory outright — and redirect both the probe and
+/// every session root into a directory of their choosing. The
+/// operator-configured directory is exempt from those three: a symlink, a
+/// shared owner or a group-writable mount there is the operator's own
+/// decision. It still gets the `O_EXCL` probe, because "the operator chose
+/// a world-writable location" is not "the operator chose to let neighbours
+/// clobber our files".
 fn probe_session_base(dir: &Path, ours: bool) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -531,17 +608,10 @@ fn probe_session_base(dir: &Path, ours: bool) -> Result<()> {
         )));
     }
 
-    let md = match std::fs::metadata(dir) {
+    let mut md = match std::fs::metadata(dir) {
         Ok(md) => md,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(dir)?;
-            if ours {
-                // Fallbacks can land under a world-writable /tmp. Each
-                // `<sid>` is already forced to 0700 by
-                // `SessionLogService::start`, but the base should not be
-                // listable by other users either.
-                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-            }
             std::fs::metadata(dir)?
         }
         Err(e) => return Err(e.into()),
@@ -553,26 +623,41 @@ fn probe_session_base(dir: &Path, ours: bool) -> Result<()> {
             dir.display()
         )));
     }
+
     if ours {
-        let me = nix::unistd::Uid::current();
-        if md.uid() != me.as_raw() && !me.is_root() {
+        let me = nix::unistd::Uid::current().as_raw();
+        if !fallback_owner_is_us(md.uid(), me) {
             return Err(MemoryError::Other(format!(
-                "{} is owned by uid {}, not {}",
+                "{} is owned by uid {}, not {me}; refusing it as a session dir",
                 dir.display(),
-                md.uid(),
-                me.as_raw()
+                md.uid()
             )));
+        }
+
+        // Fallbacks can land under a world-writable /tmp, and a base created
+        // before this hardening keeps whatever the umask gave it. Each
+        // `<sid>` is already forced to 0700 by `SessionLogService::start`,
+        // but the base should not be listable or writable by other users
+        // either. Both failures reject the candidate instead of being
+        // swallowed: a chmod that errors, or that a filesystem accepts
+        // without applying (some FUSE and network mounts do), would
+        // otherwise leave session data in a base we just promised was 0700.
+        if md.mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+                MemoryError::Other(format!("cannot tighten {} to 0700: {e}", dir.display()))
+            })?;
+            md = std::fs::metadata(dir)?;
+            if md.mode() & 0o077 != 0 {
+                return Err(MemoryError::Other(format!(
+                    "{} is still mode {:o} after chmod; refusing it as a session dir",
+                    dir.display(),
+                    md.mode() & 0o777
+                )));
+            }
         }
     }
 
-    let probe = dir.join(format!(
-        ".anolisa-probe-{}-{}",
-        std::process::id(),
-        PROBE_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&probe, [])?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
+    probe_writable(dir, PROBE_SEQ.fetch_add(PROBE_ATTEMPTS, Ordering::Relaxed))
 }
 
 fn start_session(config: &AppConfig, ns: &Namespace) -> Result<SessionLogService> {
@@ -741,5 +826,148 @@ mod session_base_tests {
             "tmp fallback must be uid-suffixed, got {}",
             last.display()
         );
+    }
+
+    // ---------- review follow-ups: hardening the probe and the fallback ----------
+
+    #[test]
+    fn fallback_owner_check_has_no_root_exemption() {
+        // `/tmp/anolisa-sessions-0` is a predictable name in a world-writable
+        // directory. Accepting an existing base just because the server
+        // happens to be uid 0 hands any local user control over every session
+        // root the root server builds inside it, so the check compares
+        // against the effective uid and nothing else.
+        assert!(fallback_owner_is_us(0, 0));
+        assert!(fallback_owner_is_us(1000, 1000));
+        assert!(
+            !fallback_owner_is_us(1000, 0),
+            "a root server must reject a user-owned fallback"
+        );
+        assert!(!fallback_owner_is_us(0, 1000));
+    }
+
+    #[test]
+    fn rejects_a_foreign_owned_fallback_even_as_root() {
+        use nix::unistd::{Gid, Uid, chown};
+
+        if !nix::unistd::Uid::current().is_root() {
+            eprintln!("skipped: planting a foreign owner needs root");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("anolisa-sessions-0");
+        std::fs::create_dir_all(&planted).unwrap();
+        // Addressed numerically, so this does not depend on `nobody` existing.
+        chown(
+            &planted,
+            Some(Uid::from_raw(65534)),
+            Some(Gid::from_raw(65534)),
+        )
+        .unwrap();
+        let good = tmp.path().join("next");
+
+        let picked = pick_session_base(&[(planted.clone(), true), (good.clone(), true)]).unwrap();
+
+        assert_eq!(
+            picked,
+            good,
+            "must fall through instead of using the foreign-owned {}",
+            planted.display()
+        );
+    }
+
+    #[test]
+    fn probe_refuses_to_follow_a_planted_symlink() {
+        // The probe name is predictable (pid + a counter), so on a base
+        // another local user can write to it can be pre-planted. That
+        // includes an operator-configured one: a group-writable
+        // MEMORY_SESSION_DIR is explicitly allowed. `std::fs::write` followed
+        // the link and truncated the target, which made the writability check
+        // itself a file-clobber primitive against anything the server uid can
+        // write; O_CREAT|O_EXCL refuses the name instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let planted = base.join(format!(".anolisa-probe-{}-7", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        let err = probe_writable(&base, 7).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"precious",
+            "the symlink target must survive the probe"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a squatter's file is not ours to unlink"
+        );
+    }
+
+    #[test]
+    fn probe_steps_over_a_stale_file_and_removes_only_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let pid = std::process::id();
+        let stale = base.join(format!(".anolisa-probe-{pid}-3"));
+        std::fs::write(&stale, b"left behind by a killed server").unwrap();
+
+        probe_writable(&base, 3).unwrap();
+
+        assert_eq!(
+            std::fs::read(&stale).unwrap(),
+            b"left behind by a killed server",
+            "a stale probe is not ours to delete"
+        );
+        let probes: Vec<String> = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".anolisa-probe-"))
+            .collect();
+        assert_eq!(
+            probes,
+            vec![stale.file_name().unwrap().to_string_lossy().into_owned()],
+            "our own probe must be cleaned up"
+        );
+    }
+
+    #[test]
+    fn tightens_a_pre_existing_fallback_to_0700() {
+        // A base created before this hardening keeps whatever the umask gave
+        // it. The chmod that fixes that is no longer a `let _ =`, so a
+        // filesystem that refuses it rejects the candidate instead of quietly
+        // holding session data in a directory other users can list.
+        let tmp = tempfile::tempdir().unwrap();
+        let ours = tmp.path().join("anolisa-sessions-1000");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let picked = pick_session_base(&[(ours.clone(), true)]).unwrap();
+
+        assert_eq!(picked, ours);
+        assert_eq!(modes(&ours), 0o700);
+    }
+
+    #[test]
+    fn leaves_an_operator_configured_dir_mode_alone() {
+        // The tightening above is for directories *we* chose. An operator who
+        // points MEMORY_SESSION_DIR at a group-shared mount made that call
+        // deliberately, and the probe must not widen or narrow it.
+        let tmp = tempfile::tempdir().unwrap();
+        let configured = tmp.path().join("shared");
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o770)).unwrap();
+
+        let picked = pick_session_base(&[(configured.clone(), false)]).unwrap();
+
+        assert_eq!(picked, configured);
+        assert_eq!(modes(&configured), 0o770);
     }
 }
