@@ -388,6 +388,12 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 
 在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会先回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。若某个记录路径的内容已与其 sha256 不一致，说明它已被另一种安装接管，脚本会保留它。
 
+上一个 npm 全局包会在写入新文件**之前**回收。当它的 prefix 与安装目录重叠时这一点很关键——`npm install -g --prefix ~/.local` 会把 bin 链接放进 `~/.local/bin`，也就是安装脚本的默认安装目录，而 `npm uninstall --prefix ~/.local` 又会把它们删掉。先回收，才能避免源码构建刚写入的 `~/.local/bin/tokenless` 随后被删除。中途失败的 npm 尝试也会按同样方式回滚，因此源码构建回退不会接手无主的软件包、启动器链接或 Adapter 目录。
+
+源码构建回退只支持 Linux。在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会执行 `cargo`。Intel Mac 也没有已发布的 npm 软件包，因此目前没有受支持的安装路径——见[快速开始](QUICKSTART.md#平台适配性)中的平台表格。
+
+`~/.local/share/anolisa/adapters/tokenless` 与 anolisa CLI 以及直接执行的 `npm install -g` 共享。当该目录已属于其中之一时，安装脚本会在 npm postinstall 覆盖之后把原有所有者的资源恢复回去，不记录 Adapter 目录，并明确提示。此后卸载脚本不会触碰这些资源，也不会触碰指向它们的框架注册。
+
 随后重启 Agent。如果走的是 npm 路径，框架中已注册的 Plugin 可能仍是旧副本——按照 [npm 安装](#npm-安装)重新执行该框架的 `scripts/install.sh`。
 
 卸载使用配套脚本，它只删除 receipt 中记录的内容：

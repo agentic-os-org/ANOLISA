@@ -395,6 +395,12 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 
 Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — first retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. A recorded path whose content no longer matches its digest was taken over by another installer and is left alone.
 
+The previous npm package is retired **before** the new files are written, which matters when its prefix and the install directory overlap — `npm install -g --prefix ~/.local` puts its bin links in `~/.local/bin`, the installer's default install directory, and `npm uninstall --prefix ~/.local` removes them again. Retiring first is what keeps a source build that writes `~/.local/bin/tokenless` from having it deleted afterwards. An npm attempt that fails part-way is rolled back the same way, so the source-build fallback never inherits an unowned package, launcher link or adapter tree.
+
+The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS has no published npm package either, so it currently has no supported route — see the platform table in the [Quick Start](QUICKSTART.md#platform-support).
+
+`~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI and with a direct `npm install -g`. When that directory already belongs to one of them, the installer restores the previous owner's resources after the npm postinstall has replaced them, records no adapter directory, and says so. The uninstaller then leaves those resources and the framework registrations pointing at them alone.
+
 Restart the agent afterwards. When the run took the npm path, the plugin registered with a framework may still be an older copy — run that framework's `scripts/install.sh` again as described in [npm installation](#npm-installation).
 
 Uninstall with the matching script, which removes only what the receipt records:

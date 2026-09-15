@@ -60,7 +60,7 @@ Supported platforms:
 | macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` — declared build target, **not published yet** |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
 
-`@anolisa/tokenless-darwin-x64` is a release build target only: it is not on the registry, so the npm route cannot deliver an Intel macOS binary. Use Method C with `TOKENLESS_FORCE_BUILD=1` there.
+`@anolisa/tokenless-darwin-x64` is a release build target only: it is not on the registry, so the npm route cannot deliver an Intel macOS binary. Method C cannot either — its source-build fallback is Linux-only, and `scripts/install.sh` exits with an error on macOS instead of running `cargo`. Until that package is published, Intel macOS has no supported install route; see [Platform support](#platform-support).
 
 ### Method C: curl standalone install
 
@@ -75,9 +75,9 @@ Prerequisites depend on which path the script takes:
 | Path | Taken when | Requires | Installs |
 |------|-----------|----------|----------|
 | npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16+ with `npm` | `tokenless`, `rtk`, and the adapter resources |
-| Source build | npm is missing, npm fails, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1` | `curl`, `tar`, a Rust toolchain (`cargo`) | the `tokenless` CLI only — no `rtk` and no adapters |
+| Source build (Linux only) | npm is missing, npm fails, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1` | `curl`, `tar`, a Rust toolchain (`cargo`) | the `tokenless` CLI only — no `rtk` and no adapters |
 
-The script supports Linux and macOS only; on Windows it exits with an error, so use WSL2 there.
+The script supports Linux and macOS only; on Windows it exits with an error, so use WSL2 there. Its source-build path is Linux-only as well: on macOS the installer either takes the npm path or exits with an error, and never invokes `cargo`.
 
 Pin a version or set a custom install directory. Pass the variables to `bash`, not to `curl`:
 
@@ -257,13 +257,13 @@ without removable fields is returned unchanged and is not recorded.
 | Linux x86_64/aarch64 (glibc) | Supported | Supported | Supported (npm path) | Supported (follows curl) |
 | Linux with musl, such as Alpine | Not currently supported | Not currently supported | Source build only, needs a Rust toolchain | Source build only, needs a Rust toolchain |
 | macOS Apple Silicon | Supported | Supported | Supported (npm path) | Supported (follows curl) |
-| macOS x86_64 | Not currently supported | Supported | Supported (npm path) | Supported (follows curl) |
+| macOS x86_64 | Not currently supported | Not currently supported | Not currently supported | Not currently supported |
 | Windows | Not currently supported | Not currently supported | Not supported, use WSL2 | Not supported, use WSL2 |
 
 Notes on the boundaries above:
 
-- npm and curl ship prebuilt binaries on macOS x86_64; the anolisa CLI does not currently support macOS x86_64.
-- curl on macOS relies on its npm path. Its source-build fallback is validated on Linux only, so a macOS machine without npm has no supported curl path.
+- macOS x86_64 has no supported route in this release. `@anolisa/tokenless-darwin-x64` is a release build target that is not on the registry, so neither npm nor the curl npm path can deliver a binary there, and the curl source-build fallback is refused on macOS — `scripts/install.sh` exits with an error instead of running `cargo`. Use Linux or Apple Silicon macOS until that package is published.
+- curl on macOS relies on its npm path. Its source-build fallback is validated on Linux only, and the installer refuses to run it on macOS, so a macOS machine without npm has no supported curl path.
 - The npm package declares `os: linux, darwin`, so Windows is unsupported by every method here. Inside WSL2 the Linux rows apply.
 - The Skill method delegates to the anolisa CLI, npm, or curl, so its support follows the method it selects.
 

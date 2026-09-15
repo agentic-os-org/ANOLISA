@@ -58,7 +58,7 @@ tokenless --version
 | macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` —— 仅为发布构建目标，**尚未发布** |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
 
-`@anolisa/tokenless-darwin-x64` 只是发布构建目标：registry 中并没有该包，因此 npm 路径无法在 Intel Mac 上提供二进制。该平台请使用方式 C 并设置 `TOKENLESS_FORCE_BUILD=1`。
+`@anolisa/tokenless-darwin-x64` 只是发布构建目标：registry 中并没有该包，因此 npm 路径无法在 Intel Mac 上提供二进制。方式 C 同样不行——它的源码构建回退只支持 Linux，`scripts/install.sh` 在 macOS 上会直接报错退出而不执行 `cargo`。在该软件包发布之前，Intel Mac 没有受支持的安装路径，详见[平台适配性](#平台适配性)。
 
 ### 方式 C：curl 独立安装
 
@@ -73,9 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 | 路径 | 触发条件 | 依赖 | 安装内容 |
 |------|----------|------|----------|
 | npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16+（含 `npm`） | `tokenless`、`rtk` 以及 Adapter 资源 |
-| 源码构建 | 无 npm、npm 安装失败、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1` | `curl`、`tar`、Rust 工具链（`cargo`） | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
+| 源码构建（仅 Linux） | 无 npm、npm 安装失败、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1` | `curl`、`tar`、Rust 工具链（`cargo`） | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
 
-脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。
+脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。源码构建路径同样只支持 Linux：在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会调用 `cargo`。
 
 可指定版本或安装目录。变量要传给 `bash`，不要传给 `curl`：
 
@@ -252,13 +252,13 @@ tokenless stats list --limit 1
 | Linux x86_64/aarch64（glibc） | 支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
 | 使用 musl 的 Linux（例如 Alpine） | 暂不支持 | 暂不支持 | 仅源码构建，需要 Rust 工具链 | 仅源码构建，需要 Rust 工具链 |
 | macOS Apple Silicon | 支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
-| macOS x86_64 | 暂不支持 | 支持 | 支持（npm 路径） | 支持（跟随 curl） |
+| macOS x86_64 | 暂不支持 | 暂不支持 | 暂不支持 | 暂不支持 |
 | Windows | 暂不支持 | 暂不支持 | 暂不支持，请使用 WSL2 | 暂不支持，请使用 WSL2 |
 
 上述边界的补充说明：
 
-- npm 和 curl 方式在 macOS x86_64 上提供预编译二进制；anolisa CLI 暂不支持 macOS x86_64。
-- macOS 上的 curl 依赖 npm 路径。其源码构建回退只在 Linux 上验证过，因此没有 npm 的 macOS 机器没有受支持的 curl 路径。
+- macOS x86_64 在当前版本没有受支持的安装路径。`@anolisa/tokenless-darwin-x64` 只是发布构建目标，registry 中并没有该包，因此 npm 与 curl 的 npm 路径都无法在该平台提供二进制；curl 的源码构建回退在 macOS 上会被拒绝——`scripts/install.sh` 会直接报错退出而不执行 `cargo`。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
+- macOS 上的 curl 依赖 npm 路径。其源码构建回退只在 Linux 上验证过，并且安装脚本在 macOS 上拒绝执行该回退，因此没有 npm 的 macOS 机器没有受支持的 curl 路径。
 - npm 包声明了 `os: linux, darwin`，所以本页所有方式都不支持 Windows。在 WSL2 内按 Linux 各行处理。
 - Skill 方式会委托给 anolisa CLI、npm 或 curl，其支持范围跟随实际选中的方式。
 

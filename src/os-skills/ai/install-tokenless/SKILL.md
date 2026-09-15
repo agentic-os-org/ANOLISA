@@ -23,10 +23,10 @@ Per-method prerequisites:
 |--------|----------|----------|
 | A — anolisa CLI | `curl` | full component suite including adapters |
 | B — npm | Node.js 16+ with `npm`, glibc Linux or macOS | `tokenless`, `rtk`, adapter resources |
-| C — curl | `curl`, `tar`, plus Node.js 16+ **or** a Rust toolchain (`cargo`) depending on the path taken | npm path: as Method B. Source-build path: the `tokenless` CLI only |
+| C — curl | `curl`, `tar`, plus Node.js 16+ **or** a Rust toolchain (`cargo`) depending on the path taken | npm path: as Method B. Source-build path (Linux only): the `tokenless` CLI only |
 | D — Skill | whichever of A/B/C the agent runs | as that method |
 
-The source-build fallback is validated on Linux only. On musl Linux (Alpine) it is the only available path, because prebuilt binaries are glibc-linked.
+The source-build fallback is validated on Linux only, and the installer refuses it on macOS: there it either takes the npm path or exits with an error, and never runs `cargo`. On musl Linux (Alpine) the source build is the only available path, because prebuilt binaries are glibc-linked.
 
 ## Installation Workflow
 
@@ -65,7 +65,10 @@ This automatically installs the `tokenless` and `rtk` binaries plus the framewor
 
 The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
 Intel macOS (x86_64) has no published platform package yet either: `@anolisa/tokenless-darwin-x64` is a
-release build target, not a registry artifact, so use Method A or Method C with `TOKENLESS_FORCE_BUILD=1` there.
+release build target, not a registry artifact, so Intel macOS has **no supported install route in this release**.
+Method A does not cover the platform and Method C only reaches its npm path there. Do not pass
+`TOKENLESS_FORCE_BUILD=1` on macOS — the installer refuses the source build on that platform and exits with an
+error instead of running `cargo`. Use Linux or Apple Silicon macOS until that package is published.
 
 **Method C: Standalone curl Install**
 
@@ -84,13 +87,13 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 # Custom install directory
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
 
-# Force the source build even when npm is available (needs cargo)
+# Force the source build even when npm is available (needs cargo; Linux only)
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_FORCE_BUILD=1 bash
 ```
 
 A pinned version is a hard pin: the source build downloads only the matching `tokenless/v<VERSION>` tag, and fails if that tag does not exist. It never falls back to the `main` branch.
 
-The source-build path installs the `tokenless` CLI only — no `rtk` and no adapter resources. Treat it as a CLI-only install (see Step 3).
+The source-build path installs the `tokenless` CLI only — no `rtk` and no adapter resources. Treat it as a CLI-only install (see Step 3). It runs on Linux only.
 
 The installer records every path it created in `~/.local/share/tokenless/install-receipt`, which the uninstall step below relies on.
 
@@ -139,7 +142,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 | Codex | `anolisa adapter enable tokenless codex` | `bash ~/.local/share/anolisa/adapters/tokenless/codex/scripts/install.sh` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` | `bash ~/.local/share/anolisa/adapters/tokenless/qwencode/scripts/install.sh` |
 
-Each bundled adapter also ships a matching `scripts/uninstall.sh` next to its `install.sh`; use it to disable that framework again.
+Each bundled adapter also ships a matching `scripts/uninstall.sh` next to its `install.sh`; use it to disable that framework again. Run it **before** removing the adapter resources — a registration points into that directory, so deleting the directory first leaves the framework hooked, plugged or symlinked to a path that no longer exists. The [Uninstall](#uninstall) section gives the full order per install method.
 
 Restart the agent CLI, IDE, or gateway after enabling.
 
@@ -201,6 +204,13 @@ line the installer appended, and leaves `~/.tokenless` (stats and stash data)
 in place unless `--purge` is passed. A source-build install recorded no adapters,
 so none are removed.
 
+`~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI and
+with a direct `npm install -g`. When that directory already belonged to another
+installation, the curl installer puts the previous owner's tree back, does not
+record the directory, and says so — the receipt then owns only the launcher
+links, and this uninstaller leaves the shared resources and their framework
+registrations alone.
+
 Each recorded file also carries its sha256, and the adapter directory carries the
 digest of its stamped `manifest.json`. A path whose content no longer matches was
 taken over by another installer (anolisa, a manual `npm install -g`) and is kept.
@@ -210,15 +220,35 @@ removed rather than left pointing at a deleted directory.
 
 Re-running the installer with a different method retires the previous receipt
 first, so switching npm → source does not orphan the `rtk` launcher, the npm
-global package or the adapter tree.
+global package or the adapter tree. The previous npm package is retired before
+the new files are written, which matters when its prefix and the install
+directory overlap (`--prefix ~/.local` with `~/.local/bin`): `npm uninstall`
+would otherwise take the freshly installed CLI with it. A failed npm attempt is
+rolled back the same way, so the source-build fallback never inherits an
+unowned package, `rtk` link or adapter tree.
 
 **Direct npm installation (Method B), not through the curl script:** no receipt
-exists, so clean up both places npm wrote to:
+exists, so undo the three things the install did, in this order. Deregister the
+frameworks enabled in Step 3 **first**, while their resources are still on disk —
+otherwise every hook entry, plugin directory and symlink keeps pointing at a
+directory that no longer exists:
 
 ```bash
+# 1. Once per framework enabled in Step 3 (claude-code, codex, hermes, openclaw,
+#    opencode, qoder, qwencode, qwenpaw).
+bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
+
+# 2. Remove the global package.
 npm uninstall -g anolisa-tokenless
-rm -rf ~/.local/share/anolisa/adapters/tokenless   # created by the package postinstall
+
+# 3. Remove the adapter resources the package postinstall created.
+rm -rf ~/.local/share/anolisa/adapters/tokenless
 ```
+
+This is the order the receipt-driven uninstaller uses internally, and the order
+the Tokenless troubleshooting page prescribes for an npm installation. Step 3
+also removes the resources a Method C npm install writes, so skip it when
+another Tokenless installation on this machine still needs them.
 
 If the receipt is missing (for example after a manual cleanup), the uninstaller
 exits with an error rather than guessing; remove `<install-dir>/tokenless` and

@@ -21,6 +21,17 @@
 #      recorded path whose content another installer has since replaced.
 #   7. uninstall.sh deregisters an enabled framework adapter (real qwencode
 #      scripts, link-type registration) before deleting the adapter resources.
+#   8. A npm attempt that fails after `npm install -g` is rolled back, so the
+#      source-build fallback inherits no unowned package, link or adapter tree.
+#   9. An npm prefix whose bin directory *is* the install directory: the
+#      previous package is retired before the new CLI is written, so
+#      `npm uninstall` cannot take it away again.
+#  10. macOS has no source-build route — the installer exits without running
+#      cargo, on Intel macOS where no npm package is published as well.
+#  11. A shared adapter directory that belongs to another installation is
+#      neither adopted into the receipt nor destroyed, round trip included.
+#  12. Adapter deregistration removes framework registrations only, never the
+#      component binary the caller decided to keep.
 
 set -euo pipefail
 
@@ -121,8 +132,19 @@ case "$1" in
     prefix="$(pkg_prefix "$@")"
     mkdir -p "$prefix/bin" "$prefix/lib/node_modules/anolisa-tokenless"
     for b in tokenless rtk; do
-      printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$b" "${FAKE_VERSION:-0.7.9}" > "$prefix/bin/$b"
-      chmod +x "$prefix/bin/$b"
+      if [ "${NPM_STUB_SYMLINK_BINS:-0}" = "1" ]; then
+        # Real npm keeps the payload in the module directory and links it into
+        # <prefix>/bin. Needed to reproduce a prefix whose bin directory is the
+        # installer's install directory.
+        payload="$prefix/lib/node_modules/anolisa-tokenless/bin/$b"
+        mkdir -p "$(dirname "$payload")"
+        printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$b" "${FAKE_VERSION:-0.7.9}" > "$payload"
+        chmod +x "$payload"
+        ln -sfn "$payload" "$prefix/bin/$b"
+      else
+        printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$b" "${FAKE_VERSION:-0.7.9}" > "$prefix/bin/$b"
+        chmod +x "$prefix/bin/$b"
+      fi
     done
     # Mimic npm/scripts/postinstall.js: bundled adapters are copied into the
     # user data dir, replacing whatever was there.
@@ -151,6 +173,8 @@ STUB
 cat > "$STUB_DIR/cargo" <<'STUB'
 #!/usr/bin/env bash
 # `cargo build --release --locked -p tokenless-cli`, run from src/tokenless.
+# Every invocation is logged: the macOS scenarios assert cargo is never reached.
+printf '%s\n' "$*" >> "${CARGO_LOG:-/dev/null}"
 if [ "${CARGO_STUB_FAIL:-0}" = "1" ]; then
   echo "error: could not compile \`tokenless-cli\`" >&2; exit 101
 fi
@@ -211,12 +235,30 @@ esac
 exit 0
 STUB
 
+# Platform boundaries have to be testable on a Linux CI host, so `uname` is
+# stubbed too. Without UNAME_STUB_OS / UNAME_STUB_ARCH it passes through to the
+# real binary and every other scenario still runs against the host platform.
+cat > "$STUB_DIR/uname" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) if [ -n "${UNAME_STUB_OS:-}" ]; then printf '%s\n' "$UNAME_STUB_OS"; exit 0; fi ;;
+  -m) if [ -n "${UNAME_STUB_ARCH:-}" ]; then printf '%s\n' "$UNAME_STUB_ARCH"; exit 0; fi ;;
+esac
+real="${REAL_UNAME_BIN:-}"
+if [ -z "$real" ]; then
+  for c in /usr/bin/uname /bin/uname; do [ -x "$c" ] && real="$c" && break; done
+fi
+[ -n "$real" ] || { echo "uname stub: no real uname found" >&2; exit 127; }
+exec "$real" "$@"
+STUB
+
 REAL_INSTALL_BIN="$(command -v install || true)"
 REAL_LN_BIN="$(command -v ln || true)"
-[ -n "$REAL_INSTALL_BIN" ] && [ -n "$REAL_LN_BIN" ] \
-  || { echo "FAIL the host provides no install(1) or ln" >&2; exit 1; }
+REAL_UNAME_BIN="$(command -v uname || true)"
+[ -n "$REAL_INSTALL_BIN" ] && [ -n "$REAL_LN_BIN" ] && [ -n "$REAL_UNAME_BIN" ] \
+  || { echo "FAIL the host provides no install(1), ln or uname" >&2; exit 1; }
 chmod +x "$STUB_DIR/curl" "$STUB_DIR/npm" "$STUB_DIR/cargo" \
-         "$STUB_DIR/install" "$STUB_DIR/ln" "$STUB_DIR/qwen"
+         "$STUB_DIR/install" "$STUB_DIR/ln" "$STUB_DIR/qwen" "$STUB_DIR/uname"
 
 # --- harness -----------------------------------------------------------------
 # run_script <script> <scenario> [ENV=VAL ...] [-- <script-arg> ...]
@@ -243,6 +285,8 @@ run_script() {
       SHELL=/bin/bash \
       TMPDIR="$tmp" \
       CURL_LOG="$TEST_DIR/$scenario/curl.log" \
+      CARGO_LOG="$TEST_DIR/$scenario/cargo.log" \
+      REAL_UNAME_BIN="$REAL_UNAME_BIN" \
       CURL_TAG_TARBALL="$FAKE_TARBALL" \
       CURL_MAIN_TARBALL="$DIST_DIR/main.tar.gz" \
       FAKE_VERSION="$FAKE_VERSION" \
@@ -252,13 +296,14 @@ run_script() {
       ${envs[@]+"${envs[@]}"} \
       bash "$script" ${script_args[@]+"${script_args[@]}"} 2>&1
   )" && RUN_STATUS=0 || RUN_STATUS=$?
-  touch "$TEST_DIR/$scenario/curl.log"
+  touch "$TEST_DIR/$scenario/curl.log" "$TEST_DIR/$scenario/cargo.log"
 }
 
 receipt_of() { printf '%s\n' "$TEST_DIR/$1/home/.local/share/tokenless/install-receipt"; }
 receipt_value() { sed -n "s/^$2=//p" "$(receipt_of "$1")" | head -1; }
 receipt_files() { sed -n 's/^file=//p' "$(receipt_of "$1")"; }
 curl_log() { cat "$TEST_DIR/$1/curl.log"; }
+cargo_log() { cat "$TEST_DIR/$1/cargo.log"; }
 
 # =============================================================================
 # Scenario 1 — forced source build against a real GitHub archive layout
@@ -621,5 +666,217 @@ assert_eq "receipt records the rc file once" \
 run_script "$UNINSTALL_SH" path-idempotent
 assert_eq "uninstall after the re-run exits 0" "$RUN_STATUS" "0"
 assert_not_contains "no PATH entry survives the uninstall" "$(cat "$S13_RC")" "tokenless installer"
+
+# =============================================================================
+# Scenario 14 — a npm attempt that fails after `npm install -g` is rolled back
+# =============================================================================
+# npm succeeds, the launcher links cannot be written, so the run falls back to
+# the source build. Everything the npm route already put on disk has to go with
+# it: the source receipt records the CLI only, and an unowned global package,
+# `rtk` link or adapter tree would survive with no uninstaller that can see it.
+run_script "$INSTALL_SH" npm-rollback \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "LN_STUB_FAIL=1"
+assert_eq "npm failure followed by a source build exits 0" "$RUN_STATUS" "0"
+S14_HOME="$TEST_DIR/npm-rollback/home"
+S14_NPM="$TEST_DIR/npm-rollback/npm-prefix"
+assert_eq "receipt records the source method" "$(receipt_value npm-rollback method)" "source"
+assert_eq "receipt records only the CLI" "$(receipt_files npm-rollback)" "$S14_HOME/.local/bin/tokenless"
+assert_file "the source-built CLI is there" "$S14_HOME/.local/bin/tokenless"
+assert_no_file "the failed npm attempt left no rtk link behind" "$S14_HOME/.local/bin/rtk"
+assert_no_file "the failed npm attempt's global package was rolled back" \
+  "$S14_NPM/lib/node_modules/anolisa-tokenless"
+assert_no_file "the failed npm attempt's adapter tree was rolled back" \
+  "$S14_HOME/.local/share/anolisa/adapters/tokenless"
+assert_contains "reports the package it rolled back" "$RUN_OUTPUT" \
+  "Removing the npm package the failed attempt installed"
+assert_contains "reports the adapter tree it rolled back" "$RUN_OUTPUT" \
+  "the failed npm attempt created"
+
+# =============================================================================
+# Scenario 15 — an npm prefix whose bin directory is the install directory
+# =============================================================================
+# `npm install -g --prefix ~/.local` puts its bin links in ~/.local/bin, which is
+# also the installer's default install directory. Retiring that package *after*
+# a source build has written ~/.local/bin/tokenless deletes the CLI this run just
+# installed, so the retirement has to happen first.
+S15_HOME="$TEST_DIR/npm-prefix-overlap/home"
+S15_PKG="$S15_HOME/.local/lib/node_modules/anolisa-tokenless"
+run_script "$INSTALL_SH" npm-prefix-overlap \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "NPM_STUB_SYMLINK_BINS=1" \
+  "NPM_STUB_PREFIX=$S15_HOME/.local" \
+  "TOKENLESS_INSTALL_DIR=$S15_HOME/.local/bin"
+assert_eq "npm install into an overlapping prefix exits 0" "$RUN_STATUS" "0"
+assert_eq "receipt records the npm method" "$(receipt_value npm-prefix-overlap method)" "npm"
+assert_eq "receipt records the overlapping npm prefix" \
+  "$(receipt_value npm-prefix-overlap npm_prefix)" "$S15_HOME/.local"
+assert_file "the npm route placed the CLI" "$S15_HOME/.local/bin/tokenless"
+assert_file "the npm route placed rtk" "$S15_HOME/.local/bin/rtk"
+assert_file "the npm route installed the global package" "$S15_PKG"
+
+run_script "$INSTALL_SH" npm-prefix-overlap \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "NPM_STUB_SYMLINK_BINS=1" \
+  "NPM_STUB_PREFIX=$S15_HOME/.local" \
+  "TOKENLESS_INSTALL_DIR=$S15_HOME/.local/bin" \
+  "TOKENLESS_FORCE_BUILD=1"
+assert_eq "source build over an overlapping npm prefix exits 0" "$RUN_STATUS" "0"
+assert_eq "receipt now records the source method" "$(receipt_value npm-prefix-overlap method)" "source"
+assert_file "the source-built CLI survives retiring the overlapping package" \
+  "$S15_HOME/.local/bin/tokenless"
+if [ -L "$S15_HOME/.local/bin/tokenless" ]; then
+  fail "the CLI at the overlapping path is still the npm link"
+fi
+pass "the CLI at the overlapping path is a regular file, not the npm link"
+assert_contains "the surviving CLI is the source build" \
+  "$("$S15_HOME/.local/bin/tokenless" --version 2>&1)" "-src"
+assert_no_file "removes rtk from the overlapping prefix" "$S15_HOME/.local/bin/rtk"
+assert_no_file "removes the npm global package from the overlapping prefix" "$S15_PKG"
+assert_contains "retires the previous npm package before writing" "$RUN_OUTPUT" \
+  "Removing the npm package left behind by the previous install"
+
+run_script "$UNINSTALL_SH" npm-prefix-overlap
+assert_eq "uninstall after the overlapping switch exits 0" "$RUN_STATUS" "0"
+assert_no_file "removes the source-built CLI" "$S15_HOME/.local/bin/tokenless"
+
+# =============================================================================
+# Scenario 16 — macOS has no source-build route, so no cargo and no false success
+# =============================================================================
+run_script "$INSTALL_SH" darwin-x64-npm-failure \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "UNAME_STUB_OS=Darwin" \
+  "UNAME_STUB_ARCH=x86_64" \
+  "NPM_STUB_FAIL=1"
+assert_eq "Intel macOS with a failing npm route exits non-zero" "$RUN_STATUS" "1"
+assert_eq "Intel macOS never invokes cargo" "$(cargo_log darwin-x64-npm-failure)" ""
+assert_no_file "Intel macOS writes no CLI" \
+  "$TEST_DIR/darwin-x64-npm-failure/home/.local/bin/tokenless"
+assert_no_file "Intel macOS writes no receipt" "$(receipt_of darwin-x64-npm-failure)"
+assert_contains "says the source build is not supported on macOS" "$RUN_OUTPUT" \
+  "Source builds are not supported on macOS"
+assert_contains "says Intel macOS has no supported install route" "$RUN_OUTPUT" \
+  "no supported install route"
+
+run_script "$INSTALL_SH" darwin-force-build \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "UNAME_STUB_OS=Darwin" \
+  "UNAME_STUB_ARCH=arm64" \
+  "TOKENLESS_FORCE_BUILD=1"
+assert_eq "a forced source build on macOS exits non-zero" "$RUN_STATUS" "1"
+assert_eq "a forced source build on macOS never invokes cargo" "$(cargo_log darwin-force-build)" ""
+assert_contains "points at the prebuilt route instead" "$RUN_OUTPUT" \
+  "npm install -g anolisa-tokenless"
+
+# =============================================================================
+# Scenario 17 — a shared adapter directory owned by another installation
+# =============================================================================
+# ~/.local/share/anolisa/adapters/tokenless is shared with the anolisa CLI and
+# with a direct `npm install -g`, and the npm postinstall replaces it wholesale.
+# A tree that was already there must survive, must not be claimed by the receipt,
+# and must not be deregistered or deleted by a later uninstall.
+S17_HOME="$TEST_DIR/foreign-adapters/home"
+S17_ADAPTERS="$S17_HOME/.local/share/anolisa/adapters/tokenless"
+S17_LINK="$S17_HOME/.qwen/extensions/tokenless"
+mkdir -p "$S17_ADAPTERS"
+cp -R "$TOKENLESS_ROOT/adapters/tokenless/qwencode" "$S17_ADAPTERS/qwencode"
+printf '{"component":"tokenless","version":"0.6.0-anolisa"}\n' > "$S17_ADAPTERS/manifest.json"
+S17_MANIFEST_BEFORE="$(cat "$S17_ADAPTERS/manifest.json")"
+# The pre-existing installation is enabled: the registration points into the tree.
+RUN_OUTPUT="$(
+  env -i \
+    PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" \
+    HOME="$S17_HOME" \
+    SHELL=/bin/bash \
+    REAL_INSTALL_BIN="$REAL_INSTALL_BIN" \
+    REAL_LN_BIN="$REAL_LN_BIN" \
+    bash "$S17_ADAPTERS/qwencode/scripts/install.sh" 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "the pre-existing adapter can be enabled" "$RUN_STATUS" "0"
+assert_eq "the pre-existing registration points into the shared tree" \
+  "$(readlink "$S17_LINK")" "$S17_ADAPTERS/qwencode"
+
+run_script "$INSTALL_SH" foreign-adapters \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "NPM_STUB_ADAPTER_SRC=$TOKENLESS_ROOT/adapters/tokenless"
+assert_eq "npm install next to a foreign adapter tree exits 0" "$RUN_STATUS" "0"
+assert_eq "receipt records the npm method" "$(receipt_value foreign-adapters method)" "npm"
+assert_eq "receipt claims no adapter directory" "$(receipt_value foreign-adapters adapters_dir)" ""
+assert_file "the CLI this run linked is there" "$S17_HOME/.local/bin/tokenless"
+assert_eq "the foreign manifest survives the npm postinstall" \
+  "$(cat "$S17_ADAPTERS/manifest.json")" "$S17_MANIFEST_BEFORE"
+assert_eq "the foreign registration still points into the shared tree" \
+  "$(readlink "$S17_LINK")" "$S17_ADAPTERS/qwencode"
+assert_contains "says the directory belongs to another installation" "$RUN_OUTPUT" \
+  "already belonged to another installation"
+
+run_script "$UNINSTALL_SH" foreign-adapters
+assert_eq "uninstall next to a foreign adapter tree exits 0" "$RUN_STATUS" "0"
+assert_no_file "removes the CLI link this run created" "$S17_HOME/.local/bin/tokenless"
+assert_file "keeps the foreign adapter tree" "$S17_ADAPTERS/manifest.json"
+assert_file "keeps the foreign framework registration" "$S17_LINK"
+assert_eq "the foreign registration is unchanged by the uninstall" \
+  "$(readlink "$S17_LINK")" "$S17_ADAPTERS/qwencode"
+assert_not_contains "does not deregister a framework it does not own" "$RUN_OUTPUT" \
+  "Deregistered the qwencode adapter"
+
+# =============================================================================
+# Scenario 18 — adapter deregistration must not remove the component binary
+# =============================================================================
+# The adapters' own uninstall.sh scripts are full uninstallers, and the Codex one
+# also removes $PREFIX/bin/tokenless. When the receipt-driven uninstaller has
+# decided to keep that binary because another installation took the path over,
+# deregistering the adapter must not get a second chance at deleting it.
+run_script "$INSTALL_SH" codex-deregister "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "install with a Codex adapter in the tree exits 0" "$RUN_STATUS" "0"
+S18_ADAPTERS="$TEST_DIR/codex-deregister/home/.local/share/anolisa/adapters/tokenless"
+cp -R "$TOKENLESS_ROOT/adapters/tokenless/codex" "$S18_ADAPTERS/codex"
+S18_CLI="$TEST_DIR/codex-deregister/home/.local/bin/tokenless"
+# Replace the link with a real file, the way another installer taking the path
+# over would: writing through the link would only rewrite the npm payload it
+# points at and leave a dangling link behind once that package is uninstalled.
+rm -f "$S18_CLI"
+printf '#!/bin/sh\necho "anolisa-managed tokenless"\n' > "$S18_CLI"
+chmod +x "$S18_CLI"
+
+run_script "$UNINSTALL_SH" codex-deregister
+assert_eq "uninstall with a taken-over binary and a Codex adapter exits 0" "$RUN_STATUS" "0"
+assert_file "keeps the binary another installation took over" "$S18_CLI"
+assert_contains "the surviving binary is the foreign one" "$(cat "$S18_CLI")" "anolisa-managed"
+assert_contains "still deregisters the Codex adapter" "$RUN_OUTPUT" "Deregistered the codex adapter"
+assert_no_file "removes the adapter resources it owns" "$S18_ADAPTERS"
+
+# The contract the Codex adapter script implements for that caller: with
+# TOKENLESS_DEREGISTER_ONLY=1 the registration goes and the binary stays; an
+# explicit --non-interactive run of the same script keeps removing it.
+S18_HOME="$TEST_DIR/codex-contract/home"
+mkdir -p "$S18_HOME/.local/bin"
+printf '#!/bin/sh\necho kept\n' > "$S18_HOME/.local/bin/tokenless"
+chmod +x "$S18_HOME/.local/bin/tokenless"
+RUN_OUTPUT="$(
+  env -i \
+    PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" \
+    HOME="$S18_HOME" \
+    SHELL=/bin/bash \
+    TOKENLESS_DEREGISTER_ONLY=1 \
+    bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "deregistration-only mode exits 0" "$RUN_STATUS" "0"
+assert_file "deregistration-only mode keeps the component binary" "$S18_HOME/.local/bin/tokenless"
+assert_contains "deregistration-only mode says why it keeps the binary" "$RUN_OUTPUT" \
+  "Deregistration only"
+
+printf '#!/bin/sh\necho removed\n' > "$S18_HOME/.local/bin/tokenless"
+chmod +x "$S18_HOME/.local/bin/tokenless"
+RUN_OUTPUT="$(
+  env -i \
+    PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" \
+    HOME="$S18_HOME" \
+    SHELL=/bin/bash \
+    bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "an explicit --non-interactive Codex uninstall exits 0" "$RUN_STATUS" "0"
+assert_no_file "an explicit --non-interactive Codex uninstall still removes the binary" \
+  "$S18_HOME/.local/bin/tokenless"
 
 echo "install-script test passed"

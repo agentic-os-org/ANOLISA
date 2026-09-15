@@ -11,7 +11,12 @@
 #                          falls back to `main`, so a bad pin fails loudly
 #                          instead of installing unselected trunk code.
 #   TOKENLESS_INSTALL_DIR  Binary install directory (default: ~/.local/bin)
-#   TOKENLESS_FORCE_BUILD  Set to 1 to force source build even when npm binary exists
+#   TOKENLESS_FORCE_BUILD  Set to 1 to force source build even when npm binary
+#                          exists. Linux only: on macOS the source build is
+#                          refused and the installer exits instead of running
+#                          cargo, because the macOS binaries are cross-compiled
+#                          on Linux by the release pipeline and the fallback is
+#                          validated on Linux only.
 #   TOKENLESS_RECEIPT      Install receipt path (default:
 #                          ${XDG_DATA_HOME:-$HOME/.local/share}/tokenless/install-receipt).
 #                          Records what this run created; consumed by
@@ -24,6 +29,13 @@
 # Installation methods and what each one produces:
 #   npm     prebuilt `tokenless` + `rtk` binaries and the bundled Agent adapters
 #   source  the `tokenless` CLI only — no `rtk`, no adapters (CLI-only install)
+#
+# The npm route is transactional: everything it replaces is snapshotted first,
+# and a failure after `npm install -g` puts the global package, the launcher
+# links and the shared adapter directory back before the source-build fallback
+# runs. The shared adapter directory is only recorded in the receipt when this
+# installer owns it; a tree an anolisa component install or a direct
+# `npm install -g` put there is restored untouched and stays out of the receipt.
 # See docs/user-guide/{en,zh}/token-saving/tokenless/QUICKSTART.md for the
 # adapter-enable path that matches each method.
 
@@ -52,6 +64,21 @@ VERSION_PINNED=0
 SRC_TMPDIR=""
 CARRIED_PATH_RC=""
 RECEIPT_WRITTEN=0
+# Rollback state for the npm attempt. That route writes three things before the
+# run can tell whether it succeeded: the global package, the launcher links in
+# the install directory and — through the package postinstall — the shared
+# adapter directory. A failure after any of them has to put all three back, or
+# the source-build fallback reports success while leaving npm artefacts behind
+# that no receipt records.
+ROLLBACK_DIR=""
+NPM_ATTEMPT_STARTED=0
+NPM_ATTEMPT_PREFIX=""
+NPM_PKG_PRE_EXISTED=0
+ADAPTERS_FOREIGN=0
+# Retirement of the *previous* receipt's npm package runs before this run writes
+# anything; see retire_previous_npm_package().
+PREV_RECEIPT_LOADED=0
+PREV_NPM_RETIRED=0
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -67,6 +94,12 @@ cleanup_src_tmpdir() {
     rm -rf "$SRC_TMPDIR"
   fi
   SRC_TMPDIR=""
+  # The rollback snapshot is only meaningful while the attempt it belongs to is
+  # running, so no exit path may leave it behind.
+  if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
+    rm -rf "$ROLLBACK_DIR"
+  fi
+  ROLLBACK_DIR=""
 }
 
 trap cleanup_src_tmpdir EXIT
@@ -164,7 +197,13 @@ deregister_framework_adapters() {
   for script in "$adapters_dir"/*/scripts/uninstall.sh; do
     [ -f "$script" ] || continue
     framework=$(basename "$(dirname "$(dirname "$script")")")
-    output=$(bash "$script" 2>&1) && status=0 || status=$?
+    # Deregistration only. These are the adapters' full uninstall scripts, and
+    # at least the Codex one also removes ${PREFIX}/bin/tokenless. This caller
+    # has already decided what happens to that binary, so the sub-script must
+    # not revisit the decision: TOKENLESS_DEREGISTER_ONLY=1 limits it to the
+    # framework registration. stdin is closed as well, so an interactive prompt
+    # can neither block the run nor vanish into the captured output.
+    output=$(TOKENLESS_DEREGISTER_ONLY=1 bash "$script" </dev/null 2>&1) && status=0 || status=$?
     if [ "$status" -ne 0 ]; then
       warn "Could not deregister the ${framework} adapter (exit ${status}); remove its registration manually:"
       warn "  bash ${script}"
@@ -207,6 +246,233 @@ read_receipt() {
   return 0
 }
 
+# The user-level adapter resource directory every tokenless hook dispatcher
+# searches. It is shared with the anolisa CLI and with a direct
+# `npm install -g`, which is exactly why this installer may not adopt it just
+# because it exists.
+shared_adapters_dir() {
+  printf '%s\n' "${HOME}/.local/share/anolisa/adapters/tokenless"
+}
+
+# Reads the previous receipt once, so the callers that run before the install
+# and the ones that run after it agree on what the previous run owned.
+load_previous_receipt() {
+  [ "$PREV_RECEIPT_LOADED" = "1" ] && return 0
+  PREV_RECEIPT_LOADED=1
+  [ -f "$RECEIPT_FILE" ] || return 0
+  read_receipt "$RECEIPT_FILE" || return 0
+  return 0
+}
+
+# True only when the shared adapter directory is the tree a previous run of this
+# installer recorded, still carrying the identity it recorded. Anything else —
+# an anolisa component install, a direct `npm install -g`, a manual copy —
+# belongs to somebody else and has to survive this run unchanged.
+adapters_owned_by_previous_receipt() {
+  local dir="$1" current
+  load_previous_receipt
+  [ -n "$OLD_ADAPTERS_DIR" ] || return 1
+  [ "$OLD_ADAPTERS_DIR" = "$dir" ] || return 1
+  if [ -n "$OLD_ADAPTERS_DIR_DIGEST" ]; then
+    current=$(file_digest "${dir}/${ADAPTERS_IDENTITY_FILE}")
+    [ "$current" = "$OLD_ADAPTERS_DIR_DIGEST" ] || return 1
+  fi
+  return 0
+}
+
+# Removes the global ${NPM_PACKAGE} installation under <prefix>.
+#
+# `npm uninstall -g --prefix P` deletes P/bin/tokenless and P/bin/rtk together
+# with the module directory. When P/bin is also the directory this run installs
+# into, that removes the CLI the source-build fallback has just written there,
+# so in that case the package is retired by hand instead: the module directory
+# goes, and a bin entry only goes while it is still a link into it.
+remove_npm_package() {
+  local prefix="$1" protect_dir="${2:-}"
+  local pkg_dir="${prefix}/lib/node_modules/${NPM_PACKAGE}" bin link resolved
+  if [ -n "$prefix" ] && { [ -z "$protect_dir" ] || [ "$protect_dir" != "${prefix}/bin" ]; }; then
+    if command -v npm >/dev/null 2>&1 \
+       && npm uninstall -g "$NPM_PACKAGE" --prefix "$prefix" >/dev/null 2>&1; then
+      return 0
+    fi
+    warn "npm could not remove ${NPM_PACKAGE} from ${prefix}; removing the package files directly."
+  fi
+  for bin in tokenless rtk; do
+    link="${prefix}/bin/${bin}"
+    [ -L "$link" ] || continue
+    resolved=$(readlink -f "$link" 2>/dev/null || true)
+    case "$resolved" in
+      "${pkg_dir}"*) rm -f "$link" 2>/dev/null || warn "Could not remove ${link}; remove it manually." ;;
+    esac
+  done
+  if [ -d "$pkg_dir" ]; then
+    rm -rf "$pkg_dir" 2>/dev/null || warn "Could not remove ${pkg_dir}; remove it manually."
+  fi
+  return 0
+}
+
+# Removes the previous run's recorded launcher links that point into <prefix>,
+# before that prefix is retired. Retiring the package takes its bin directory
+# with it, and a link left dangling has no content left to digest — the
+# ownership check in retire_previous_receipt would then read the recorded path
+# as "another installation took this over" and keep the broken link.
+drop_links_into() {
+  local prefix="$1" i=0 path digest resolved
+  [ "${#OLD_FILES[@]}" -gt 0 ] || return 0
+  for path in "${OLD_FILES[@]}"; do
+    digest="${OLD_DIGESTS[$i]:-}"
+    i=$((i + 1))
+    [ -L "$path" ] || continue
+    resolved=$(readlink -f "$path" 2>/dev/null || true)
+    case "$resolved" in
+      "${prefix}"/*) ;;
+      *) continue ;;
+    esac
+    if [ -n "$digest" ] && [ "$(file_digest "$path")" != "$digest" ]; then
+      warn "Keeping ${path}: it no longer matches the previous receipt, so another installation owns it now."
+      continue
+    fi
+    if rm -f "$path" 2>/dev/null; then
+      info "Removed ${path} left behind by the previous ${OLD_METHOD:-unknown} install"
+    else
+      warn "Could not remove ${path} left behind by the previous install; remove it manually."
+    fi
+  done
+  return 0
+}
+
+# Retires the npm global package of the previous run *before* this run writes
+# anything. <prospective> is the prefix this run is about to install into, and
+# empty when it will not take the npm route at all. An unchanged prefix is left
+# to the npm install that follows, which replaces that package in place.
+retire_previous_npm_package() {
+  local prospective="${1:-}"
+  load_previous_receipt
+  [ "$OLD_METHOD" = "npm" ] || return 0
+  [ -n "$OLD_NPM_PREFIX" ] || return 0
+  if [ -n "$prospective" ] && [ "$prospective" = "$OLD_NPM_PREFIX" ]; then
+    return 0
+  fi
+  drop_links_into "$OLD_NPM_PREFIX"
+  info "Removing the npm package left behind by the previous install..."
+  remove_npm_package "$OLD_NPM_PREFIX" "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+  PREV_NPM_RETIRED=1
+  return 0
+}
+
+# Snapshots everything the npm route is about to replace: the launcher links in
+# the install directory, the shared adapter directory, and whether the global
+# package was already there.
+begin_npm_attempt() {
+  local prefix="$1"
+  local install_dir="${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+  local adapters_dir bin
+  adapters_dir=$(shared_adapters_dir)
+
+  NPM_ATTEMPT_PREFIX="$prefix"
+  NPM_PKG_PRE_EXISTED=0
+  ADAPTERS_FOREIGN=0
+
+  if ! ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-rollback.XXXXXX" 2>/dev/null); then
+    ROLLBACK_DIR=""
+    warn "Cannot create a rollback directory under ${TMPDIR:-/tmp}."
+    warn "The npm route needs one to undo a partial install, so it is skipped."
+    return 1
+  fi
+
+  if [ -d "${prefix}/lib/node_modules/${NPM_PACKAGE}" ]; then
+    NPM_PKG_PRE_EXISTED=1
+  fi
+  if [ -d "$adapters_dir" ]; then
+    if ! adapters_owned_by_previous_receipt "$adapters_dir"; then
+      ADAPTERS_FOREIGN=1
+    fi
+    if ! cp -a "$adapters_dir" "${ROLLBACK_DIR}/adapters-tokenless" 2>/dev/null; then
+      if [ "$ADAPTERS_FOREIGN" = "1" ]; then
+        warn "Cannot snapshot ${adapters_dir}, which belongs to another installation."
+        warn "The npm postinstall would replace that tree irreversibly, so the npm route"
+        warn "is skipped. Remove the directory first, or install through the anolisa CLI."
+        end_npm_attempt
+        return 1
+      fi
+      warn "Could not snapshot ${adapters_dir}; continuing without an adapter rollback."
+    fi
+  else
+    # Nothing there yet, so the postinstall is what creates it — and a rollback
+    # has to take it away again.
+    : > "${ROLLBACK_DIR}/adapters-absent"
+  fi
+  for bin in tokenless rtk; do
+    if [ -e "${install_dir}/${bin}" ] || [ -L "${install_dir}/${bin}" ]; then
+      cp -a "${install_dir}/${bin}" "${ROLLBACK_DIR}/link-${bin}" 2>/dev/null || true
+    fi
+  done
+  NPM_ATTEMPT_STARTED=1
+  return 0
+}
+
+# Drops the rollback snapshot, once the attempt either succeeded or was undone.
+# Any other exit path leaves it to the EXIT trap.
+end_npm_attempt() {
+  NPM_ATTEMPT_STARTED=0
+  NPM_ATTEMPT_PREFIX=""
+  NPM_PKG_PRE_EXISTED=0
+  ADAPTERS_FOREIGN=0
+  if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
+    rm -rf "$ROLLBACK_DIR" 2>/dev/null || true
+  fi
+  ROLLBACK_DIR=""
+  return 0
+}
+
+# Undoes a failed npm attempt: the launcher links it wrote, the adapter
+# directory its postinstall replaced, and the global package it installed. The
+# run can then fall back to the source build with nothing unowned left behind.
+rollback_npm_attempt() {
+  [ "$NPM_ATTEMPT_STARTED" = "1" ] || return 0
+  local install_dir="${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+  local prefix="$NPM_ATTEMPT_PREFIX" adapters_dir bin
+  adapters_dir=$(shared_adapters_dir)
+
+  for bin in tokenless rtk; do
+    if [ -e "${ROLLBACK_DIR}/link-${bin}" ] || [ -L "${ROLLBACK_DIR}/link-${bin}" ]; then
+      rm -f "${install_dir}/${bin}" 2>/dev/null || true
+      cp -a "${ROLLBACK_DIR}/link-${bin}" "${install_dir}/${bin}" 2>/dev/null \
+        || warn "Could not restore ${install_dir}/${bin} after the failed npm attempt."
+    elif [ -L "${install_dir}/${bin}" ]; then
+      # Written by this attempt, and nothing was there before it.
+      case "$(readlink -f "${install_dir}/${bin}" 2>/dev/null || true)" in
+        "${prefix}"/*) rm -f "${install_dir}/${bin}" 2>/dev/null || true ;;
+      esac
+    fi
+  done
+  INSTALLED_FILES=()
+
+  if [ -d "${ROLLBACK_DIR}/adapters-tokenless" ]; then
+    rm -rf "$adapters_dir" 2>/dev/null || true
+    mkdir -p "$(dirname "$adapters_dir")" 2>/dev/null || true
+    if cp -a "${ROLLBACK_DIR}/adapters-tokenless" "$adapters_dir" 2>/dev/null; then
+      info "Restored ${adapters_dir} after the failed npm attempt"
+    else
+      warn "Could not restore ${adapters_dir}; the failed npm attempt replaced it."
+    fi
+  elif [ -f "${ROLLBACK_DIR}/adapters-absent" ] && [ -d "$adapters_dir" ]; then
+    # The postinstall created this directory; without it the run would hand the
+    # source-build fallback an adapter tree no receipt records.
+    rm -rf "$adapters_dir" 2>/dev/null || true
+    info "Removed ${adapters_dir} the failed npm attempt created"
+  fi
+
+  if [ "$NPM_PKG_PRE_EXISTED" != "1" ] && [ -n "$prefix" ] \
+     && [ -d "${prefix}/lib/node_modules/${NPM_PACKAGE}" ]; then
+    info "Removing the npm package the failed attempt installed..."
+    remove_npm_package "$prefix" "$install_dir"
+  fi
+
+  end_npm_attempt
+  return 0
+}
+
 # Re-running the installer overwrites the receipt, so the artefacts of the
 # *previous* method would otherwise be orphaned: installing from source on top
 # of an npm install leaves the `rtk` link, the npm global package and the adapter
@@ -215,7 +481,7 @@ read_receipt() {
 # another installer has since taken over is no longer ours to delete.
 retire_previous_receipt() {
   [ -f "$RECEIPT_FILE" ] || return 0
-  read_receipt "$RECEIPT_FILE" || return 0
+  load_previous_receipt
 
   local i=0 path digest current adapters_owned
   if [ "${#OLD_FILES[@]}" -gt 0 ]; then
@@ -243,20 +509,16 @@ retire_previous_receipt() {
     done
   fi
 
-  # The npm global package of a previous npm run. Skipped when this run reused
-  # the same prefix — the package there is the one just installed.
+  # The npm global package of a previous npm run. Normally already retired
+  # before this run wrote anything (retire_previous_npm_package); this is the
+  # path that is left when the npm route was attempted into the very same
+  # prefix and then failed, so the fallback owns the install directory now.
+  # Skipped when this run reused the prefix successfully — the package there is
+  # the one just installed.
   if [ "$OLD_METHOD" = "npm" ] && [ -n "$OLD_NPM_PREFIX" ] \
-     && [ "$OLD_NPM_PREFIX" != "$NPM_PREFIX_USED" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      info "Removing the npm package left behind by the previous install..."
-      if ! npm uninstall -g "$NPM_PACKAGE" --prefix "$OLD_NPM_PREFIX" >/dev/null 2>&1; then
-        warn "Could not remove ${NPM_PACKAGE} from ${OLD_NPM_PREFIX}. Run:"
-        warn "  npm uninstall -g ${NPM_PACKAGE} --prefix ${OLD_NPM_PREFIX}"
-      fi
-    else
-      warn "npm not found; remove the previous global package yourself:"
-      warn "  npm uninstall -g ${NPM_PACKAGE} --prefix ${OLD_NPM_PREFIX}"
-    fi
+     && [ "$OLD_NPM_PREFIX" != "$NPM_PREFIX_USED" ] && [ "$PREV_NPM_RETIRED" != "1" ]; then
+    info "Removing the npm package left behind by the previous install..."
+    remove_npm_package "$OLD_NPM_PREFIX" "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
   fi
 
   # The adapter tree of a previous npm run, deregistered before it is deleted.
@@ -388,9 +650,15 @@ try_npm_install() {
   local npm_prefix
   npm_prefix=$(npm config get prefix 2>/dev/null || echo "${HOME}/.npm-global")
 
+  # Everything the npm route replaces is snapshotted first, so each failure
+  # below can be undone instead of handing the source-build fallback a machine
+  # that already carries an unowned package, an `rtk` link and an adapter tree.
+  begin_npm_attempt "$npm_prefix" || return 1
+
   if ! npm install -g "${NPM_PACKAGE}@${VERSION}" --prefix "$npm_prefix" 2>&1 | tail -5; then
     warn "npm install failed (possible EACCES or network issue)"
     warn "To fix npm permissions: mkdir -p ~/.npm-global && npm config set prefix '~/.npm-global'"
+    rollback_npm_attempt
     return 1
   fi
 
@@ -401,6 +669,7 @@ try_npm_install() {
   fi
   if [ ! -f "${npm_bin}/tokenless" ]; then
     warn "npm install succeeded but binary not found at expected path"
+    rollback_npm_attempt
     return 1
   fi
 
@@ -432,21 +701,54 @@ try_npm_install() {
 
   if [ "${#INSTALLED_FILES[@]}" -eq 0 ]; then
     warn "npm install succeeded but no binaries were linked into ${install_dir}"
+    rollback_npm_attempt
     return 1
   fi
   if ! verify_cli "${install_dir}/tokenless"; then
     warn "npm install succeeded but ${install_dir}/tokenless is not a working CLI"
+    rollback_npm_attempt
     return 1
   fi
 
   NPM_PREFIX_USED="$npm_prefix"
-  # The package postinstall copies the bundled adapters here and replaces
-  # whatever was in that directory, so this npm run owns it.
-  local adapters_dir="${HOME}/.local/share/anolisa/adapters/tokenless"
-  if [ -d "$adapters_dir" ]; then
+
+  # The package postinstall copies the bundled adapters into the shared
+  # directory and replaces whatever was there. That makes the tree this run's
+  # own only when nothing else owned it first: an anolisa component install, a
+  # direct `npm install -g` or a manual copy all leave a tree there that this
+  # run must neither adopt nor destroy. A receipt claiming it would let
+  # uninstall.sh deregister every framework and delete resources that a
+  # component record still refers to, and the manifest digest can only describe
+  # the tree after the overwrite — it cannot identify the owner before it.
+  local adapters_dir pkg_adapters
+  adapters_dir=$(shared_adapters_dir)
+  if [ "$ADAPTERS_FOREIGN" = "1" ]; then
+    if [ -d "${ROLLBACK_DIR}/adapters-tokenless" ]; then
+      rm -rf "$adapters_dir" 2>/dev/null || true
+      if cp -a "${ROLLBACK_DIR}/adapters-tokenless" "$adapters_dir" 2>/dev/null; then
+        info "Kept the adapter resources that were already in ${adapters_dir}"
+      else
+        warn "Could not put ${adapters_dir} back; the npm postinstall had replaced it."
+      fi
+    fi
+    warn "${adapters_dir} already belonged to another installation, so this run did"
+    warn "not take it over and the receipt does not record it. Its resources and"
+    warn "framework registrations are unchanged, and scripts/uninstall.sh will not"
+    warn "touch them."
+    pkg_adapters="${npm_prefix}/lib/node_modules/${NPM_PACKAGE}/adapters/tokenless"
+    if [ -d "$pkg_adapters" ]; then
+      info "The adapter resources shipped by this npm package are at: ${pkg_adapters}"
+    fi
+    ADAPTERS_DIR_USED=""
+    ADAPTERS_DIR_DIGEST=""
+  elif [ -d "$adapters_dir" ]; then
+    # Either this run created the directory, or it is the tree a previous npm
+    # run of this installer owned — replacing it is expected, so it stays
+    # recorded.
     ADAPTERS_DIR_USED="$adapters_dir"
     ADAPTERS_DIR_DIGEST=$(file_digest "${adapters_dir}/${ADAPTERS_IDENTITY_FILE}")
   fi
+  end_npm_attempt
   write_receipt npm
 
   info "Installed to ${install_dir}"
@@ -458,6 +760,25 @@ try_npm_install() {
 }
 
 try_source_build() {
+  # macOS has no supported source-build route. The release pipeline produces the
+  # macOS binaries by cross-compiling on Linux, and this fallback is validated on
+  # Linux only, so building here would hand the user an unvalidated CLI. On Intel
+  # macOS it is worse than that: no npm package is published for the platform
+  # either, so an unvalidated build would be the only thing standing between the
+  # installer and a reported "success".
+  if [ "${PLATFORM_OS:-}" = "darwin" ]; then
+    err "Source builds are not supported on macOS (${PLATFORM_KEY:-darwin})."
+    err "The macOS binaries are cross-compiled on Linux by the release pipeline, and"
+    err "this installer's source-build fallback is validated on Linux only."
+    if [ "${PLATFORM_KEY:-}" = "darwin-x64" ]; then
+      err "Intel macOS has no published npm package yet either"
+      err "(@anolisa/tokenless-darwin-x64 is a release build target, not a registry"
+      err "artifact), so this platform currently has no supported install route."
+    else
+      err "Install the prebuilt binaries instead: npm install -g ${NPM_PACKAGE}"
+    fi
+    return 1
+  fi
   info "Building from source..."
   local install_dir="${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
   # Checked explicitly for the same reason as in try_npm_install: errexit is
@@ -583,6 +904,17 @@ main() {
   local install_dir="${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
   info "Platform: ${PLATFORM_KEY}"
   info "Install directory: ${install_dir}"
+
+  # Retire the previous run's npm global package before anything new is written.
+  # `npm uninstall -g --prefix P` also removes P/bin/tokenless, so when P/bin is
+  # this run's install directory, doing it after the install would delete the CLI
+  # the source build has just placed there and fail the whole run.
+  local prospective_prefix=""
+  if [ "${TOKENLESS_FORCE_BUILD:-0}" != "1" ] && [ "${MUSL_LINUX:-0}" != "1" ] \
+     && command -v npm >/dev/null 2>&1; then
+    prospective_prefix=$(npm config get prefix 2>/dev/null || true)
+  fi
+  retire_previous_npm_package "$prospective_prefix"
 
   if [ "${TOKENLESS_FORCE_BUILD:-0}" = "1" ]; then
     try_source_build || die "Source build failed"

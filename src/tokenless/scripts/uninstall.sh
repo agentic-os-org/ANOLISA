@@ -101,7 +101,15 @@ deregister_framework_adapters() {
       info "[dry-run] would deregister the ${framework} adapter via ${script}"
       continue
     fi
-    output=$(bash "$script" 2>&1) && status=0 || status=$?
+    # Deregistration only. These are the adapters' full uninstall scripts, and
+    # at least the Codex one also removes ${PREFIX}/bin/tokenless. Step 1 above
+    # has already decided what happens to that binary — it keeps it when the
+    # recorded digest says another installation took the path over — so the
+    # sub-script must not get a second chance at it: TOKENLESS_DEREGISTER_ONLY=1
+    # limits it to the framework registration. stdin is closed as well, so an
+    # interactive prompt can neither block the run nor vanish into the captured
+    # output.
+    output=$(TOKENLESS_DEREGISTER_ONLY=1 bash "$script" </dev/null 2>&1) && status=0 || status=$?
     if [ "$status" -ne 0 ]; then
       warn "Could not deregister the ${framework} adapter (exit ${status}); remove its registration manually:"
       warn "  bash ${script}"

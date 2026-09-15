@@ -195,8 +195,11 @@ consumes to remove exactly those paths; its source-build path is CLI-only
 Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
 macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
 optional-dependency entry describes a release build target, not a registry
-artifact, so the npm route cannot deliver a binary there. Use the source-build
-path (`TOKENLESS_FORCE_BUILD=1`) or build from source.
+artifact, so the npm route cannot deliver a binary there. The standalone
+installer does not fall back to a source build on macOS either — it exits with
+an error instead of running `cargo` — so Intel macOS currently has no supported
+install route. Use Linux or Apple Silicon macOS until that package is
+published.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands

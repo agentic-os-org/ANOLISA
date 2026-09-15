@@ -159,8 +159,9 @@ adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样�
 当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
 仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
 optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
-因此 npm 路径无法在 Intel Mac 上提供二进制。请改用源码构建路径
-（`TOKENLESS_FORCE_BUILD=1`）或自行从源码构建。
+因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
+回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
+受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
