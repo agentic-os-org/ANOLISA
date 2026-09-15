@@ -122,6 +122,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthCollectorHooks => "Hooks",
         MessageId::HealthCollectorPty => "PTY",
         MessageId::HealthCollectorPermissions => "Permissions",
+        MessageId::HealthCollectorRuntime => "Runtime",
+        MessageId::HealthCollectorLogs => "Logs",
         MessageId::DoctorTitle => "cosh-shell doctor",
         MessageId::DoctorStatusLabel => "status",
         MessageId::DoctorChecksLabel => "checks",
@@ -132,6 +134,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingHooksUntrusted => "project hooks not trusted",
         MessageId::HealthFindingPtyUnavailable => "PTY support unavailable",
         MessageId::HealthFindingPermissionsUnwritable => "config directory not writable",
+        MessageId::HealthFindingOrphanCore => "orphaned cosh-core process (pid {pid})",
+        MessageId::HealthFindingStaleEntry => {
+            "{kind} entry left behind (pid {pid}, started {time})"
+        }
+        MessageId::HealthFindingCrash => "{kind} panicked at {time}: {panic}",
+        MessageId::HealthFindingRecentErrors => {
+            "{count} ERROR entries in {file} within 24h (last {time})"
+        }
+        MessageId::HealthFindingWarnFlood => {
+            "{count} WARN entries in {file} within 24h (retry loop?)"
+        }
         MessageId::HealthRemediationProvider => {
             "configure credentials for adapter '{adapter}' (env or config.toml) or run /auth"
         }
@@ -155,6 +168,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HealthRemediationPermissions => {
             "fix permissions on {path} so cosh-shell can write config, logs and state"
+        }
+        MessageId::HealthRemediationOrphanCore => {
+            "no shell owns this core; stop it with: kill {pid}"
+        }
+        MessageId::HealthRemediationStaleEntry => {
+            "correlate with crash records; run `cosh-shell diagnostics export` to collect evidence"
+        }
+        MessageId::HealthRemediationCrash => {
+            "run `cosh-shell diagnostics export` and inspect the crashes section"
+        }
+        MessageId::HealthRemediationLogs => {
+            "run `cosh-shell diagnostics export` and inspect the logs section"
         }
         MessageId::HealthTryReasonMemoryLow => "available memory is low",
         MessageId::HealthTryReasonSwapWithContext => "swap is high with pressure context",

@@ -112,6 +112,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthCollectorHooks => "Hooks",
         MessageId::HealthCollectorPty => "PTY",
         MessageId::HealthCollectorPermissions => "权限",
+        MessageId::HealthCollectorRuntime => "运行时",
+        MessageId::HealthCollectorLogs => "日志",
         MessageId::DoctorTitle => "cosh-shell 体检",
         MessageId::DoctorStatusLabel => "状态",
         MessageId::DoctorChecksLabel => "检查项",
@@ -122,6 +124,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingHooksUntrusted => "项目 hooks 未信任",
         MessageId::HealthFindingPtyUnavailable => "PTY 支持不可用",
         MessageId::HealthFindingPermissionsUnwritable => "配置目录不可写",
+        MessageId::HealthFindingOrphanCore => "孤立的 cosh-core 进程（pid {pid}）",
+        MessageId::HealthFindingStaleEntry => {
+            "{kind} 进程留下残留条目（pid {pid}，启动于 {time}）"
+        }
+        MessageId::HealthFindingCrash => "{kind} 于 {time} 发生 panic：{panic}",
+        MessageId::HealthFindingRecentErrors => {
+            "{file} 24h 内有 {count} 条 ERROR（最近一条 {time}）"
+        }
+        MessageId::HealthFindingWarnFlood => {
+            "{file} 24h 内有 {count} 条 WARN（疑似重试循环）"
+        }
         MessageId::HealthRemediationProvider => {
             "为 adapter '{adapter}' 配置凭据（环境变量或 config.toml），或运行 /auth"
         }
@@ -143,6 +156,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HealthRemediationPermissions => {
             "修正 {path} 的权限，使 cosh-shell 能写入配置、日志与状态"
+        }
+        MessageId::HealthRemediationOrphanCore => {
+            "没有 shell 持有该 core；用以下命令停止：kill {pid}"
+        }
+        MessageId::HealthRemediationStaleEntry => {
+            "请与 crash 记录关联查看；运行 `cosh-shell diagnostics export` 收集证据"
+        }
+        MessageId::HealthRemediationCrash => {
+            "运行 `cosh-shell diagnostics export` 并在 crashes 部分查看崩溃详情"
+        }
+        MessageId::HealthRemediationLogs => {
+            "运行 `cosh-shell diagnostics export` 并在 logs 部分查看错误日志"
         }
         MessageId::HealthTryReasonMemoryLow => "可用内存偏低",
         MessageId::HealthTryReasonSwapWithContext => "swap 偏高且有压力上下文",

@@ -135,6 +135,8 @@ fn collector_token(collector: HealthCollector) -> &'static str {
         HealthCollector::Hooks => "hooks",
         HealthCollector::Pty => "pty",
         HealthCollector::Permissions => "permissions",
+        HealthCollector::Runtime => "runtime",
+        HealthCollector::Logs => "logs",
     }
 }
 

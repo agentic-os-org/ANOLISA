@@ -366,6 +366,8 @@ fn parse_fixture_category(value: &str) -> Option<HealthFactCategory> {
         "hooks" => Some(HealthFactCategory::Hooks),
         "pty" => Some(HealthFactCategory::Pty),
         "permissions" => Some(HealthFactCategory::Permissions),
+        "runtime" => Some(HealthFactCategory::Runtime),
+        "logs" => Some(HealthFactCategory::Logs),
         _ => None,
     }
 }
@@ -394,6 +396,8 @@ fn parse_fixture_collector(value: &str) -> Option<HealthCollector> {
         "hooks" => Some(HealthCollector::Hooks),
         "pty" => Some(HealthCollector::Pty),
         "permissions" => Some(HealthCollector::Permissions),
+        "runtime" => Some(HealthCollector::Runtime),
+        "logs" => Some(HealthCollector::Logs),
         _ => None,
     }
 }

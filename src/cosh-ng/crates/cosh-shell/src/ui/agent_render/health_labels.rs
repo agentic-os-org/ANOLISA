@@ -19,5 +19,7 @@ pub(super) fn collector_label(collector: HealthCollector, i18n: crate::I18n) -> 
         HealthCollector::Hooks => i18n.t(crate::MessageId::HealthCollectorHooks),
         HealthCollector::Pty => i18n.t(crate::MessageId::HealthCollectorPty),
         HealthCollector::Permissions => i18n.t(crate::MessageId::HealthCollectorPermissions),
+        HealthCollector::Runtime => i18n.t(crate::MessageId::HealthCollectorRuntime),
+        HealthCollector::Logs => i18n.t(crate::MessageId::HealthCollectorLogs),
     }
 }
