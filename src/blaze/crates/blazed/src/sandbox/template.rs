@@ -2819,18 +2819,35 @@ impl MountTable {
                     "mountinfo entry has fewer than six fields",
                 ));
             }
+            let separator = fields
+                .iter()
+                .enumerate()
+                .skip(6)
+                .find_map(|(index, field)| (*field == b"-").then_some(index))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "mountinfo entry lacks field separator",
+                    )
+                })?;
+            let filesystem_type = fields.get(separator + 1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mountinfo entry lacks filesystem type",
+                )
+            })?;
             let device = parse_mount_device(fields[2])?;
             let root = decode_mount_path(fields[3])?;
             let mount_point = decode_mount_path(fields[4])?;
-            if !root.is_absolute() || !mount_point.is_absolute() {
+            if !mount_point.is_absolute() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "mountinfo root and mount point must be absolute",
+                    "mountinfo mount point must be absolute",
                 ));
             }
             entries.push(MountEntry {
                 device,
-                root: normalize_absolute_path(&root)?,
+                root: normalize_mount_root(&root, filesystem_type)?,
                 mount_point: normalize_absolute_path(&mount_point)?,
             });
         }
@@ -2900,6 +2917,35 @@ fn decode_mount_path(value: &[u8]) -> io::Result<PathBuf> {
         ));
     }
     Ok(PathBuf::from(OsString::from_vec(decoded)))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn normalize_mount_root(root: &Path, filesystem_type: &[u8]) -> io::Result<PathBuf> {
+    if root.is_absolute() {
+        return normalize_absolute_path(root);
+    }
+    if filesystem_type != b"nsfs" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mountinfo root must be absolute for non-nsfs filesystems",
+        ));
+    }
+
+    let mut components = root.components();
+    let Some(Component::Normal(namespace)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mountinfo nsfs root must identify one namespace",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mountinfo nsfs root must identify one namespace",
+        ));
+    }
+
+    Ok(Path::new("/").join(namespace))
 }
 
 fn normalize_absolute_path(path: &Path) -> io::Result<PathBuf> {
@@ -5068,6 +5114,39 @@ mod tests {
                 .expect("mounted location")
                 .path,
             Path::new("/srv/runtime templates/base")
+        );
+    }
+
+    #[test]
+    fn mount_table_accepts_nsfs_namespace_roots() {
+        let mounts = MountTable::parse(
+            b"1062 592 0:4 net:[4026539640] /run/netns/blz-ns-0-e0fe3133-49ee-471a-ac53-6233df618010 rw shared:681 - nsfs nsfs rw\n",
+        )
+        .expect("nsfs mount table");
+
+        assert_eq!(
+            mounts
+                .location(Path::new(
+                    "/run/netns/blz-ns-0-e0fe3133-49ee-471a-ac53-6233df618010",
+                ))
+                .expect("location")
+                .expect("mounted location")
+                .path,
+            Path::new("/net:[4026539640]")
+        );
+    }
+
+    #[test]
+    fn mount_table_rejects_relative_regular_filesystem_roots() {
+        let error =
+            MountTable::parse(b"25 24 8:1 srv/storage /mnt/catalog rw - ext4 /dev/root rw\n")
+                .expect_err("relative ext4 root must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("root must be absolute for non-nsfs filesystems")
         );
     }
 
