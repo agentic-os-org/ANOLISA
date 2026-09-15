@@ -4,10 +4,15 @@
 # matching for both negotiated flags — capability consent and the legacy
 # unsafe-install bypass — the consent opt-out, AGENT_MEMORY_SAFE_INSTALL, and
 # the per-outcome log lines. No real plugin is installed.
+#
+# It also pins the memory_get / memory_search tool-name hand-off (#3218):
+# install.sh must disable OpenClaw's bundled memory-core, record that it did,
+# and uninstall.sh must restore it from that record alone.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SH="$SCRIPT_DIR/../adapters/agent-memory/openclaw/scripts/install.sh"
+UNINSTALL_SH="$SCRIPT_DIR/../adapters/agent-memory/openclaw/scripts/uninstall.sh"
 SANDBOX="$(mktemp -d -t agent-memory-openclaw-install.XXXXXX)"
 trap 'rm -r -- "$SANDBOX"' EXIT
 # The space in "adapter root" pins argv quoting through PLUGIN_DIR.
@@ -79,6 +84,54 @@ fi
 if [ "$1" = config ] && [ "$2" = set ]; then
     exit 0
 fi
+# install.sh reads memory-core's persisted enablement flag before disabling it,
+# because `plugins disable` is idempotent and its exit status cannot tell a real
+# transition from a no-op. TEST_MEMORY_CORE_ENABLED models what a host answers
+# for that key: `absent` (the default) is a bundled plugin nobody ever
+# configured, so the probe fails and the flag reads as its enabled default;
+# anything else is echoed verbatim, which is how the value-rendering variants
+# get pinned.
+if [ "$1" = config ] && [ "$2" = get ] \
+        && [ "$3" = plugins.entries.memory-core.enabled ]; then
+    case "${TEST_MEMORY_CORE_ENABLED:-absent}" in
+        absent) echo "Config key not found: $3" >&2; exit 1 ;;
+        *) printf '%s\n' "$TEST_MEMORY_CORE_ENABLED" ;;
+    esac
+    exit 0
+fi
+# uninstall.sh reads the memory slot's owner before it restores memory-core,
+# because `plugins enable` re-runs OpenClaw's exclusive slot selection and would
+# otherwise take the slot back from a backend the operator chose after
+# install.sh ran (#3222). TEST_MEMORY_SLOT models the answer for that key the
+# same way TEST_MEMORY_CORE_ENABLED models the enablement flag: `absent` (the
+# default) fails the probe, anything else is echoed verbatim so the
+# value-rendering variants get pinned.
+if [ "$1" = config ] && [ "$2" = get ] \
+        && [ "$3" = plugins.slots.memory ]; then
+    case "${TEST_MEMORY_SLOT:-absent}" in
+        absent) echo "Config key not found: $3" >&2; exit 1 ;;
+        *) printf '%s\n' "$TEST_MEMORY_SLOT" ;;
+    esac
+    exit 0
+fi
+# install.sh disables OpenClaw's bundled memory backend so this plugin can own
+# the memory_get / memory_search tool names (#3218). `plugins disable` is
+# idempotent on a real host, so the stub is too; TEST_MEMORY_CORE_DISABLE_FAILS
+# models a host that refuses it (unknown plugin, read-only config).
+if [ "$1" = plugins ] && [ "$2" = uninstall ]; then
+    exit 0
+fi
+if [ "$1" = plugins ] && [ "$2" = enable ] && [ "$3" = memory-core ]; then
+    echo 'Enabled plugin "memory-core". Restart the gateway to apply.'
+    exit 0
+fi
+if [ "$1" = plugins ] && [ "$2" = disable ] && [ "$3" = memory-core ]; then
+    if [ "${TEST_MEMORY_CORE_DISABLE_FAILS:-0}" = 1 ]; then
+        echo 'Plugin not found: memory-core.' >&2; exit 1
+    fi
+    echo 'Disabled plugin "memory-core". Restart the gateway to apply.'
+    exit 0
+fi
 [ "$1" = plugins ] && [ "$2" = install ]
 [ "$3" = "$ANOLISA_ADAPTER_DIR/openclaw" ]
 accepted=0
@@ -135,6 +188,12 @@ export OPENCLAW_HOME="$SANDBOX/ignored home"
 export TEST_STATE_DIR="$OPENCLAW_STATE_DIR"
 export TEST_ARGV_LOG="$SANDBOX/argv"
 export TEST_INSTALLED="$SANDBOX/installed"
+# install.sh records that *it* disabled memory-core, so uninstall.sh restores
+# exactly what install.sh changed and never re-enables one an operator disabled
+# themselves. Same path the script derives from OPENCLAW_STATE_DIR.
+# Exported because the harness-pin scenario re-runs scenario() in a child bash
+# that inherits only the environment and `declare -f scenario fail`.
+export MEMORY_CORE_MARKER="$OPENCLAW_STATE_DIR/.anolisa-memory-anolisa-disabled-memory-core"
 # `openclaw plugins install --help` captured verbatim from real releases, so the
 # unsafe-install classifier is pinned against how commander actually renders and
 # wraps the option descriptions rather than against hand-written help text.
@@ -172,6 +231,11 @@ scenario() {
     local rc=0
     : > "$TEST_ARGV_LOG"
     rm -f "$TEST_INSTALLED"
+    # The state directory is the marker's home, and an earlier scenario may have
+    # removed it (unlock_install_target). Recreate it, and start every scenario
+    # from "install.sh has never disabled memory-core here".
+    mkdir -p -- "$OPENCLAW_STATE_DIR"
+    rm -f -- "$MEMORY_CORE_MARKER"
     env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
     [ "$rc" = "$want_rc" ] || fail "$label: rc=$rc, want $want_rc"
@@ -188,14 +252,59 @@ scenario() {
     install_argv="$(awk '/^plugins install / && !/--help$/ {print}' "$TEST_ARGV_LOG")"
     [ "$install_argv" = "$want_argv" ] \
         || fail "$label: install argv '$install_argv' != '$want_argv'"
+    local disable_calls
+    disable_calls="$(awk '/^plugins disable memory-core$/ {n++} END {print n+0}' "$TEST_ARGV_LOG")"
     if [ "$want_rc" = 0 ]; then
         [ -f "$TEST_INSTALLED" ] || fail "$label: install did not run"
         [ "$(grep -c '^config set plugins.entries.memory-anolisa.hooks.allowConversationAccess true$' "$TEST_ARGV_LOG")" = 1 ] \
             || fail "$label: allowConversationAccess config-set missing"
+        # The memory-core disable is what releases the memory_get /
+        # memory_search tool names (#3218), so it is part of a successful
+        # install's contract, not an optional extra.
+        [ "$disable_calls" = 1 ] \
+            || fail "$label: expected exactly one 'plugins disable memory-core', got $disable_calls"
+        if [ "${TEST_MEMORY_CORE_DISABLE_FAILS:-0}" = 1 ]; then
+            [ ! -f "$MEMORY_CORE_MARKER" ] \
+                || fail "$label: marker written even though the disable failed"
+        elif memory_core_pre_disabled; then
+            # memory-core was already off, so `plugins disable` caused no
+            # transition. Claiming one would make uninstall.sh re-enable a
+            # plugin the operator deliberately turned off.
+            [ ! -f "$MEMORY_CORE_MARKER" ] \
+                || fail "$label: marker claims a memory-core disable this install did not cause"
+        else
+            [ -f "$MEMORY_CORE_MARKER" ] \
+                || fail "$label: marker not written after a successful disable"
+        fi
     else
         [ ! -f "$TEST_INSTALLED" ] || fail "$label: install ran despite failure"
+        # Nothing may be changed on the host after a failed install: the script
+        # exits before the memory-core step, so it must not have run either.
+        [ "$disable_calls" = 0 ] \
+            || fail "$label: memory-core disabled despite a failed install"
+        [ ! -f "$MEMORY_CORE_MARKER" ] || fail "$label: marker written despite a failed install"
     fi
     echo "PASS: $label"
+}
+
+# Whether the value TEST_MEMORY_CORE_ENABLED hands back tells install.sh that
+# memory-core was already disabled before this run — i.e. that the idempotent
+# `plugins disable` caused no transition and no marker may be written. Mirrors
+# the script's own false-ish token table so a scenario cannot drift from it.
+memory_core_pre_disabled() {
+    # Same reduction install.sh applies to the probe's answer: last line, lower
+    # cased, trailing token after any `=`/`:`, quoting and punctuation stripped.
+    # Duplicating it here rather than re-deriving a simpler match is the point —
+    # a rendering the script classifies as "already off" must classify the same
+    # way in the assertion, or the two silently disagree on one host shape.
+    local prior
+    prior="$(printf '%s' "${TEST_MEMORY_CORE_ENABLED:-absent}" | tail -n 1 \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -e 's/.*[=:]//' -e 's/[]["'\''`,;]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$prior" in
+        false|0|no|off|disabled) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 expect_log() { grep -q -- "$1" "$SANDBOX/output" || fail "expected log line: $1"; }
@@ -534,6 +643,304 @@ if command -v make >/dev/null 2>&1; then
         || fail 'remote-test does not run the installer test'
     echo 'PASS: remote-test includes the installer test'
 fi
+
+# --- memory-core tool-name release (#3218) -----------------------------------
+# OpenClaw keeps its bundled memory-core loaded as the dreaming sidecar even
+# after this plugin takes the memory slot, and memory-core owns the
+# memory_get / memory_search names. OpenClaw's plugin tool registry is
+# first-wins, so the plugin's same-named tools are dropped and agent calls bind
+# to memory-core's workspace reader, which answers disabled:true for every
+# ~/.anolisa/memory path. A successful install must therefore disable it.
+export TEST_HELP=modern TEST_GATE=new
+scenario 'successful install disables memory-core' 0 "$(argv no yes)"
+expect_log 'Disabled memory-core'
+expect_log 'first-wins tool registry'
+expect_no_log "plugins disable memory-core' failed"
+
+# A host that refuses the disable still has a working plugin (observe,
+# auto-recall and the MCP transport are all unaffected), so the install must not
+# fail — but it has to say why memory_get will keep answering disabled:true
+# instead of leaving the operator with the silent breakage this fixes.
+# Exported rather than passed as a KEY=VAL scenario argument: scenario() reads
+# it too, to flip its own marker assertion, and a per-run env assignment would
+# only reach the install.sh child.
+export TEST_MEMORY_CORE_DISABLE_FAILS=1
+scenario 'memory-core disable failure warns without failing the install' 0 "$(argv no yes)"
+expect_log "plugins disable memory-core' failed"
+expect_log 'disabled:true'
+expect_no_log '] Disabled memory-core'
+unset TEST_MEMORY_CORE_DISABLE_FAILS
+
+# Re-running the installer (upgrade, or a retry after a warning) converges:
+# `plugins disable` is idempotent and the marker survives every run, so
+# uninstall.sh still knows the restore is its job. scenario() resets the marker
+# before each run by design, so this pins the two-run sequence directly.
+: > "$TEST_ARGV_LOG"
+rm -f -- "$MEMORY_CORE_MARKER"
+env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || fail 're-install pair: first install failed'
+[ -f "$MEMORY_CORE_MARKER" ] || fail 're-install pair: marker missing after the first install'
+env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || fail 're-install pair: second install failed'
+[ -f "$MEMORY_CORE_MARKER" ] || fail 're-install pair: marker lost across a re-install'
+[ "$(awk '/^plugins disable memory-core$/ {n++} END {print n+0}' "$TEST_ARGV_LOG")" = 2 ] \
+    || fail 're-install pair: expected one memory-core disable per install run'
+echo 'PASS: re-install keeps the memory-core disable and its marker'
+
+# --- the marker records only a transition this install caused (#3218) --------
+# `plugins disable` is idempotent, so an operator who had already turned
+# memory-core off still gets exit 0 from it. Only the pre-read of
+# plugins.entries.memory-core.enabled separates that no-op from a real
+# transition, and the distinction is what keeps uninstall.sh from re-enabling a
+# plugin the operator meant to keep off. Every rendering a host might use for
+# the flag has to classify identically, or the operator's choice survives on
+# some hosts and not others.
+for prior in false FALSE '"false"' 0 off disabled \
+        'plugins.entries.memory-core.enabled=false' 'enabled: false'; do
+    export TEST_MEMORY_CORE_ENABLED="$prior"
+    scenario "operator-disabled memory-core (${prior}) records no marker" 0 "$(argv no yes)"
+    expect_log 'was already disabled'
+    expect_no_log '] Disabled memory-core'
+done
+unset TEST_MEMORY_CORE_ENABLED
+
+# A host that answers the probe positively keeps the restore: this disable is a
+# real transition, so the marker stands and no uncertainty note is printed.
+export TEST_MEMORY_CORE_ENABLED=true
+scenario 'enabled memory-core still records the marker' 0 "$(argv no yes)"
+expect_log '] Disabled memory-core'
+expect_no_log 'returned no value'
+unset TEST_MEMORY_CORE_ENABLED
+
+# An unanswerable probe (no `config get`, unreadable config, or a bundled
+# default nobody ever wrote) must not cost the restore. The two failure modes
+# are not symmetric: skipping the marker strands the host with no memory plugin
+# at all after uninstall, because `plugins uninstall` resets the memory slot to
+# its memory-core default while config still says enabled=false, whereas
+# recording it can only cost an operator one extra `plugins disable`.
+export TEST_MEMORY_CORE_ENABLED=absent
+scenario 'unanswerable prior-state probe keeps the restore' 0 "$(argv no yes)"
+expect_log '] Disabled memory-core'
+expect_log 'returned no value'
+expect_log 'delete'
+unset TEST_MEMORY_CORE_ENABLED
+
+# --- uninstall restores exactly what install.sh changed (#3218) ---------------
+# uninstall.sh resolves the CLI the same way install.sh does — OPENCLAW_BIN,
+# defaulting to `openclaw` — so the stub reaches it through the exported
+# override. PATH carries it too, which is what the no-override default needs.
+run_uninstall() {
+    : > "$TEST_ARGV_LOG"
+    env PATH="$SANDBOX:$PATH" bash "$UNINSTALL_SH" >"$SANDBOX/output" 2>&1 || true
+}
+
+# Run uninstall.sh with a PATH that deliberately has no `openclaw` on it, so
+# only an honored OPENCLAW_BIN can reach the CLI at all. The bin dir carries the
+# externals the script and its shebang need — bash itself is resolved through
+# `env`, so omitting it would fail the run for the wrong reason and prove
+# nothing about the override.
+run_uninstall_via_bin() {
+    : > "$TEST_ARGV_LOG"
+    env PATH="$SANDBOX/no-openclaw-bin" OPENCLAW_BIN="$1" \
+        bash "$UNINSTALL_SH" >"$SANDBOX/output" 2>&1 || true
+}
+
+enable_calls() {
+    awk '/^plugins enable memory-core$/ {n++} END {print n+0}' "$TEST_ARGV_LOG"
+}
+
+# With the marker: memory-anolisa is gone, so the memory slot falls back to its
+# default — a memory-core still recorded as disabled would leave the host with
+# no memory backend at all.
+touch -- "$MEMORY_CORE_MARKER"
+run_uninstall
+[ "$(enable_calls)" = 1 ] || fail 'uninstall did not re-enable memory-core'
+[ ! -f "$MEMORY_CORE_MARKER" ] || fail 'uninstall left the marker behind'
+expect_log 'Re-enabled memory-core'
+echo 'PASS: uninstall restores the memory-core install.sh disabled'
+
+# Without the marker this script never disabled memory-core, so an operator's
+# own choice to keep it off must survive the uninstall untouched.
+rm -f -- "$MEMORY_CORE_MARKER"
+run_uninstall
+[ "$(enable_calls)" = 0 ] || fail 'uninstall re-enabled a memory-core it never disabled'
+expect_no_log 'Re-enabled memory-core'
+echo 'PASS: uninstall leaves an unmarked memory-core alone'
+
+# End to end over the pair an operator actually hits: memory-core already off,
+# install, uninstall. Neither step may touch the operator's choice.
+export TEST_MEMORY_CORE_ENABLED=false
+: > "$TEST_ARGV_LOG"
+rm -f -- "$MEMORY_CORE_MARKER"
+env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || fail 'pre-disabled pair: install failed'
+[ ! -f "$MEMORY_CORE_MARKER" ] \
+    || fail 'pre-disabled pair: install claimed a disable it did not cause'
+run_uninstall
+[ "$(enable_calls)" = 0 ] \
+    || fail 'pre-disabled pair: uninstall re-enabled a memory-core the operator disabled'
+echo 'PASS: an operator-disabled memory-core survives install and uninstall'
+unset TEST_MEMORY_CORE_ENABLED
+
+# --- uninstall must not take the memory slot back from a later choice (#3222) --
+# The marker records that install.sh disabled memory-core; it does not record
+# that this plugin still owns the memory slot. `plugins enable memory-core`
+# re-runs OpenClaw's exclusive slot selection, so a restore driven by the marker
+# alone drags the slot back from a backend the operator chose *after* that
+# install, and the backend they picked then silently stops serving retrieval.
+slot_probe_calls() {
+    awk '/^config get plugins\.slots\.memory$/ {n++} END {print n+0}' "$TEST_ARGV_LOG"
+}
+
+OPENCLAW_CFG_UNDER_TEST="$OPENCLAW_STATE_DIR/openclaw.json"
+
+# A host as the operator left it after switching backends: this plugin is still
+# installed and allowed, memory-core is still off from install.sh, and the
+# memory slot belongs to memory-lancedb.
+write_lancedb_config() {
+    cat > "$OPENCLAW_CFG_UNDER_TEST" <<'JSON'
+{
+  "plugins": {
+    "allow": ["memory-anolisa", "memory-lancedb"],
+    "entries": {
+      "memory-anolisa": { "enabled": true },
+      "memory-core": { "enabled": false },
+      "memory-lancedb": { "enabled": true }
+    },
+    "slots": { "memory": "memory-lancedb" }
+  }
+}
+JSON
+}
+
+memory_slot_in_config() {
+    # grep, not jq/python3: this has to hold whichever of the two the script's
+    # cleanup took, and must not depend on either being installed. Both render
+    # the nested key identically, and leading whitespace is irrelevant here.
+    grep -q '"memory": "memory-lancedb"' "$OPENCLAW_CFG_UNDER_TEST"
+}
+
+# The lifecycle end to end: install with memory-core enabled (so install.sh
+# claims the disable and writes the marker), the operator moves the memory slot
+# to memory-lancedb, uninstall. The slot must still read memory-lancedb
+# afterwards — no `plugins enable memory-core` may run to re-select memory-core
+# into it — while the cleanup still drops this plugin's own keys.
+: > "$TEST_ARGV_LOG"
+rm -f -- "$MEMORY_CORE_MARKER" "$OPENCLAW_CFG_UNDER_TEST"
+env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || fail 'slot hand-off: install failed'
+[ -f "$MEMORY_CORE_MARKER" ] || fail 'slot hand-off: install wrote no marker'
+write_lancedb_config
+export TEST_MEMORY_SLOT=memory-lancedb
+run_uninstall
+[ "$(enable_calls)" = 0 ] \
+    || fail 'slot hand-off: uninstall forced the memory slot back to memory-core'
+[ "$(slot_probe_calls)" = 1 ] \
+    || fail 'slot hand-off: uninstall never asked who owns the memory slot'
+memory_slot_in_config \
+    || fail 'slot hand-off: plugins.slots.memory no longer reads memory-lancedb'
+[ -f "$MEMORY_CORE_MARKER" ] \
+    || fail 'slot hand-off: uninstall dropped the record of a memory-core it left disabled'
+expect_log 'Left memory-core disabled'
+expect_log 'memory-lancedb'
+expect_no_log 'Re-enabled memory-core'
+if command -v jq &>/dev/null || command -v python3 &>/dev/null; then
+    ! grep -q 'memory-anolisa' "$OPENCLAW_CFG_UNDER_TEST" \
+        || fail 'slot hand-off: cleanup left this plugin behind in openclaw.json'
+fi
+echo 'PASS: install → slot switch → uninstall keeps the memory-lancedb slot'
+
+# Every rendering a host might use for a third-party owner has to classify the
+# same way, or the operator's later choice survives on some hosts and not others.
+rm -f -- "$OPENCLAW_CFG_UNDER_TEST"
+for owner in memory-lancedb '"memory-lancedb"' MEMORY-LANCEDB \
+        'plugins.slots.memory=memory-lancedb' 'slots.memory: memory-lancedb'; do
+    export TEST_MEMORY_SLOT="$owner"
+    touch -- "$MEMORY_CORE_MARKER"
+    run_uninstall
+    [ "$(enable_calls)" = 0 ] \
+        || fail "slot owner '${owner}' did not stop the memory-core restore"
+    expect_log 'Left memory-core disabled'
+done
+
+# A slot this plugin or memory-core still owns — or one nobody owns, however the
+# host renders that — keeps the restore. Skipping it there is exactly what
+# strands the host with no memory backend at all, since `plugins uninstall`
+# vacates the slot while config still says memory-core is disabled.
+for owner in memory-anolisa '"memory-anolisa"' memory-core MEMORY-CORE \
+        null none undefined '(empty)' absent ''; do
+    export TEST_MEMORY_SLOT="$owner"
+    touch -- "$MEMORY_CORE_MARKER"
+    run_uninstall
+    [ "$(enable_calls)" = 1 ] \
+        || fail "slot owner '${owner}' blocked a restore it should have allowed"
+    [ ! -f "$MEMORY_CORE_MARKER" ] \
+        || fail "slot owner '${owner}' kept the marker after a restore"
+    expect_log 'Re-enabled memory-core'
+done
+unset TEST_MEMORY_SLOT
+rm -f -- "$MEMORY_CORE_MARKER"
+echo 'PASS: only a positively identified third owner blocks the memory-core restore'
+
+# The CLI is not the only source of truth: a host whose `config get` cannot
+# answer still has the slot persisted in openclaw.json, which is the file the
+# cleanup edits anyway. Reading it back is what stops the guard from silently
+# degrading into the behaviour it exists to prevent.
+if command -v jq &>/dev/null || command -v python3 &>/dev/null; then
+    write_lancedb_config
+    touch -- "$MEMORY_CORE_MARKER"
+    run_uninstall
+    [ "$(enable_calls)" = 0 ] \
+        || fail 'a slot only openclaw.json knows about did not stop the restore'
+    memory_slot_in_config \
+        || fail 'the persisted memory slot no longer reads memory-lancedb'
+    rm -f -- "$OPENCLAW_CFG_UNDER_TEST" "$MEMORY_CORE_MARKER"
+    echo 'PASS: uninstall reads the slot owner from openclaw.json when the CLI cannot answer'
+fi
+
+# With no marker there is nothing to restore, so the slot is nobody's business
+# and the probe must not run at all on that path.
+rm -f -- "$MEMORY_CORE_MARKER"
+run_uninstall
+[ "$(slot_probe_calls)" = 0 ] \
+    || fail 'uninstall probed the memory slot with no marker to act on'
+echo 'PASS: an unmarked uninstall does not probe the memory slot'
+
+# --- uninstall resolves the CLI through OPENCLAW_BIN (#3218) ------------------
+# Install honors a supported OPENCLAW_BIN override — an absolute CLI path that
+# is not on PATH as the literal `openclaw` — so it disables memory-core and
+# writes the marker. If the restore ignores that same override it reports the
+# CLI missing and leaves memory-core disabled on a host where the configured
+# executable is available, which is the one outcome the marker exists to
+# prevent.
+mkdir -p "$SANDBOX/no-openclaw-bin"
+for _b in bash env rm mv cat mkdir tail tr sed; do
+    ln -sf "$(command -v "$_b")" "$SANDBOX/no-openclaw-bin/$_b"
+done
+[ ! -e "$SANDBOX/no-openclaw-bin/openclaw" ] || fail 'test bin dir shadows openclaw'
+
+touch -- "$MEMORY_CORE_MARKER"
+run_uninstall_via_bin "$OPENCLAW_BIN"
+[ "$(enable_calls)" = 1 ] \
+    || fail 'uninstall ignored OPENCLAW_BIN and left memory-core disabled'
+[ ! -f "$MEMORY_CORE_MARKER" ] \
+    || fail 'uninstall kept the marker after restoring through OPENCLAW_BIN'
+expect_log 'Re-enabled memory-core'
+expect_no_log 'CLI not found'
+echo 'PASS: uninstall restores memory-core through the OPENCLAW_BIN override'
+
+# An override that cannot be resolved must say which binary it tried and keep
+# the marker, so the operator is pointed at the CLI they configured rather than
+# at a bare `openclaw` that was never the install path.
+touch -- "$MEMORY_CORE_MARKER"
+run_uninstall_via_bin "$SANDBOX/absent-host/openclaw"
+[ "$(enable_calls)" = 0 ] || fail 'uninstall enabled memory-core without a CLI'
+[ -f "$MEMORY_CORE_MARKER" ] \
+    || fail 'uninstall dropped a marker it could not honor'
+expect_log 'OPENCLAW_BIN='"$SANDBOX"'/absent-host/openclaw'
+expect_log 'still disabled by the'
+echo 'PASS: an unresolvable OPENCLAW_BIN keeps the marker and names the override'
+rm -f -- "$MEMORY_CORE_MARKER"
 
 # The suite must be hermetic: hostile ambient switch values must neither
 # leak into baseline scenarios nor break the suite itself.

@@ -130,6 +130,14 @@ anolisa adapter status agent-memory
 
 安装失败时，脚本只报告它自己能核实的部分。`${OPENCLAW_STATE_DIR}/extensions` 不可写会被点名为足以独立导致安装失败的文件系统权限问题——应修目录权限，不要为此去动安全策略。其余情况以脚本提示上方的 `openclaw` 输出为准，`security.installPolicy` 只作为供运维在该输出中确认的条件句出现，绝不会被断言为失败原因：「宿主把该参数标注为 deprecated no-op」本身并不能说明安装为何失败。
 
+`install.sh` 还会执行 `openclaw plugins disable memory-core`。即使别的插件已经占据 `memory` slot，OpenClaw 仍会把内置的 `memory-core` 插件作为记忆整理（dreaming）sidecar 保留加载，而 `memory_get` / `memory_search` 这两个工具名归它所有。OpenClaw 的插件工具注册表是「先到先得」：名字已被占用的插件工具会被丢弃，只在 gateway 日志里留下 `plugin tool name conflict (memory-anolisa): memory_get`，永远不会进入 agent 工具集；于是 `memory_get` 绑定到 `memory-core` 的 workspace 文件读取器，对 `~/.anolisa/memory` 下的任何路径都返回 `disabled: true`——哪怕文件确实在磁盘上（#3218）。禁用 `memory-core` 才能释放这两个名字，而 memory slot 本来就已经把记忆流量交给本插件。本插件持有 memory 期间有两个后果：`openclaw memory` 子命令与 `MEMORY.md` 的 dreaming/整理都来自 `memory-core`，在卸载前不可用。如果禁用这一步本身失败，`install.sh` 只打印 WARNING 并仍以 0 退出——`memory_observe`、auto-recall、auto-capture 照常工作，但 `memory_get` / `memory_search` 会一直是坏的，直到你自己执行 `openclaw plugins disable memory-core` 并重启 gateway。
+
+只有这个入口会做上述交接。`anolisa adapter enable agent-memory openclaw` 走的是 anolisa 内置的 OpenClaw driver：它自己执行 `openclaw plugins install`，从不调用适配器的 `install.sh`，因此这条路径上 `memory-core` 仍处于加载状态，`memory_get` 会继续返回 `disabled: true`——而 `adapter enable` 依旧报告成功，因为 `memory-anolisa` 自身确实已加载，那条路径上没有任何环节会观察到工具名冲突。通过适配器管理器启用后，请自行执行 `openclaw plugins disable memory-core` 与 `openclaw gateway restart`；同时注意 `anolisa adapter disable` 也不会替你把 `memory-core` 重新启用。把这次交接纳入 driver 的 receipt 生命周期由 #3225 跟踪。
+
+`plugins disable` 是幂等的——无论 `memory-core` 原本是否启用都以 0 退出——所以 `install.sh` 会先读取 `plugins.entries.memory-core.enabled`，只有在本次调用确实造成了状态变化时，才把这件事记录到 `${OPENCLAW_STATE_DIR}/.anolisa-memory-anolisa-disabled-memory-core`。`uninstall.sh` 只依据这个记录重新启用 `memory-core`，因此你自己手动禁用的 `memory-core` 不会被改动。当探测无法给出答案时——宿主没有 `config get`，或内置默认值从未被写入过——记录仍会写下，安装日志会说明这一点。这个偏向是刻意的：不写记录会让宿主在卸载后彻底没有任何 memory 插件，因为 `plugins uninstall` 会把 memory slot 重置回它的 `memory-core` 默认值，而 config 里仍写着 `enabled=false`；相反，一次多余的恢复只花费一条 `openclaw plugins disable memory-core`。如果你正处在这种情况下并希望 `memory-core` 保持关闭，删除该记录文件即可。
+
+记录并不是恢复的唯一条件。`uninstall.sh` 在重新启用 `memory-core` 之前，还会读取 `plugins.slots.memory` 当前归属于谁——先用 `openclaw config get`，CLI 答不上来再退回 `openclaw.json`——因为 `plugins enable` 会连带重跑 OpenClaw 的排他 slot 选择。如果你在安装之后把 memory slot 换给了别的后端（`openclaw plugins enable memory-lancedb`，或直接修改 `plugins.slots.memory`），卸载会把你选的后端留在 slot 里、让 `memory-core` 继续处于禁用状态，并在输出中说明；想把它换回来就自己执行 `openclaw plugins enable memory-core`，然后删除记录文件。只有被明确识别出的第三方归属才会阻止恢复——当 slot 属于本插件、属于 `memory-core`，或根本读不到时，`uninstall.sh` 仍照旧恢复，因为在那几种情况下跳过恢复，才会让宿主在卸载后彻底没有任何 memory 后端。
+
 插件 contract 名 ↔ agent-memory MCP 工具映射：
 
 | OpenClaw contract | agent-memory MCP 工具 |
@@ -605,6 +613,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
+| `memory_get` 对 `~/.anolisa/memory` 下确实存在的文件返回 `disabled: true`，且 gateway 日志反复出现 `plugin tool name conflict (memory-anolisa): memory_get` / `memory_search` | OpenClaw 内置的 `memory-core` 仍被加载——它在别的插件占据 memory slot 后作为整理 sidecar 存活——并占着这两个工具名，OpenClaw「先到先得」的注册表因此丢弃本插件的同名工具 | 执行 `openclaw plugins disable memory-core`，再 `openclaw gateway restart`。`install.sh` 会自动做这件事并留下记录，供 `uninstall.sh` 恢复；`anolisa adapter enable` 不会，因此那条路径上这两条命令要你自己执行，`adapter disable` 也不会替你回退（#3218、#3225） |
 | install.sh 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 的能力同意门禁；安装参数探测失败、设置了 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0`，或脚本早于修复版本 | 查看安装输出中的探测 WARNING 或 opt-out 拒绝行；升级 agent-memory、取消该环境变量，或手动执行 `openclaw plugins install <插件目录> --force --accept-capabilities`。被拒绝授予且遭门禁拦截的安装以退出码 3 结束；若 OpenClaw 调整拒绝文案，脚本会退回退出码 1 并附带 opt-out 提示 |
 | install.sh 报安装目标目录不可写 | `${OPENCLAW_STATE_DIR}/extensions`（或其最近的已存在父目录）对运行脚本的用户不可写，OpenClaw 的 `mkdir extensions/memory-anolisa` 因此以 `EACCES` 失败 | 修正该目录的属主/权限——或把 `OPENCLAW_STATE_DIR` 指向可写的 state 目录——后重跑。这是文件系统权限失败，不是策略拒绝：不要为此放宽 `security.installPolicy` |
 | install.sh 在把 `--dangerously-force-unsafe-install` 标注为 deprecated no-op 的宿主上安装失败 | OpenClaw 2026.6.5 及之后已无安装期扫描，脚本没有传递覆盖参数，也就无法影响该宿主的安装期安全；原因在 `openclaw` 自己的输出里 | 阅读脚本提示上方的 CLI 输出。只有当它点名 `security.installPolicy` 时，需要放宽的才是这条运维自有策略——重跑脚本或设置 `AGENT_MEMORY_SAFE_INSTALL` 都无法覆盖它 |
