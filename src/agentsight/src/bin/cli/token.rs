@@ -44,8 +44,22 @@ impl TokenCommand {
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
+        // Validate custom data file exists
+        if self.data_file.is_some()
+            && let Err(e) = agentsight::check_data_file(data_path)
+        {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+
         // Open token store
-        let store = TokenStore::new(data_path);
+        let store = match TokenStore::new(data_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to open token database: {e}");
+                std::process::exit(1);
+            }
+        };
         let query = agentsight::TokenQuery::new(&store);
 
         // Execute query
@@ -70,7 +84,7 @@ impl TokenCommand {
 
         // Output result
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            super::print_json(&result);
         } else {
             print_human_readable(&result, self.compare);
         }

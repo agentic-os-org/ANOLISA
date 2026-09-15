@@ -121,7 +121,7 @@ pub use response_map::ResponseSessionMapper;
 pub use storage::{
     AuditStore, HttpStore, SqliteConfig, SqliteStore, Storage, StorageBackend, TimePeriod,
     TokenBreakdown, TokenComparison, TokenQuery, TokenQueryResult, TokenStore, Trend,
-    format_tokens, format_tokens_with_commas,
+    check_data_file, format_tokens, format_tokens_with_commas,
 };
 #[cfg(target_os = "linux")]
 pub use unified::AgentSight;

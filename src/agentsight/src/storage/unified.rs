@@ -162,7 +162,7 @@ impl Storage {
     pub fn with_sqlite_config(config: &SqliteConfig) -> Result<Self> {
         let db_path = config.db_path();
         let audit_store = AuditStore::with_table(&db_path, &config.audit_table)?;
-        let token_store = TokenStore::with_table(&db_path, &config.token_table);
+        let token_store = TokenStore::with_table(&db_path, &config.token_table)?;
         let http_store = HttpStore::with_table(&db_path, &config.http_table)?;
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, &config.token_consumption_table)?;
@@ -222,7 +222,8 @@ impl Storage {
         let db_path = PathBuf::from(":memory:");
         let audit_store = AuditStore::with_table(&db_path, "audit_events")
             .expect("in-memory audit store should always succeed");
-        let token_store = TokenStore::with_table(&db_path, "token_records");
+        let token_store = TokenStore::with_table(&db_path, "token_records")
+            .expect("in-memory token store should always succeed");
         let http_store = HttpStore::with_table(&db_path, "http_records")
             .expect("in-memory http store should always succeed");
         let token_consumption_store =
