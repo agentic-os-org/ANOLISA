@@ -522,3 +522,16 @@ persistent Repository；这些边界见 [Runtime 设计](BINDING_RECONCILER_RUNT
 - [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)：
   background run span、root/parent 关系和 context propagation 的标准语义。attempt child span
   与 contributor Span Links 不属于 Rust 首版要求。
+
+## 14. [TARGET V2] SkillGuard 启动恢复边界
+
+第五批在 UDS 准入前执行一次 SkillGuard 恢复：首先恢复私有换钥 intent，再按已登记的精确根目录
+调用 reconcile。任务共享 SkillGuardService 和公共 Action Runtime，使用 120 秒总预算，不启动
+周期调度器。单 Skill 恢复失败记录公开错误类别和进程诊断，继续处理其他 Skill；后续写操作在同一
+锁内再次检查其恢复 intent。换钥未完成时普通 Ledger 操作拒绝，但 status 与管理员重试可用。
+启动恢复与最近一次业务结果分开；进程启动不代表每个 Skill 均已激活。
+
+DJOB-SG-001 的可执行核心证据是 `asc-capability-skill-guard/src/service/administration.rs` 和
+`src/service/rollback.rs` 的中断恢复测试；进程装配位于 `v2/apps/asc-daemon/src/skill_guard.rs`。
+SkillFS notify 驱动的后台合并队列、重试、shutdown、健康与实际 FUSE 生效在第六批接入，不由本节
+提前声称完成。

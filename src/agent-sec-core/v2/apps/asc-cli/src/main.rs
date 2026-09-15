@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use asc_cli::{
     Cli, InputError, Plan,
     capabilities::process_environment,
-    output::{render_binding_mutation, render_policy, render_scan_code},
+    output::{render_binding_mutation, render_policy, render_scan_code, render_skill_guard},
 };
 
 fn main() -> ExitCode {
@@ -21,6 +21,11 @@ fn main() -> ExitCode {
     };
     match run(&cli) {
         Ok(code) => ExitCode::from(code),
+        Err(RunError::Input(InputError::AnalyzeInput { code, message })) => {
+            let result = serde_json::json!({"schema_version":"1","engine_version":env!("CARGO_PKG_VERSION"),"status":"error","coverage_complete":false,"scanners":[],"errors":[{"code":code,"message":message}]});
+            println!("{result}");
+            ExitCode::from(2)
+        }
         Err(error @ RunError::Input(InputError::EmptyCode)) => {
             eprintln!("{error}");
             ExitCode::FAILURE
@@ -50,7 +55,18 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if cli.is_scan_code() {
+    if cli.is_skill_guard() {
+        let code = render_skill_guard(
+            &response,
+            &mut io::stdout().lock(),
+            &mut io::stderr().lock(),
+        )
+        .map_err(RunError::Output)?;
+        if code == 0 {
+            cli.after_success(&request)?;
+        }
+        Ok(code)
+    } else if cli.is_scan_code() {
         render_scan_code(
             &response,
             &mut io::stdout().lock(),

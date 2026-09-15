@@ -21,7 +21,7 @@ Phase-two policy integration is outside this PR.
 | 2 | Scanner and analyze | Implemented; Linux gates passed | V1 result comparison, selection/aliases, incomplete coverage, errors, no Ledger writes |
 | 3 | Ledger and Service | Implemented; Linux gates passed | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
 | 4 | Activation | Implemented; Linux gates passed | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
-| 5 | daemon, CLI and audit | Planned | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
+| 5 | daemon, CLI and audit | Linux acceptance passed | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
 | 6 | SkillFS | Planned | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
 | 7 | Deployment | Planned | Source/RPM installation, root systemd service, local non-root callers, complete core workflow |
 
@@ -241,3 +241,75 @@ selection, manual decisions, fallback, drift, rollback, export and show explanat
 tests cover actual xattr bytes, file/xattr split failure, rollback commit failure, interrupted source
 replacement (including missing SKILL.md), damaged backups and committed-intent recovery. The daemon
 startup loop and real SkillFS consumer are integrated in subsequent batches.
+
+## Daemon, CLI and audit boundary in batch five
+
+`action.skill_guard` accepts a closed `command` enum. This is the approved V2 replacement for the
+previous candidate `action.skill_ledger`; it does not enable generic action dispatch or legacy V1
+RPC envelopes. Results contain `success`, `exitCode`, `error`, `errorType` and the business `data`.
+The Rust `skill-ledger` CLI prints the business object and uses the explicit exit code. It never
+reads the daemon key, executes Python, or scans locally. Client-side path expansion, findings-file
+reading/deletion and export-directory creation run with the caller's own permissions.
+
+Supported commands are `init`, `check`, `analyze`, `scan`, `certify`, `status`, `audit`,
+`list-scanners`, `decide`, `show`, `export`, `rotate-keys`, and publication retry `activate`.
+`init --no-baseline` creates only keys; `init --force-keys` and `rotate-keys` require kernel UID 0.
+The retired `init-keys` and per-user `--passphrase` are not part of the system-key contract.
+`scan`, `certify` and `decide` create the initial key when absent, but never replace a corrupt current key.
+`check` returns exit 1 for deny/tampered/error; scan/certify and complete analyze return exit 0 for
+completed risk results. An incomplete analyze returns 1 and invalid analyze input returns 2.
+A committed scan/decision can return exit 0 with `activation.activationPending=true`; callers must
+inspect that field before claiming publication or a live FUSE effect.
+
+The process uses `/run/agent-sec-core/daemon.sock`, overridden by `--socket` or a nonempty
+`AGENT_SEC_DAEMON_SOCKET`. A service-owned 0700/0750/0755 runtime directory and private flock file
+protect singleton/stale-socket handling; only a verified owned socket returning connection refused
+is removable. The runnable process uses mode 0666 while embedded service defaults remain 0600.
+These focused lifecycle changes align with the open system-service proposal #3217 at `5d2ff1f`;
+they do not imply that proposal has merged or that its service identity is adopted.
+
+Root-owned `/etc/agent-sec/skillguard.json` (or `--skillguard-config`) configures `stateDir`, exact
+`managedSkillDirs`, scanner overrides and parsers. The default state is
+`/var/lib/agent-sec/skillguard`, owned by root with mode 0700; the current key remains 0600.
+No user config, history or keyring is imported. For `init` baseline and `check/scan --all`, the CLI
+contributes exact roots discovered in the current user's default Skill locations and the two system
+Skill directories; the daemon combines these with its registered roots. Empty `check/scan --all` returns an execution failure without creating keys. Caller discovery is
+bounded to 1024 roots; persisted registration remains available for status and key rotation.
+No sibling registration is
+inferred from a single explicit path. Status reports the system registry, not the invoking HOME.
+The shared CLI discovery includes direct Skill children of `$XDG_DATA_HOME/anolisa/skills`.
+It follows the installer's syntax rules: unset/empty/relative overrides or raw `.`/`..` segments
+fall back to `$HOME/.local/share/anolisa/skills`; a valid but absent directory is simply skipped.
+An unset or empty `HOME` resolves through the CLI user's system account home directory.
+Only the CLI reads this caller environment. `init --no-baseline` and explicit-path requests bypass
+discovery, and hidden/snapshot directory filtering remains in effect.
+
+Rotation takes the service generation write lock, records a private intent, and withdraws every
+registered exposure before replacing the key. A pending rollback must first reconcile. A failed
+withdrawal retains the old key and fences ordinary Ledger operations until administrator retry or
+startup recovery succeeds. A changed fingerprint during recovery proves replacement already
+committed and prevents a second rotation. Startup recovery uses the public Action Runtime; failed
+Skill recovery is visible without disabling unrelated daemon methods.
+
+The public Finalizer/Sink receives controlled command, counts, verdict/status, version and execution
+failure class. `result.verdict` retains the V1 command-specific verdict and worst-result batch
+projection; non-judgment operations do not manufacture a security verdict. It excludes raw findings, code, imported evidence, manual reasons, paths and key
+bytes. Full business results remain available to the client. Two concurrent SkillGuard requests
+bound content-capture memory; busy returns a visible failure. SkillGuard defaults to 60 seconds,
+with `timeoutMs`/CLI `--timeout-ms` bounded to 120 seconds on the server. Other methods retain their
+configured dispatch deadline. Requests are never retried automatically. A response above 3 MiB
+returns `ResponseTooLarge` with `operationMayHaveCommitted=true`; no data is silently truncated and
+no committed mutation is undone. Findings import is bounded to 2 MiB.
+
+`v2/fixtures/skillguard/consumer.json` records normal, risk, uninitialized, timeout, execution-error
+and incomplete-activation examples. CLI rendering tests consume these examples; runtime and real
+CLI tests independently exercise execution, caller identity, rotation and safe audit. They do not
+establish Agent Hook integration or SkillFS effects. Linux batch-five acceptance passed strict
+workspace Clippy, all workspace tests and rustdoc. The cross-UID CLI workflow runs with normal
+root DAC permissions; other permission-sensitive cases retain reduced DAC. A separate daemon
+binary and CLI completed 25 operations, including restart, rotation, ordinary-user export, PAP,
+Code Scan and safe public audit.
+
+A rollback performed by the root daemon restores regular files and directories to the source
+Skill directory owner, so its ordinary user can continue editing. Snapshot privilege bits remain
+stripped. The cross-UID CLI workflow verifies rollback followed by a real user write.

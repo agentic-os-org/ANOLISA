@@ -74,6 +74,7 @@ asc-sqlite-kernel = { path = "crates/data/persistence/asc-sqlite-kernel" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+dirs = "6"
 fancy-regex = "0.16"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -4,7 +4,9 @@
 #![forbid(unsafe_code)]
 
 pub mod activation;
+pub mod command;
 pub mod config;
+pub mod executor;
 mod filesystem;
 pub mod identity;
 pub mod integrity;
@@ -43,6 +45,15 @@ pub enum GuardError {
     /// Cryptographic key generation or decoding failed without exposing secrets.
     #[error("SkillGuard signing key operation failed")]
     Key,
+    /// The operation requires the kernel-authenticated root administrator.
+    #[error("SkillGuard operation requires root administrator")]
+    PermissionDenied,
+    /// Bounded shared-daemon admission is exhausted.
+    #[error("SkillGuard is busy; retry after an in-flight operation completes")]
+    Busy,
+    /// Rotation must finish before ordinary ledger access resumes.
+    #[error("SkillGuard key rotation is pending; administrator must resume rotation")]
+    RotationPending,
     /// A request exhausted its execution deadline before completing.
     #[error("SkillGuard execution deadline exceeded")]
     Timeout,

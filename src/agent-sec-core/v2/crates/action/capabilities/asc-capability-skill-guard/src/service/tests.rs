@@ -143,7 +143,7 @@ fn existing_history_still_requires_a_valid_private_key() {
 }
 
 #[test]
-fn empty_skill_queries_obey_skill_locks() {
+fn empty_skill_queries_obey_skill_locks_and_rotation_fences() {
     let (_temporary, service, root) = uninitialized_fixture();
     let lock = service.skill_lock(&root.identity).unwrap();
     let guard = lock.lock().unwrap();
@@ -156,7 +156,20 @@ fn empty_skill_queries_obey_skill_locks() {
         Err(GuardError::Timeout)
     ));
     drop(guard);
-    assert_eq!(service.check(&root, deadline()).unwrap()["status"], "none");
+    fs::write(
+        service.config.state_dir.join("key-rotation.json"),
+        serde_json::to_vec(&json!({"previous_fingerprint":"previous","skills":[]})).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        service.check(&root, deadline()),
+        Err(GuardError::RotationPending)
+    ));
+    assert!(matches!(
+        service.audit(&root, false, deadline()),
+        Err(GuardError::RotationPending)
+    ));
+    assert!(!root.io_dir.join(".skill-meta").exists());
 }
 
 #[test]

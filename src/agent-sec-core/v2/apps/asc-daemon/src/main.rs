@@ -1,4 +1,5 @@
 mod runtime_path;
+mod skill_guard;
 
 use runtime_path::RuntimeLease;
 
@@ -78,6 +79,13 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    let skill_guard = match skill_guard::start(cli.skillguard_config.as_deref()) {
+        Ok(service) => service,
+        Err(error) => {
+            report_error(&error);
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let repository = Arc::new(ProcessLocalPapRepository::default());
     let (finalizer, event_sinks) = match event_finalizer() {
         Ok(sinks) => sinks,
@@ -86,6 +94,12 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    if let Err(error) = skill_guard::recover(&skill_guard, finalizer.clone()) {
+        report_error(&error);
+        eprintln!(
+            "agent-sec-daemon: SkillGuard recovery is degraded; status and administrator retry remain available"
+        );
+    }
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
@@ -107,11 +121,10 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = Arc::new(DaemonDispatcher::new_with_finalizer(
-        pap,
-        policy_for_handler,
-        finalizer,
-    ));
+    let dispatcher = Arc::new(
+        DaemonDispatcher::new_with_finalizer(pap, policy_for_handler, finalizer.clone())
+            .with_skill_guard(skill_guard, finalizer),
+    );
     eprintln!("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
     let shutdown = ShutdownToken::new();

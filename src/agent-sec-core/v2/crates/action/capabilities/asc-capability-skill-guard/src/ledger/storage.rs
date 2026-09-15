@@ -31,9 +31,13 @@ impl Directory {
     pub fn child(&self, name: &str, create: bool) -> Result<Self, GuardError> {
         validate_name(name)?;
         let path = self.path.join(name);
+        let mut created = false;
         if create {
             match mkdirat(&self.file, name, Mode::from_raw_mode(0o755)) {
-                Ok(()) => self.sync()?,
+                Ok(()) => {
+                    self.sync()?;
+                    created = true;
+                }
                 Err(rustix::io::Errno::EXIST) => {}
                 Err(e) => return Err(io_error(&path, e)),
             }
@@ -47,6 +51,12 @@ impl Directory {
             )
             .map_err(|e| io_error(&path, e))?,
         );
+        if created {
+            // The process umask protects secrets; published Skill metadata still needs its
+            // explicit reader mode for a separately running SkillFS consumer.
+            rustix::fs::fchmod(&file, Mode::from_raw_mode(0o755))
+                .map_err(|e| io_error(&path, e))?;
+        }
         Ok(Self { file, path })
     }
 
@@ -55,7 +65,10 @@ impl Directory {
         mkdirat(&self.file, name, Mode::from_raw_mode(0o755))
             .map_err(|e| io_error(self.path.join(name), e))?;
         self.sync()?;
-        self.child(name, false)
+        let child = self.child(name, false)?;
+        rustix::fs::fchmod(&child.file, Mode::from_raw_mode(0o755))
+            .map_err(|e| io_error(&child.path, e))?;
+        Ok(child)
     }
 
     pub fn names(&self, deadline: Instant) -> Result<Vec<String>, GuardError> {
@@ -151,6 +164,8 @@ impl Directory {
             .map_err(|e| io_error(&path, e))?,
         );
         file.write_all(bytes).map_err(|e| io_error(&path, e))?;
+        rustix::fs::fchmod(&file, Mode::from_raw_mode(mode & 0o777))
+            .map_err(|e| io_error(&path, e))?;
         file.sync_all().map_err(|e| io_error(&path, e))?;
         Ok(file)
     }

@@ -12,6 +12,7 @@ mod action;
 mod dispatcher;
 mod pap;
 mod rejection;
+mod skill_guard;
 
 pub use dispatcher::DaemonDispatcher;
 pub use rejection::JsonRejectionEncoder;

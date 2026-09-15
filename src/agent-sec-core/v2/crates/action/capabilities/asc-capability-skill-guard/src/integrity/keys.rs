@@ -75,6 +75,33 @@ impl KeyStore {
         result
     }
 
+    /// Replaces current trust after the service has withdrawn all managed activation.
+    /// No previous public key or private key is retained.
+    pub(crate) fn replace(&self) -> Result<SigningIdentity, GuardError> {
+        self.load()?;
+        let key =
+            Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).map_err(|_| GuardError::Key)?;
+        let temp = crate::ledger::storage::nonce(".key-")?;
+        let result = (|| {
+            let directory = crate::ledger::storage::Directory::open(&self.path)?;
+            directory.write_new(&temp, key.as_ref(), 0o600)?;
+            renameat_with(
+                &self.directory,
+                temp.as_str(),
+                &self.directory,
+                KEY_FILE,
+                RenameFlags::empty(),
+            )
+            .map_err(|e| io_error(&self.path, e))?;
+            self.directory
+                .sync_all()
+                .map_err(|e| io_error(&self.path, e))?;
+            self.load()
+        })();
+        let _ = unlinkat(&self.directory, temp.as_str(), AtFlags::empty());
+        result
+    }
+
     /// Creates the first key atomically, or loads the existing identity unchanged.
     ///
     /// # Errors

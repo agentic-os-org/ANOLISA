@@ -19,7 +19,7 @@ daemon、CLI、SkillFS 和 Linux 部署。Agent Hook 实现、能力视图、Hoo
 | 2 | Scanner 与 analyze | 已实现，Linux 验收通过 | V1 结果对照，选择与别名，覆盖不足，错误，不写账本 |
 | 3 | Ledger 与 Service | 已实现，Linux 验收通过 | 版本、补扫与强制扫描、快照、导出、串行化、扫描期间内容变化 |
 | 4 | Activation | 已实现，Linux 验收通过 | 决策、active/pending/hidden、回滚、发布失败与启动 reconcile |
-| 5 | daemon、CLI 与审计 | 计划 | 真实 CLI 请求、输出和退出码、peer 身份、审计、超时、管理员换钥、消费者样例 |
+| 5 | daemon、CLI 与审计 | Linux 验收通过 | 真实 CLI 请求、输出和退出码、peer 身份、审计、超时、管理员换钥、消费者样例 |
 | 6 | SkillFS | 计划 | 单 socket、HMAC notify/resolver、拒绝降级、真实 FUSE 效果、普通 IPC 回归 |
 | 7 | 部署 | 计划 | 源码与 RPM 安装、root systemd、普通本地用户调用、核心完整流程 |
 
@@ -197,3 +197,62 @@ latest 的分裂，清理遗留内部临时项并重新发布。不引入自动�
 回退、漂移、回滚、导出和 show 说明。Linux 测试覆盖真实 xattr、文件/xattr 分裂失败、回滚提交
 失败、源替换中断（含 SKILL.md 缺失）、备份损坏和已提交意图恢复。daemon 启动循环及真实 SkillFS
 消费者在后续批次集成。
+
+## 第五批 daemon、CLI 与审计边界
+
+`action.skill_guard` 接受封闭的 `command` 枚举，是此前候选 `action.skill_ledger` 的明确 V2
+替代；不开放任意 Action 调用或普通 V1 RPC envelope。响应包含 `success`、`exitCode`、`error`、
+`errorType` 与业务 `data`。Rust `skill-ledger` CLI 输出业务对象并采用显式退出码，不读取 daemon
+密钥、不回调 Python、不在本地执行扫描。路径展开、findings 文件读取与删除、导出目录创建均以
+CLI 调用者自身权限执行。
+
+支持 `init`、`check`、`analyze`、`scan`、`certify`、`status`、`audit`、`list-scanners`、`decide`、
+`show`、`export`、`rotate-keys`，以及发布重试命令 `activate`。`init --no-baseline` 只建密钥；
+`init --force-keys` 与 `rotate-keys` 要求内核 UID 为 0。旧 `init-keys` 和用户口令 `--passphrase`
+不属于系统密钥接口。`scan/certify` 可首次创建缺失密钥，但不会替换损坏密钥。`check` 的
+ deny/tampered/error 退出 1；scan/certify 与完整 analyze 的风险结果退出 0。analyze 覆盖不足退出 1，
+非法输入退出 2。已提交操作可能退出 0 且 `activation.activationPending=true`；消费者必须检查
+发布状态，不能仅凭退出码声称发布或 FUSE 生效。
+
+进程默认 socket 为 `/run/agent-sec-core/daemon.sock`，可由 `--socket` 或非空
+`AGENT_SEC_DAEMON_SOCKET` 覆盖。运行目录要求服务所有、0700/0750/0755，通过私有 flock 文件
+保持单实例；仅清理已验证所有权且连接返回 refused 的残留 socket。进程端点为 0666，嵌入式服务
+默认仍为 0600。这部分定向对齐尚未合并的系统服务 PR #3217（`5d2ff1f`）；不意味着该 PR 已合并，
+也不采用其服务身份设计。
+
+root 所有的 `/etc/agent-sec/skillguard.json` 或 `--skillguard-config` 指定 `stateDir`、精确
+`managedSkillDirs`、scanner 覆盖配置与 parsers。默认状态目录 `/var/lib/agent-sec/skillguard`
+要求 root 所有、0700，当前密钥保持 0600。不导入用户配置、旧历史和 keyring。init baseline 和
+check/scan --all 由 CLI 发现当前用户默认 Skill 位置及两处系统目录中的精确根目录，再由 daemon
+与已登记目录合并；单个显式路径不隐式登记相邻 Skill。status 查看系统登记集合，不随调用者 HOME 改变。
+CLI 的共享发现逻辑包括 `$XDG_DATA_HOME/anolisa/skills` 下的直接 Skill 子目录，遵循安装器的
+路径规则：未设置、为空、相对路径或原始路径含 `.`/`..` 段时，回退到
+`$HOME/.local/share/anolisa/skills`；合法但不存在的目录直接跳过。`HOME` 未设置或为空时，
+使用 CLI 当前用户的系统账户主目录。只有 CLI 读取调用者环境，
+`init --no-baseline` 和显式路径请求不触发发现，隐藏目录及快照过滤保持不变。
+
+换钥持有全局代际写锁，写入私有 intent，撤销全部登记 Skill 的 activation 后才替换密钥。
+有未完成回滚时须先 reconcile。撤销失败保留旧密钥，并阻止普通账本操作，直到管理员重试或启动
+恢复成功。恢复发现指纹已经变化时，不会再次换钥。启动恢复经过公共 Action Runtime；单个 Skill
+恢复失败可见，但不关闭其他 daemon 方法。
+
+公共 Finalizer/Sink 仅记录受控的 command、数量、判定状态、版本和执行错误类别；不包含原始
+findings、源码、导入证据、人工理由、路径和密钥字节。完整业务结果仍返回客户端。最多同时执行
+两个 SkillGuard 请求以限制内容捕获内存，满载返回明确 Busy。默认预算 60 秒，timeoutMs 或
+CLI --timeout-ms 在服务端最多 120 秒；其他方法保留原有预算。不自动重试请求。响应超过 3 MiB
+返回 `ResponseTooLarge` 和 `operationMayHaveCommitted=true`，不静默截断数据、不撤销已提交
+操作；findings 导入上限为 2 MiB。
+
+`v2/fixtures/skillguard/consumer.json` 提供正常、风险、未初始化、超时、执行错误及激活未完成
+样例。CLI 输出测试消费样例，Runtime 与真实 CLI 测试独立验证执行、调用者身份、换钥和审计脱敏。
+这些证据不代表 Hook 接入或 SkillFS 生效。第五批 Linux 格式检查、严格 Clippy、工作区测试及
+rustdoc 均通过，共覆盖 806 个不同测试。跨 UID CLI 用例在正常 root DAC 能力下运行，其他
+工作区测试采用削减 DAC 的配置。独立 daemon 与 CLI 完成 25 次操作，覆盖重启恢复、换钥、
+普通用户导出、PAP、公共 Code Scan，以及审计身份、风险判定和敏感内容脱敏。
+
+第五批保留公共审计的 `result.verdict`：按命令投影，批量操作取最高风险结果，非判定操作不虚构安全结论。
+单项 scan/certify/decide 保留 `keyCreated`；空 `check/scan --all` 返回执行失败且不创建密钥。
+调用端单次发现最多 1024 个目录，已持久化的系统注册表不受此请求输入限制，避免阻塞状态查询和换钥。
+
+root daemon 回滚后，恢复的普通文件与目录归属于源 Skill 目录的所有者，普通用户可以继续
+编辑。快照仍去除特权权限位。跨 UID CLI 用例验证回滚后由真实普通用户写入原文件。

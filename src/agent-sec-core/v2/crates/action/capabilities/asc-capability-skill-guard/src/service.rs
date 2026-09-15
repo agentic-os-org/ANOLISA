@@ -61,6 +61,7 @@ pub struct SkillGuardService {
     pub(crate) config: GuardConfig,
     pub(crate) registry: ScannerRegistry,
     pub(crate) generation: RwLock<()>,
+    pub(crate) active_requests: std::sync::atomic::AtomicUsize,
     locks: Mutex<BTreeMap<SkillIdentity, Weak<Mutex<()>>>>,
     managed: Mutex<BTreeSet<SkillIdentity>>,
 }
@@ -88,6 +89,7 @@ impl SkillGuardService {
             config,
             registry,
             generation: RwLock::new(()),
+            active_requests: std::sync::atomic::AtomicUsize::new(0),
             locks: Mutex::new(BTreeMap::new()),
             managed: Mutex::new(managed),
         })
@@ -98,9 +100,24 @@ impl SkillGuardService {
     /// # Errors
     /// Propagates unsafe existing key/state and persistence errors.
     pub fn initialize(&self) -> Result<Value, GuardError> {
-        let _generation = self.generation.write().map_err(|_| poisoned())?;
-        let key = KeyStore::open(&self.config.state_dir)?.initialize()?;
-        Ok(json!({"initialized":true,"keyFingerprint":key.fingerprint()}))
+        self.initialize_with_deadline(Instant::now() + Duration::from_secs(30))
+    }
+
+    /// Initializes keys within the caller deadline, without replacing current trust.
+    ///
+    /// # Errors
+    /// Rejects unsafe keys, pending rotation and exhausted deadlines.
+    pub fn initialize_with_deadline(&self, deadline: Instant) -> Result<Value, GuardError> {
+        let _generation = self.generation_write(deadline)?;
+        self.require_no_rotation(deadline)?;
+        let store = KeyStore::open(&self.config.state_dir)?;
+        let created = match store.load() {
+            Ok(_) => false,
+            Err(error) if missing(&error) => true,
+            Err(error) => return Err(error),
+        };
+        let key = store.initialize()?;
+        Ok(json!({"initialized":true,"keyFingerprint":key.fingerprint(),"keyCreated":created}))
     }
 
     /// Exact registered roots; registration never expands a parent into sibling Skills.
@@ -382,6 +399,7 @@ impl SkillGuardService {
                 Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
             }
         };
+        self.require_no_rotation(deadline)?;
         let lock = self.skill_lock(&root.identity)?;
         let _guard = timed_lock(&lock, deadline)?;
         if [root.identity.path(), root.io_dir.as_path()]
@@ -672,6 +690,7 @@ fn check_locked(
 }
 
 mod activation;
+mod administration;
 mod display;
 mod rollback;
 use activation::refresh_locked;

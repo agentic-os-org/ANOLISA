@@ -136,6 +136,13 @@ pub struct DispatchError;
 /// owns and bounds that writer. Transport rejection encoding is a separate
 /// [`RejectionEncoder`] dependency.
 pub trait RequestDispatcher: Send + Sync + 'static {
+    /// Selects a method-specific execution budget after a complete bounded frame arrives.
+    /// The transport caps overrides at 120 seconds. Default adapters keep configured limits.
+    /// Implementations must perform bounded parsing only, never I/O or capability work.
+    fn dispatch_timeout(&self, _payload: &[u8]) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Dispatches one complete bounded request frame.
     ///
     /// # Errors

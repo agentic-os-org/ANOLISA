@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+asc-action-runtime = { workspace = true }
+asc-action-types = { workspace = true }
 asc-capability-code-scan = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }

@@ -344,15 +344,18 @@ response 和 output failure 退出 1，参数用法错误退出 2。
 
 请求发送后的超时或协议失败不证明业务未执行；CLI 不自动重试，也不把 Binding
 `PENDING_APPLY`/`PENDING_DELETE` 表述为目标生效或删除完成。CREATE identity、current
-revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；当前命令范围仅覆盖本节的 PAP
-命令，不代表已替代 V1 全量能力或提供 V1 wire adapter。
+revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；
+本节仅冻结 PAP 子集。现有 Code Scan 和新增 SkillGuard 命令分别依照各自合同，不表示
+Rust binary 已替代 V1 全量能力或提供通用 V1 wire adapter。
 
 DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
 共同运行的双进程 E2E 位于 `tests/v2/e2e/`。
 `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root`
-验证真实 daemon binary 的只读授权和信号退出，不依赖 Client 默认凭据是否可用。测试不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
+在 root 环境验证真实 daemon binary 的管理员配置与信号退出，在非 root 环境验证系统 daemon
+明确拒绝启动。普通用户 CLI 调用 root daemon 的证据见 DPROC-SG-001。
+测试注入独立配置、状态及审计目录，不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
 完整 PAP CRUD 保留在 `asc-daemon/tests/pap_protocol.rs` 的进程内 UDS fixture 中；后台下发
 装配由 DPROC-021 验证，CLI/daemon 进程链路由上述 pytest E2E 验证。完整范围与命令见
 [`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
@@ -440,3 +443,26 @@ DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→
   v2/apps/asc-daemon/tests/bootstrap.rs；
 - Rust PAP 完整 serialized UDS scenario：
   v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json。
+
+## 11. [TARGET V2] SkillGuard 系统身份与恢复
+
+SkillGuard 第一阶段使用 root 系统 daemon。`/run/agent-sec-core/daemon.sock` 为默认公共端点，
+CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；无 HOME/XDG socket 回退。
+现有库内 BootstrapConfig::new 仍默认 0600，实际进程使用 0666。单实例锁贯穿已准入请求 drain
+与外层 Tokio 退出；残留恢复拒绝普通文件、符号链接、错误所有者和活跃/不确定监听者。
+
+领域状态默认 `/var/lib/agent-sec/skillguard`，root 所有、0700，当前 signing-key.pk8 为 0600。
+`/etc/agent-sec/skillguard.json` 或 --skillguard-config 可注入 stateDir、精确 managedSkillDirs、
+scanners 和 parsers；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+配置、状态与 runtime 路径校验不跟随符号链接。客户端有业务访问权限不意味着有密钥或配置权限。
+
+换钥不执行 DPROC-017 的 V1 state migration：本模块明确采用新信任域，不导入历史密钥和记录。
+旧部署回退须使用对应 V1 状态，不能混合两个写入者。启动恢复先完成私有换钥 intent，再 reconcile
+登记 Skill；通过公共 Action Runtime 留审计。恢复失败保留状态供管理员排查，不伪装成功；普通
+方法仍可提供状态与诊断。正式 root systemd/RPM 生命周期由第七批部署验收补齐。
+
+| ID | 必须验证 | 可执行证据 |
+|---|---|---|
+| DPROC-SG-001 | 公共 socket 上普通 UID 调用、换钥拒绝、导出归属 | `v2/apps/asc-cli/tests/skill_guard.rs` |
+| DPROC-SG-002 | 启动换钥恢复、旧密钥撤销与重新建立信任 | `asc-capability-skill-guard/src/service/administration.rs` 测试 |
+| DPROC-SG-003 | 核心接口保持普通方法原超时和权限 | `asc-daemon-handler/src/skill_guard.rs` 测试与原 PAP/CodeScan 回归 |
