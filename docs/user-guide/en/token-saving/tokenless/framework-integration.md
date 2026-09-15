@@ -377,3 +377,9 @@ Then execute a tool task with visible output in the target agent. If `stats list
 - [Measuring savings](measuring-savings.md)
 - [Configuration and data privacy](configuration-and-privacy.md)
 - [Troubleshooting](troubleshooting.md)
+
+## Standalone Qoder bundles
+
+For publisher-built bundles, see [packaging and limitations](../../../../../src/tokenless/packaging/qoder/README.md).
+Bash and Python 3.10+ are required; shell-recovery-dependent Marker compression is disabled.
+Use Qoder native plugin disable/uninstall for rollback; avoid enabling duplicate copies.

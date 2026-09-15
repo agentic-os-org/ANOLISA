@@ -999,3 +999,9 @@ layout and single-target interface.
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+### Standalone Qoder distribution
+
+Publishers can assemble a plugin containing native binaries and shared hooks with
+the [Qoder packaging entry point](packaging/qoder/README.md). It requires Python
+3.10+ and disables shell-recovery-dependent Marker compression in standalone mode.

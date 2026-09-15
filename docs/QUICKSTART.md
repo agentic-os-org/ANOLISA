@@ -81,3 +81,5 @@ anolisa adapter scan
 - [anolisa CLI reference](user-guide/en/user-entrypoint/anolisa-cli.md) — lifecycle and adapter commands
 - [Troubleshooting](user-guide/en/troubleshooting.md) — common installation and runtime failures
 - [Build from source](BUILDING.md) — developer builds only
+
+Qoder plugin publishers can also use the [standalone bundle builder](../src/tokenless/packaging/qoder/README.md); read its runtime requirements and recovery limitations before distribution.

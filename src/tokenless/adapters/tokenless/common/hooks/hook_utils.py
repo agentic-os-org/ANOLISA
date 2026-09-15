@@ -210,7 +210,10 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return shutil.which("tokenless") is not None
+    return (
+        os.environ.get("TOKENLESS_DISABLE_SHELL_RECOVERY") != "1"
+        and shutil.which("tokenless") is not None
+    )
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:

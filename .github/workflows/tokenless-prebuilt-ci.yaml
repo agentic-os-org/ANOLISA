@@ -60,3 +60,6 @@ jobs:
 
       - name: Run Tokenless raw package tests
         run: src/tokenless/tests/test-package-raw.sh
+
+      - name: Run standalone Qoder bundle tests
+        run: python3 src/tokenless/tests/test_qoder_bundle.py

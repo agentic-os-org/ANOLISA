@@ -79,3 +79,5 @@ anolisa adapter scan
 - [anolisa CLI 参考](user-guide/zh/user-entrypoint/anolisa-cli.md)——生命周期与 Adapter 命令
 - [故障排查](user-guide/zh/troubleshooting.md)——常见安装和运行问题
 - [从源码构建](BUILDING_zh.md)——仅面向开发者构建
+
+Qoder 插件发布方也可使用[独立插件打包器](../src/tokenless/packaging/qoder/README_zh.md)，分发前请阅读运行依赖和原文恢复限制。

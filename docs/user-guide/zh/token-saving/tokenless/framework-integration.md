@@ -377,3 +377,9 @@ tokenless stats list --limit 5
 - [效果度量](measuring-savings.md)
 - [配置与数据隐私](configuration-and-privacy.md)
 - [故障排查](troubleshooting.md)
+
+## Qoder 独立插件包
+
+发布方构建的独立插件参见[打包方法和限制](../../../../../src/tokenless/packaging/qoder/README_zh.md)。
+运行需要 Bash 和 Python 3.10+；关闭依赖 Shell 原文恢复的 Marker 压缩。
+通过 Qoder 原生插件管理器禁用或卸载即可回退，请避免同时启用多个副本。

@@ -296,6 +296,7 @@ test-adapters: build-openclaw-plugin build-dsh-plugin
 	bash tests/test-dsh-adapter.sh
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
+	python3 tests/test_qoder_bundle.py
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs

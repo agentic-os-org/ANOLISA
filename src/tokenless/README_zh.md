@@ -587,3 +587,8 @@ tokenless env-check --tool Shell --fix
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。
+
+### Qoder 独立插件分发
+
+发布方可通过 [Qoder 打包入口](packaging/qoder/README_zh.md)组装包含二进制和共享
+Hooks 的插件。运行需要 Python 3.10+；独立模式关闭依赖 Shell 原文恢复的 Marker 压缩。

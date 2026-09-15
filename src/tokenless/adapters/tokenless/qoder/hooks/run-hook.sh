@@ -20,6 +20,32 @@ case "$SCRIPT" in
     *) fail_open ;;
 esac
 
+# Standalone bundles own their dependencies and must not fall back to another
+# installed version when an asset is missing.
+if [ -d "${SCRIPT_DIR}/../bin" ]; then
+    PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+    if ! bash "${PLUGIN_ROOT}/bin/tokenless" --check >/dev/null; then
+        fail_open
+    fi
+    if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+        echo "[tokenless] Python 3.10+ is required; hook disabled." >&2
+        fail_open
+    fi
+    export PATH="${PLUGIN_ROOT}/bin:${PATH}"
+    # A hook-local PATH does not make the bare recovery command available
+    # inside the agent's shell. Never advertise an unusable recovery path.
+    export TOKENLESS_DISABLE_SHELL_RECOVERY=1
+    candidate="${PLUGIN_ROOT}/common/hooks/${SCRIPT}"
+    if [ ! -f "$candidate" ]; then
+        echo "[tokenless] Missing bundled hook: ${SCRIPT}" >&2
+        fail_open
+    fi
+    case "$candidate" in
+        *.py) exec python3 "$candidate" "$@" ;;
+        *.sh) exec bash "$candidate" "$@" ;;
+    esac
+fi
+
 CANDIDATES=(
     "${SCRIPT_DIR}/../../common/hooks/${SCRIPT}"
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"

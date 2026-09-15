@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Dispatch only to the platform binaries shipped in this plugin.
+set -euo pipefail
+ROOT="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) target=linux-x64 ;;
+    Linux-aarch64|Linux-arm64) target=linux-arm64 ;;
+    Darwin-arm64) target=darwin-arm64 ;;
+    Darwin-x86_64) target=darwin-x64 ;;
+    *) echo "[tokenless] Unsupported platform" >&2; exit 1 ;;
+esac
+for name in tokenless rtk; do
+    if [ ! -x "${ROOT}/native/${target}/${name}" ]; then
+        echo "[tokenless] Missing bundled executable: ${target}/${name}" >&2
+        exit 1
+    fi
+done
+if [ "${1:-}" = "--check" ]; then exit 0; fi
+export PATH="${ROOT}/native/${target}:${PATH}"
+exec "${ROOT}/native/${target}/tokenless" "$@"
