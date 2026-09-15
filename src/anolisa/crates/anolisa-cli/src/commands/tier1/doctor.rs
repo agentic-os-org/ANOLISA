@@ -4770,6 +4770,12 @@ mod tests {
             "dry-run",
             "stdout-human",
             "stdout-json",
+            "custom-system-human",
+            "custom-system-json",
+            "custom-system-dry-run",
+            "custom-language-human",
+            "custom-language-json",
+            "custom-language-dry-run",
         ] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -4794,7 +4800,7 @@ mod tests {
                 .split_once("RPM_OUTPUT_END\n")
                 .unwrap()
                 .0;
-            assert!(stdout.contains(if mode == "dry-run" {
+            assert!(stdout.contains(if mode.ends_with("dry-run") {
                 "DOMAIN_EXIT=0"
             } else {
                 "DOMAIN_EXIT=2"
@@ -4802,16 +4808,19 @@ mod tests {
             assert!(!rendered.contains("sudo dnf install"));
             assert!(!rendered.contains("fix_manifest"));
             match mode {
-                "json" | "stdout-json" => {
+                "json" | "stdout-json" | "custom-system-json" | "custom-language-json" => {
                     let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
                     assert_eq!(json["command"], "doctor");
                     assert_eq!(json["ok"], false);
                     assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
                     let component = &json["data"]["components"][0];
+                    assert_eq!(component["fix_plan"].as_array().unwrap().len(), 1);
                     assert_eq!(component["dependencies"][0]["status"], "unresolvable");
                     assert_eq!(
                         component["dependencies"][0]["detail"],
-                        if mode == "stdout-json" {
+                        if mode.starts_with("custom-") {
+                            "unexpected libfoo output: libfoo --version failed (code None); stdout: partial version\n"
+                        } else if mode == "stdout-json" {
                             "unexpected rpm output: rpm -q libfoo failed (code Some(1)); stdout: package libfoo is not installed\nextra\n"
                         } else {
                             "rpm failed (code Some(1)): rpmdb broken\n"
@@ -4825,9 +4834,12 @@ mod tests {
                     assert_eq!(component["fix_plan"][0]["automatic"], false);
                     assert!(component["fix_plan"][0]["command"].is_null());
                 }
-                "human" | "stdout-human" => {
+                "human" | "stdout-human" | "custom-system-human" | "custom-language-human" => {
                     assert!(rendered.contains("[dependency_probe_failed]"));
-                    if mode == "stdout-human" {
+                    if mode.starts_with("custom-") {
+                        assert!(rendered.contains("libfoo --version failed (code None)"));
+                        assert!(rendered.contains("partial version\n"));
+                    } else if mode == "stdout-human" {
                         assert!(rendered.contains("code Some(1)"));
                         assert!(rendered.contains("package libfoo is not installed\nextra\n"));
                     } else {
@@ -4836,7 +4848,9 @@ mod tests {
                     assert!(rendered.contains("inspect_dependency_probe"));
                 }
                 "quiet" => assert!(rendered.is_empty()),
-                "dry-run" => assert!(!rendered.contains("dependency_probe_failed")),
+                "dry-run" | "custom-system-dry-run" | "custom-language-dry-run" => {
+                    assert!(!rendered.contains("dependency_probe_failed"))
+                }
                 _ => unreachable!(),
             }
         }
@@ -4859,7 +4873,18 @@ mod tests {
         };
         if !matches!(
             mode.as_str(),
-            "human" | "json" | "quiet" | "dry-run" | "stdout-human" | "stdout-json"
+            "human"
+                | "json"
+                | "quiet"
+                | "dry-run"
+                | "stdout-human"
+                | "stdout-json"
+                | "custom-system-human"
+                | "custom-system-json"
+                | "custom-system-dry-run"
+                | "custom-language-human"
+                | "custom-language-json"
+                | "custom-language-dry-run"
         ) {
             return;
         }
@@ -4869,19 +4894,25 @@ mod tests {
             crate::test_support::TestContextOptions {
                 json: mode.ends_with("json"),
                 quiet: mode == "quiet",
-                dry_run: mode == "dry-run",
+                dry_run: mode.ends_with("dry-run"),
                 ..Default::default()
             },
         );
         let runner = RuntimeRunner::new(vec![Ok(anolisa_platform::command::CommandOutput {
-            code: Some(1),
-            stdout: if mode.starts_with("stdout-") {
+            code: if mode.starts_with("custom-") {
+                None
+            } else {
+                Some(1)
+            },
+            stdout: if mode.starts_with("custom-") {
+                "partial version\n"
+            } else if mode.starts_with("stdout-") {
                 "package libfoo is not installed\nextra\n"
             } else {
                 "package libfoo is not installed\n"
             }
             .into(),
-            stderr: if mode.starts_with("stdout-") {
+            stderr: if mode.starts_with("stdout-") || mode.starts_with("custom-") {
                 ""
             } else {
                 "rpmdb broken\n"
@@ -4892,13 +4923,27 @@ mod tests {
         let payload = diagnose_runtime_fixture(
             ctx.layout(),
             Some(owned_object("runtime-tool", LifecycleStatus::Installed)),
-            Some("[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\""),
+            Some(if mode.starts_with("custom-system-") {
+                "[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\"\nprobe = \"libfoo --version\""
+            } else if mode.starts_with("custom-language-") {
+                "[[component.dependencies]]\nname = \"libfoo\"\nkind = \"language-runtime\"\nversion = \">=20\""
+            } else {
+                "[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\""
+            }),
             ctx.dry_run,
             &|deps, env| resolver.resolve(deps, env),
         );
         assert_eq!(runner.calls.borrow().len(), usize::from(!ctx.dry_run));
         if !ctx.dry_run {
             assert!(runner.outputs.borrow().is_empty());
+            assert_eq!(
+                *runner.calls.borrow(),
+                [if mode.starts_with("custom-") {
+                    "libfoo --version"
+                } else {
+                    "rpm -q libfoo"
+                }]
+            );
         }
         let has_issues = payload_has_issues(&payload);
         println!("RPM_OUTPUT_BEGIN");
@@ -5027,7 +5072,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_runtime_probe_errors_distinguish_native_rpm_from_legacy_probes() {
+    fn doctor_runtime_probe_errors_distinguish_execution_faults_from_platform_limits() {
         for kind in [
             std::io::ErrorKind::NotFound,
             std::io::ErrorKind::PermissionDenied,
@@ -5062,7 +5107,18 @@ mod tests {
             );
             assert_eq!(
                 component.dependencies[1].status,
-                DoctorDependencyStatus::Unresolved
+                DoctorDependencyStatus::Unresolvable
+            );
+            assert_eq!(component.findings[1].code, "dependency_probe_failed");
+            assert_eq!(
+                component.dependencies[1].detail.as_deref(),
+                Some("node failed (code None): ")
+            );
+            assert!(
+                !component
+                    .fix_plan
+                    .iter()
+                    .any(|fix| fix.action == "install_runtime")
             );
             assert_eq!(
                 component.dependencies[2].status,

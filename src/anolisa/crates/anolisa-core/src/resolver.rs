@@ -75,7 +75,7 @@ pub enum DependencyProbeError {
         command: String,
         /// Exit code, or `None` for signal termination or other spawn failures.
         code: Option<i32>,
-        /// Original diagnostic supplied by the package query adapter.
+        /// Original stderr or spawn-error diagnostic from the probe boundary.
         stderr: String,
     },
     /// The query returned malformed or ambiguous metadata.
@@ -83,7 +83,7 @@ pub enum DependencyProbeError {
     UnexpectedOutput {
         /// Executable name.
         command: String,
-        /// Original explanation from the package query adapter.
+        /// Explanation from the probe boundary, including unexpected output.
         detail: String,
     },
 }
@@ -270,7 +270,13 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
         env: &ResolverEnv,
     ) -> (DependencyStatus, Option<String>) {
         let present = match &dep.probe {
-            Some(probe) => matches!(self.run_probe(probe), ProbeOutcome::Present { .. }),
+            Some(probe) => match self.run_probe(probe) {
+                ProbeOutcome::Present { .. } => true,
+                ProbeOutcome::Absent => false,
+                ProbeOutcome::Failed(error) => {
+                    return (DependencyStatus::ProbeFailed { error }, None);
+                }
+            },
             None => match self.native_package_present(dep, env) {
                 Ok(present) => present,
                 Err(error) => return (DependencyStatus::ProbeFailed { error }, None),
@@ -297,13 +303,17 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
             .probe
             .clone()
             .unwrap_or_else(|| format!("{} --version", dep.name));
-        let ProbeOutcome::Present { stdout } = self.run_probe(&probe) else {
-            return (
-                DependencyStatus::Unresolved {
-                    remediation: language_runtime_hint(dep),
-                },
-                None,
-            );
+        let stdout = match self.run_probe(&probe) {
+            ProbeOutcome::Present { stdout } => stdout,
+            ProbeOutcome::Absent => {
+                return (
+                    DependencyStatus::Unresolved {
+                        remediation: language_runtime_hint(dep),
+                    },
+                    None,
+                );
+            }
+            ProbeOutcome::Failed(error) => return (DependencyStatus::ProbeFailed { error }, None),
         };
         match version_verdict(dep.version.as_deref(), &stdout) {
             VersionVerdict::Ok => (DependencyStatus::Resolved, None),
@@ -325,8 +335,8 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
         }
     }
 
-    /// Run a `program arg arg` probe string. Present iff the command spawns and
-    /// exits 0; a spawn failure (missing binary) counts as absent.
+    // Ordinary nonzero exits and missing executables retain the manifest's
+    // presence contract; execution faults must not trigger installation.
     fn run_probe(&self, probe: &str) -> ProbeOutcome {
         let mut parts = probe.split_whitespace();
         let Some(program) = parts.next() else {
@@ -335,7 +345,38 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
         let args: Vec<&str> = parts.collect();
         match self.runner.run(program, &args) {
             Ok(out) if out.code == Some(0) => ProbeOutcome::Present { stdout: out.stdout },
-            _ => ProbeOutcome::Absent,
+            Ok(out) if out.code.is_none() => {
+                let error = if out.stderr.trim().is_empty() && !out.stdout.trim().is_empty() {
+                    DependencyProbeError::UnexpectedOutput {
+                        command: program.into(),
+                        detail: format!(
+                            "{probe} failed (code {:?}); stdout: {}",
+                            out.code, out.stdout
+                        ),
+                    }
+                } else {
+                    DependencyProbeError::QueryFailed {
+                        command: program.into(),
+                        code: out.code,
+                        stderr: out.stderr,
+                    }
+                };
+                ProbeOutcome::Failed(error)
+            }
+            Ok(_) => ProbeOutcome::Absent,
+            Err(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => ProbeOutcome::Absent,
+                std::io::ErrorKind::PermissionDenied => {
+                    ProbeOutcome::Failed(DependencyProbeError::PermissionDenied {
+                        command: program.into(),
+                    })
+                }
+                _ => ProbeOutcome::Failed(DependencyProbeError::QueryFailed {
+                    command: program.into(),
+                    code: None,
+                    stderr: error.to_string(),
+                }),
+            },
         }
     }
 
@@ -366,6 +407,7 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
 enum ProbeOutcome {
     Present { stdout: String },
     Absent,
+    Failed(DependencyProbeError),
 }
 
 /// Platform capability: gate `min_kernel` first, then evaluate the built-in
@@ -674,6 +716,214 @@ mod tests {
             .resolve(&[d], env)
             .expect("resolve");
         plan.resolutions.into_iter().next().expect("one resolution")
+    }
+
+    #[test]
+    fn custom_probe_execution_failure_is_not_missing() {
+        for kind in [
+            DependencyKind::SystemPackage,
+            DependencyKind::LanguageRuntime,
+        ] {
+            let mut dependency = dep("node", kind);
+            dependency.probe = Some("node --version".into());
+            let runner = FakeRunner {
+                map: HashMap::from([("node".into(), Fake::Spawn(io::ErrorKind::PermissionDenied))]),
+            };
+            let result = resolve_one(runner, dependency, &rpm_env());
+            assert_eq!(
+                result.status,
+                DependencyStatus::ProbeFailed {
+                    error: DependencyProbeError::PermissionDenied {
+                        command: "node".into()
+                    }
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn custom_probes_preserve_execution_evidence_and_order() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        struct Runner {
+            calls: RefCell<Vec<(String, Vec<String>)>>,
+            outputs: RefCell<VecDeque<io::Result<CommandOutput>>>,
+        }
+        impl CommandRunner for &Runner {
+            fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+                self.calls
+                    .borrow_mut()
+                    .push((program.into(), args.iter().map(|s| s.to_string()).collect()));
+                self.outputs
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("unexpected probe or native fallback")
+            }
+        }
+        for (kind, explicit) in [
+            (DependencyKind::SystemPackage, true),
+            (DependencyKind::LanguageRuntime, true),
+            (DependencyKind::LanguageRuntime, false),
+        ] {
+            for case in [
+                "success",
+                "nonzero",
+                "warning",
+                "missing",
+                "permission",
+                "io",
+                "signal",
+                "stdout",
+                "empty-signal",
+            ] {
+                let mut dependency = dep("node", kind);
+                dependency.probe = explicit.then(|| "node  --version".into());
+                dependency.version = Some(">=20".into());
+                let probe = if explicit {
+                    "node  --version"
+                } else {
+                    "node --version"
+                };
+                let output = match case {
+                    "missing" => Err(io::Error::new(io::ErrorKind::NotFound, "missing node")),
+                    "permission" => Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                    "io" => Err(io::Error::other(" spawn diagnostic\n")),
+                    _ => Ok(CommandOutput {
+                        code: match case {
+                            "signal" | "stdout" | "empty-signal" => None,
+                            "success" => Some(0),
+                            "warning" => Some(2),
+                            _ => Some(1),
+                        },
+                        stdout: match case {
+                            "success" => "v20.1.0",
+                            "stdout" => " partial version\n",
+                            _ => "",
+                        }
+                        .into(),
+                        stderr: match case {
+                            "success" | "warning" => "warning\n",
+                            "signal" => " terminated\n",
+                            "stdout" => " \t\n",
+                            _ => "",
+                        }
+                        .into(),
+                    }),
+                };
+                let expected_error = match case {
+                    "permission" => Some(DependencyProbeError::PermissionDenied {
+                        command: "node".into(),
+                    }),
+                    "io" | "signal" | "empty-signal" => Some(DependencyProbeError::QueryFailed {
+                        command: "node".into(),
+                        code: None,
+                        stderr: match case {
+                            "io" => " spawn diagnostic\n",
+                            "signal" => " terminated\n",
+                            _ => "",
+                        }
+                        .into(),
+                    }),
+                    "stdout" => Some(DependencyProbeError::UnexpectedOutput {
+                        command: "node".into(),
+                        detail: format!("{probe} failed (code None); stdout:  partial version\n"),
+                    }),
+                    _ => None,
+                };
+                let runner = Runner {
+                    calls: RefCell::new(Vec::new()),
+                    outputs: RefCell::new(VecDeque::from([
+                        output,
+                        Ok(CommandOutput {
+                            code: Some(0),
+                            stdout: "ok".into(),
+                            stderr: String::new(),
+                        }),
+                    ])),
+                };
+                let mut following = dep("following", DependencyKind::SystemPackage);
+                following.probe = Some("next --check".into());
+                let deps = [dependency, following];
+                let plan = DependencyResolver::with_probes(&runner, || panic!("no btrfs read"))
+                    .resolve(&deps, &rpm_env())
+                    .expect("valid declarations");
+                assert_eq!(
+                    runner.calls.into_inner(),
+                    vec![
+                        ("node".into(), vec!["--version".into()]),
+                        ("next".into(), vec!["--check".into()]),
+                    ]
+                );
+                assert!(runner.outputs.into_inner().is_empty());
+                assert_eq!(
+                    plan.resolutions
+                        .iter()
+                        .map(|r| r.name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["node", "following"]
+                );
+                assert_eq!(plan.resolutions[1].status, DependencyStatus::Resolved);
+                assert!(plan.warnings.is_empty());
+                let provision = crate::ProvisionPlan::from_resolution(&plan, &deps, &rpm_env());
+                if let Some(error) = expected_error {
+                    assert_eq!(
+                        plan.resolutions[0].status,
+                        DependencyStatus::ProbeFailed {
+                            error: error.clone()
+                        }
+                    );
+                    assert!(plan.unsatisfied_lines()[0].contains(&error.to_string()));
+                    assert!(plan.resolutions[0].detail.is_none());
+                    assert!(provision.has_blockers());
+                    assert!(provision.installable.is_empty());
+                    assert!(provision.manual.is_empty());
+                } else if case == "success" {
+                    assert_eq!(plan.resolutions[0].status, DependencyStatus::Resolved);
+                    assert!(provision.is_satisfied());
+                } else {
+                    assert!(matches!(
+                        plan.resolutions[0].status,
+                        DependencyStatus::Unresolved { .. }
+                    ));
+                    assert!(!provision.has_blockers());
+                    assert_eq!(
+                        provision.installable.len(),
+                        usize::from(kind == DependencyKind::SystemPackage)
+                    );
+                    assert_eq!(
+                        provision.manual.len(),
+                        usize::from(kind == DependencyKind::LanguageRuntime)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_custom_probes_remain_absent_without_execution() {
+        struct NoRunner;
+        impl CommandRunner for NoRunner {
+            fn run(&self, _: &str, _: &[&str]) -> io::Result<CommandOutput> {
+                panic!("empty probe must not execute")
+            }
+        }
+        for kind in [
+            DependencyKind::SystemPackage,
+            DependencyKind::LanguageRuntime,
+        ] {
+            for probe in ["", " \t\n"] {
+                let mut dependency = dep("node", kind);
+                dependency.probe = Some(probe.into());
+                let plan = DependencyResolver::with_probes(NoRunner, || panic!("no btrfs read"))
+                    .resolve(&[dependency], &rpm_env())
+                    .unwrap();
+                assert!(matches!(
+                    plan.resolutions[0].status,
+                    DependencyStatus::Unresolved { .. }
+                ));
+            }
+        }
     }
 
     #[test]
