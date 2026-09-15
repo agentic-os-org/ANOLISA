@@ -1047,6 +1047,7 @@ mod tests {
             true,
             &std::collections::HashSet::new(),
             &mut reporter,
+            crate::test_support::raw_effects(),
         );
         let member = member_application_outcome(result);
         let item =

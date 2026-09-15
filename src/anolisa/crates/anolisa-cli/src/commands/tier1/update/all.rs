@@ -1013,6 +1013,7 @@ mod tests {
                 &retry_host,
                 &retry_host,
                 true,
+                crate::test_support::raw_effects(),
             );
             Ok(application::member_application_outcome(outcome))
         };

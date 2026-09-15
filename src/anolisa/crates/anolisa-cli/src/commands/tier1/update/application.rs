@@ -22,6 +22,7 @@ use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionEr
 use anolisa_platform::privilege;
 
 use crate::commands::common;
+use crate::commands::tier1::install::RawEffectFactories;
 use crate::commands::tier1::install::{RawReplayOps, RawResolution};
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
@@ -183,7 +184,14 @@ pub(super) fn run(
     ctx: &CliContext,
 ) -> Result<ApplicationOutcome, CliError> {
     let (query, txn) = update_backends(request.component, ctx)?;
-    run_with_dependencies(request, ctx, &query, &txn, privilege::is_root())
+    run_with_dependencies(
+        request,
+        ctx,
+        &query,
+        &txn,
+        privilege::is_root(),
+        RawEffectFactories::system(),
+    )
 }
 
 /// Run one batch member while preserving its terminal classification.
@@ -192,7 +200,14 @@ pub(super) fn run_for_batch(
     ctx: &CliContext,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
     let (query, txn) = update_backends(request.component, ctx)?;
-    run_with_dependencies_classified(request, ctx, &query, &txn, privilege::is_root())
+    run_with_dependencies_classified(
+        request,
+        ctx,
+        &query,
+        &txn,
+        privilege::is_root(),
+        RawEffectFactories::system(),
+    )
 }
 
 /// Run the single-component application protocol with explicit host boundaries.
@@ -202,8 +217,9 @@ pub(super) fn run_with_dependencies(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
-    run_with_dependencies_classified(request, ctx, query, txn, is_root)
+    run_with_dependencies_classified(request, ctx, query, txn, is_root, effects)
         .map_err(ApplicationFailure::into_cli_error)
 }
 
@@ -214,10 +230,11 @@ pub(super) fn run_with_dependencies_classified(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
     let planned = plan_component_update(request.component, ctx, query, txn)?;
     let prepared = request.intent.prepare(planned.plan.clone());
-    execute_planned_update(planned, prepared, ctx, query, txn, is_root)
+    execute_planned_update(planned, prepared, ctx, query, txn, is_root, effects)
 }
 
 fn execute_planned_update(
@@ -227,6 +244,7 @@ fn execute_planned_update(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
     let PlannedComponentUpdate {
         command,
@@ -306,6 +324,7 @@ fn execute_planned_update(
                     resolution,
                     prior,
                     &command,
+                    effects,
                 )
             }
             PlannedUpdateRoute::Delegated { .. } => apply_delegated(
@@ -538,6 +557,7 @@ pub(super) fn apply_owned(
     resolution: RawResolution,
     prior: OwnedArtifact,
     command: &str,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
     apply_owned_with_hydration(
         target,
@@ -551,7 +571,8 @@ pub(super) fn apply_owned(
         resolution,
         prior,
         command,
-        common::hydrate_owned_file_contracts,
+        |store, layout| effects.hydrate_owned_file_contracts(store, layout),
+        effects,
     )
 }
 
@@ -569,6 +590,7 @@ pub(super) fn apply_owned_with_hydration(
     prior: OwnedArtifact,
     command: &str,
     hydrate: impl FnOnce(&mut StateStore, &FsLayout) -> usize,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, ApplicationFailure> {
     // A user prefix may be writable without root; permission failures belong
     // to the exact owned-executor step so compensation remains honest.
@@ -626,6 +648,7 @@ pub(super) fn apply_owned_with_hydration(
     let execution_result = {
         let mut ops = RawReplayOps::new(
             ctx,
+            effects,
             layout,
             target.to_string(),
             scope,

@@ -968,8 +968,26 @@ fn install_raw_end_to_end_applies_optional_capability() {
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install with optional capability must succeed even without root");
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|factories| {
+            handle_with_effects(a, &ctx_with_prefix(false, Some(prefix.clone())), factories)
+        })
+        .expect("install with fake capability must succeed");
+    assert_eq!(
+        effects.calls(),
+        vec![
+            "capability factory system".to_string(),
+            format!(
+                "apply {} CAP_BPF",
+                FsLayout::system(Some(prefix.clone()))
+                    .bin_dir
+                    .join("agentsight")
+                    .display()
+            ),
+            "service factory system System".to_string(),
+        ]
+    );
 
     let layout = FsLayout::system(Some(prefix));
     assert!(
@@ -1040,8 +1058,22 @@ fn install_raw_end_to_end_records_declared_service() {
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install with a declared service must succeed (activation is best-effort)");
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|factories| {
+            handle_with_effects(a, &ctx_with_prefix(false, Some(prefix.clone())), factories)
+        })
+        .expect("install with a declared service must succeed");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory system",
+            "service factory system System",
+            "DaemonReload System ",
+            "Enable System agentsight.service",
+            "Start System agentsight.service",
+        ]
+    );
 
     let layout = FsLayout::system(Some(prefix));
     assert!(
@@ -2485,5 +2517,264 @@ install_modes = [1]
         err.reason().contains("cannot parse") && err.reason().contains("self-update"),
         "got: {}",
         err.reason()
+    );
+}
+
+#[test]
+fn raw_effect_capability_policy_matrix() {
+    for supported in [false, true] {
+        for optional in [false, true] {
+            for fail in [false, true] {
+                let tmp = tempdir().expect("tmpdir");
+                let prefix = tmp.path().join("sys");
+                let repo = write_local_repo_component_with_capability(
+                    &tmp.path().join("repo"),
+                    "agentsight",
+                    "0.2.0",
+                    &["system"],
+                    "{bindir}/agentsight",
+                    &["CAP_BPF"],
+                    optional,
+                );
+                let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+                let layout = common::resolve_layout(&ctx);
+                let mut request = args("agentsight");
+                request.repo = Some(repo);
+                let mut effects = crate::test_support::RawEffectRecorder::default();
+                effects.supported = supported;
+                effects.fail_capability = fail;
+                let result = effects.with(|f| handle_with_effects(request, &ctx, f));
+                let aborted = supported && fail && !optional;
+                assert_eq!(result.is_err(), aborted);
+                assert_eq!(layout.bin_dir.join("agentsight").exists(), !aborted);
+                assert_eq!(
+                    effects
+                        .calls()
+                        .iter()
+                        .filter(|s| s.starts_with("apply "))
+                        .count(),
+                    usize::from(supported)
+                );
+                assert_eq!(
+                    effects
+                        .calls()
+                        .iter()
+                        .filter(|s| s.starts_with("service factory"))
+                        .count(),
+                    usize::from(!aborted)
+                );
+                let store = load_v5_store(&layout);
+                assert_eq!(
+                    store.find(ObjectKind::Component, "agentsight").is_some(),
+                    !aborted
+                );
+                if aborted {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .reason()
+                            .contains("required capability application failed")
+                    );
+                } else {
+                    let warnings = result.unwrap();
+                    assert_eq!(
+                        warnings
+                            .iter()
+                            .filter(|w| w.contains("optional capability"))
+                            .count(),
+                        usize::from(supported && fail)
+                    );
+                    let record = store
+                        .find(ObjectKind::Component, "agentsight")
+                        .expect("record");
+                    let grants = &owned_artifact(record)
+                        .files
+                        .iter()
+                        .find(|f| f.path == layout.bin_dir.join("agentsight"))
+                        .expect("binary")
+                        .capabilities;
+                    assert_eq!(!grants.is_empty(), supported && !fail);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_effect_service_failures_remain_ordered_warnings() {
+    use anolisa_core::ServiceOp;
+    for fail in [
+        None,
+        Some(ServiceOp::DaemonReload),
+        Some(ServiceOp::Enable),
+        Some(ServiceOp::Start),
+    ] {
+        for supported in [false, true] {
+            let tmp = tempdir().expect("tmpdir");
+            let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+            let mut request = args("agentsight");
+            request.repo = Some(write_local_repo_component_with_service(
+                &tmp.path().join("repo"),
+                "agentsight",
+                "0.2.0",
+                &["system"],
+                "agentsight.service",
+                true,
+                true,
+            ));
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.supported = supported;
+            effects.fail_service = fail;
+            let warnings = effects
+                .with(|f| handle_with_effects(request, &ctx, f))
+                .expect("best effort");
+            let mut expected = vec!["capability factory system", "service factory system System"];
+            if supported {
+                expected.extend([
+                    "DaemonReload System ",
+                    "Enable System agentsight.service",
+                    "Start System agentsight.service",
+                ]);
+            }
+            assert_eq!(effects.calls(), expected);
+            assert_eq!(warnings.len(), usize::from(supported && fail.is_some()));
+            if let Some(op) = fail.filter(|_| supported) {
+                assert!(warnings[0].contains(op.as_str()), "{warnings:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_effect_preview_noop_and_refusal_do_not_create_managers() {
+    for case in ["preview", "noop", "refusal"] {
+        let tmp = tempdir().expect("tmpdir");
+        let mut ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+        let mut request = args("agentsight");
+        request.repo = Some(write_local_repo_component_with_service(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            if case == "refusal" {
+                &["user"]
+            } else {
+                &["system"]
+            },
+            "agentsight.service",
+            true,
+            true,
+        ));
+        if case == "noop" {
+            handle_with_fake_rpm(
+                {
+                    let mut seed = args("agentsight");
+                    seed.repo = request.repo.clone();
+                    seed
+                },
+                &ctx,
+            )
+            .expect("seed installation");
+        }
+        ctx.dry_run = case == "preview";
+        let effects = crate::test_support::RawEffectRecorder::default();
+        let result = effects.with(|f| handle_with_effects(request, &ctx, f));
+        assert_eq!(result.is_err(), case == "refusal");
+        assert!(effects.calls().is_empty(), "{case}: {:?}", effects.calls());
+    }
+}
+
+#[test]
+fn raw_effect_post_enable_failure_compensates_activated_units() {
+    let tmp = tempdir().expect("tmpdir");
+    let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+    let root = tmp.path().join("repo");
+    let repo = write_local_repo_component_with_service(
+        &root,
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "agentsight.service",
+        true,
+        true,
+    );
+    let manifest = format!(
+        "{}\n[[component.hooks]]\nphase = \"post_enable\"\nscript = \"hooks/fail.sh\"\nstrict = true\n",
+        service_manifest("agentsight.service", true, true, None)
+    );
+    replace_repo_artifact(
+        &root,
+        "agentsight",
+        &build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"binary\n"),
+            ("hooks/fail.sh", b"#!/bin/sh\nexit 1\n"),
+        ]),
+    );
+    let mut request = args("agentsight");
+    request.repo = Some(repo);
+    let effects = crate::test_support::RawEffectRecorder::default();
+    let err = effects
+        .with(|f| handle_with_effects(request, &ctx, f))
+        .expect_err("strict hook");
+    assert!(err.reason().contains("post_enable"), "{err}");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory system",
+            "service factory system System",
+            "DaemonReload System ",
+            "Enable System agentsight.service",
+            "Start System agentsight.service",
+            "Stop System agentsight.service",
+            "Disable System agentsight.service",
+        ]
+    );
+    let layout = common::resolve_layout(&ctx);
+    assert!(!layout.bin_dir.join("agentsight").exists());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none()
+    );
+}
+
+#[test]
+fn raw_effect_install_user_scope_keeps_its_manager_routing() {
+    let tmp = tempdir().expect("tmpdir");
+    let ctx = crate::test_support::context_for_root(
+        tmp.path(),
+        crate::context::InstallMode::User,
+        Some(tmp.path().join("sys")),
+        Default::default(),
+    );
+    let root = tmp.path().join("repo");
+    let repo = write_local_repo_component(&root, "agentsight", "0.2.0", &["user"]);
+    let manifest = format!(
+        "{}\n[[component.services]]\nunit = \"agentsight.service\"\nscope = \"user\"\nenable = true\nstart = true\n",
+        component_manifest_toml("agentsight", "0.2.0", &["user"])
+    );
+    replace_repo_artifact(
+        &root,
+        "agentsight",
+        &build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"binary\n"),
+        ]),
+    );
+    let mut request = args("agentsight");
+    request.repo = Some(repo);
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|f| handle_with_effects(request, &ctx, f))
+        .expect("user service install");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory user",
+            "service factory user User",
+            "DaemonReload User ",
+            "Enable User agentsight.service",
+            "Start User agentsight.service",
+        ]
     );
 }

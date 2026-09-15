@@ -523,6 +523,7 @@ pub(crate) fn update_component_with_deps(
         query,
         txn,
         is_root,
+        crate::test_support::raw_effects(),
     )?;
     render_application_outcome(ctx, outcome)
 }
@@ -3973,7 +3974,24 @@ sha256 = "{sha}"
         );
         let rpm = FakeRpm::new("unused", None);
 
-        update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("no-op must succeed");
+        let effects = crate::test_support::RawEffectRecorder::default();
+        let outcome = effects
+            .with(|f| {
+                application::run_with_dependencies(
+                    application::ApplicationRequest {
+                        component: "foo",
+                        intent: execution_intent(&c),
+                    },
+                    &c,
+                    &rpm,
+                    &rpm,
+                    false,
+                    f,
+                )
+            })
+            .expect("read-only update outcome");
+        assert!(effects.calls().is_empty());
+        render_application_outcome(&c, outcome).expect("render");
 
         let layout = common::resolve_layout(&c);
         assert_eq!(
@@ -4003,7 +4021,24 @@ sha256 = "{sha}"
         );
         let rpm = FakeRpm::new("unused", None);
 
-        update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("dry-run must succeed");
+        let effects = crate::test_support::RawEffectRecorder::default();
+        let outcome = effects
+            .with(|f| {
+                application::run_with_dependencies(
+                    application::ApplicationRequest {
+                        component: "foo",
+                        intent: execution_intent(&c),
+                    },
+                    &c,
+                    &rpm,
+                    &rpm,
+                    false,
+                    f,
+                )
+            })
+            .expect("read-only update outcome");
+        assert!(effects.calls().is_empty());
+        render_application_outcome(&c, outcome).expect("render");
 
         let layout = common::resolve_layout(&c);
         assert_eq!(
@@ -4084,10 +4119,8 @@ sha256 = "{sha}"
     /// xattr — so rollback has to re-apply the capabilities confirmed in the
     /// prior state, or the restored binary comes back stripped of them.
     ///
-    /// User mode is deliberate: `capability_for_install_mode` always answers
-    /// with the unsupported manager there, so the assertion is about which
-    /// capabilities the rollback resolved and attempted, not about whether
-    /// this machine happens to have `setcap`.
+    /// The recording capability backend is independent of host support;
+    /// user scope still exercises the original rollback routing.
     #[test]
     fn raw_update_rollback_reapplies_prior_capabilities() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -4133,14 +4166,41 @@ sha256 = "{sha}"
         );
         let rpm = FakeRpm::new("unused", None);
 
-        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
-            .expect_err("install of the new version must fail");
+        let effects = crate::test_support::RawEffectRecorder::default();
+        let err = effects
+            .with(|f| {
+                application::run_with_dependencies(
+                    application::ApplicationRequest {
+                        component: "foo",
+                        intent: execution_intent(&c),
+                    },
+                    &c,
+                    &rpm,
+                    &rpm,
+                    false,
+                    f,
+                )
+            })
+            .err()
+            .expect("install of the new version must fail");
+        assert_eq!(
+            effects.calls(),
+            vec![
+                "capability factory user".to_string(),
+                "capability factory user".to_string(),
+                format!("apply {} cap_net_bind_service", bin.display()),
+            ]
+        );
         assert!(
             err.reason().contains("the previous files were restored"),
             "the failure must report the compensation honestly: {}",
             err.reason()
         );
 
+        assert_eq!(
+            effects.capability_contents(),
+            vec![b"original v1 binary\n".to_vec()]
+        );
         // The forward path never reached SetCapabilities, so any capability
         // record in the log was written by the rollback.
         let log = std::fs::read_to_string(&layout.central_log).expect("read central log");
@@ -4247,29 +4307,42 @@ sha256 = "{sha}"
             };
             let (resolution, prior) = planned.owned_execution.expect("owned resolution");
             let mut hydration_calls = 0;
-            let err = application::apply_owned_with_hydration(
-                &planned.target,
-                &c,
-                &layout,
-                &layout.state_dir.join("installed.toml"),
-                &rpm_install::journal_dir(&layout),
-                planned.scope,
-                &planned.now,
-                steps,
-                resolution,
-                prior,
-                &planned.command,
-                |store, layout| {
-                    hydration_calls += 1;
-                    common::hydrate_owned_file_contracts_with_capability_support(
-                        store, layout, supported,
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.supported = false;
+            let err = effects
+                .with(|f| {
+                    application::apply_owned_with_hydration(
+                        &planned.target,
+                        &c,
+                        &layout,
+                        &layout.state_dir.join("installed.toml"),
+                        &rpm_install::journal_dir(&layout),
+                        planned.scope,
+                        &planned.now,
+                        steps,
+                        resolution,
+                        prior,
+                        &planned.command,
+                        |store, layout| {
+                            hydration_calls += 1;
+                            common::hydrate_owned_file_contracts_with_capability_support(
+                                store, layout, supported,
+                            )
+                        },
+                        f,
                     )
-                },
-            )
-            .err()
-            .expect("install of the new version must fail")
-            .into_cli_error();
+                })
+                .err()
+                .expect("install of the new version must fail")
+                .into_cli_error();
             assert_eq!(hydration_calls, 1);
+            let expected = if inferred {
+                vec!["capability factory user"]
+            } else {
+                vec![]
+            };
+            assert_eq!(effects.calls(), expected);
+            assert!(effects.capability_contents().is_empty());
             assert!(
                 err.reason().contains("the previous files were restored"),
                 "{}",
@@ -4322,6 +4395,80 @@ sha256 = "{sha}"
                 std::fs::read(&bin).expect("read restored binary"),
                 b"original v1 binary\n"
             );
+        }
+    }
+
+    #[test]
+    fn raw_effect_update_hydrates_legacy_capabilities_through_factory() {
+        for supported in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().join("home"), InstallMode::User, false);
+            seed_installed_raw(&c, "foo", "0.1.0", b"prior bytes\n");
+            let layout = common::resolve_layout(&c);
+            let bin = layout.bin_dir.join("foo");
+            let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
+                .expect("manifest path");
+            std::fs::write(
+                manifest_path,
+                format!(
+                    "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\noptional = false\n",
+                    raw_manifest("foo", "0.1.0")
+                ),
+            )
+            .expect("legacy manifest");
+            publish_raw_repo(
+                &tmp.path().join("repo"),
+                &layout,
+                "foo",
+                "0.2.0",
+                &raw_artifact_missing_binary("foo", "0.2.0"),
+            );
+            let state_path = layout.state_dir.join("installed.toml");
+            let before = std::fs::read(&state_path).expect("state");
+            let rpm = FakeRpm::new("unused", None);
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.supported = supported;
+            let error = effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            component: "foo",
+                            intent: execution_intent(&c),
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        f,
+                    )
+                })
+                .err()
+                .expect("new artifact is missing its binary");
+            assert!(
+                error.reason().contains("the previous files were restored"),
+                "{error}"
+            );
+            let mut expected = vec!["capability factory user".to_string()];
+            if supported {
+                expected.extend([
+                    "capability factory user".to_string(),
+                    format!("apply {} cap_net_bind_service", bin.display()),
+                ]);
+            }
+            assert_eq!(effects.calls(), expected);
+            assert_eq!(
+                effects.capability_contents(),
+                if supported {
+                    vec![b"prior bytes\n".to_vec()]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                std::fs::read(&bin).expect("restored binary"),
+                b"prior bytes\n"
+            );
+            assert_eq!(std::fs::read(&state_path).expect("unchanged state"), before);
         }
     }
 
@@ -4586,6 +4733,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             resolution,
             stale,
             "update foo",
+            crate::test_support::raw_effects(),
         )
         .err()
         .expect("a drifted snapshot must abort under the lock")
@@ -5363,5 +5511,154 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         let err = handle(args, &c).expect_err("must require a target");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("specify a component"));
+    }
+    #[test]
+    fn raw_effect_update_routes_scopes_and_preserves_restart_warnings() {
+        use anolisa_core::ServiceOp;
+        for mode in [InstallMode::System, InstallMode::User] {
+            for fail in [None, Some(ServiceOp::Restart)] {
+                let tmp = tempfile::tempdir().expect("tmpdir");
+                let c = ctx(tmp.path().join("root"), mode, false);
+                seed_installed_raw(&c, "foo", "0.1.0", b"old binary\n");
+                let layout = common::resolve_layout(&c);
+                let scope = if mode == InstallMode::User {
+                    "user"
+                } else {
+                    "system"
+                };
+                let manifest = format!(
+                    "{}\n[[component.services]]\nunit = \"foo.service\"\nscope = \"{scope}\"\nenable = true\nstart = true\n\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"CAP_BPF\"]\noptional = true\n",
+                    raw_manifest("foo", "0.2.0")
+                );
+                publish_raw_repo(
+                    &tmp.path().join("repo"),
+                    &layout,
+                    "foo",
+                    "0.2.0",
+                    &tar_gz(&[
+                        (".anolisa/component.toml", manifest.as_bytes()),
+                        ("bin/foo", b"new binary\n"),
+                    ]),
+                );
+                let rpm = FakeRpm::new("unused", None);
+                let mut effects = crate::test_support::RawEffectRecorder::default();
+                effects.fail_service = fail;
+                let outcome = effects
+                    .with(|f| {
+                        application::run_with_dependencies(
+                            application::ApplicationRequest {
+                                component: "foo",
+                                intent: execution_intent(&c),
+                            },
+                            &c,
+                            &rpm,
+                            &rpm,
+                            false,
+                            f,
+                        )
+                    })
+                    .expect("best effort update");
+                let scope_label = if mode == InstallMode::User {
+                    "User"
+                } else {
+                    "System"
+                };
+                assert_eq!(
+                    effects.calls(),
+                    vec![
+                        format!("capability factory {scope}"),
+                        format!("capability factory {scope}"),
+                        format!("apply {} CAP_BPF", layout.bin_dir.join("foo").display()),
+                        format!("service factory {scope} {scope_label}"),
+                        format!("DaemonReload {scope_label} "),
+                        format!("Enable {scope_label} foo.service"),
+                        format!("Restart {scope_label} foo.service"),
+                    ]
+                );
+                assert_eq!(
+                    outcome
+                        .warnings()
+                        .iter()
+                        .filter(|w| w.contains("restart foo.service failed"))
+                        .count(),
+                    usize::from(fail.is_some())
+                );
+                assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.2.0");
+                render_application_outcome(&c, outcome).expect("existing renderer");
+            }
+        }
+    }
+    #[test]
+    fn raw_effect_replay_failed_capability_restore_retains_error_context() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("root"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"prior bytes\n");
+        let layout = common::resolve_layout(&c);
+        let bin = layout.bin_dir.join("foo");
+        let mut store = load_store(&c);
+        let ProviderBinding::Owned { artifact } = &mut store
+            .find_mut(ObjectKind::Component, "foo")
+            .expect("record")
+            .binding
+        else {
+            panic!("owned");
+        };
+        artifact
+            .files
+            .iter_mut()
+            .find(|f| f.path == bin)
+            .expect("binary")
+            .capabilities = vec!["CAP_BPF".to_string()];
+        store
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("prior grant");
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+        let mut effects = crate::test_support::RawEffectRecorder::default();
+        effects.fail_capability = true;
+        let error = effects
+            .with(|f| {
+                application::run_with_dependencies(
+                    application::ApplicationRequest {
+                        component: "foo",
+                        intent: execution_intent(&c),
+                    },
+                    &c,
+                    &rpm,
+                    &rpm,
+                    false,
+                    f,
+                )
+            })
+            .err()
+            .expect("failed replay");
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .reason()
+                .contains("restored files but could not re-apply their file capabilities"),
+            "{error}"
+        );
+        assert_eq!(
+            effects.calls(),
+            vec![
+                "capability factory system".to_string(),
+                "capability factory system".to_string(),
+                format!("apply {} CAP_BPF", bin.display())
+            ]
+        );
+        assert_eq!(
+            effects.capability_contents(),
+            vec![b"prior bytes\n".to_vec()]
+        );
+        assert_eq!(std::fs::read(&bin).expect("restored"), b"prior bytes\n");
+        assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.1.0");
     }
 }

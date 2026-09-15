@@ -19,6 +19,7 @@ use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::install::RawEffectFactories;
 use crate::commands::tier1::rpm_install;
 use crate::commands::tier1::update::rpm_repo_source_for_update;
 use crate::context::CliContext;
@@ -228,7 +229,14 @@ pub(super) fn run(
         if let Ok(Some(repo)) = rpm_repo_source_for_update(&repo_config, &env, &command) {
             let query = RpmPackageQuery::system_with_repo(repo.clone());
             let transaction = RpmTransaction::system_with_repo(repo);
-            return run_with_dependencies(request, ctx, &query, &transaction, privilege::is_root());
+            return run_with_dependencies(
+                request,
+                ctx,
+                &query,
+                &transaction,
+                privilege::is_root(),
+                RawEffectFactories::system(),
+            );
         }
     }
     run_with_dependencies(
@@ -237,6 +245,7 @@ pub(super) fn run(
         &RpmPackageQuery::system(),
         &RpmTransaction::system(),
         privilege::is_root(),
+        RawEffectFactories::system(),
     )
 }
 
@@ -247,8 +256,9 @@ pub(super) fn run_with_dependencies(
     query: &dyn PackageQuery,
     transaction: &dyn PackageTransaction,
     is_root: bool,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
-    repair_attempt(request, ctx, query, transaction, is_root, true)
+    repair_attempt(request, ctx, query, transaction, is_root, true, effects)
 }
 
 fn repair_attempt(
@@ -258,6 +268,7 @@ fn repair_attempt(
     transaction: &dyn PackageTransaction,
     is_root: bool,
     may_recover_journal: bool,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
     let input = request.component;
     let command = format!("repair {input}");
@@ -274,7 +285,7 @@ fn repair_attempt(
 
     let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
     let mut store = view.writable.state;
-    common::hydrate_owned_file_contracts(&mut store, &layout);
+    effects.hydrate_owned_file_contracts(&mut store, &layout);
     let target = resolved.as_str();
 
     let native_package = match store.find(ObjectKind::Component, target) {
@@ -411,6 +422,7 @@ fn repair_attempt(
             store,
             provider,
             steps,
+            effects,
         ),
     }
 }
@@ -435,6 +447,7 @@ fn apply_repair_plan(
     store: anolisa_core::state_store::StateStore,
     provider: DelegatedProvider<'_>,
     steps: Vec<Step>,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
     if matches!(steps.as_slice(), [Step::RecoverJournal]) {
         if !may_recover_journal {
@@ -458,7 +471,9 @@ fn apply_repair_plan(
             command,
         )? {
             Recovery::Recovered(outcome) => Ok(*outcome),
-            Recovery::Cleared => repair_attempt(request, ctx, query, transaction, is_root, false),
+            Recovery::Cleared => {
+                repair_attempt(request, ctx, query, transaction, is_root, false, effects)
+            }
         };
     }
 
@@ -479,7 +494,7 @@ fn apply_repair_plan(
             may_recover_journal,
             target,
             command,
-            || repair_attempt(request, ctx, query, transaction, is_root, true),
+            || repair_attempt(request, ctx, query, transaction, is_root, true, effects),
         );
     }
 
@@ -509,13 +524,14 @@ fn apply_repair_plan(
             &steps,
             prior,
             command,
+            effects,
         )?;
         return continue_after_locked_repair(
             execution,
             may_recover_journal,
             target,
             command,
-            || repair_attempt(request, ctx, query, transaction, is_root, true),
+            || repair_attempt(request, ctx, query, transaction, is_root, true, effects),
         );
     }
 
@@ -570,7 +586,7 @@ fn apply_repair_plan(
         command,
     )?;
     continue_after_locked_repair(execution, may_recover_journal, target, command, || {
-        repair_attempt(request, ctx, query, transaction, is_root, true)
+        repair_attempt(request, ctx, query, transaction, is_root, true, effects)
     })
 }
 

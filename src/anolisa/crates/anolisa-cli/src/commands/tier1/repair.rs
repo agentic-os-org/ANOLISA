@@ -52,6 +52,7 @@ use anolisa_platform::privilege;
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::install::RawEffectFactories;
 use crate::commands::tier1::install::{
     QuarantineRestoreOps, RawReplayOps, ResolveInputs, inspect_datadir_contract_drift,
     refresh_datadir_contract_snapshot, resolve_raw, resolve_raw_inputs_for_component,
@@ -139,6 +140,7 @@ pub(crate) fn repair_with_deps(
         query,
         txn,
         is_root,
+        crate::test_support::raw_effects(),
     )?;
     render_application_outcome(ctx, outcome)
 }
@@ -485,6 +487,7 @@ fn repair_owned_replay(
     steps: &[Step],
     prior: anolisa_core::domain::OwnedArtifact,
     command: &str,
+    effects: RawEffectFactories<'_>,
 ) -> Result<LockedRepairExecution, CliError> {
     // No root pre-check: `--prefix` may point at a user-writable tree, and a
     // genuine permission problem fails the exact step and unwinds honestly.
@@ -545,6 +548,7 @@ fn repair_owned_replay(
     let outcome = {
         let mut ops = RawReplayOps::new(
             ctx,
+            effects,
             layout,
             target.to_string(),
             scope,
@@ -4875,5 +4879,151 @@ mod tests {
         assert!(!delegated_repair_authorized(
             &store, "cosh", "cosh", &restore
         ));
+    }
+    #[test]
+    fn raw_effect_repair_hydrates_legacy_capabilities_through_factory() {
+        use crate::commands::tier1::install::tests::component_manifest_toml;
+        use std::os::unix::fs::PermissionsExt;
+
+        for supported in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().join("home"), InstallMode::User, false);
+            let (state_path, binary) = seed_damaged_owned(tmp.path(), &c);
+            let layout = common::resolve_layout(&c);
+            fs::create_dir_all(binary.parent().expect("parent")).expect("bindir");
+            fs::write(&binary, b"healthy binary\n").expect("binary");
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("mode");
+            let manifest_path =
+                common::installed_component_manifest_path(&layout, "skillfs", "repair")
+                    .expect("manifest path");
+            fs::create_dir_all(manifest_path.parent().expect("parent")).expect("manifest dir");
+            fs::write(
+                &manifest_path,
+                format!(
+                    "{}\n[[component.capabilities]]\npath = \"{{bindir}}/skillfs\"\ncaps = [\"cap_net_bind_service\"]\noptional = false\n",
+                    component_manifest_toml("skillfs", "1.0.0", &["user"])
+                ),
+            )
+            .expect("legacy manifest");
+            let before = fs::read(&state_path).expect("state");
+            let rpm = FakeRpm::new("unused", None);
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.supported = supported;
+            let outcome = effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            component: "skillfs",
+                            intent: anolisa_core::execution::ExecutionIntent::Plan,
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        f,
+                    )
+                })
+                .expect("repair preview");
+            assert_eq!(effects.calls(), ["capability factory user"]);
+            assert!(effects.capability_contents().is_empty());
+            if supported {
+                assert!(matches!(
+                    outcome,
+                    application::ApplicationOutcome::Preview { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    application::ApplicationOutcome::NoOp { .. }
+                ));
+            }
+            assert_eq!(fs::read(&state_path).expect("unchanged state"), before);
+            assert!(!layout.lock_file.exists());
+            assert_eq!(
+                fs::read(&binary).expect("unchanged binary"),
+                b"healthy binary\n"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_effect_repair_replay_uses_injected_service_and_capability() {
+        use crate::commands::tier1::install::tests::{
+            build_tar_gz, component_manifest_toml, replace_repo_artifact,
+        };
+        for fail in [None, Some(anolisa_core::ServiceOp::Restart)] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+            let (state_path, binary) = seed_damaged_owned(tmp.path(), &c);
+            let manifest = format!(
+                "{}\n[[component.services]]\nunit = \"skillfs.service\"\nenable = true\nstart = true\n\n[[component.capabilities]]\npath = \"{{bindir}}/skillfs\"\ncaps = [\"CAP_BPF\"]\noptional = true\n",
+                component_manifest_toml("skillfs", "1.0.0", &["system"])
+            );
+            replace_repo_artifact(
+                &tmp.path().join("repo"),
+                "skillfs",
+                &build_tar_gz(&[
+                    (".anolisa/component.toml", manifest.as_bytes()),
+                    ("bin/skillfs", b"repaired binary\n"),
+                ]),
+            );
+            let rpm = FakeRpm::new("unused", None);
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.fail_service = fail;
+            effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            component: "skillfs",
+                            intent: anolisa_core::execution::ExecutionIntent::Plan,
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        f,
+                    )
+                })
+                .expect("repair preview");
+            assert_eq!(effects.calls(), ["capability factory system"]);
+            assert!(effects.capability_contents().is_empty());
+            assert!(!binary.exists());
+            let outcome = effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            component: "skillfs",
+                            intent: execution_intent(&c),
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        f,
+                    )
+                })
+                .expect("repair succeeds with non-terminal service warnings");
+            assert_eq!(
+                effects.calls(),
+                vec![
+                    "capability factory system".to_string(),
+                    "capability factory system".to_string(),
+                    "capability factory system".to_string(),
+                    format!("apply {} CAP_BPF", binary.display()),
+                    "service factory system System".to_string(),
+                    "DaemonReload System ".to_string(),
+                    "Enable System skillfs.service".to_string(),
+                    "Restart System skillfs.service".to_string(),
+                ]
+            );
+            assert_eq!(fs::read(&binary).expect("binary"), b"repaired binary\n");
+            assert!(
+                StateStore::load(&state_path, 0)
+                    .expect("state")
+                    .find(ObjectKind::Component, "skillfs")
+                    .is_some()
+            );
+            render_application_outcome(&c, outcome).expect("existing renderer");
+        }
     }
 }

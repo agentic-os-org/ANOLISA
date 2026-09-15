@@ -129,6 +129,7 @@ fn handle_with_deps_and_progress(
         txn,
         is_root,
         reporter,
+        crate::test_support::raw_effects(),
     )?;
     render_outcome(ctx, outcome)
 }
@@ -724,6 +725,11 @@ mod tests {
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    fn handle_with_fake_effects(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+        let rpm = FakeRpm::absent("unused");
+        handle_with_deps(args, ctx, &rpm, &rpm, false)
+    }
+
     #[derive(Default)]
     struct RecordingProgress {
         messages: RefCell<Vec<String>>,
@@ -834,7 +840,7 @@ mod tests {
     #[test]
     fn uninstall_unknown_component_routes_to_not_installed_exit_2() {
         let tmp = tempdir().expect("tmpdir");
-        let err = handle(
+        let err = handle_with_fake_effects(
             args("agentsight", false),
             &ctx_with_prefix(
                 false,
@@ -893,7 +899,7 @@ mod tests {
             .save(&layout.state_dir.join("installed.toml"))
             .expect("seed state save");
 
-        let err = handle(
+        let err = handle_with_fake_effects(
             args("agent-observability", false),
             &ctx_with_prefix(
                 false,
@@ -919,7 +925,7 @@ mod tests {
     #[test]
     fn uninstall_dry_run_on_unknown_component_reports_not_installed() {
         let tmp = tempdir().expect("tmpdir");
-        let err = handle(
+        let err = handle_with_fake_effects(
             args("agentsight", false),
             &ctx_with_prefix(
                 false,
@@ -988,7 +994,7 @@ mod tests {
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
 
-        handle(
+        handle_with_fake_effects(
             args("agentsight", false),
             &ctx_with_prefix(
                 false,
@@ -1113,7 +1119,7 @@ mod tests {
             .save(&layout.state_dir.join("installed.toml"))
             .expect("seed state save");
 
-        handle(
+        handle_with_fake_effects(
             args("ws-ckpt", false),
             &ctx_with_prefix(
                 false,
@@ -1186,7 +1192,7 @@ mod tests {
         state.save(&state_path).expect("seed state save");
         let prior_bytes = std::fs::read(&state_path).expect("read prior");
 
-        let err = handle(
+        let err = handle_with_fake_effects(
             args("agentsight", true),
             &ctx_with_prefix(
                 false,
@@ -1640,6 +1646,7 @@ mod tests {
             &rpm,
             true,
             &mut progress,
+            crate::test_support::raw_effects(),
         )
         .expect("preview");
 
@@ -2286,7 +2293,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle(args_rm("agentsight"), &c).expect("raw uninstall must succeed");
+        handle_with_fake_effects(args_rm("agentsight"), &c).expect("raw uninstall must succeed");
 
         assert!(
             !owned.exists(),
@@ -2823,5 +2830,127 @@ name = "copilot-shell"
             obj.get("plan").is_none(),
             "purge payload must also stay flat: {value}",
         );
+    }
+    #[test]
+    fn raw_effect_uninstall_groups_scopes_and_preserves_warnings() {
+        use crate::commands::tier1::install::tests::{
+            handle_with_fake_rpm, write_local_repo_component_with_service,
+        };
+        use anolisa_core::{ServiceOp, ServiceRef, ServiceScope};
+        for fail in [None, Some(ServiceOp::Stop), Some(ServiceOp::Disable)] {
+            let tmp = tempdir().expect("tmpdir");
+            let c = ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().join("sys")),
+            );
+            let mut install_args = crate::commands::tier1::install::tests::args("agentsight");
+            install_args.repo = Some(write_local_repo_component_with_service(
+                &tmp.path().join("repo"),
+                "agentsight",
+                "0.2.0",
+                &["system"],
+                "agentsight.service",
+                true,
+                true,
+            ));
+            handle_with_fake_rpm(install_args, &c).expect("seed installed service");
+            let layout = common::resolve_layout(&c);
+            let mut store = load_state(&c);
+            let ProviderBinding::Owned { artifact } = &mut store
+                .find_mut(ObjectKind::Component, "agentsight")
+                .expect("component")
+                .binding
+            else {
+                panic!("owned");
+            };
+            artifact.services.push(ServiceRef {
+                name: "user.service".to_string(),
+                manager: "systemd-user".to_string(),
+                restartable: true,
+                enabled: true,
+                scope: ServiceScope::User,
+            });
+            store
+                .save(&layout.state_dir.join("installed.toml"))
+                .expect("mixed scopes");
+            let rpm = FakeRpm::absent("unused");
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.fail_service = fail;
+            let mut reporter = RecordingProgress::default();
+            let request = args_rm("agentsight");
+            effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            args: &request,
+                            intent: anolisa_core::execution::ExecutionIntent::Plan,
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        &mut reporter,
+                        f,
+                    )
+                })
+                .expect("uninstall preview");
+            assert!(effects.calls().is_empty());
+            assert!(layout.bin_dir.join("agentsight").exists());
+            let outcome = effects
+                .with(|f| {
+                    application::run_with_dependencies(
+                        application::ApplicationRequest {
+                            args: &request,
+                            intent: execution_intent(&c),
+                        },
+                        &c,
+                        &rpm,
+                        &rpm,
+                        false,
+                        &mut reporter,
+                        f,
+                    )
+                })
+                .expect("best effort uninstall");
+            assert_eq!(
+                effects.calls(),
+                [
+                    "service factory system System",
+                    "service factory system User",
+                    "Stop System agentsight.service",
+                    "Disable System agentsight.service",
+                    "Stop User user.service",
+                    "Disable User user.service",
+                ]
+            );
+            assert!(!layout.bin_dir.join("agentsight").exists());
+            assert!(
+                load_state(&c)
+                    .find(ObjectKind::Component, "agentsight")
+                    .is_none()
+            );
+            let application::ApplicationOutcome::Applied {
+                outcome: ref command_outcome,
+                ..
+            } = outcome
+            else {
+                panic!("applied");
+            };
+            assert_eq!(
+                command_outcome.warnings().len(),
+                if fail.is_some() { 2 } else { 0 }
+            );
+            if let Some(op) = fail {
+                assert!(
+                    command_outcome
+                        .warnings()
+                        .iter()
+                        .all(|w| w.contains(op.as_str()))
+                );
+            }
+            render_outcome(&c, outcome).expect("existing renderer");
+        }
     }
 }

@@ -58,8 +58,8 @@ use super::application::{
     ApplicationFailure, InstallApplicationOutcome, InstallChange, InstallSubject,
 };
 use super::owned_ops::{
-    RawInstallOps, ValidatedInstall, installed_version_label, validate_component_conflict,
-    validate_owned_install,
+    RawEffectFactories, RawInstallOps, ValidatedInstall, installed_version_label,
+    validate_component_conflict, validate_owned_install,
 };
 use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
@@ -646,6 +646,7 @@ pub(super) fn execute_planned(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let PlannedComponent {
         command,
@@ -806,6 +807,7 @@ pub(super) fn execute_planned(
                 native_package: native_package.as_deref(),
                 degraded_rpmdb: (!missing_rpm_tooling_is_fatal(env, rpmdb)).then_some(rpmdb),
             },
+            effects,
         );
     }
 
@@ -831,6 +833,7 @@ pub(super) fn execute_planned(
             index_base_override: index_base_override.as_deref(),
             is_root,
         },
+        effects,
     )
 }
 
@@ -1262,6 +1265,7 @@ fn install_applied(
     command: &str,
     reporter: &mut dyn ProgressReporter,
     apply: InstallApply<'_>,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     if let InstallApply::Delegated {
         repo_config,
@@ -1337,6 +1341,7 @@ fn install_applied(
             let (result, retained_note) = {
                 let mut ops = RawInstallOps::new(
                     ctx,
+                    effects,
                     layout,
                     target.to_string(),
                     scope,
@@ -2166,6 +2171,7 @@ mod tests {
             true,
             &HashSet::new(),
             &mut reporter,
+            crate::test_support::raw_effects(),
         )
         .expect("delegated install");
 

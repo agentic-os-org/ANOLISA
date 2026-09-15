@@ -32,7 +32,7 @@ use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::color::Palette;
 use crate::commands::common;
-use crate::commands::tier1::install::RawTeardownOps;
+use crate::commands::tier1::install::{RawEffectFactories, RawTeardownOps};
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
@@ -127,6 +127,7 @@ pub(super) fn run(
         &txn,
         privilege::is_root(),
         &mut activity,
+        RawEffectFactories::system(),
     )
 }
 
@@ -138,6 +139,7 @@ pub(super) fn run_with_dependencies(
     txn: &dyn PackageTransaction,
     is_root: bool,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
     reporter.report(&format!(
         "Preparing to uninstall {}...",
@@ -147,7 +149,7 @@ pub(super) fn run_with_dependencies(
         reporter.finish();
         return plan_purge(request, ctx);
     }
-    uninstall_component(request, ctx, query, txn, is_root, reporter)
+    uninstall_component(request, ctx, query, txn, is_root, reporter, effects)
 }
 
 fn uninstall_component(
@@ -157,6 +159,7 @@ fn uninstall_component(
     txn: &dyn PackageTransaction,
     is_root: bool,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
     let args = request.args;
     let input = args.component.as_str();
@@ -267,6 +270,7 @@ fn uninstall_component(
                 is_root,
                 &command,
                 reporter,
+                effects,
             )
         }
     }
@@ -288,6 +292,7 @@ fn execute_apply(
     is_root: bool,
     command: &str,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<ApplicationOutcome, CliError> {
     let lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
@@ -424,6 +429,7 @@ fn execute_apply(
             let outcome = {
                 let mut ops = RawTeardownOps::new(
                     ctx,
+                    effects,
                     layout,
                     target.to_string(),
                     operation_id.clone(),

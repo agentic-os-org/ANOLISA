@@ -196,6 +196,7 @@ pub(crate) fn install_component_with_deps_and_env(
         is_root,
         &std::collections::HashSet::new(),
         &mut activity,
+        crate::test_support::raw_effects(),
     )?;
     let batch_outcome = outcome.batch_outcome();
     render_outcome(ctx, outcome)?;
