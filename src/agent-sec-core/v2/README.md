@@ -158,7 +158,7 @@ startup. The daemon and CLI default socket is `/run/agent-sec-core/daemon.sock`;
 a nonempty `AGENT_SEC_DAEMON_SOCKET` overrides it, and explicit `--socket` takes
 precedence over both. Both entrypoints require absolute paths. HOME and
 XDG_RUNTIME_DIR do not select a daemon namespace. The V2 RPM stages a system
-unit running as `agent-sec:agent-sec`, with a 0755 runtime directory and 0666
+unit running as `root:root`, with a 0755 runtime directory and 0666
 socket. Ordinary users can connect; server-side peer-UID authorization still
 protects policy administration. Runtime directory validation, a retained flock and conservative stale
 socket recovery protect this namespace. Readiness and persistence remain separate

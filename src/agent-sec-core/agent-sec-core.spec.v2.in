@@ -75,7 +75,6 @@ Requires:       python3 < 3.12
 Requires:       gnupg2 >= 2.0
 Requires:       loongshield >= 1.2.0
 Requires:       systemd
-Requires(pre):  /usr/bin/systemd-sysusers
 Recommends:     python3-pgpy >= 0.5
 
 %description -n agent-sec-cli
@@ -88,18 +87,11 @@ domain socket and carries no Python runtime of its own.
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
 %{_unitdir}/agent-sec-core.service
-/usr/lib/sysusers.d/agent-sec-core.conf
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/sec-core
 %{_datadir}/anolisa/components/sec-core/component.toml
 %license LICENSE
-
-# Create the account before the service can be enabled by package policy.
-%pre -n agent-sec-cli
-systemd-sysusers - <<'AGENT_SEC_SYSUSERS'
-u agent-sec - "AgentSec daemon" /nonexistent /sbin/nologin
-AGENT_SEC_SYSUSERS
 
 %post -n agent-sec-cli
 %systemd_post agent-sec-core.service

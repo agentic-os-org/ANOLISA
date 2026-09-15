@@ -1,13 +1,11 @@
 """DPROC-013 system-manager gate; run explicitly as root on a systemd host.
 
-Uses an isolated unit/runtime namespace and the existing nobody account. Never
+Uses an isolated unit/runtime namespace with the shipped root identity. Never
 starts, stops, or overwrites the installed agent-sec-core service.
 """
 
-import grp
 import json
 import os
-import pwd
 import shutil
 import socket
 import subprocess
@@ -47,8 +45,6 @@ def test_dproc_013_systemd_lifecycle(request):
     assert (
         source_binary is not None
     ), "agent-sec-daemon must be installed or built and on PATH"
-    account = pwd.getpwnam("nobody")
-    group = grp.getgrgid(account.pw_gid).gr_name
     with tempfile.TemporaryDirectory(prefix="asc-systemd-", dir="/run") as staging:
         staging = Path(staging)
         staging.chmod(0o755)
@@ -62,12 +58,8 @@ def test_dproc_013_systemd_lifecycle(request):
         unit_path = Path("/run/systemd/system") / unit
         template = (ROOT / "packaging/systemd/agent-sec-core-v2.service.in").read_text()
         rendered = template.replace("{bindir}", str(staging))
-        rendered = (
-            rendered.replace("User=agent-sec", "User=nobody")
-            .replace("Group=agent-sec", f"Group={group}")
-            .replace(
-                "RuntimeDirectory=agent-sec-core", f"RuntimeDirectory={runtime.name}"
-            )
+        rendered = rendered.replace(
+            "RuntimeDirectory=agent-sec-core", f"RuntimeDirectory={runtime.name}"
         )
         rendered = rendered.replace(" serve\n", f" serve --socket {endpoint}\n")
 
@@ -109,7 +101,10 @@ def test_dproc_013_systemd_lifecycle(request):
             wait_for(rpc)
             pid = int(value("MainPID"))
             assert Path(f"/proc/{pid}/exe").resolve() == binary
-            assert runtime.stat().st_uid == account.pw_uid
+            assert runtime.stat().st_uid == 0
+            assert runtime.stat().st_gid == 0
+            assert value("User") == "root"
+            assert value("Group") == "root"
             assert runtime.stat().st_mode & 0o777 == 0o755
             assert endpoint.stat().st_mode & 0o777 == 0o666
             lock_inode = (runtime / "daemon.lock").stat().st_ino

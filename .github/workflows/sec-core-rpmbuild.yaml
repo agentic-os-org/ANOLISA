@@ -316,8 +316,9 @@ jobs:
           echo "=== Verify daemon systemd unit ==="
           test -f /usr/lib/systemd/system/agent-sec-core.service
           test ! -e /usr/lib/systemd/user/agent-sec-core.service
-          test -f /usr/lib/sysusers.d/agent-sec-core.conf
-          getent passwd agent-sec
+          test ! -e /usr/lib/sysusers.d/agent-sec-core.conf
+          grep -qx 'User=root' /usr/lib/systemd/system/agent-sec-core.service
+          grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
           systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
           echo "=== Verify component manifest ==="
           test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }

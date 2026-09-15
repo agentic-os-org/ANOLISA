@@ -6,8 +6,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=agent-sec
-Group=agent-sec
+User=root
+Group=root
 ExecStart="{bindir}/agent-sec-daemon" serve
 RuntimeDirectory=agent-sec-core
 RuntimeDirectoryMode=0755

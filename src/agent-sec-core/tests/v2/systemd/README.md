@@ -16,7 +16,7 @@ sudo env PATH="$PWD/v2/target/debug:$PATH" "$PWD/agent-sec-cli/.venv/bin/python"
 
 所有测试均由 pytest 收集。普通容器/非 root 环境下 systemd 测试显示 SKIPPED，
 `-ra` 展示原因；最后一条用 `--require-systemd` 强制验收，条件不足直接失败。它使用随机
-`/run/asc-systemd-*` unit/runtime、复制的二进制和已有 nobody 账户，验证专用非 root
+`/run/asc-systemd-*` unit/runtime、复制的二进制和已有 root 账户，验证专用非 root
 服务身份；不操作已安装的 `agent-sec-core.service`。finally 停止测试服务并清理测试资源。
 SIGSTOP 故障注入会等待完整 45s stop timeout，整套通常需约一分钟。
 该测试验证 system manager 生命周期；RPM 安装/升级脚本的目标发行版验收仍须在打包环境执行。
@@ -40,13 +40,12 @@ SIGSTOP 故障注入会等待完整 45s stop timeout，整套通常需约一分�
 
 ## 部署配置和兼容边界
 
-V2 RPM 安装 `/usr/lib/systemd/system/agent-sec-core.service` 和
-`/usr/lib/sysusers.d/agent-sec-core.conf`，以无登录专用账户 `agent-sec` 运行。
+V2 RPM 安装 `/usr/lib/systemd/system/agent-sec-core.service`，以 `root:root` 运行，
+不创建专用账户或安装 sysusers 文件。
 也可用 `make install-systemd-system DESTDIR=<staging>` 审阅生成物；该 target 仅 staging。
 RPM 宏负责 system service 的 preset/卸载/升级生命周期，不自动启用用户 session 服务。
-V2 CLI 子包已删除 V1 Python/GPG/PGPy/loongshield 依赖及 wheel 专用 RPM 设置；
-Python hook 仍由相应子包声明解释器依赖。源包只收录对应代际的 unit 模板。
-V2 RPM CI 同时检查 system unit、sysusers 文件和服务账户，并断言 user unit 不存在；
+V2 spec 暂保留原有依赖声明及 wheel 专用 RPM 设置，发布前单独审计。源包只收录对应代际的 unit 模板。
+V2 RPM CI 同时检查 system unit 的 root 身份配置，并断言 user unit 不存在；
 `test-e2e-rpm-v2` 收集整个 `tests/v2/`，包含打包和 systemd 生命周期测试。容器中的 unit 检查仍不等于 system manager 验收。
 默认启用 `SystemCallFilter=@system-service`、`SystemCallArchitectures=native` 和
 `MemoryDenyWriteExecute=true`，并清空 capability 集合（issue #2861）。上述 pytest 生命周期

@@ -611,13 +611,11 @@ install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
 
 .PHONY: install-systemd-system
-install-systemd-system: ## Stage V2 system unit and service-account definition
-	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR) $(DESTDIR)/usr/lib/sysusers.d
+install-systemd-system: ## Stage V2 system unit
+	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)
 	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
 		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
-	install -m 0644 packaging/systemd/agent-sec-core-v2.sysusers \
-		$(DESTDIR)/usr/lib/sysusers.d/agent-sec-core.conf
 
 # =============================================================================
 # UNINSTALL

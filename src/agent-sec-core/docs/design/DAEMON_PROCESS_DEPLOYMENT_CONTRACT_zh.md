@@ -113,10 +113,11 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 
 - 安装 system-scope systemd unit，不安装或启用 user-scope unit；
 - 默认一个 Host 一个 asc-daemon；第二实例必须因 Host 级 singleton 失败；
-- unit 使用专用 service account 和最小 capability，system-level 不等于 UID 0；
+- 当前 Linux unit 使用 root:root，不创建专用账户；保留现有 capability 和沙箱限制，
+  root 身份不等于开放全部特权；
 - systemd 负责 start/stop/restart、资源限制、目录准备和故障拉起；
 - daemon 不自行 daemonize，不在启动路径隐式执行不可逆 migration；
-- packaging 通过 sysusers/tmpfiles 或等价机制创建 system-owned runtime/state/log path；
+- runtime 目录由 systemd RuntimeDirectory 创建；state/log 路径按各自存储契约管理；
 - 两个不同 UID/Agent 通过同一 system socket 访问并保持 owner-scope 隔离。
 
 ### 4.2 Kubernetes
@@ -260,7 +261,7 @@ framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 trans
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
 本阶段交付 V2 RPM 的 system-scope unit（`packaging/systemd/agent-sec-core-v2.service.in`）。
-它以专用 `agent-sec:agent-sec` 运行，systemd 创建 `/run/agent-sec-core`（0755），socket
+它以 `root:root` 运行，不创建专用 UID，systemd 创建 `/run/agent-sec-core`（0755），socket
 为 0666。普通用户无需加入服务组即可连接；方法授权仍检查内核 peer UID，
 连接权限不授予 PAP 管理权限。
 **TODO（独立入口流量控制任务）**：当前全局 64 个连接名额可被单个普通 UID 占满，
@@ -281,10 +282,10 @@ framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 trans
 服务下验收当前业务路径，不能用 unit 语法检查或普通进程测试替代。
 V2 spec 暂保留原有 Python、GPG/PGPy、loongshield 依赖声明及 strip/自动依赖
 排除设置；发布前按能力迁移结果单独审计，不在本次 system-service 变更中清理。
-服务账户创建显式依赖 `/usr/bin/systemd-sysusers`。V1/V2 源包分别收录各自的 unit
+不再打包 sysusers 文件或执行账户创建脚本。V1/V2 源包分别收录各自的 unit
 模板；构建和安装继续复制共享的 `.anolisa/component.toml`。该 manifest 仍声明
 V1 user scope，尚未适配 V2 的 system-service 编排，不能作为 V2 服务管理的验收证据。
-V2 安装态 CI 检查 system unit、sysusers 和服务账户，并拒绝遗留 user unit。
+V2 安装态 CI 检查 system unit 的 root 身份配置，并拒绝遗留 user unit。
 
 启动先逐级以 nofollow 打开并验证 runtime 目录：祖先属于 root 或服务 UID，不允许
 非 sticky 的 group/world 可写祖先；最终目录必须服务 UID 所有，普通权限位
@@ -308,7 +309,7 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 
 版本化变更记录 **DPROC-V2-SYSTEM-1（2026-09-10）**：本次搭建独立 V2 system-service
 基础，不执行 V1 到 V2 的迁移。V1 raw/RPM 保留 user unit 和原有测试入口；V2 RPM
-使用 system unit、sysusers 和独立安装检查。V2 不再沿用此前的 XDG socket 默认值。服务环境由 systemd 配置，终端变量不会自动
+使用 root 身份的 system unit 和独立安装检查。V2 不再沿用此前的 XDG socket 默认值。服务环境由 systemd 配置，终端变量不会自动
 传给服务；自定义路径时，部署者须同时配置服务和客户端。
 回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
 持久化、业务重启恢复、readiness/持续健康检查和 OTel 不在本次交付范围。

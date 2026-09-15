@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_v2_stages_system_unit_and_matching_account(tmp_path):
+def test_v2_stages_root_system_unit(tmp_path):
     subprocess.run(
         [
             "make",
@@ -26,8 +26,8 @@ def test_v2_stages_system_unit_and_matching_account(tmp_path):
     assert "{bindir}" not in content
     assert not (tmp_path / "usr/lib/systemd/user").exists()
     for setting in (
-        "User=agent-sec",
-        "Group=agent-sec",
+        "User=root",
+        "Group=root",
         "RuntimeDirectory=agent-sec-core",
         "RuntimeDirectoryMode=0755",
         "RuntimeDirectoryPreserve=yes",
@@ -43,15 +43,12 @@ def test_v2_stages_system_unit_and_matching_account(tmp_path):
         "MemoryDenyWriteExecute=true",
     ):
         assert setting in content.splitlines()
-    sysusers = (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").read_text()
-    assert sysusers.strip() in (ROOT / "agent-sec-core.spec.v2.in").read_text()
+    assert not (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").exists()
     spec = (ROOT / "agent-sec-core.spec.v2.in").read_text()
     assert "%systemd_postun_with_restart agent-sec-core.service" in spec
     assert "systemd_user_" not in spec and "_userunitdir" not in spec
-    cli_package = spec.split("%package -n agent-sec-cli\n", 1)[1].split(
-        "%description -n agent-sec-cli", 1
-    )[0]
-    assert "Requires(pre):  /usr/bin/systemd-sysusers" in cli_package
+    assert "systemd-sysusers" not in spec
+    assert "%pre -n agent-sec-cli" not in spec
     makefile = (ROOT / "Makefile").read_text()
     targets = [
         line
