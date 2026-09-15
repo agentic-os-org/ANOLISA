@@ -4,6 +4,12 @@
 
 LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
+随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
+并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
+不按 Tokenless 租户或 Session 隔离。
+Flag 迁移、Pipeline 行为和输出恢复详见
+[随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |

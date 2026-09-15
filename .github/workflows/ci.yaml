@@ -914,6 +914,11 @@ jobs:
       - name: Install RTK Rust toolchain
         run: rustup toolchain install 1.91.0 --profile minimal
 
+      - name: Test bundled RTK integration
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: make -C src/tokenless test-rtk-integration
+
       - name: Build and test Tokenless Python packages
         env:
           RUSTUP_TOOLCHAIN: '1.91.0'
@@ -926,7 +931,7 @@ jobs:
           node-version: '20'
 
       - name: npm packaging smoke test (native Linux)
-        # rtk v0.43.0 declares rust-version = "1.91", above the 1.89.0 pin
+        # rtk v0.49.0 declares rust-version = "1.91", above the 1.89.0 pin
         # used by the workspace MSRV checks earlier in this job. Packaging
         # runs on its own 1.91 toolchain while the MSRV pin stays intact.
         env:

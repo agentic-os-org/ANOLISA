@@ -53,10 +53,10 @@ fi
 # do not break the pipeline.
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 # third_party/rtk is excluded on purpose: it is a gitignored pinned clone
-# (just setup-rtk fetches v0.43.0 and applies the tokenless patches). Syncing a
-# developer's local rtk would let it bypass the pin — setup-rtk only checks for
-# Cargo.toml before skipping the clone — and attribute results from arbitrary
-# rtk sources to the ANOLISA SHA. Leaving it out forces the remote to build the
+# (just setup-rtk fetches v0.49.0 and applies the tokenless patches). Syncing a
+# developer's local rtk could carry edits beyond the pinned upstream commit
+# and attribute results from those sources to the ANOLISA SHA.
+# Leaving it out forces the remote to build the
 # pinned tree, whose revision the report then records.
 RSYNC_EXCLUDES=(
     --exclude target

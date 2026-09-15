@@ -69,7 +69,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
         test-agentscope-integration test-hooks test-claude-code-detect \
-        test-hook-parity
+        test-hook-parity test-rtk-integration
 
 # Default target
 all: build
@@ -81,7 +81,7 @@ build-tokenless:
 	@echo "==> Building tokenless + rtk..."
 	just setup-rtk
 	cargo build --release
-	cargo build --release --manifest-path third_party/rtk/Cargo.toml
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
@@ -239,7 +239,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-hook-parity \
+test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
       test-npm-package test-toon-cleanup
 
@@ -273,6 +273,12 @@ test-integration:
 	python3 tests/test_release_regression_probe.py
 	python3 tests/test_qwenpaw_plugin.py
 
+test-rtk-integration:
+	bash scripts/setup-rtk.sh
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
+	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
+		python3 tests/test_rtk_integration.py
+
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
 test-hook-parity:
@@ -302,7 +308,7 @@ python-wheel:
 	@echo "==> Building Tokenless Python wheel..."
 	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
 		just setup-rtk; \
-		cargo build --release --manifest-path third_party/rtk/Cargo.toml; \
+		cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml; \
 	fi
 	@test -x "$(PYTHON_RTK_BINARY)" || { \
 		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
@@ -615,6 +621,7 @@ help:
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
+	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"

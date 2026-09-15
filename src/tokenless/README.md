@@ -11,6 +11,12 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
+The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+not isolated by Tokenless tenant or session.
+See [bundled RTK commands](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#bundled-rtk-commands)
+for flag migration, pipeline behavior, and output recovery.
+
 Agent adapters are available for:
 
 - **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
