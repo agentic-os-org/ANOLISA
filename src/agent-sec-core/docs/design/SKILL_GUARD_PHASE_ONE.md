@@ -20,7 +20,7 @@ Phase-two policy integration is outside this PR.
 | 1 | Types, canonical identity, system keys, Integrity | Implemented; Linux gates passed | Signature/tamper/replay checks, key permissions, source/snapshot path rules |
 | 2 | Scanner and analyze | Implemented; Linux gates passed | V1 result comparison, selection/aliases, incomplete coverage, errors, no Ledger writes |
 | 3 | Ledger and Service | Implemented; Linux gates passed | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
-| 4 | Activation | Planned | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
+| 4 | Activation | Implemented; Linux gates passed | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
 | 5 | daemon, CLI and audit | Planned | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
 | 6 | SkillFS | Planned | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
 | 7 | Deployment | Planned | Source/RPM installation, root systemd service, local non-root callers, complete core workflow |
@@ -189,6 +189,12 @@ Without any Ledger artifacts, `check` returns `none` and an empty `audit` succee
 initialization. These read-only queries do not create a key or Ledger; existing artifacts still
 require authentication.
 
+Registration follows the signed commit and precedes activation. If the first registration fails,
+the request fails without publishing activation, although its version may already be committed.
+Startup recovery only enumerates registered roots. After correcting the reported failure, retrying
+`scan` on unchanged content reuses the authenticated version and completes registration. No durable
+discovery queue is promised for an unacknowledged first request.
+
 Export reads an authenticated snapshot and writes `snapshot/`, `manifest.json` and `findings.json`.
 The caller must first create an empty, caller-owned output directory outside Skill/state roots;
 peer UID, directory type and write permissions are checked by the service. No destination parent
@@ -203,3 +209,35 @@ Keys, manifest format and signatures intentionally differ between V1 and V2. Add
 cover parallel certification, alias serialization, deadline expiry, staged-content mutation,
 missing/forged artifacts, safe export and exact registration. No daemon or Hook interface is
 registered by this batch.
+
+
+## Activation boundary in batch four
+
+Service now supplies `decide`, `clear_decision`, `show`, `activate` and `rollback`. Scan and certify
+publish activation before releasing the same Skill lock. `allow`, `always_allow`, `block` and
+`rollback` retain V1 selection rules; only `always_allow` inherits into a new content version.
+`active` exports the selected authenticated snapshot. `show` is read-only and keeps latest/active,
+source consistency, findings and bounded review messages separate.
+
+Publication writes the minimal schema-1 `activation.json` and directory xattr consumed by SkillFS.
+It exposes a verified snapshot, a safe pending-review stub, or a null target for an explicit block.
+`contractWritten`, `activationXattr.written` and `activationPending` distinguish committed business
+state from incomplete publication. An xattr failure never undoes a signed decision; activation or
+startup reconcile retries it. This is publication evidence, not proof of an observed FUSE effect.
+
+Rollback scans a captured trusted snapshot, backs up the current tree, then records a private
+per-Skill recovery intent before replacing source content. The backup retains nested metadata directories and link text without
+following targets; special files and excessive trees fail before replacement. Signed snapshots
+still exclude links and privileged executable bits. A prepared intent does not undo later edits.
+After replacement begins, failure before the matching signed version restores the backup; after
+the version is committed, reconcile repairs latest without undoing that commit. Recovery verifies
+backup hashes/link text and refuses damaged backups. Backups are retained for explicit inspection.
+Startup reconciliation also repairs authenticated version/latest splits only with a valid snapshot,
+removes abandoned internal temporary entries, and republishes selection. There is no automatic
+history retention policy or generic transaction engine.
+
+`tests/reference_activation.py` freezes twelve source-pinned V1 workflows. The Rust suite compares
+selection, manual decisions, fallback, drift, rollback, export and show explanations. Linux-specific
+tests cover actual xattr bytes, file/xattr split failure, rollback commit failure, interrupted source
+replacement (including missing SKILL.md), damaged backups and committed-intent recovery. The daemon
+startup loop and real SkillFS consumer are integrated in subsequent batches.

@@ -18,7 +18,7 @@ daemon、CLI、SkillFS 和 Linux 部署。Agent Hook 实现、能力视图、Hoo
 | 1 | 类型、canonical 身份、系统密钥、Integrity | 已实现，Linux 门禁通过 | 签名、篡改与重放拒绝，密钥权限，源目录与快照路径规则 |
 | 2 | Scanner 与 analyze | 已实现，Linux 验收通过 | V1 结果对照，选择与别名，覆盖不足，错误，不写账本 |
 | 3 | Ledger 与 Service | 已实现，Linux 验收通过 | 版本、补扫与强制扫描、快照、导出、串行化、扫描期间内容变化 |
-| 4 | Activation | 计划 | 决策、active/pending/hidden、回滚、发布失败与启动 reconcile |
+| 4 | Activation | 已实现，Linux 验收通过 | 决策、active/pending/hidden、回滚、发布失败与启动 reconcile |
 | 5 | daemon、CLI 与审计 | 计划 | 真实 CLI 请求、输出和退出码、peer 身份、审计、超时、管理员换钥、消费者样例 |
 | 6 | SkillFS | 计划 | 单 socket、HMAC notify/resolver、拒绝降级、真实 FUSE 效果、普通 IPC 回归 |
 | 7 | 部署 | 计划 | 源码与 RPM 安装、root systemd、普通本地用户调用、核心完整流程 |
@@ -158,6 +158,10 @@ Unicode、元数据、符号链接、目录排除及覆盖不完整。仅归一�
 没有任何账本工件时，即使尚未初始化密钥，`check` 仍返回 `none`，空历史 `audit` 仍成功。
 这些只读查询不创建密钥或账本；已有工件仍须通过认证。
 
+登记在签名提交之后、激活发布之前。首次登记失败时，请求报错且不发布激活，但版本可能已经提交。
+启动恢复仅枚举已登记根目录。修复所报告的失败原因后，对未变化内容重试 `scan`，会复用可信版本并
+完成登记；不承诺为尚未成功响应的首次请求提供持久化发现队列。
+
 导出从可信快照生成 `snapshot/`、`manifest.json` 和 `findings.json`。调用者须先在 Skill 与
 状态目录之外创建自己的空输出目录；Service 校验真实 peer UID、目录类型和写权限。daemon 不以
 root 创建任意目标父目录，不跟随符号链接，也不截断已有目标文件。新建导出文件和目录归真实调用者
@@ -168,3 +172,28 @@ root 创建任意目标父目录，不跟随符号链接，也不截断已有目
 结果合并、文件数、变化列表与审计结论。V1/V2 密钥、manifest 格式和签名按已批准的破坏性变更处理。
 另有并发认证、别名串行化、等待超时、暂存后内容变化、缺失或伪造记录、安全导出及精确注册测试。
 本批尚不注册 daemon 或 Hook 接口。
+
+
+## 第四批 Activation 边界
+
+Service 已提供 `decide`、`clear_decision`、`show`、`activate` 和 `rollback`；scan/certify
+在释放同一 Skill 写锁前发布激活。`allow`、`always_allow`、`block`、`rollback` 保留 V1
+选择规则，只有 `always_allow` 继承到新的内容版本。`active` 导出已选择的可信快照。
+`show` 只读，分别呈现 latest/active、源目录一致性、findings 和有长度限制的审核说明。
+
+发布写入 SkillFS 使用的最小 schema-1 `activation.json` 与目录 xattr；目标是已验证快照、
+安全的待审核占位目录，或显式 block 对应的 null。`contractWritten`、
+`activationXattr.written`、`activationPending` 区分业务提交与发布完成。xattr 失败不会撤销
+已签名决策；activate 或启动 reconcile 可重试。发布成功不等于已证明真实 FUSE 暴露效果。
+
+回滚扫描已捕获的可信快照，备份当前目录，在替换源内容前写入 daemon 私有的单 Skill 恢复意图。
+备份保留嵌套 metadata 目录及符号链接文本而不跟随目标；特殊文件或超限目录在替换前报错。签名快照仍排除符号链接
+和特权执行位。仅准备完成的意图不会覆盖后来的用户修改；开始替换后，匹配的签名版本提交前
+失败会恢复备份，提交后则由 reconcile 修复 latest，不撤销已提交版本。恢复校验备份摘要和链接
+文本，拒绝损坏备份；备份保留供显式检查。启动 reconcile 也会在快照有效时修复已认证版本与
+latest 的分裂，清理遗留内部临时项并重新发布。不引入自动历史清理策略或通用事务引擎。
+
+`tests/reference_activation.py` 冻结十二组带源码哈希的 V1 流程。Rust 对照选择结果、人工决策、
+回退、漂移、回滚、导出和 show 说明。Linux 测试覆盖真实 xattr、文件/xattr 分裂失败、回滚提交
+失败、源替换中断（含 SKILL.md 缺失）、备份损坏和已提交意图恢复。daemon 启动循环及真实 SkillFS
+消费者在后续批次集成。

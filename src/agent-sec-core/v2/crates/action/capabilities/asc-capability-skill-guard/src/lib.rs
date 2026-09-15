@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod activation;
 pub mod config;
 mod filesystem;
 pub mod identity;

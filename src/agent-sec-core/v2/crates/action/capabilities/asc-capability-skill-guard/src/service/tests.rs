@@ -3,7 +3,7 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::sync::mpsc;
 
-fn fixture() -> (tempfile::TempDir, Arc<SkillGuardService>, SkillRoot) {
+pub(crate) fn fixture() -> (tempfile::TempDir, Arc<SkillGuardService>, SkillRoot) {
     let fixture = uninitialized_fixture();
     fixture.1.initialize().unwrap();
     fixture
@@ -36,7 +36,7 @@ fn uninitialized_fixture() -> (tempfile::TempDir, Arc<SkillGuardService>, SkillR
     (temporary, service, SkillRoot::direct(path).unwrap())
 }
 
-fn deadline() -> Instant {
+pub(crate) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
 
@@ -189,6 +189,57 @@ fn ledger_snapshots_cannot_be_registered_as_skill_roots() {
             .check(&SkillRoot::direct(hidden_host).unwrap(), deadline())
             .unwrap()["status"],
         "none"
+    );
+}
+
+#[test]
+fn retry_recovers_registration_failure_after_first_commit_without_a_new_version() {
+    let (_temporary, service, root) = fixture();
+    let registration = service.config.state_dir.join("managed-skills.json");
+    // A directory blocks registration's atomic rename after the real Ledger commit succeeds.
+    fs::create_dir(&registration).unwrap();
+    assert!(
+        service
+            .scan(&root, &ScanOptions::default(), deadline())
+            .is_err()
+    );
+    let latest_path = root.io_dir.join(".skill-meta/latest.json");
+    let latest = fs::read(&latest_path).unwrap();
+    assert_eq!(service.check(&root, deadline()).unwrap()["status"], "pass");
+    assert!(service.managed_skills().unwrap().is_empty());
+    assert!(!root.io_dir.join(".skill-meta/activation.json").exists());
+
+    fs::remove_dir(&registration).unwrap();
+    let config = service.config.clone();
+    drop(service);
+    let restarted = SkillGuardService::new(config.clone(), ScannerRegistry::default()).unwrap();
+    // Startup only discovers persisted registrations. The unacknowledged request needs retry.
+    assert!(restarted.managed_skills().unwrap().is_empty());
+    let retried = restarted
+        .scan(&root, &ScanOptions::default(), deadline())
+        .unwrap();
+    assert_eq!(retried["status"], "noop");
+    assert_eq!(retried["newVersion"], false);
+    assert_eq!(retried["versionId"], "v000001");
+    assert_eq!(fs::read(&latest_path).unwrap(), latest);
+    assert_eq!(
+        restarted.managed_skills().unwrap(),
+        vec![root.identity.clone()]
+    );
+    assert!(root.io_dir.join(".skill-meta/activation.json").is_file());
+    drop(restarted);
+
+    let restarted = SkillGuardService::new(config, ScannerRegistry::default()).unwrap();
+    for identity in restarted.managed_skills().unwrap() {
+        let result = restarted
+            .reconcile(&SkillRoot::direct(identity.path()).unwrap(), deadline())
+            .unwrap();
+        assert_eq!(result["reconciled"], true);
+        assert_eq!(result["repairedLatest"], false);
+    }
+    assert_eq!(
+        restarted.audit(&root, true, deadline()).unwrap()["versions_checked"],
+        1
     );
 }
 

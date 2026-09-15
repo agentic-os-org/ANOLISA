@@ -25,11 +25,27 @@ pub(crate) struct Content {
     files: BTreeMap<String, ContentFile>,
     directories: BTreeSet<String>,
     size: usize,
+    include_nested_metadata: bool,
 }
 
 impl Content {
     pub fn capture(root: &Directory, strict: bool, deadline: Instant) -> Result<Self, GuardError> {
+        Self::capture_mode(root, strict, false, deadline)
+    }
+
+    // Recovery must retain nested metadata that root replacement will remove.
+    pub fn capture_backup(root: &Directory, deadline: Instant) -> Result<Self, GuardError> {
+        Self::capture_mode(root, false, true, deadline)
+    }
+
+    fn capture_mode(
+        root: &Directory,
+        strict: bool,
+        include_nested_metadata: bool,
+        deadline: Instant,
+    ) -> Result<Self, GuardError> {
         let mut content = Self {
+            include_nested_metadata,
             files: BTreeMap::new(),
             directories: BTreeSet::new(),
             size: 0,
@@ -53,7 +69,9 @@ impl Content {
         }
         for name in root.names(deadline)? {
             check_deadline(deadline)?;
-            if matches!(name.as_str(), ".git" | ".skill-meta") {
+            if matches!(name.as_str(), ".git" | ".skill-meta")
+                && (!self.include_nested_metadata || depth == 0)
+            {
                 if strict {
                     return Err(GuardError::Integrity(
                         "snapshot contains excluded metadata".into(),
@@ -266,7 +284,7 @@ impl Content {
         original: &ScanTree,
         deadline: Instant,
     ) -> Result<(), GuardError> {
-        let current = Self::capture(root, false, deadline)?;
+        let current = Self::capture_mode(root, false, self.include_nested_metadata, deadline)?;
         let new_tree = ScanTree::open(&root.path, deadline)?;
         let links = |tree: &ScanTree| -> BTreeMap<String, EntryKind> {
             tree.entries
