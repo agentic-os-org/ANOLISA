@@ -1239,6 +1239,266 @@ exec sleep 30"#
 }
 
 #[test]
+fn cosh_core_cancel_after_completed_result_emits_only_cancelled() {
+    // Deterministic reproduction of the cancel/completion race. The provider
+    // emits init, then delays the success result, and stays alive afterwards.
+    // Cancelling only after the parsed `initialized` event guarantees the
+    // cancel flag is set while the turn loop is still polling and the result
+    // line provably arrives later. A live provider keeps stdout open and the
+    // forced-kill grace (2s) outlasts the script delay (1s), so the loop
+    // cannot exit before the genuine result is parsed. The finalization check
+    // therefore necessarily sees cancelled=true together with a real
+    // AgentCompleted — the exact combination that must resolve to
+    // AgentCancelled alone.
+    let script = mock_provider_script(
+        "cosh-core-cancel-after-completed-result",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+sleep 1
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000"}'
+exec sleep 30"#,
+    );
+
+    let adapter = cosh_core_active_adapter(&script);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-cancel-after-completed-result"),
+        CoshApprovalMode::Recommend,
+    );
+    // Sync on the parsed init line: the handshake is complete, the turn loop
+    // is polling, and the script delay guarantees the result is still pending.
+    let initialized = collect_events_until(
+        &handle,
+        Duration::from_secs(3),
+        |event| matches!(event, AgentEvent::StatusChanged { phase, .. } if phase == "initialized"),
+    );
+    assert!(
+        initialized.iter().any(|event| matches!(
+            event,
+            AgentEvent::StatusChanged { phase, .. } if phase == "initialized"
+        )),
+        "provider did not report initialized before cancel: {initialized:?}"
+    );
+
+    handle.cancel();
+    let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCancelled { .. })),
+        "cancelled run should emit AgentCancelled: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "cancelled run must not emit AgentCompleted: {events:?}"
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cosh_core_drop_during_active_turn_emits_cancelled_not_error() {
+    // Dropping the last adapter mid-turn is routine teardown: the runtime
+    // Drop path marks the provider's expected-stop flag and kills it while
+    // the run's cancelled flag stays false. The turn must resolve to
+    // AgentCancelled — never a synthetic AgentCompleted, an AgentFailed, or
+    // an AdapterError — and must leave the session recovery state untouched.
+    let script = mock_provider_script(
+        "cosh-core-drop-during-turn",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+exec sleep 30"#,
+    );
+
+    let adapter = cosh_core_active_adapter(&script);
+    // Keep the session state observable after the adapter is dropped.
+    let session = Arc::clone(&adapter.session);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-drop-during-turn"),
+        CoshApprovalMode::Recommend,
+    );
+    // Sync on the parsed init line: the handshake is complete and the turn
+    // loop is provably still polling — the provider never emits a result.
+    let initialized = collect_events_until(
+        &handle,
+        Duration::from_secs(3),
+        |event| matches!(event, AgentEvent::StatusChanged { phase, .. } if phase == "initialized"),
+    );
+    assert!(
+        initialized.iter().any(|event| matches!(
+            event,
+            AgentEvent::StatusChanged { phase, .. } if phase == "initialized"
+        )),
+        "provider did not report initialized before drop: {initialized:?}"
+    );
+
+    drop(adapter);
+    let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::AgentCancelled { reason, .. } if reason.contains("runtime shut down")
+        )),
+        "dropped runtime should emit AgentCancelled with a teardown reason: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "dropped runtime must not emit AgentCompleted: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentFailed { .. })),
+        "routine teardown must not emit AgentFailed: {events:?}"
+    );
+    let state = session.lock().expect("session state lock");
+    assert_eq!(
+        state.recovery.state,
+        SessionRecoveryState::Active,
+        "routine teardown must not mark the recovery state as failed"
+    );
+    assert!(
+        state.recovery.last_error.is_none(),
+        "routine teardown must not record a recovery error: {:?}",
+        state.recovery.last_error
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cosh_core_drop_during_selected_restore_records_no_transport_error() {
+    // Same teardown as above, but for a Selected resume attempt. Recovery
+    // legitimately ends as Failed — the restore never finished — yet the
+    // recorded failure must describe the unfinished session, not the
+    // teardown EOF, which used to leak into recovery as a fake transport
+    // error through the service error path.
+    let script = mock_provider_script(
+        "cosh-core-drop-during-restore",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111","model":"mock","tools":[]}'
+exec sleep 30"#,
+    );
+
+    let adapter = cosh_core_restore_adapter(&script);
+    let session = Arc::clone(&adapter.session);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-drop-during-restore"),
+        CoshApprovalMode::Recommend,
+    );
+    let initialized = collect_events_until(
+        &handle,
+        Duration::from_secs(3),
+        |event| matches!(event, AgentEvent::StatusChanged { phase, .. } if phase == "initialized"),
+    );
+    assert!(
+        initialized.iter().any(|event| matches!(
+            event,
+            AgentEvent::StatusChanged { phase, .. } if phase == "initialized"
+        )),
+        "provider did not report initialized before drop: {initialized:?}"
+    );
+
+    drop(adapter);
+    let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCancelled { .. })),
+        "dropped runtime should emit AgentCancelled: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "dropped runtime must not emit AgentCompleted: {events:?}"
+    );
+    let state = session.lock().expect("session state lock");
+    assert_eq!(
+        state.recovery.state,
+        SessionRecoveryState::Failed,
+        "an interrupted restore attempt must still fail recovery"
+    );
+    let error = state
+        .recovery
+        .last_error
+        .as_ref()
+        .expect("structured recovery failure");
+    assert_eq!(
+        error.message, "provider session did not complete",
+        "teardown EOF must not be recorded as the recovery failure"
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cosh_core_drop_with_unanswered_question_emits_cancelled_not_error() {
+    // The provider asked a question and the last adapter was dropped before
+    // an answer. The teardown EOF resolves the turn as aborted, so the
+    // parser's synthetic completion must not run: with the question still in
+    // flight the gate would reject it as premature completion and routine
+    // teardown would surface as a turn failure.
+    let script = mock_provider_script(
+        "cosh-core-drop-with-question",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+printf '%s\n' '{"type":"control_request","request_id":"ask-pending","request":{"subtype":"ask_user","question":"Choose","options":[{"label":"One"}],"allow_free_text":false,"multi_select":false}}'
+exec sleep 30"#,
+    );
+
+    let adapter = cosh_core_active_adapter(&script);
+    let session = Arc::clone(&adapter.session);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-drop-with-question"),
+        CoshApprovalMode::Recommend,
+    );
+    let questioned = collect_events_until(&handle, Duration::from_secs(3), |event| {
+        matches!(event, AgentEvent::UserQuestion { .. })
+    });
+    assert!(
+        questioned
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UserQuestion { .. })),
+        "provider did not emit the question before drop: {questioned:?}"
+    );
+
+    drop(adapter);
+    let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::AgentCancelled { reason, .. } if reason.contains("runtime shut down")
+        )),
+        "dropped runtime should emit AgentCancelled with a teardown reason: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "dropped runtime must not emit AgentCompleted: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentFailed { .. })),
+        "routine teardown must not emit AgentFailed: {events:?}"
+    );
+    let state = session.lock().expect("session state lock");
+    assert_eq!(
+        state.recovery.state,
+        SessionRecoveryState::Active,
+        "routine teardown must not mark the recovery state as failed"
+    );
+    assert!(
+        state.recovery.last_error.is_none(),
+        "routine teardown must not record a recovery error: {:?}",
+        state.recovery.last_error
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn structured_session_failure_survives_nonzero_exit_for_every_runner() {
     let script = mock_provider_script(
         "cosh-core-active-persist-conflict-exit-one",

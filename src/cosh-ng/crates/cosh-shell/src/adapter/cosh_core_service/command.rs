@@ -12,11 +12,11 @@ use crate::types::{AgentEvent, CoshApprovalMode};
 
 use super::super::cosh_core::{SessionResumeAttempt, SessionRuntimeState};
 use super::super::cosh_core_registry::RegistryQueryError;
+use super::super::PreparedInvocation;
 use super::super::{
     control_protocol, AdapterError, ApprovalChannelMessage, AuthResponse,
     ProviderCancellationArtifactStore,
 };
-use super::PreparedInvocation;
 
 pub(super) struct RunCommand {
     pub(super) run_id: String,
@@ -44,4 +44,10 @@ pub(super) struct RegistryCommand {
     pub(super) action: String,
     pub(super) params: Value,
     pub(super) response_tx: mpsc::Sender<Result<Value, RegistryQueryError>>,
+}
+
+pub(super) enum ServiceCommand {
+    Run(RunCommand),
+    Registry(RegistryCommand),
+    Shutdown,
 }
