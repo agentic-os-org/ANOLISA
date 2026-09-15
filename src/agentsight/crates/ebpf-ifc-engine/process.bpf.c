@@ -175,13 +175,18 @@ struct {
 } te_protected_pids SEC(".maps");
 
 /* Inode-level guard map for file protection on kernels lacking bpf_d_path.
- * Keyed by (ino, dev) identity; value is a flags bitmap.
+ * Keyed by (ino, dev) identity; value carries flags + the owning domain_id
+ * so the guard only applies to processes in that specific domain.
  * Managed exclusively by userspace; no LRU eviction. */
+struct inode_guard_val {
+	__u32 flags;
+	__u32 domain_id;
+};
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
 	__type(key, struct file_id);
-	__type(value, __u32);
+	__type(value, struct inode_guard_val);
 } te_inode_guard SEC(".maps");
 
 #define INODE_GUARD_UNLINK  1
@@ -189,7 +194,8 @@ struct {
 #define INODE_GUARD_WRITE   4
 
 static __always_inline int te_inode_guarded(
-	const void *a, const void *b, __u32 ref_kind, __u32 guard_flag)
+	const void *a, const void *b, __u32 ref_kind, __u32 guard_flag,
+	pid_t pid)
 {
 	struct inode *inode = NULL;
 	struct file_id fid = {};
@@ -213,8 +219,13 @@ static __always_inline int te_inode_guarded(
 	fid.ino = BPF_CORE_READ(inode, i_ino);
 	fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
 
-	__u32 *flags = bpf_map_lookup_elem(&te_inode_guard, &fid);
-	return flags && (*flags & guard_flag);
+	struct inode_guard_val *val = bpf_map_lookup_elem(&te_inode_guard, &fid);
+	if (!val || !(val->flags & guard_flag))
+		return 0;
+	/* Verify the guard belongs to the caller's domain so bindings
+	 * from different agents do not cross-block each other. */
+	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
+	return domain && *domain == val->domain_id;
 }
 
 static __always_inline int te_pid_protected(pid_t pid)
@@ -2500,7 +2511,7 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	if (enforce_mode && te_pid_active(pid) &&
 	    te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY,
-			     INODE_GUARD_UNLINK)) {
+			     INODE_GUARD_UNLINK, pid)) {
 		te_inode_guard_violation(pid, dir, dentry, TE_REF_PATH_DENTRY,
 					TOP_WRITE);
 		return -EPERM;
@@ -2526,7 +2537,7 @@ int BPF_PROG(enforce_path_rename, const struct path *old_dir,
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	if (enforce_mode && te_pid_active(pid) &&
 	    te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
-			     INODE_GUARD_RENAME)) {
+			     INODE_GUARD_RENAME, pid)) {
 		te_inode_guard_violation(pid, old_dir, old_dentry,
 					TE_REF_PATH_DENTRY, TOP_WRITE);
 		return -EPERM;

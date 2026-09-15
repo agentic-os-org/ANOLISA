@@ -313,7 +313,7 @@ impl ActPlaneBackend {
         // Populate inode guard map for kernel-level fast-path protection.
         // This allows 5.10/6.6 kernels (where bpf_d_path is unavailable in
         // LSM hooks) to still block file deletion via inode matching.
-        let guarded_inodes = populate_inode_guards(&self.engine, &request.policy_dsl);
+        let guarded_inodes = populate_inode_guards(&self.engine, &request.policy_dsl, id);
 
         let binding = Binding {
             request,
@@ -1382,7 +1382,11 @@ fn extract_guarded_paths(dsl: &str) -> Vec<String> {
 /// Returns the list of successfully guarded `(ino, dev)` pairs so the caller
 /// can store them for later cleanup.
 #[cfg(target_os = "linux")]
-fn populate_inode_guards(engine: &PinnedEngine, policy_dsl: &str) -> Vec<(u64, u32)> {
+fn populate_inode_guards(
+    engine: &PinnedEngine,
+    policy_dsl: &str,
+    domain_id: u32,
+) -> Vec<(u64, u32)> {
     let mut guarded: Vec<(u64, u32)> = Vec::new();
     for path in extract_guarded_paths(policy_dsl) {
         match fs::metadata(&path) {
@@ -1391,7 +1395,7 @@ fn populate_inode_guards(engine: &PinnedEngine, policy_dsl: &str) -> Vec<(u64, u
                 let dev = userspace_dev_to_kernel(meta.dev());
                 let flags =
                     ebpf_ifc_engine::INODE_GUARD_UNLINK | ebpf_ifc_engine::INODE_GUARD_RENAME;
-                if let Err(e) = engine.guard_inode(ino, dev, flags) {
+                if let Err(e) = engine.guard_inode(ino, dev, flags, domain_id) {
                     eprintln!("failed to guard inode {ino}:{dev} for {path}: {e}");
                 } else {
                     guarded.push((ino, dev));
@@ -1404,7 +1408,11 @@ fn populate_inode_guards(engine: &PinnedEngine, policy_dsl: &str) -> Vec<(u64, u
 }
 
 #[cfg(not(target_os = "linux"))]
-fn populate_inode_guards(_engine: &PinnedEngine, _policy_dsl: &str) -> Vec<(u64, u32)> {
+fn populate_inode_guards(
+    _engine: &PinnedEngine,
+    _policy_dsl: &str,
+    _domain_id: u32,
+) -> Vec<(u64, u32)> {
     Vec::new()
 }
 

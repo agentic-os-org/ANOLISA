@@ -212,12 +212,22 @@ pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
 
+/// Value stored in te_inode_guard map: flags + owning domain_id.
+/// Must match BPF `struct inode_guard_val` layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InodeGuardVal {
+    pub flags: u32,
+    pub domain_id: u32,
+}
+
+unsafe impl aya::Pod for FileId {}
+unsafe impl aya::Pod for InodeGuardVal {}
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
 unsafe impl aya::Pod for PidDomainKey {}
 unsafe impl aya::Pod for CapPolicyMask {}
-unsafe impl aya::Pod for FileId {}
 
 // ringbuf event (bpf/process.h: struct event).
 const EVENT_TYPE_TAINT_VIOLATION: i32 = 3;
@@ -1927,12 +1937,15 @@ impl PinnedEngine {
     }
 
     /// Add an inode to the guard map. Files matching `(ino, dev)` will be
-    /// blocked from unlink/rename/write according to `flags`.
-    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32) -> io::Result<()> {
+    /// blocked from unlink/rename/write according to `flags`, but only for
+    /// processes in the specified `domain_id`.
+    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32, domain_id: u32) -> io::Result<()> {
         let key = FileId { ino, dev, _pad: 0 };
-        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        let val = InodeGuardVal { flags, domain_id };
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
         guard
-            .insert(key, flags, 0)
+            .insert(key, val, 0)
             .map_err(|e| err(format!("guard inode {ino}:{dev}: {e}")))?;
         Ok(())
     }
@@ -1940,13 +1953,15 @@ impl PinnedEngine {
     /// Remove an inode from the guard map.
     pub fn unguard_inode(&self, ino: u64, dev: u32) -> io::Result<()> {
         let key = FileId { ino, dev, _pad: 0 };
-        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
         ignore_missing_remove(guard.remove(&key), "unguard inode")
     }
 
     /// Remove all entries from the inode guard map.
     pub fn clear_inode_guards(&self) -> io::Result<()> {
-        let mut guard: HashMap<_, FileId, u32> = pinned_hash_map(&self.paths, "te_inode_guard")?;
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
         let keys: Vec<FileId> = guard
             .keys()
             .map(|k| k.map_err(|e| err(format!("list inode guards: {e}"))))
