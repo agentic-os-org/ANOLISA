@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import chdir
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,6 +99,8 @@ class GateTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import os, sys\n"
             "mode = os.environ['FIXTURE_INVENTORY']\n"
+            "if mode == 'core-empty':\n"
+            "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
             "if mode.startswith('contract-empty-'):\n"
             "    target = mode.removeprefix('contract-empty-')\n"
             "    mode = 'empty' if target in sys.argv else 'valid'\n"
@@ -109,7 +112,7 @@ class GateTests(unittest.TestCase):
         )
         cargo.chmod(0o755)
         for mode in (
-            "valid", "empty", "ignored", "missing",
+            "valid", "empty", "ignored", "missing", "core-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
         ):
@@ -133,6 +136,80 @@ class GateTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 gate.inventory(malformed)
+
+    def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
+        core = self.root / "crates/aw-core"
+        packages = []
+        for name, directory, dependencies in (
+            ("aw-contracts", self.root, ["serde_json"]),
+            ("aw-core", core, ["aw-contracts", "serde_json", "thiserror"]),
+        ):
+            (directory / "src").mkdir(parents=True)
+            (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
+            packages.append(
+                {
+                    "id": name,
+                    "name": name,
+                    "manifest_path": str(directory / "Cargo.toml"),
+                    "targets": [{"src_path": str(directory / "src/lib.rs")}],
+                    "dependencies": [
+                        {
+                            "name": dependency,
+                            "path": str(self.root) if dependency == "aw-contracts" else None,
+                            "source": None if dependency == "aw-contracts" else "registry+fixture",
+                        }
+                        for dependency in dependencies
+                    ],
+                }
+            )
+        metadata = {"packages": packages, "workspace_members": [p["id"] for p in packages]}
+        gate.structure(metadata, self.root)
+        for package, dependency in ((0, "aw-core"), (1, "tokio")):
+            invalid = json.loads(json.dumps(metadata))
+            invalid["packages"][package]["dependencies"].append({"name": dependency})
+            with self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
+        invalid = json.loads(json.dumps(metadata))
+        invalid["packages"][1]["dependencies"][0]["path"] = str(self.root / "other-contracts")
+        with self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
+        invalid["packages"][1]["dependencies"][0] = {
+            "name": "aw-contracts",
+            "source": "registry+fixture",
+        }
+        with chdir(self.root), self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
+        with self.assertRaises(ValueError):
+            gate.structure({**metadata, "workspace_members": ["aw-contracts"]}, self.root)
+        invalid = json.loads(json.dumps(metadata))
+        invalid["packages"][1]["targets"][0]["src_path"] = str(core / "lib.rs")
+        with self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
+        source = core / "src/lib.rs"
+        source.write_text("// fixture\n" * 700, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            gate.structure(metadata, self.root)
+        source.write_text("// fixture\n" * 699, encoding="utf-8")
+        legacy = self.root / "src/validation.rs"
+        legacy.write_text("// fixture\n" * 711, encoding="utf-8")
+        gate.structure(metadata, self.root)
+        legacy.write_text("// fixture\n" * 712, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            gate.structure(metadata, self.root)
+        legacy.unlink()
+        module = core / "src/mod.rs"
+        module.touch()
+        with self.assertRaises(ValueError):
+            gate.structure(metadata, self.root)
+        module.unlink()
+        common = core / "tests/common/mod.rs"
+        common.parent.mkdir(parents=True)
+        common.touch()
+        gate.structure(metadata, self.root)
+        alias = core / "src/alias.rs"
+        alias.symlink_to(source)
+        with self.assertRaises(ValueError):
+            gate.structure(metadata, self.root)
 
     def test_commands_fail_and_stop_the_sequence(self) -> None:
         commands = self.root / "commands.jsonl"

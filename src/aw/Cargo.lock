@@ -49,6 +49,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-core"
+version = "0.1.0"
+dependencies = [
+ "aw-contracts",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
