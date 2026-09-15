@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
@@ -580,6 +580,10 @@ fn generate_auto_id() -> String {
 }
 
 fn handle_plugin(action: PluginAction) -> Result<()> {
+    handle_plugin_with_adapter_root(action, Path::new("/usr/share/anolisa/adapters/ws-ckpt"))
+}
+
+fn handle_plugin_with_adapter_root(action: PluginAction, adapter_root: &Path) -> Result<()> {
     let (runtime, runtime_dir) = match &action {
         PluginAction::Install { runtime } | PluginAction::Uninstall { runtime } => match runtime {
             PluginRuntime::Openclaw => (runtime, "openclaw"),
@@ -587,7 +591,7 @@ fn handle_plugin(action: PluginAction) -> Result<()> {
         },
     };
 
-    let adapter_dir = PathBuf::from("/usr/share/anolisa/adapters/ws-ckpt").join(runtime_dir);
+    let adapter_dir = adapter_root.join(runtime_dir);
 
     if let PluginAction::Install { .. } = &action {
         let detect_script = adapter_dir.join(format!("detect-{runtime_dir}.sh"));
@@ -604,10 +608,16 @@ fn handle_plugin(action: PluginAction) -> Result<()> {
             .code()
             .unwrap_or(-1);
         match detect_code {
-            0 => {
-                eprintln!("{runtime_dir} plugin already installed");
-                return Ok(());
-            }
+            0 => match runtime {
+                PluginRuntime::Openclaw => {
+                    // Reinstall also reconciles the tool allowlist after configuration drift.
+                    eprintln!("openclaw plugin already installed; refreshing configuration");
+                }
+                PluginRuntime::Hermes => {
+                    eprintln!("hermes plugin already installed");
+                    return Ok(());
+                }
+            },
             1 => {}
             2 => anyhow::bail!("missing prerequisites for {runtime:?}"),
             _ => anyhow::bail!("detect failed for {runtime:?} (exit {detect_code})"),
@@ -2068,6 +2078,49 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn assert_existing_plugin_install_behavior(
+        runtime: PluginRuntime,
+        runtime_dir: &str,
+        expect_install: bool,
+    ) {
+        let adapter_root = std::env::temp_dir().join(format!(
+            "ws-ckpt-{runtime_dir}-existing-{}",
+            std::process::id()
+        ));
+        let adapter_dir = adapter_root.join(runtime_dir);
+        let marker = adapter_dir.join("install-ran");
+        let _ = std::fs::remove_dir_all(&adapter_root);
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        std::fs::write(
+            adapter_dir.join(format!("detect-{runtime_dir}.sh")),
+            "exit 0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            adapter_dir.join(format!("install-{runtime_dir}.sh")),
+            "#!/bin/bash\n: > \"${0%/*}/install-ran\"\n",
+        )
+        .unwrap();
+
+        let result =
+            handle_plugin_with_adapter_root(PluginAction::Install { runtime }, &adapter_root);
+        let install_ran = marker.is_file();
+        let _ = std::fs::remove_dir_all(&adapter_root);
+
+        result.unwrap();
+        assert_eq!(install_ran, expect_install);
+    }
+
+    #[test]
+    fn openclaw_install_refreshes_an_existing_plugin() {
+        assert_existing_plugin_install_behavior(PluginRuntime::Openclaw, "openclaw", true);
+    }
+
+    #[test]
+    fn hermes_install_keeps_existing_plugin() {
+        assert_existing_plugin_install_behavior(PluginRuntime::Hermes, "hermes", false);
+    }
 
     // ── Subcommand basic parsing ──
 

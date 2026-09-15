@@ -224,7 +224,7 @@ plugins:
 ## 实现细节
 
 - **Reload 安全**：`register()` 可重入，`pluginState` 模块级单例 + 原地更新引用，老 hook closure 不会引用陈旧对象
-- **OpenClaw tools.alsoAllow 兜底**：`register()` 时自动把缺失的 `ws-ckpt-*` 写入 `openclaw.json` 的 allowlist（原子写 + 进程级 dedup），Hermes 不需要（toolset 直接注册）
+- **OpenClaw tool allowlist 兜底**：由 `install-openclaw.sh` 在 `plugins install` 之前经 `openclaw config set`（官方 config mutation 通道）合并写入；已有非空 `tools.allow` 时沿用该字段，否则使用 `tools.alsoAllow`。OpenClaw ≥ 2026.9.1 使用条件写；旧版仅在根配置不含 `$include` 时使用 JSON 模式写入，避免打平 include 结构。`register()` 只做缺失检测并告警，绝不直写 `openclaw.json`（OpenClaw ≥ 2026.9.2 的 config 快照哈希守卫会把外部直写判为 "config changed since last load"）。Hermes 不需要（toolset 直接注册）
 
 ---
 

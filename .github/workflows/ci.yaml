@@ -996,9 +996,13 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
-      - name: Run openclaw install script tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run OpenClaw script tests
         working-directory: src/ws-ckpt
-        run: make test-openclaw-install
+        run: make test-openclaw-scripts
 
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
@@ -1008,10 +1012,6 @@ jobs:
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
       # ── Plugin tests + coverage gates ───────────────────────────────────
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: OpenClaw plugin coverage gate (≥90%)
         working-directory: src/ws-ckpt/src/plugins/openclaw
         run: |
