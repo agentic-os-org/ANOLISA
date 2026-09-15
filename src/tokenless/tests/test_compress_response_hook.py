@@ -7,6 +7,7 @@ Validates the PostToolUse hook output contract:
 - No duplicate content in the model-visible output.
 - Pass-through when compression yields no size reduction.
 - Legacy path for non-replacement adapters.
+- Hardened permissions on the cached `claude --version` probe.
 
 Uses subprocess to invoke the hook with a mock tokenless binary,
 avoiding Python version issues with the hook_utils module.
@@ -701,6 +702,58 @@ class TestReplacementProtocol(unittest.TestCase):
         updated_str = json.dumps(updated) if isinstance(updated, (dict, list)) else str(updated)
         self.assertNotIn(sentinel * 30, updated_str,
                          "updatedToolOutput must not contain the full original sentinel")
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestClaudeVersionCacheHardening(unittest.TestCase):
+    """The cached `claude --version` probe is private state under ~/.tokenless.
+
+    Replacement capability is gated on the detected Claude Code version, so the
+    hook caches the probe in ~/.tokenless/.claude-version. On a shared HOME a
+    world-readable cache would leak which CLI version a user runs, and a
+    world-writable one would let a co-tenant pin a fake version and flip the
+    replacement decision. `secure_write_text` is what keeps it 0600 inside a
+    0700 directory; assert that here so the guarantee cannot silently regress.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+        self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
+        self.mock_claude = _create_mock_claude(self.tmpdir, "2.1.210")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    def test_version_cache_is_0600_inside_a_0700_dir(self):
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _make_large_json_payload(),
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+
+        cache_dir = os.path.join(self.isolated_home, ".tokenless")
+        cache = os.path.join(cache_dir, ".claude-version")
+        self.assertTrue(os.path.isfile(cache),
+                        f"version cache was not written: {cache}")
+        self.assertEqual(
+            stat.S_IMODE(os.stat(cache_dir).st_mode), 0o700,
+            "~/.tokenless must not be group/world accessible",
+        )
+        self.assertEqual(
+            stat.S_IMODE(os.stat(cache).st_mode), 0o600,
+            ".claude-version must be owner-only",
+        )
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
