@@ -23,6 +23,10 @@
 #   6. only the first --version line is recorded
 #   7. resolution and the success-only rule also hold on hosts without a
 #      timeout(1) helper
+#
+# The reaping checks go through pid_is_gone rather than a bare `kill -0`, and
+# check 8 self-tests that helper — see the comments there for why a zombie has
+# to count as gone.
 
 # SC2016 (file scope): every rtk stub body below is deliberately single-quoted
 # so it reaches the stub file verbatim and is expanded by the stub's own shell
@@ -96,10 +100,37 @@ check_elapsed() { # check_elapsed <label> <elapsed-secs> <deadline-secs> <max-se
     fi
 }
 
-# A probe we abandoned must not leave its child behind.
+# A probe we abandoned must not leave a LIVE child behind. A bare `kill -0`
+# does not say that: it also succeeds for a zombie, i.e. a child that is dead
+# but whose status nobody has collected yet — and timeout(1)'s SIGKILL path
+# produces exactly that. GNU timeout moves itself and the monitored command
+# into a fresh process group and, when the --kill-after deadline fires, signals
+# the whole group (cleanup() in src/timeout.c ends with `send_sig (0, sig)`),
+# so it dies by SIGKILL without reaping the child it just killed. That orphan
+# is reparented to PID 1, and a PID 1 with no reaper (a plain container without
+# --init, say) keeps it as a zombie indefinitely. A zombie holds no CPU and no
+# descriptors, so "gone" here means: no such PID, or the PID is a zombie.
+pid_is_gone() { # pid_is_gone <pid>
+    local pid="$1" state=""
+    kill -0 "$pid" 2>/dev/null || return 0
+    if [ -r "/proc/$pid/stat" ]; then
+        # The state char follows the parenthesised comm, which may itself hold
+        # spaces and parens — cut at the last ')' rather than counting fields.
+        state=$(sed 's/^.*(.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}' || true)
+    elif command -v ps > /dev/null 2>&1; then
+        state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d ' \n' || true)
+    fi
+    # With neither /proc nor ps the state stays unknown, so the answer falls
+    # back to `kill -0` alone — the previous, stricter behaviour.
+    if [ "$state" = "Z" ]; then
+        return 0
+    fi
+    ! kill -0 "$pid" 2>/dev/null   # ...or it was collected between the checks
+}
+
 check_reaped() { # check_reaped <label> <pid-file>
     local rc=1
-    [ -f "$2" ] && ! kill -0 "$(cat "$2")" 2>/dev/null && rc=0
+    [ -f "$2" ] && pid_is_gone "$(cat "$2")" && rc=0
     check_true "$1" "$rc"
 }
 
@@ -195,6 +226,39 @@ CURRENT_RUNNER="$L1_DIR/prelude.sh"
 if command -v python3 > /dev/null 2>&1; then
     python3 -m json.tool "$IDENTITY_FILE" > /dev/null
     echo "  ok   benchmark_identity.json is valid JSON"
+fi
+
+# 8. Self-check of pid_is_gone, the tolerance every reaping check above relies
+#    on: hold a dead child without collecting its status — what a PID 1 with no
+#    reaper does to the child timeout(1) SIGKILLs — and require that the helper
+#    reports it gone even though `kill -0` still says "present". python3 is the
+#    portable way to get a parent that never wait()s; where it is missing this
+#    reports a skip rather than a failure.
+if command -v python3 > /dev/null 2>&1; then
+    ZOMBIE_PID_FILE="$WORK/zombie.pid"
+    python3 - "$ZOMBIE_PID_FILE" <<'PY' &
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(7)
+with open(sys.argv[1], "w") as fh:
+    fh.write(str(pid))
+time.sleep(30)  # never reaps, so the child above stays a zombie
+PY
+    ZOMBIE_HOLDER=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if [ -s "$ZOMBIE_PID_FILE" ]; then break; fi
+        sleep 0.1
+    done
+    ZOMBIE_PID="$(cat "$ZOMBIE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$ZOMBIE_PID" ] && kill -0 "$ZOMBIE_PID" 2>/dev/null; then
+        check_true "unreaped (zombie) child counts as gone" \
+            "$(pid_is_gone "$ZOMBIE_PID"; echo $?)"
+    else
+        echo "  ok   zombie self-check skipped (host collected the child first)"
+    fi
+    kill "$ZOMBIE_HOLDER" 2>/dev/null || true
+    wait "$ZOMBIE_HOLDER" 2>/dev/null || true
 fi
 
 if [ "$FAILED" -ne 0 ]; then

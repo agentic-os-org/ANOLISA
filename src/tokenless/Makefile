@@ -69,7 +69,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
         test-agentscope-integration test-hooks test-claude-code-detect \
-        test-hook-parity test-rtk-integration
+        test-hook-parity test-rtk-integration test-benchmark-rtk-probe
 
 # Default target
 all: build
@@ -241,7 +241,7 @@ uninstall:
 # Run tests
 test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup
+      test-npm-package test-toon-cleanup test-benchmark-rtk-probe
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -274,7 +274,22 @@ test-integration:
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
 
-test-rtk-integration:
+# The L1 runner records an `rtk_version` in benchmark_identity.json through a
+# best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
+# resolved through PATH, the probe runs under a timeout(1) deadline whose child
+# is reaped, and only a successful probe records a version (everything else
+# collapses to "unavailable"). tests/test-benchmark-rtk-version-probe.sh guards
+# exactly that contract with stub binaries, but no target ever ran it, so a
+# probe regression reached CI unnoticed: the benchmark job would either stall on
+# a hung rtk or silently publish an "unavailable" identity. The suite needs no
+# rtk build and finishes in a few seconds, so it runs ahead of the pinned build
+# below and fails fast. `test-rtk-integration` is the only RTK target a CI job
+# calls ("Test bundled RTK integration"), which is what puts this in CI.
+test-benchmark-rtk-probe:
+	@echo "==> Testing benchmark RTK version probe..."
+	bash tests/test-benchmark-rtk-version-probe.sh
+
+test-rtk-integration: test-benchmark-rtk-probe
 	bash scripts/setup-rtk.sh
 	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
@@ -623,6 +638,7 @@ help:
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
 	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
+	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
