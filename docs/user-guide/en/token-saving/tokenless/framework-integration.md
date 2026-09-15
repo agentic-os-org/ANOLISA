@@ -20,6 +20,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
+| Trae | `trae` | Hard-disabled | Replaces RunCommand input | Keeps the original; adds context only for classified environment failures | — | — |
 
 “—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
 
@@ -31,6 +32,9 @@ Tool Ready remains registered by these adapters but is unconditionally hard-disa
 there because the original would remain visible and total context would grow. It uses that field
 only for additive environment-error guidance. A statistics record proves that a candidate became
 smaller, not by itself that the host removed the original from its model request.
+
+Trae currently uses the bundled lifecycle scripts documented below and is not registered with the
+`anolisa adapter enable` driver set in this release.
 
 ## Adapter processing rules
 
@@ -348,6 +352,20 @@ The extension loads in a new Qwen Code session. Restart and run one tool call to
 The adapter is a QwenPaw plugin: `anolisa adapter enable tokenless qwenpaw` and the bundled install script both run `qwenpaw plugin install <bundle> --force`, so QwenPaw copies the plugin into `<working dir>/plugins/tokenless/` and installs its `requirements.txt` into QwenPaw's own Python environment. That requirement is the `anolisa_tokenless` wheel from the matching GitHub Release, so the first install needs network access. QwenPaw only runs pip when `anolisa_tokenless` is missing from its interpreter's package metadata, so on an offline host `pip install` the wheel into QwenPaw's Python environment first; the same rule means an already installed older wheel is never upgraded by `plugin install`. The install script therefore checks, through the interpreter behind the `qwenpaw` command, that `anolisa_tokenless` imports and carries the SDK surface the plugin needs, and fails when no wheel matched the platform (`requirements.txt` lists Linux x86_64, Linux aarch64, and macOS arm64). The plugin itself refuses to register against an older wheel and logs the required release instead of failing at the first model call. The plugin requires the recovery entry points introduced in Tokenless 0.8.0. Install the SDK wheel matching the plugin release into QwenPaw's Python environment; the 0.7.14 wheel does not provide these APIs. The working directory is resolved like QwenPaw itself: `QWENPAW_WORKING_DIR`, else `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`. Without a `qwenpaw` command the install script prints a hint and exits 0 so `make setup` completes on hosts without QwenPaw.
 
 A running QwenPaw hot-loads the plugin; otherwise start QwenPaw. Schema compression and the `tokenless_retrieve` tool apply from the next model call, and command rewriting runs after QwenPaw's approval step, so an approved `execute_shell_command` executes the rewritten command. Only QwenPaw's built-in tools are classified: `execute_shell_command` is command output, `read_file`, `recall_history`, `view_image`, and `view_video` are file content, and the remaining built-ins are API responses; skills, MCP tools, and tools added by later QwenPaw releases pass through untouched. QwenPaw's own tool-result pruning runs after Tokenless and keeps the head of each result (50000 bytes for the two most recent tool results, 3000 bytes for older ones, overflow written to `tool_results/`), so a recovery instruction at the end of a compressed result survives only while the result fits that budget; the omitted content stays retrievable from the stash with `tokenless retrieve`. Records land under `<workspace>/.tokenless` for each QwenPaw workspace; point `tokenless stats list --data-dir` there.
+### Trae
+
+Trae (TraeCode) has no plugin system for hooks. The bundled lifecycle script merges the Tokenless hook groups into the global `hooks.json` of every installed Trae edition (`~/.trae-cn/hooks.json` for the CN edition, `~/.trae/hooks.json` for the international edition):
+
+```bash
+# After `make -C src/tokenless install` (or the RPM) staged the adapter resources:
+make -C src/tokenless trae-install
+# or run the script directly:
+bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/install.sh
+# remove again:
+bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
+```
+
+User-configured hooks are preserved; the uninstall script removes only the Tokenless-owned entries. Trae standardizes the terminal tool name to `RunCommand`, so the rewrite hook matches that name. Because Trae's PostToolUse does not support tool-output replacement, the response hook keeps the original output: it only adds `additionalContext` for classified environment failures and never appends a compressed copy, which would grow the model-visible payload. Restart Trae after installing or removing.
 
 ## AgentScope framework integration
 

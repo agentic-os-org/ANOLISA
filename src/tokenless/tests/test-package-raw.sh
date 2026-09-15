@@ -25,7 +25,8 @@ mkdir -p \
     "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
     "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
     "$ADAPTERS/qwencode/hooks" \
-    "$ADAPTERS/qwenpaw"
+    "$ADAPTERS/qwenpaw" \
+    "$ADAPTERS/trae/hooks"
 
 cat > "$SOURCE/Cargo.toml" <<EOF
 [workspace]
@@ -82,6 +83,7 @@ chmod 0755 \
     "$ADAPTERS/common/hooks/run-hook.sh"
 ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/claude-code/hooks/run-hook.sh"
 ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/qwencode/hooks/run-hook.sh"
+ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/trae/hooks/run-hook.sh"
 
 make_binaries() {
     local os="$1"
@@ -166,7 +168,8 @@ cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
 
 for relative in \
     adapters/claude-code/hooks/run-hook.sh \
-    adapters/qwencode/hooks/run-hook.sh; do
+    adapters/qwencode/hooks/run-hook.sh \
+    adapters/trae/hooks/run-hook.sh; do
     test -f "$EXTRACTED/$relative"
     test ! -L "$EXTRACTED/$relative"
     cmp "$ADAPTERS/common/hooks/run-hook.sh" "$EXTRACTED/$relative"

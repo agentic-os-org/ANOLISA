@@ -104,6 +104,7 @@ stage_payload() {
         qwenpaw/plugin.json \
         qwenpaw/plugin.py \
         qwenpaw/requirements.txt \
+        trae/hooks/run-hook.sh \
         common/cosh-extension.json \
         common/tool-ready-spec.json \
         common/tokenless-env-fix.sh; do
@@ -131,6 +132,7 @@ stage_payload() {
     # these dispatchers by symlink, so raw packages must carry regular files.
     materialize_hook "$stage" "claude-code/hooks/run-hook.sh"
     materialize_hook "$stage" "qwencode/hooks/run-hook.sh"
+    materialize_hook "$stage" "trae/hooks/run-hook.sh"
 
     install -p -m 0644 \
         "$adapters/common/cosh-extension.json" \

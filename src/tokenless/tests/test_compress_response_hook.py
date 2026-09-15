@@ -1054,6 +1054,55 @@ class TestNonReplacementAdapters(unittest.TestCase):
         self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
         self.assertNotIn("updatedToolOutput", hso)
 
+    def test_trae_passes_through_via_core(self):
+        """Trae declares no replacement capability to Core: Core returns
+        passthrough and the hook emits a plain skip — no compressed copy in
+        additionalContext, which would duplicate the still-visible original.
+        Regression guard for the manifest/README capability claims."""
+        large_payload = _make_large_json_payload()
+
+        result = _run_hook(
+            {
+                "tool_name": "RunCommand",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="trae",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {},
+                         "Trae must remain passthrough: no replacement field")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "The hook owes Core its one v2 call even when the "
+                         "host cannot replace output")
+
+    def test_trae_still_receives_env_attribution(self):
+        """Environment attribution is additive and stays for Trae: it is
+        the only PostToolUse content the hook may inject there."""
+        result = _run_hook(
+            {
+                "tool_name": "RunCommand",
+                "tool_response": {"stdout": "", "stderr": "bash: rg: command not found",
+                                  "exit_code": 127},
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="trae",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolOutput", hso)
+
     def test_shell_diagnostic_uses_short_stderr_not_large_stdout(self):
         result = _run_hook(
             {
