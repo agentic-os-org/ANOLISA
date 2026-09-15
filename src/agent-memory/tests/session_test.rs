@@ -219,10 +219,17 @@ fn session_log_includes_promote_and_prior_session_log_call() {
 }
 
 #[test]
-fn session_log_degrades_gracefully_when_session_dir_unavailable() {
-    // Make the session base dir a regular file → create_dir_all fails →
-    // service still constructs but svc.session == None; session-dependent
-    // tools return NotImplemented.
+fn unusable_session_dir_falls_back_instead_of_losing_the_session() {
+    // Make the session base dir a regular file so create_dir_all can never
+    // succeed — the same failure a non-root server gets from the shipped
+    // default /run/anolisa/sessions, whose parent the RPM creates 0700
+    // root:root and which make install / containers do not create at all
+    // (/run is drwxr-xr-x root root).
+    //
+    // The service must still build, and the session must now be recovered
+    // from a per-user fallback instead of being lost: before the fallback
+    // this degraded to `session == None` behind a single warn!, so every
+    // mem_promote / mem_session_log call errored on a stock install.
     let store_tmp = tempdir().unwrap();
     let blocker = tempdir().unwrap();
     let blocking_file = blocker.path().join("not-a-dir");
@@ -235,16 +242,24 @@ fn session_log_degrades_gracefully_when_session_dir_unavailable() {
     cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
 
     let svc = MemoryService::new(cfg).expect("service should still build");
+    let session = svc
+        .session
+        .as_ref()
+        .expect("session must be recovered from a fallback dir, not lost");
     assert!(
-        svc.session.is_none(),
-        "session should be None when base unwritable"
+        !session.root().starts_with(blocker.path()),
+        "session root {} must be outside the unusable configured path",
+        session.root().display()
     );
 
-    let err = svc.session_log().unwrap_err();
-    assert!(matches!(err, MemoryError::NotImplemented(_)));
+    // Both session-dependent tools work end to end through the fallback.
+    std::fs::write(session.scratch_root().join("draft.md"), "fallback scratch").unwrap();
+    let n = svc.promote("draft.md", "notes/from-fallback.md").unwrap();
+    assert!(n > 0);
+    assert!(svc.mount.root.join("notes/from-fallback.md").exists());
+    svc.session_log().unwrap();
 
-    let err = svc.promote("x.md", "y.md").unwrap_err();
-    assert!(matches!(err, MemoryError::NotImplemented(_)));
+    let _ = std::fs::remove_dir_all(session.root());
 }
 
 // ---------- audit double-write ----------
