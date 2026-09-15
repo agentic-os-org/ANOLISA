@@ -241,7 +241,7 @@ uninstall:
 # Run tests
 test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup
+      test-npm-package test-toon-cleanup test-install-methods
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -359,6 +359,23 @@ test-npm-package:
 
 test-toon-cleanup:
 	@bash tests/test-toon-cleanup.sh
+
+# Standalone curl installer/uninstaller behaviour plus the install-method docs
+# that describe it. Offline: curl, npm and cargo are stubbed by the test.
+# test-npm-postinstall runs the real npm/scripts/postinstall.js and skips when
+# node is unavailable.
+test-install-methods: test-npm-postinstall
+	@echo "==> Testing standalone install/uninstall scripts..."
+	@bash tests/test-install-script.sh
+	@echo "==> Testing install-method documentation consistency..."
+	@bash tests/test-install-docs.sh
+
+# The npm package postinstall shares ~/.local/share/anolisa/adapters/tokenless
+# with the anolisa CLI, so it has to identify the current owner before replacing
+# the tree. Needs node; skips without it.
+test-npm-postinstall:
+	@echo "==> Testing npm postinstall adapter ownership..."
+	@bash tests/test-npm-postinstall.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:

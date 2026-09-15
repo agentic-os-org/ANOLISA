@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# Uninstall a Tokenless CLI installation created by scripts/install.sh.
+#
+# The installer records every path it created in a receipt file, together with
+# the sha256 of each recorded file, the link target each launcher resolves to,
+# and an install_id that ownership markers inside the adapter tree and the npm
+# module directory repeat. This script removes exactly those recorded paths and
+# nothing else, so it stays symmetric with the install and never deletes
+# binaries, adapters, or data that belong to another installation method
+# (anolisa CLI, a manual `npm install -g`, or a custom TOKENLESS_INSTALL_DIR you
+# manage yourself).
+#
+# Identity is checked, not just content. A later anolisa or npm install of the
+# same version reproduces byte-identical binaries and manifests, so a digest
+# match alone would let this script delete a newer installation's files, adapter
+# tree, framework registrations and npm package. A recorded path whose content no
+# longer matches, whose launcher no longer resolves to the recorded target, or
+# whose ownership marker belongs to a newer install was taken over after the
+# receipt was written, and is left alone.
+#
+# Usage:
+#   bash scripts/uninstall.sh [--dry-run] [--purge] [--receipt <path>]
+#
+# Options:
+#   --dry-run        Print what would be removed, change nothing.
+#   --purge          Also delete the runtime data directory (~/.tokenless,
+#                    which holds stats.db and stash.db). Off by default so an
+#                    uninstall does not destroy collected statistics.
+#   --receipt PATH   Read a non-default receipt (mirrors TOKENLESS_RECEIPT).
+#
+# Environment variables:
+#   TOKENLESS_RECEIPT  Receipt path (default:
+#                      ${XDG_DATA_HOME:-$HOME/.local/share}/tokenless/install-receipt)
+#   TOKENLESS_DATA_DIR Runtime data directory (default: ~/.tokenless)
+
+set -euo pipefail
+
+NPM_PACKAGE="anolisa-tokenless"
+DEFAULT_DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
+RECEIPT="${TOKENLESS_RECEIPT:-${DEFAULT_DATA_DIR}/tokenless/install-receipt}"
+RUNTIME_DATA_DIR="${TOKENLESS_DATA_DIR:-${HOME}/.tokenless}"
+MARKER="# Added by tokenless installer"
+# Identity anchor inside the npm-owned adapter tree, stamped with the release
+# version by npm/scripts/package-npm.js.
+ADAPTERS_IDENTITY_FILE="manifest.json"
+# Ownership marker written by scripts/install.sh into the artefacts that can
+# carry one. It lives where a foreign reinstall removes it, which is what makes
+# it evidence rather than a restatement of the content hash.
+OWNER_MARKER_FILE=".tokenless-owner"
+RECEIPT_SCHEMA_CURRENT=3
+
+DRY_RUN=0
+PURGE=0
+
+info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; }
+die()  { err "$@"; exit 1; }
+
+usage() {
+  printf '%s\n' \
+    "Usage: bash scripts/uninstall.sh [--dry-run] [--purge] [--receipt <path>]" \
+    "" \
+    "  --dry-run        Print what would be removed, change nothing." \
+    "  --purge          Also delete the runtime data directory (~/.tokenless)." \
+    "  --receipt PATH   Read a non-default receipt (mirrors TOKENLESS_RECEIPT)." \
+    "  -h, --help       Show this help."
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)  DRY_RUN=1; shift ;;
+    --purge)    PURGE=1; shift ;;
+    --receipt)  [ "$#" -ge 2 ] || die "--receipt requires a path"; RECEIPT="$2"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          usage >&2; die "Unknown option: $1" ;;
+  esac
+done
+
+run() {
+  if [ "$DRY_RUN" = "1" ]; then
+    info "[dry-run] $*"
+  else
+    "$@"
+  fi
+}
+
+# Portable absolute-path resolution. GNU readlink(1) has -f; the BSD readlink
+# shipped with macOS only gained it in 12.3 and prints nothing where it is
+# missing, which every caller here would read as "not our link". Walk the
+# symlink chain and normalise with `cd -P` instead.
+resolve_path() {
+  local p="$1" out="" i=0 target dir base
+  if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  while [ -L "$p" ] && [ "$i" -lt 32 ]; do
+    target=$(readlink "$p" 2>/dev/null) || return 1
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -e "$p" ] || return 1
+  dir=$(dirname "$p")
+  base=$(basename "$p")
+  out=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$out" "$base"
+}
+
+owner_marker_read() {
+  [ -f "$1" ] || return 1
+  head -n 1 "$1" 2>/dev/null
+}
+
+# Ownership is the recorded identity, not merely the recorded content: a later
+# anolisa or npm install of the same version reproduces byte-identical binaries,
+# so a launcher also has to resolve to the target the installer linked it to. An
+# empty recorded target means a regular file was written there (source build),
+# and a symlink in that spot is therefore somebody else's launcher.
+owned_by_receipt() {
+  local path="$1" target="$2" resolved
+  if [ -n "$target" ]; then
+    [ -L "$path" ] || return 1
+    resolved=$(resolve_path "$path" 2>/dev/null || true)
+    [ -n "$resolved" ] && [ "$resolved" = "$target" ] && return 0
+    return 1
+  fi
+  if [ -L "$path" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# True when the receipt carries schema 3 fields, i.e. when the identity checks
+# above have evidence to work with. Older receipts record content only, and are
+# handled exactly as before rather than being refused.
+receipt_schema_at_least() {
+  case "${SCHEMA:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$SCHEMA" -ge "$1" ]
+}
+
+# sha256 of a file's content, following symlinks. Prints nothing when the file
+# is unreadable or no sha256 tool exists, which callers treat as "no identity".
+file_digest() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    { sha256sum "$f" 2>/dev/null || true; } | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    { shasum -a 256 "$f" 2>/dev/null || true; } | cut -d' ' -f1
+  fi
+  return 0
+}
+
+# Frameworks register the adapter tree by reference — plugin directories, hook
+# entries and symlinks that point into it. Deleting the tree first leaves those
+# registrations dangling against a path that no longer exists, and the CLI they
+# call is already gone, so each bundled adapter's own uninstall.sh runs before
+# its resources are removed. Failures are warnings, not errors: the resources
+# are going away either way, and a framework CLI the user already removed
+# cannot be deregistered.
+deregister_framework_adapters() {
+  local adapters_dir="$1" script framework output status
+  [ -d "$adapters_dir" ] || return 0
+  for script in "$adapters_dir"/*/scripts/uninstall.sh; do
+    [ -f "$script" ] || continue
+    framework=$(basename "$(dirname "$(dirname "$script")")")
+    if [ "$DRY_RUN" = "1" ]; then
+      info "[dry-run] would deregister the ${framework} adapter via ${script}"
+      continue
+    fi
+    # Deregistration only. These are the adapters' full uninstall scripts, and
+    # at least the Codex one also removes ${PREFIX}/bin/tokenless. Step 1 above
+    # has already decided what happens to that binary — it keeps it when the
+    # recorded digest says another installation took the path over — so the
+    # sub-script must not get a second chance at it: TOKENLESS_DEREGISTER_ONLY=1
+    # limits it to the framework registration. stdin is closed as well, so an
+    # interactive prompt can neither block the run nor vanish into the captured
+    # output.
+    output=$(TOKENLESS_DEREGISTER_ONLY=1 bash "$script" </dev/null 2>&1) && status=0 || status=$?
+    if [ "$status" -ne 0 ]; then
+      warn "Could not deregister the ${framework} adapter (exit ${status}); remove its registration manually:"
+      warn "  bash ${script}"
+      printf '%s\n' "$output" | sed 's/^/    /' >&2 || true
+    else
+      info "Deregistered the ${framework} adapter"
+    fi
+  done
+  return 0
+}
+
+SCHEMA=""
+INSTALL_ID=""
+METHOD=""
+TL_VERSION=""
+INSTALL_DIR=""
+NPM_PREFIX=""
+NPM_PKG_OWNER=""
+ADAPTERS_DIR=""
+ADAPTERS_DIR_DIGEST=""
+ADAPTERS_OWNER=""
+PATH_RC=""
+FILES=()
+DIGESTS=()
+TARGETS=()
+
+if [ ! -f "$RECEIPT" ]; then
+  err "No install receipt found at ${RECEIPT}"
+  err "This script only removes what scripts/install.sh recorded, so it will not guess."
+  err "Uninstall manually instead, matching how you installed Tokenless:"
+  err "  anolisa CLI : anolisa uninstall tokenless"
+  err "  npm         : npm uninstall -g ${NPM_PACKAGE}"
+  err "  source build: rm -f <install-dir>/tokenless"
+  exit 1
+fi
+
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|'#'*) continue ;;
+  esac
+  key="${line%%=*}"
+  value="${line#*=}"
+  case "$key" in
+    schema)              SCHEMA="$value" ;;
+    install_id)          INSTALL_ID="$value" ;;
+    method)              METHOD="$value" ;;
+    version)             TL_VERSION="$value" ;;
+    install_dir)         INSTALL_DIR="$value" ;;
+    npm_prefix)          NPM_PREFIX="$value" ;;
+    npm_pkg_owner)       NPM_PKG_OWNER="$value" ;;
+    adapters_dir)        ADAPTERS_DIR="$value" ;;
+    adapters_dir_digest) ADAPTERS_DIR_DIGEST="$value" ;;
+    adapters_dir_owner)  ADAPTERS_OWNER="$value" ;;
+    path_rc_file)        PATH_RC="$value" ;;
+    file)                FILES+=("$value") ;;
+    file_digest)         DIGESTS+=("$value") ;;
+    file_target)         TARGETS+=("$value") ;;
+  esac
+done < "$RECEIPT"
+
+info "Tokenless uninstaller"
+info "Receipt      : ${RECEIPT}"
+info "Method       : ${METHOD:-unknown}"
+info "Version      : ${TL_VERSION:-unknown}"
+info "Install dir  : ${INSTALL_DIR:-unknown}"
+info "Install id   : ${INSTALL_ID:-unknown}"
+if [ "$SCHEMA" != "$RECEIPT_SCHEMA_CURRENT" ]; then
+  case "$SCHEMA" in
+    ''|1)
+      warn "Receipt schema is '${SCHEMA:-1}', which records no file identity."
+      warn "Recorded paths are removed on path alone; files another installer"
+      warn "placed at the same path afterwards cannot be told apart."
+      ;;
+    2)
+      warn "Receipt schema is 2, which records content but no install ownership."
+      warn "A later anolisa or npm install of the same version leaves identical"
+      warn "bytes behind, so those paths cannot be told apart from this install's."
+      ;;
+    *)
+      warn "Receipt schema is '${SCHEMA}', which this uninstaller does not know;"
+      warn "it is read on a best-effort basis."
+      ;;
+  esac
+fi
+
+# 1. Recorded binaries in the install directory. Nothing else in that directory
+#    is touched, so a foreign `rtk`/`toon` or an anolisa-managed CLI survives.
+#    The recorded digest is checked first: when anolisa or a manual npm install
+#    later replaced the file at that path, it is no longer ours to delete.
+if [ "${#FILES[@]}" -gt 0 ]; then
+  idx=0
+  for f in "${FILES[@]}"; do
+    digest="${DIGESTS[$idx]:-}"
+    target="${TARGETS[$idx]:-}"
+    idx=$((idx + 1))
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      warn "Already gone, skipping: ${f}"
+      continue
+    fi
+    if [ -d "$f" ] && [ ! -L "$f" ]; then
+      warn "Refusing to remove directory not owned by this installer: ${f}"
+      continue
+    fi
+    if [ -n "$digest" ]; then
+      current="$(file_digest "$f")"
+      if [ "$current" != "$digest" ]; then
+        warn "Skipping ${f}: its content no longer matches the receipt,"
+        warn "  so another installation has taken over that path."
+        continue
+      fi
+    fi
+    # Identical content is not ownership: a newer anolisa or npm install of the
+    # same version reproduces these bytes, so the recorded link target has to
+    # match as well.
+    if receipt_schema_at_least 3 && ! owned_by_receipt "$f" "$target"; then
+      warn "Skipping ${f}: it is no longer the artefact this receipt recorded,"
+      warn "  so another installation has taken over that path."
+      continue
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+      info "[dry-run] would remove ${f}"
+    else
+      rm -f "$f"
+      info "Removed ${f}"
+    fi
+  done
+else
+  warn "Receipt lists no installed files"
+fi
+
+# 2. npm global package — only for the npm method, only from the recorded prefix,
+#    and only while the ownership marker the installer wrote is still there. A
+#    newer `npm install -g` of the same version replaces the module directory and
+#    the marker with it, which is the only way to tell the two apart.
+if [ "$METHOD" = "npm" ] && [ -n "$NPM_PREFIX" ]; then
+  pkg_marker="$(owner_marker_read "${NPM_PREFIX}/lib/node_modules/${NPM_PACKAGE}/${OWNER_MARKER_FILE}" 2>/dev/null || true)"
+  if [ -n "$NPM_PKG_OWNER" ] && [ "$pkg_marker" != "$NPM_PKG_OWNER" ]; then
+    warn "Skipping the npm package in ${NPM_PREFIX}: its ownership marker belongs to"
+    warn "  a newer installation. Remove it yourself if you no longer need it:"
+    warn "  npm uninstall -g ${NPM_PACKAGE} --prefix ${NPM_PREFIX}"
+  elif command -v npm &>/dev/null; then
+    run npm uninstall -g "$NPM_PACKAGE" --prefix "$NPM_PREFIX"
+    info "Uninstalled npm package ${NPM_PACKAGE} from prefix ${NPM_PREFIX}"
+  else
+    warn "npm not found; remove the global package yourself: npm uninstall -g ${NPM_PACKAGE} --prefix ${NPM_PREFIX}"
+  fi
+fi
+
+# 3. Adapter resources — recorded only when the npm postinstall placed them.
+#    A source build installs no adapters, so this step is skipped for it and an
+#    adapter tree owned by the anolisa CLI is left alone. Frameworks that were
+#    enabled against this tree are deregistered first, so no plugin directory,
+#    hook entry or symlink is left pointing at a deleted path.
+if [ -n "$ADAPTERS_DIR" ]; then
+  if [ -d "$ADAPTERS_DIR" ]; then
+    adapters_owned=1
+    if [ -n "$ADAPTERS_DIR_DIGEST" ]; then
+      current="$(file_digest "${ADAPTERS_DIR}/${ADAPTERS_IDENTITY_FILE}")"
+      if [ "$current" != "$ADAPTERS_DIR_DIGEST" ]; then
+        adapters_owned=0
+        warn "Skipping ${ADAPTERS_DIR}: it no longer matches the receipt,"
+        warn "  so another installation has taken over that adapter tree."
+      fi
+    fi
+    # The manifest is stamped with the release version, so a same-version install
+    # by anolisa or by a direct `npm install -g` reproduces it byte for byte. The
+    # ownership marker is what such a reinstall removes.
+    if [ "$adapters_owned" = "1" ] && [ -n "$ADAPTERS_OWNER" ]; then
+      marker="$(owner_marker_read "${ADAPTERS_DIR}/${OWNER_MARKER_FILE}" 2>/dev/null || true)"
+      if [ "$marker" != "$ADAPTERS_OWNER" ]; then
+        adapters_owned=0
+        warn "Skipping ${ADAPTERS_DIR}: its ownership marker belongs to a newer"
+        warn "  installation, so its resources and framework registrations are kept."
+      fi
+    fi
+    if [ "$adapters_owned" = "1" ]; then
+      deregister_framework_adapters "$ADAPTERS_DIR"
+      run rm -rf "$ADAPTERS_DIR"
+      info "Removed adapter resources ${ADAPTERS_DIR}"
+    fi
+  else
+    warn "Already gone, skipping: ${ADAPTERS_DIR}"
+  fi
+fi
+
+# 4. PATH entry appended by the installer, only in the recorded rc file and only
+#    when it references the recorded install directory.
+if [ -n "$PATH_RC" ] && [ -f "$PATH_RC" ] && [ -n "$INSTALL_DIR" ]; then
+  if grep -Fq "$MARKER" "$PATH_RC"; then
+    if [ "$DRY_RUN" = "1" ]; then
+      info "[dry-run] would strip the tokenless PATH entry from ${PATH_RC}"
+    else
+      tmp_rc="${PATH_RC}.tokenless-uninstall.$$"
+      awk -v marker="$MARKER" -v dir="$INSTALL_DIR" '
+        BEGIN { skip = 0 }
+        {
+          if (skip == 1) {
+            skip = 0
+            if ($0 ~ /^export PATH=/ && index($0, dir) > 0) next
+            print marker
+          }
+          if ($0 == marker) { skip = 1; next }
+          print
+        }
+      ' "$PATH_RC" > "$tmp_rc" && cat "$tmp_rc" > "$PATH_RC" && rm -f "$tmp_rc"
+      info "Removed the tokenless PATH entry from ${PATH_RC}"
+    fi
+  fi
+fi
+
+# 5. Runtime data (stats.db / stash.db) is user data, not an installed file.
+if [ "$PURGE" = "1" ]; then
+  if [ -d "$RUNTIME_DATA_DIR" ]; then
+    run rm -rf "$RUNTIME_DATA_DIR"
+    info "Purged runtime data ${RUNTIME_DATA_DIR}"
+  fi
+else
+  if [ -d "$RUNTIME_DATA_DIR" ]; then
+    info "Kept runtime data ${RUNTIME_DATA_DIR} (re-run with --purge to delete stats/stash)"
+  fi
+fi
+
+# 6. The receipt itself.
+if [ "$DRY_RUN" = "1" ]; then
+  info "[dry-run] would remove receipt ${RECEIPT}"
+  info "[dry-run] nothing was changed"
+  exit 0
+fi
+rm -f "$RECEIPT"
+info "Removed receipt ${RECEIPT}"
+receipt_parent=$(dirname "$RECEIPT")
+if [ -d "$receipt_parent" ] && [ -z "$(ls -A "$receipt_parent" 2>/dev/null)" ]; then
+  rmdir "$receipt_parent"
+fi
+
+info "Tokenless uninstall complete"

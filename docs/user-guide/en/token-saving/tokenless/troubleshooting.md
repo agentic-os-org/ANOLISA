@@ -383,6 +383,51 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 Run this only after confirming that the directory belongs to this Tokenless npm installation. A manually installed cosh Extension must be separately confirmed and removed from `~/.copilot-shell/extensions/tokenless`.
 
+The package postinstall makes that confirmation for you: `~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI, so when it already belongs to a managed component install the postinstall keeps it unchanged and prints where the resources inside the package are instead of replacing a tree that a component record and framework registrations still point at. Pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway, in which case re-run `anolisa adapter scan` afterwards so the component record matches what is on disk.
+
+### curl standalone installation
+
+The standalone installer records every path it created in a receipt at `~/.local/share/tokenless/install-receipt`: the method it ended up taking (npm or source build), the version, the install directory, the npm prefix, the adapter directory, the rc file it appended a PATH line to, and each installed file together with its sha256.
+
+Upgrade by re-running the installer. It overwrites the recorded paths and rewrites the receipt, so the record stays accurate:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
+
+Where the previous npm prefix and the install directory overlap — `npm install -g --prefix ~/.local` puts its bin links in `~/.local/bin`, the installer's default install directory — that package is retired by hand instead of through `npm uninstall --prefix ~/.local`, which would remove the CLI the new install just placed there. An npm attempt that fails part-way is rolled back the same way, so the source-build fallback never inherits an unowned package, launcher link or adapter tree.
+
+Ownership is checked, not just content. A newer anolisa or npm install of the same version reproduces byte-identical binaries and manifests, so the receipt also records this install's id, the link target each launcher resolves to, and an ownership marker (`.tokenless-owner`) inside the adapter tree and the npm module directory. The uninstaller keeps anything whose recorded identity or marker no longer matches — files, adapter resources, framework registrations and the npm package alike.
+
+The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS has no published npm package either, so it currently has no supported route — see the platform table in the [Quick Start](QUICKSTART.md#platform-support).
+
+`~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI and with a direct `npm install -g`. When that directory already belongs to one of them, the installer restores the previous owner's resources after the npm postinstall has replaced them, records no adapter directory, and says so. The uninstaller then leaves those resources and the framework registrations pointing at them alone.
+
+Restart the agent afterwards. When the run took the npm path, the plugin registered with a framework may still be an older copy — run that framework's `scripts/install.sh` again as described in [npm installation](#npm-installation).
+
+Uninstall with the matching script, which removes only what the receipt records:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+```
+
+Preview the plan first, or also drop the collected statistics:
+
+```bash
+bash src/tokenless/scripts/uninstall.sh --dry-run
+bash src/tokenless/scripts/uninstall.sh --purge
+```
+
+`--dry-run` prints what would be removed and changes nothing. `--purge` additionally deletes the runtime data directory `~/.tokenless`, which holds `stats.db` and `stash.db`; without it that data is kept. `--receipt <path>` reads a non-default receipt and mirrors `TOKENLESS_RECEIPT`.
+
+What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it — running each bundled framework's own `scripts/uninstall.sh` first, so an enabled OpenClaw, Hermes or Qwen Code registration is removed instead of being left pointing at a deleted directory. After a source build it removes only the `tokenless` CLI, because that path installs no `rtk` and no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
+
+Do not substitute a fixed `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` list. It misses a custom `TOKENLESS_INSTALL_DIR` and the npm global package, and after a source-build install it deletes `rtk` and adapter resources that install path never created.
+
+Without a receipt the uninstaller refuses to guess and prints the per-method manual steps instead. Uninstall through the method you actually used: [anolisa installation](#anolisa-installation), [npm installation](#npm-installation), or the YUM/RPM sequence below.
+
 ### YUM/RPM installation
 
 Prefer management through the anolisa system scope. If anolisa does not own the installation record, disable adapters first, then run:

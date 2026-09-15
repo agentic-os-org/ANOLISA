@@ -856,6 +856,12 @@ jobs:
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
 
+      # Standalone curl installer/uninstaller plus the install-method docs.
+      # Runs offline: the test stubs curl, npm and cargo.
+      - name: Test standalone install methods
+        run: |
+          make -C src/tokenless test-install-methods
+
       # The benchmark suite is split into two standalone workspaces (each with an
       # empty [workspace] table in its Cargo.toml), so the --workspace commands
       # above never touch them. Exercise both explicitly: fmt, clippy and the
