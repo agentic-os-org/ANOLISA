@@ -1,8 +1,34 @@
 #!/usr/bin/env bash
-# 全量 TOON 功能验证测试
-# 覆盖三种应用场景：Tokenless CLI、Cosh-NG、OpenClaw
+# Full TOON functional verification.
+# Covers three application scenarios: Tokenless CLI, Cosh-NG, OpenClaw.
+#
+# Run by hand (this is not a make target):
+#
+#   PATH="src/tokenless/target/debug:$PATH" bash src/tokenless/tests/test-toon-full.sh
+#
+# Prerequisites:
+#   required    tokenless on PATH built from this checkout (set
+#               TOKENLESS_ALLOW_VERSION_SKEW=1 to accept an installed one), jq, python3
+#   scenario 2  common hooks directory, taken from the repo tree by default and
+#               overridable with TOKENLESS_HOOK_DIR
+#   scenario 3  OpenClaw with the tokenless plugin installed and enabled, GNU timeout
+#               (coreutils), and an explicit TOKENLESS_TOON_FULL_LIVE=1
+#               (3.x makes real model calls: slow and quota-consuming, off by default).
+#               The OpenClaw state directory resolves as OPENCLAW_STATE_DIR ->
+#               OPENCLAW_HOME -> ~/.openclaw, the same way the adapter install/detect
+#               scripts do it, and OPENCLAW_BIN overrides the CLI path. With live mode
+#               on, a missing scenario 3 prerequisite aborts the run instead of
+#               reporting a green suite that validated nothing.
+#
+# A missing optional prerequisite is recorded as SKIP rather than FAIL: this script has
+# to reach a trustworthy verdict on dev machines, CI containers and provisioned hosts
+# alike. A permanently red case only gets ignored, and it rots together with the
+# contract it was supposed to cover.
 
 set -uo pipefail
+
+TEST_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOKENLESS_SOURCE_DIR="$(cd "$TEST_SCRIPT_DIR/.." && pwd)"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,11 +39,16 @@ NC='\033[0m'
 
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
 SCENARIOS=0
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); ((TOTAL++)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); ((TOTAL++)); }
+skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIP++)); }
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 section() { echo -e "\n${YELLOW}========== $1 ==========${NC}\n"; ((SCENARIOS++)); }
 scenario() { echo -e "\n${CYAN}▸ $1${NC}"; }
@@ -34,94 +65,347 @@ assert_not_empty() {
     else fail "$test_name - empty output"; fi
 }
 
-# ========== 环境检查 ==========
-section "环境检查"
+assert_same() {
+    local actual="$1" expected="$2" test_name="$3"
+    if [ "$actual" = "$expected" ]; then pass "$test_name"
+    else fail "$test_name - expected '$expected', got '$actual'"; fi
+}
 
-for cmd in tokenless jq openclaw; do
-    if command -v "$cmd" &>/dev/null; then
-        version=$("$cmd" --version 2>/dev/null || echo "installed")
-        pass "$cmd 可用 ($version)"
+# Compare a compress-toon run against its input byte by byte.
+#
+# Command substitution is not usable here: $(...) strips trailing newlines before the
+# assignment, so "always append a LF" and "drop the input LF" regressions both survive
+# a string comparison. Write the payload to a file, redirect stdout to a second file
+# and let cmp look at the bytes.
+#   $1 = test label, $2 = input file, $3 = --min-toon-chars value ("" keeps the default)
+assert_passthrough_bytes() {
+    local label="$1" input_file="$2" min_chars="$3"
+    local output_file="${input_file}.out" rc diff
+
+    # Bash < 4.4 treats an empty "$@" as unbound under `set -u`, so the flags are
+    # passed as a single value instead of a variadic tail.
+    if [ -n "$min_chars" ]; then
+        tokenless compress-toon --min-toon-chars "$min_chars" \
+            < "$input_file" > "$output_file" 2>/dev/null
     else
-        fail "$cmd 未安装"
+        tokenless compress-toon < "$input_file" > "$output_file" 2>/dev/null
     fi
-done
+    rc=$?
+    assert_same "$rc" "0" "$label - exit code"
+    if diff=$(cmp "$input_file" "$output_file" 2>&1); then
+        pass "$label - stdout is byte-identical to stdin"
+    else
+        fail "$label - stdout differs from stdin: $diff"
+    fi
+}
 
-# 检查 OpenClaw 插件
-if [ -f ~/.openclaw/extensions/tokenless/index.js ]; then
-    pass "OpenClaw 插件文件存在"
-else
-    fail "OpenClaw 插件文件缺失"
-fi
+# ========== Prerequisites ==========
 
-# 检查 OpenClaw 配置
-if python3 -c "
+# This script drives the binary on PATH while its assertions follow the checkout. When
+# the two disagree, failures point at the wrong file (0.7.x does not even have
+# compress-toon --min-toon-chars), so compare versions up front and name the reason
+# instead of dumping unrelated failures for the reader to guess about.
+require_matching_cli() {
+    local cmd missing=0
+    for cmd in tokenless jq python3; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "${RED}ERROR: $cmd is not installed${NC}"
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ] || exit 1
+
+    local cli_version workspace_version
+    cli_version=$(tokenless --version 2>/dev/null | awk '{print $2}')
+    workspace_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' \
+        "$TOKENLESS_SOURCE_DIR/Cargo.toml" | head -1)
+    if [ -n "$workspace_version" ] && [ "$cli_version" != "$workspace_version" ]; then
+        if [ "${TOKENLESS_ALLOW_VERSION_SKEW:-0}" = "1" ]; then
+            info "WARNING: tokenless on PATH is ${cli_version:-unknown}, this checkout is $workspace_version (TOKENLESS_ALLOW_VERSION_SKEW=1)"
+            return 0
+        fi
+        echo -e "${RED}ERROR: tokenless on PATH is ${cli_version:-unknown}, but this checkout is $workspace_version${NC}"
+        echo "The assertions follow the checkout while the binary under test does not, so a version mismatch reports unrelated failures."
+        echo "Put the current build first on PATH (or install it) and rerun:"
+        echo ""
+        echo "    PATH=\"src/tokenless/target/debug:\$PATH\" bash src/tokenless/tests/test-toon-full.sh"
+        echo "    make -C src/tokenless build && make -C src/tokenless install"
+        echo ""
+        echo "To test the installed ${cli_version:-unknown} anyway, set TOKENLESS_ALLOW_VERSION_SKEW=1."
+        exit 1
+    fi
+}
+
+# Scenario 3 bounds every model call with GNU timeout, which is not installed
+# everywhere (plain macOS, minimal containers). Without it the pipeline yields no
+# session ID, the surrounding code records SKIPs and the suite still exits 0 - a caller
+# who explicitly asked for live validation would get a green run that validated
+# nothing. Resolve it here; require_live_prerequisites turns it into a hard error when
+# live mode is on.
+resolve_timeout_bin() {
+    TIMEOUT_BIN=""
+    TIMEOUT_DETAIL="GNU timeout (coreutils) not found on PATH"
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="$(command -v timeout)"
+        TIMEOUT_DETAIL=""
+        return 0
+    fi
+    return 1
+}
+
+# Which hooks copy scenario 2 exercises: the repo tree first (that is the implementation
+# under test), then the installed copies. An explicit TOKENLESS_HOOK_DIR is the only
+# source consulted - a wrong value has to be reported instead of silently falling back
+# to the repo tree, otherwise "I tested the installed copy" becomes a false statement.
+resolve_hook_dir() {
+    local candidate
+    HOOK_DIR=""
+    HOOK_DIR_DETAIL=""
+    if [ -n "${TOKENLESS_HOOK_DIR:-}" ]; then
+        if [ -f "$TOKENLESS_HOOK_DIR/compress_response_hook.py" ]; then
+            HOOK_DIR="$TOKENLESS_HOOK_DIR"
+            return 0
+        fi
+        HOOK_DIR_DETAIL="no compress_response_hook.py under TOKENLESS_HOOK_DIR=$TOKENLESS_HOOK_DIR"
+        return 1
+    fi
+    for candidate in \
+        "$TOKENLESS_SOURCE_DIR/adapters/tokenless/common/hooks" \
+        "/usr/share/anolisa/adapters/tokenless/common/hooks" \
+        "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"; do
+        if [ -f "$candidate/compress_response_hook.py" ]; then
+            HOOK_DIR="$candidate"
+            return 0
+        fi
+    done
+    HOOK_DIR_DETAIL="no compress_response_hook.py in the repo tree or in the installed prefixes"
+    return 1
+}
+
+OPENCLAW_PLUGIN_ID="tokenless"
+OPENCLAW_PROBE_TIMEOUT=60
+
+# Scenario 3 needs an OpenClaw install with the tokenless plugin enabled. The state
+# directory is configurable, so resolve it exactly like
+# adapters/tokenless/openclaw/scripts/{install,detect}.sh do: OPENCLAW_STATE_DIR, else
+# OPENCLAW_HOME, else ~/.openclaw. Probing only $HOME/.openclaw would mark a valid
+# custom-prefix install as unready and skip every live check.
+resolve_openclaw_layout() {
+    local home="${OPENCLAW_HOME:-$HOME/.openclaw}"
+    OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$home}"
+    OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+    [ -n "$OPENCLAW_STATE_DIR" ] || OPENCLAW_STATE_DIR="${home%/}"
+    if [ -n "${OPENCLAW_BIN:-}" ]; then
+        return 0
+    fi
+    OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
+    if [ -z "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_STATE_DIR/bin/openclaw" ]; then
+        OPENCLAW_BIN="$OPENCLAW_STATE_DIR/bin/openclaw"
+    fi
+}
+
+# Read-only openclaw subcommand against the resolved state directory. OPENCLAW_HOME is
+# unset for the call, as in detect.sh and install.sh, so a stale value cannot redirect
+# the CLI to a different state root. Bounded when GNU timeout is around: a hung gateway
+# must not stall the probe for hosts that only want scenarios 1 and 2.
+openclaw_cli() {
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$OPENCLAW_PROBE_TIMEOUT" env -u OPENCLAW_HOME \
+            OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" "$@"
+    else
+        env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" "$@"
+    fi
+}
+
+# Live model calls can hang for minutes, so scenario 3 bounds each of them.
+openclaw_live() {
+    local secs="$1"
+    shift
+    "$TIMEOUT_BIN" "$secs" env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
+        "$OPENCLAW_BIN" "$@"
+}
+
+probe_openclaw() {
+    OPENCLAW_STATUS="absent"
+    resolve_openclaw_layout
+    if [ -z "${OPENCLAW_BIN:-}" ]; then
+        OPENCLAW_DETAIL="openclaw not installed (checked PATH and $OPENCLAW_STATE_DIR/bin)"
+        return 1
+    fi
+    OPENCLAW_STATUS="installed"
+
+    local plugin_dir="$OPENCLAW_STATE_DIR/extensions/$OPENCLAW_PLUGIN_ID"
+    local plugin_detail
+    if openclaw_cli plugins list --json 2>/dev/null |
+        grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"$OPENCLAW_PLUGIN_ID\""; then
+        plugin_detail="listed by openclaw plugins list"
+    elif [ -d "$plugin_dir" ]; then
+        plugin_detail="$plugin_dir"
+    else
+        OPENCLAW_DETAIL="plugin missing (not listed by openclaw plugins list, no $plugin_dir)"
+        return 1
+    fi
+
+    local reason
+    reason=$(OPENCLAW_CONFIG="$OPENCLAW_STATE_DIR/openclaw.json" \
+        OPENCLAW_PLUGIN_ID="$OPENCLAW_PLUGIN_ID" \
+        python3 - <<'PYCHECK' 2>/dev/null
 import json, os
-cfg=json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
-entries=cfg.get('plugins',{}).get('entries',{})
-assert 'tokenless' in entries and entries['tokenless'].get('enabled'), 'not enabled'
-assert entries['tokenless'].get('config',{}).get('post_tool_enabled', True), 'PostTool disabled'
-" 2>/dev/null; then
-    pass "OpenClaw 插件已启用且 PostTool 配置正确"
-else
-    fail "OpenClaw 插件配置异常"
+
+path = os.environ["OPENCLAW_CONFIG"]
+plugin_id = os.environ["OPENCLAW_PLUGIN_ID"]
+try:
+    with open(path) as handle:
+        cfg = json.load(handle)
+except OSError as exc:
+    print("cannot read %s: %s" % (path, exc))
+    raise SystemExit
+except ValueError as exc:
+    print("%s is not valid JSON: %s" % (path, exc))
+    raise SystemExit
+entries = cfg.get("plugins", {}).get("entries", {})
+entry = entries.get(plugin_id)
+if entry is None:
+    print("%s has no plugins.entries.%s (present entries: %s)"
+          % (path, plugin_id, ", ".join(sorted(entries)) or "none"))
+elif not entry.get("enabled"):
+    print("plugins.entries.%s.enabled is false" % plugin_id)
+elif not entry.get("config", {}).get("post_tool_enabled", True):
+    print("plugins.entries.%s.config.post_tool_enabled is false" % plugin_id)
+PYCHECK
+)
+    if [ -n "$reason" ]; then
+        OPENCLAW_STATUS="disabled"
+        OPENCLAW_DETAIL="$reason"
+        return 1
+    fi
+    OPENCLAW_STATUS="ready"
+    OPENCLAW_DETAIL="plugin enabled with PostTool configured ($plugin_detail, state dir $OPENCLAW_STATE_DIR)"
+    return 0
+}
+
+# TOKENLESS_TOON_FULL_LIVE=1 is an explicit request for the real model calls. Refuse to
+# start when a prerequisite for them is missing: skipping scenario 3 and exiting 0 would
+# report success for a validation that never ran.
+require_live_prerequisites() {
+    local missing=0
+    if [ -z "$TIMEOUT_BIN" ]; then
+        echo -e "${RED}ERROR: $TIMEOUT_DETAIL${NC}"
+        echo "Scenario 3 bounds every model call with timeout. Install coreutils, or unset TOKENLESS_TOON_FULL_LIVE to skip the live calls."
+        missing=1
+    fi
+    if [ "$OPENCLAW_STATUS" != "ready" ]; then
+        echo -e "${RED}ERROR: OpenClaw is not ready: $OPENCLAW_DETAIL${NC}"
+        echo "Install and enable the plugin (src/tokenless/adapters/tokenless/openclaw/scripts/install.sh), or unset TOKENLESS_TOON_FULL_LIVE to skip the live calls."
+        missing=1
+    fi
+    [ "$missing" -eq 0 ] || exit 1
+}
+
+require_matching_cli
+resolve_timeout_bin || true
+resolve_hook_dir || true
+probe_openclaw || true
+if [ "${TOKENLESS_TOON_FULL_LIVE:-0}" = "1" ]; then
+    require_live_prerequisites
 fi
 
-# 检查统一 PostTool hook
-if [ -f /usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py ]; then
-    pass "COSH PostTool hook 已安装"
+# ========== Environment check ==========
+section "Environment check"
+
+info "tokenless $(tokenless --version 2>/dev/null | awk '{print $2}') @ $(command -v tokenless)"
+pass "tokenless available and built from this checkout"
+pass "jq available ($(jq --version 2>/dev/null))"
+
+if [ -n "$HOOK_DIR" ]; then
+    pass "common hooks directory available ($HOOK_DIR)"
 else
-    fail "COSH PostTool hook 缺失"
+    skip "common hooks directory unavailable: $HOOK_DIR_DETAIL - scenario 2 will be skipped"
 fi
 
-# ========== 场景 1: Tokenless CLI ==========
-section "场景 1: Tokenless CLI"
-
-scenario "1.1 基础编码/解码"
-
-# 简单对象
-result=$(echo '{"name":"Alice","age":30,"active":true}' | tokenless compress-toon 2>/dev/null)
-assert_not_empty "$result" "简单对象编码"
-assert_contains "$result" "name: Alice" "简单对象 - name"
-assert_contains "$result" "age: 30" "简单对象 - age"
-
-# 解码往返
-roundtrip=$(echo "$result" | tokenless decompress-toon 2>/dev/null)
-assert_not_empty "$roundtrip" "简单对象解码"
-if echo "$roundtrip" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['name']=='Alice' and d['age']==30" 2>/dev/null; then
-    pass "往返转换数据一致"
+if [ -n "$TIMEOUT_BIN" ]; then
+    pass "GNU timeout available for the scenario 3 live calls ($TIMEOUT_BIN)"
 else
-    fail "往返转换数据不一致"
+    skip "$TIMEOUT_DETAIL - scenario 3 live calls cannot be bounded"
 fi
 
-scenario "1.2 表格数据压缩"
+if [ "$OPENCLAW_STATUS" = "ready" ]; then
+    pass "OpenClaw $OPENCLAW_DETAIL"
+    if [ "${TOKENLESS_TOON_FULL_LIVE:-0}" = "1" ]; then
+        info "TOKENLESS_TOON_FULL_LIVE=1 - scenario 3 will make real model calls"
+    else
+        skip "TOKENLESS_TOON_FULL_LIVE=1 not set - scenario 3 live model calls will not run"
+    fi
+else
+    skip "OpenClaw not ready: $OPENCLAW_DETAIL - scenario 3 will be skipped"
+fi
+
+# ========== Scenario 1: Tokenless CLI ==========
+section "Scenario 1: Tokenless CLI"
+
+# compress-toon applies a 500-character gate by default (MIN_TOON_CHARS, the same
+# threshold the hook layer uses) and passes shorter payloads through byte for byte; a
+# payload whose estimated token count does not drop is passed through even with the gate
+# off. The small fixtures below therefore pass --min-toon-chars 0 explicitly so their
+# assertions actually reach the encoder. The gate and the passthrough contract itself
+# are covered by 1.8.
+TOON_FORCE=(--min-toon-chars 0)
+
+scenario "1.1 basic encode/decode"
+
+# Simple object
+simple='{"name":"Alice","age":30,"active":true}'
+result=$(printf '%s' "$simple" | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+assert_not_empty "$result" "simple object encodes"
+assert_contains "$result" "name: Alice" "simple object - name"
+assert_contains "$result" "age: 30" "simple object - age"
+
+# Decode round-trip
+roundtrip=$(printf '%s' "$result" | tokenless decompress-toon 2>/dev/null)
+assert_not_empty "$roundtrip" "simple object decodes"
+if printf '%s' "$roundtrip" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['name']=='Alice' and d['age']==30" 2>/dev/null; then
+    pass "round-trip preserves the data"
+else
+    fail "round-trip does not preserve the data"
+fi
+
+scenario "1.2 tabular data compression"
 
 json='{"users":[{"id":1,"name":"Alice","email":"alice@example.com","role":"admin"},{"id":2,"name":"Bob","email":"bob@example.com","role":"user"},{"id":3,"name":"Charlie","email":"charlie@example.com","role":"moderator"},{"id":4,"name":"Diana","email":"diana@example.com","role":"admin"},{"id":5,"name":"Eve","email":"eve@example.com","role":"user"}]}'
-toon_out=$(echo "$json" | tokenless compress-toon 2>/dev/null)
+toon_out=$(printf '%s' "$json" | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
 json_len=${#json}
 toon_len=${#toon_out}
 savings=$(( (json_len - toon_len) * 100 / json_len ))
-info "  JSON: $json_len chars → TOON: $toon_len chars (${savings}% 压缩率)"
+info "  JSON: $json_len chars -> TOON: $toon_len chars (${savings}% saved)"
 if [ "$savings" -ge 15 ]; then
-    pass "表格数据压缩率 >= 15%"
+    pass "tabular data saves >= 15%"
 else
-    fail "表格数据压缩率 < 15% (${savings}%)"
+    fail "tabular data saves < 15% (${savings}%)"
 fi
-assert_contains "$toon_out" "users[5]" "表格数组头部正确"
+assert_contains "$toon_out" "users[5]" "tabular array header is correct"
 
-scenario "1.3 深度嵌套数据"
+scenario "1.3 deeply nested data"
 
 nested='{"data":{"users":[{"id":1,"profile":{"name":"Alice","age":30,"address":{"city":"Beijing","country":"CN"}}},{"id":2,"profile":{"name":"Bob","age":25,"address":{"city":"Shanghai","country":"CN"}}}],"meta":{"total":2,"page":1,"hasNext":false}}}'
-toon_out=$(echo "$nested" | tokenless compress-toon 2>/dev/null)
+toon_out=$(printf '%s' "$nested" | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
 json_len=${#nested}
 toon_len=${#toon_out}
-savings=$(( (json_len - toon_len) * 100 / json_len ))
-info "  JSON: $json_len chars → TOON: $toon_len chars (${savings}% 压缩率)"
-# 深度嵌套非表格数据 TOON 可能不压缩（TOON 优化目标是表格型数据）
-pass "深度嵌套数据 TOON 编码完成（非表格结构不保证压缩）"
+info "  JSON: $json_len chars -> TOON: $toon_len chars"
+assert_not_empty "$toon_out" "deeply nested data encodes"
+if [ "$toon_out" = "$nested" ]; then
+    # A non-tabular shape yields no estimated token savings, so the contract passes it
+    # through byte for byte. Such output must not be fed to decompress-toon (it only
+    # accepts TOON); the passthrough round-trip is covered by 1.7 and 1.8.
+    pass "deeply nested data has no token savings -> byte-for-byte passthrough (non-tabular shapes are not guaranteed to shrink)"
+else
+    nested_rt=$(printf '%s' "$toon_out" | tokenless decompress-toon 2>/dev/null)
+    assert_contains "$nested_rt" '"city"' "deeply nested round-trip decodes"
+fi
 
-scenario "1.4 大体积 JSON 压缩"
+scenario "1.4 large JSON compression"
 
-# 生成一个较大的 JSON（模拟 API 响应）
+# Build a larger JSON (an API-response shaped payload) that exceeds the default gate, so
+# this case goes through the default arguments.
 python3 -c "
 import json, sys
 data = {
@@ -130,55 +414,55 @@ data = {
     'debug_info': {'query_time': 0.123, 'cache_hit': False}
 }
 json.dump(data, sys.stdout)
-" > /tmp/large_test.json
+" > "$TMP_DIR/large_test.json"
 
-large_json=$(cat /tmp/large_test.json)
+large_json=$(cat "$TMP_DIR/large_test.json")
 large_json_len=${#large_json}
-toon_out=$(echo "$large_json" | tokenless compress-toon 2>/dev/null)
+toon_out=$(printf '%s' "$large_json" | tokenless compress-toon 2>/dev/null)
 toon_len=${#toon_out}
 savings=$(( (large_json_len - toon_len) * 100 / large_json_len ))
-info "  JSON: $large_json_len chars → TOON: $toon_len chars (${savings}% 压缩率)"
+info "  JSON: $large_json_len chars -> TOON: $toon_len chars (${savings}% saved)"
 if [ "$savings" -ge 10 ]; then
-    pass "大体积 JSON 压缩率 >= 10%"
+    pass "large JSON saves >= 10%"
 else
-    fail "大体积 JSON 压缩率 < 10% (${savings}%)"
+    fail "large JSON saves < 10% (${savings}%)"
 fi
-rm -f /tmp/large_test.json
+assert_contains "$toon_out" "results[50]" "large JSON tabular header is correct"
 
-scenario "1.5 特殊类型处理"
+scenario "1.5 special value handling"
 
-# 布尔值
-result=$(echo '{"t":true,"f":false}' | tokenless compress-toon 2>/dev/null)
-assert_contains "$result" "t: true" "true 编码"
-assert_contains "$result" "f: false" "false 编码"
+# Booleans
+result=$(printf '%s' '{"t":true,"f":false}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+assert_contains "$result" "t: true" "true encodes"
+assert_contains "$result" "f: false" "false encodes"
 
-# Null
-result=$(echo '{"val":null}' | tokenless compress-toon 2>/dev/null)
-assert_contains "$result" "val: null" "null 编码"
+# Null (a single-key sample shows no estimated token savings and would pass through, so
+# add a second key to make the encoder run)
+result=$(printf '%s' '{"val":null,"keep":1}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+assert_contains "$result" "val: null" "null encodes"
 
-# 浮点数
-result=$(echo '{"pi":3.14159,"neg":-42}' | tokenless compress-toon 2>/dev/null)
-assert_contains "$result" "pi: 3.14159" "浮点数编码"
-assert_contains "$result" "neg: -42" "负数编码"
+# Floats
+result=$(printf '%s' '{"pi":3.14159,"neg":-42}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+assert_contains "$result" "pi: 3.14159" "float encodes"
+assert_contains "$result" "neg: -42" "negative number encodes"
 
-# 空数组
-result=$(echo '{"items":[]}' | tokenless compress-toon 2>/dev/null)
-assert_contains "$result" "items[0]" "空数组编码"
+# Empty array
+result=$(printf '%s' '{"items":[],"keep":1}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+assert_contains "$result" "items[0]" "empty array encodes"
 
-scenario "1.6 文件输入/输出"
+scenario "1.6 file input/output"
 
-echo '{"from":"file","value":42}' > /tmp/toon_file_test.json
-result=$(tokenless compress-toon -f /tmp/toon_file_test.json 2>/dev/null)
-assert_contains "$result" "from: file" "文件输入编码"
+echo '{"from":"file","value":42}' > "$TMP_DIR/toon_file_test.json"
+result=$(tokenless compress-toon -f "$TMP_DIR/toon_file_test.json" "${TOON_FORCE[@]}" 2>/dev/null)
+assert_contains "$result" "from: file" "file input encodes"
 
-tokenless compress-toon -f /tmp/toon_file_test.json > /tmp/toon_file_output.toon 2>/dev/null
-result=$(cat /tmp/toon_file_output.toon 2>/dev/null)
-assert_contains "$result" "from: file" "文件输出编码"
-rm -f /tmp/toon_file_test.json /tmp/toon_file_output.toon
+tokenless compress-toon -f "$TMP_DIR/toon_file_test.json" "${TOON_FORCE[@]}" > "$TMP_DIR/toon_file_output.toon" 2>/dev/null
+result=$(cat "$TMP_DIR/toon_file_output.toon" 2>/dev/null)
+assert_contains "$result" "from: file" "file output encodes"
 
-scenario "1.7 往返转换完整性"
+scenario "1.7 round-trip integrity"
 
-python3 -c "
+if python3 -c "
 import json, subprocess, sys
 
 test_cases = [
@@ -193,8 +477,10 @@ test_cases = [
 all_passed = True
 for i, case in enumerate(test_cases):
     original = json.dumps(case, sort_keys=True)
-    # Encode
-    p1 = subprocess.run(['tokenless', 'compress-toon'], input=original, capture_output=True, text=True)
+    # Encode. --min-toon-chars 0 keeps the 500-character gate out of the way so
+    # every fixture actually reaches the encoder.
+    p1 = subprocess.run(['tokenless', 'compress-toon', '--min-toon-chars', '0'],
+                        input=original, capture_output=True, text=True)
     toon_out = p1.stdout.strip()
     if p1.returncode != 0 or not toon_out:
         print(f'Case {i} ENCODE FAILED (exit {p1.returncode}): {p1.stderr.strip()}', file=sys.stderr)
@@ -217,22 +503,54 @@ for i, case in enumerate(test_cases):
         all_passed = False
 
 sys.exit(0 if all_passed else 1)
-" 2>&1
-
-if [ $? -eq 0 ]; then
-    pass "5 种数据结构往返转换全部一致"
+" 2>&1; then
+    pass "all 5 data shapes round-trip identically"
 else
-    fail "往返转换存在数据不一致"
+    fail "round-trip produced inconsistent data"
 fi
 
-# ========== 场景 2: Cosh-NG ==========
-section "场景 2: Cosh-NG Hooks"
+scenario "1.8 default gate and no-savings passthrough contract"
 
-HOOK_DIR=/usr/share/anolisa/adapters/tokenless/common/hooks
+# Under the 500-character default gate compress-toon exits 0 and echoes stdin verbatim -
+# no LF appended and none removed. Both newline variants have to hold, and that is
+# exactly what a command substitution cannot express, so compare the files.
+short='{"name":"Alice","age":30,"active":true}'
+printf '%s' "$short" > "$TMP_DIR/gate-short.json"
+printf '%s\n' "$short" > "$TMP_DIR/gate-short-newline.json"
+assert_passthrough_bytes "short payload (${#short} chars < 500), no trailing newline" \
+    "$TMP_DIR/gate-short.json" ""
+assert_passthrough_bytes "short payload (${#short} chars < 500), trailing newline" \
+    "$TMP_DIR/gate-short-newline.json" ""
 
-scenario "2.1 响应压缩 → TOON 流水线"
+# Gate off but no estimated token savings: passthrough as well. TOON indents nested
+# objects, so a deep single-value shape costs more tokens than its JSON spelling and is
+# left alone regardless of the trailing newline.
+no_savings='{"a":{"b":{"c":{"d":{"e":1}}}}}'
+printf '%s' "$no_savings" > "$TMP_DIR/gate-no-savings.json"
+printf '%s\n' "$no_savings" > "$TMP_DIR/gate-no-savings-newline.json"
+assert_passthrough_bytes "no-savings payload with --min-toon-chars 0, no trailing newline" \
+    "$TMP_DIR/gate-no-savings.json" "0"
+assert_passthrough_bytes "no-savings payload with --min-toon-chars 0, trailing newline" \
+    "$TMP_DIR/gate-no-savings-newline.json" "0"
 
-payload=$(cat <<'EOF'
+# Over the gate: the default arguments encode (the fixture is the large JSON from 1.4).
+long_json=$(cat "$TMP_DIR/large_test.json")
+long_out=$(printf '%s' "$long_json" | tokenless compress-toon 2>/dev/null)
+if [ "${#long_json}" -ge 500 ] && [ -n "$long_out" ] && [ "$long_out" != "$long_json" ]; then
+    pass "long payload (${#long_json} chars >= 500) encodes by default"
+else
+    fail "long payload was not encoded by default"
+fi
+
+# ========== Scenario 2: Cosh-NG ==========
+section "Scenario 2: Cosh-NG hooks"
+
+scenario "2.1 response compression -> TOON pipeline"
+
+if [ -z "$HOOK_DIR" ]; then
+    skip "common hooks directory unavailable ($HOOK_DIR_DETAIL), scenario 2 skipped"
+else
+    payload=$(cat <<'EOF'
 {
   "tool_name": "web_fetch",
   "tool_response": {
@@ -258,33 +576,40 @@ payload=$(cat <<'EOF'
 EOF
 )
 
-result=$(
-    echo "$payload" |
-        COSH_NG_VERSION=0.5.0 python3 "$HOOK_DIR/compress_response_hook.py" \
-            --agent-id copilot-shell 2>/dev/null
-)
-assert_not_empty "$result" "Response→TOON 流水线输出"
-context=$(echo "$result" | jq -r '.hookSpecificOutput.updatedToolResponse')
-assert_contains "$context" "data[10]" "流水线产出 TOON 表格内容"
-if echo "$context" | grep -qE "\[tokenless\]|TOON format"; then
-    fail "流水线 updatedToolResponse 仍包含已废弃的标签前缀"
-else
-    pass "流水线 updatedToolResponse 已去除标签前缀"
+    result=$(
+        printf '%s' "$payload" |
+            COSH_NG_VERSION=0.5.0 python3 "$HOOK_DIR/compress_response_hook.py" \
+                --agent-id copilot-shell 2>/dev/null
+    )
+    assert_not_empty "$result" "response -> TOON pipeline produces output"
+    context=$(printf '%s' "$result" | jq -r '.hookSpecificOutput.updatedToolResponse')
+    assert_contains "$context" "data[10]" "pipeline emits TOON tabular content"
+    if printf '%s' "$context" | grep -qE "\[tokenless\]|TOON format"; then
+        fail "pipeline updatedToolResponse still carries the removed tag prefix"
+    else
+        pass "pipeline updatedToolResponse has no tag prefix"
+    fi
+    # Verify the JSON cleanup drops empty-valued fields
+    if printf '%s' "$context" | grep -qE "null_field|empty_obj|empty_arr"; then
+        fail "response compression kept empty-valued fields"
+    else
+        pass "response compression removed empty-valued fields"
+    fi
 fi
-# 验证 JSON 清理移除空值字段
-if echo "$context" | grep -qE "null_field|empty_obj|empty_arr"; then
-    fail "Response 压缩未移除空值字段"
+
+# ========== Scenario 3: OpenClaw ==========
+section "Scenario 3: OpenClaw agent"
+
+scenario "3.1 OpenClaw plugin state verification"
+
+if [ "$OPENCLAW_STATUS" != "ready" ]; then
+    skip "OpenClaw is not ready, all of scenario 3 skipped (reason in the environment check)"
+elif [ "${TOKENLESS_TOON_FULL_LIVE:-0}" != "1" ]; then
+    skip "scenario 3 makes real model calls; set TOKENLESS_TOON_FULL_LIVE=1 to run it"
 else
-    pass "Response 压缩移除了空值字段"
-fi
-
-# ========== 场景 3: OpenClaw ==========
-section "场景 3: OpenClaw Agent"
-
-scenario "3.1 OpenClaw 插件状态验证"
-
-# 获取最新 session ID
-SESSION_ID=$(openclaw sessions --json 2>/dev/null | python3 -c "
+    # require_live_prerequisites already refused to start without a ready OpenClaw and a
+    # usable timeout, so every call below is bounded and really runs.
+    SESSION_ID=$(openclaw_live 60 sessions --json 2>/dev/null | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 sessions = data.get('sessions', [])
@@ -294,68 +619,73 @@ for s in sessions:
     break
 " 2>/dev/null || echo "")
 
-if [ -z "$SESSION_ID" ]; then
-    fail "无法获取 OpenClaw session ID"
-else
-    info "  使用 session: $SESSION_ID"
-
-    # 检查插件 active features
-    result=$(openclaw agent --session-id "$SESSION_ID" --message "ping" --timeout 60 2>&1 || true)
-    if echo "$result" | grep -q "toon-compression"; then
-        pass "OpenClaw 插件 TOON 压缩功能已激活"
+    if [ -z "$SESSION_ID" ]; then
+        skip "no OpenClaw session ID available (start a session with openclaw first)"
     else
-        fail "OpenClaw 插件 TOON 压缩功能未激活"
-    fi
+        info "  using session: $SESSION_ID"
 
-    # 检查所有 4 个功能
-    for feature in rtk-rewrite schema-compression response-compression toon-compression; do
-        if echo "$result" | grep -q "$feature"; then
-            pass "功能已激活: $feature"
+        # Check the plugin's active features
+        result=$(openclaw_live 180 agent --session-id "$SESSION_ID" --message "ping" --timeout 60 2>&1 || true)
+        if echo "$result" | grep -q "toon-compression"; then
+            pass "OpenClaw plugin TOON compression feature is active"
         else
-            fail "功能未激活: $feature"
+            fail "OpenClaw plugin TOON compression feature is not active"
         fi
-    done
 
-    scenario "3.2 OpenClaw 实际调用 — 结构化数据 TOON 压缩"
+        # Check all four features
+        for feature in rtk-rewrite schema-compression response-compression toon-compression; do
+            if echo "$result" | grep -q "$feature"; then
+                pass "feature active: $feature"
+            else
+                fail "feature not active: $feature"
+            fi
+        done
 
-    # 让 agent 执行返回结构化 JSON 数据的命令
-    result=$(openclaw agent --session-id "$SESSION_ID" --message "请执行 'hostname' 命令，返回 JSON" --json --timeout 120 2>&1 || true)
+        scenario "3.2 OpenClaw live call - structured data TOON compression"
 
-    if echo "$result" | grep -q '"runId"'; then
-        pass "OpenClaw agent 调用已执行"
-    else
-        fail "OpenClaw agent 调用未执行"
-    fi
+        # Let the agent run a command that returns structured JSON data
+        result=$(openclaw_live 300 agent --session-id "$SESSION_ID" --message "Run the 'hostname' command and return the result as JSON" --json --timeout 120 2>&1 || true)
 
-    # 验证插件日志输出
-    if echo "$result" | grep -q "\[tokenless"; then
-        pass "OpenClaw 插件日志输出正常"
-    else
-        info "  (OpenClaw 插件日志未在当前输出中显示)"
-    fi
+        if echo "$result" | grep -q '"runId"'; then
+            pass "OpenClaw agent call executed"
+        else
+            fail "OpenClaw agent call did not execute"
+        fi
 
-    scenario "3.3 OpenClaw 调用 — 命令重写 + 响应压缩/TOON 链路"
+        # Verify the plugin's log output
+        if echo "$result" | grep -q "\[tokenless"; then
+            pass "OpenClaw plugin log output present"
+        else
+            info "  (OpenClaw plugin log output not shown in the current output)"
+        fi
 
-    result=$(openclaw agent --session-id "$SESSION_ID" --message "请执行 'ls /tmp' 命令，返回结果" --json --timeout 120 2>&1 || true)
+        scenario "3.3 OpenClaw call - command rewrite plus response compression/TOON chain"
 
-    if echo "$result" | grep -q '"runId"'; then
-        pass "多工具链路测试成功"
-    else
-        fail "多工具链路测试失败"
+        result=$(openclaw_live 300 agent --session-id "$SESSION_ID" --message "Run the 'ls /tmp' command and return the result" --json --timeout 120 2>&1 || true)
+
+        if echo "$result" | grep -q '"runId"'; then
+            pass "multi-tool chain test succeeded"
+        else
+            fail "multi-tool chain test failed"
+        fi
     fi
 fi
 
-# ========== 汇总 ==========
+# ========== Summary ==========
 echo ""
 echo "============================================"
-echo -e "  测试汇总: ${GREEN}${PASS}/${TOTAL} 通过${NC}, ${RED}${FAIL} 失败${NC}"
-echo -e "  覆盖场景: ${SCENARIOS} 个"
+echo -e "  Summary: ${GREEN}${PASS}/${TOTAL} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC}"
+echo -e "  Scenarios covered: ${SCENARIOS}"
 echo "============================================"
 echo ""
-echo -e "  ${CYAN}场景 1: Tokenless CLI${NC} — 编码/解码/往返/大JSON/高级选项"
-echo -e "  ${CYAN}场景 2: COSH Hooks${NC} — 独立TOON/转义unwrap/Response→TOON流水线/跳过逻辑"
-echo -e "  ${CYAN}场景 3: OpenClaw${NC} — 插件状态/agent调用/多工具链路"
+echo -e "  ${CYAN}Scenario 1: Tokenless CLI${NC} - encode/decode/round-trip/large JSON/gate and passthrough contract"
+echo -e "  ${CYAN}Scenario 2: COSH hooks${NC} - response -> TOON pipeline/tag prefix/empty-value cleanup"
+echo -e "  ${CYAN}Scenario 3: OpenClaw${NC} - plugin state/agent call/multi-tool chain (needs TOKENLESS_TOON_FULL_LIVE=1)"
 echo ""
 
 [ "$FAIL" -gt 0 ] && exit 1
-echo -e "${GREEN}所有测试通过！${NC}"
+if [ "$SKIP" -gt 0 ]; then
+    echo -e "${GREEN}Every executed case passed (${SKIP} skipped for missing prerequisites)${NC}"
+else
+    echo -e "${GREEN}All tests passed${NC}"
+fi
