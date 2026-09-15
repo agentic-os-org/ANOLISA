@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+mod audit;
 mod builtin;
 mod custom;
+mod executor;
 mod models;
 mod python_unicode;
 mod redact;
@@ -14,6 +16,8 @@ mod rules;
 mod scanner;
 mod validators;
 
+pub use audit::PiiAuditProjector;
+pub use executor::{PiiScanExecutor, PiiScanRequest};
 pub use models::{
     Coverage, CoverageStatus, CustomRuleStatus, CustomRuleSummary, PiiFinding, PiiScanOptions,
     PiiScanReport, PiiSummary, ScanError, ScanStatus, Severity, Source, Span, Verdict,

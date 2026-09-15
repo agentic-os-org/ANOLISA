@@ -198,6 +198,12 @@ pub struct PiiSummary {
     pub scanned_bytes: usize,
     /// Identifies this detector revision and active rule content.
     pub ruleset_id: String,
+    /// Input-independent execution failure message, absent on completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Stable execution error code, absent on completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
 }
 
 /// Stable public scan response, compatible with v1 Hook consumers.
@@ -219,7 +225,7 @@ pub struct PiiScanReport {
 }
 
 /// Bounded, input-independent scan errors suitable for adapter projection.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum ScanError {
     /// A zero byte limit cannot describe a meaningful prefix.
     #[error("max_bytes must be greater than zero")]
@@ -230,6 +236,17 @@ pub enum ScanError {
     /// A builtin engine failed during matching.
     #[error("builtin PII matching failed")]
     Matching,
+}
+
+impl ScanError {
+    /// Stable, input-independent code for public responses and audit projections.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidLimit => "invalid_limit",
+            Self::InvalidBuiltin => "invalid_builtin",
+            Self::Matching => "matching_failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -110,6 +110,8 @@ impl PiiScanner {
                 scanned_input_sha256: digest(text),
                 scanned_bytes: text.len(),
                 ruleset_id: self.rules.id.clone(),
+                error: None,
+                error_type: None,
             },
             findings,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -136,6 +136,11 @@ dependencies = [
 name = "asc-capability-pii-scan"
 version = "0.12.0"
 dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
+ "asc-event-sink",
+ "asc-persistence-sqlite",
+ "asc-security-events",
  "base64",
  "chrono",
  "fancy-regex",
