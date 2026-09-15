@@ -29,12 +29,7 @@ fn frozen_v1_builtin_responses_match() {
         ] {
             actual["summary"].as_object_mut().unwrap().remove(key);
         }
-        let mut expected = case["expected"].clone();
-        // Custom rules are introduced by the next migration commit.
-        expected["summary"]
-            .as_object_mut()
-            .unwrap()
-            .remove("custom_rules");
+        let expected = case["expected"].clone();
         assert_eq!(actual, expected, "v1 fixture {index}: {:?}", case["text"]);
     }
 }

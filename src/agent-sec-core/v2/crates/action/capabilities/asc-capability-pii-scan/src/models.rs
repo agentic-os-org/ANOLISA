@@ -79,6 +79,40 @@ pub struct Coverage {
     pub reasons: Vec<String>,
 }
 
+/// Startup validation state of the centralized custom configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomRuleStatus {
+    /// No optional default file was configured.
+    #[default]
+    Absent,
+    /// Every custom rule validated and compiled.
+    Loaded,
+    /// The entire custom collection is disabled; builtin rules remain active.
+    Invalid,
+}
+
+/// Safe configuration identity and request-local custom execution counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomRuleSummary {
+    /// Startup configuration state.
+    pub status: CustomRuleStatus,
+    /// Number of active custom rules.
+    pub rule_count: usize,
+    /// Number of custom matching errors or zero-width results.
+    pub runtime_error_count: usize,
+    /// The scan loop reached its 200 ms allowance.
+    pub budget_exhausted: bool,
+    /// Additional custom findings were omitted after the first 100.
+    pub truncated: bool,
+    /// Hash of the configuration bytes, when read within the file size bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruleset_sha256: Option<String>,
+    /// Input-independent configuration error code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
 /// Half-open Unicode scalar offsets, matching Python string indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Span {
@@ -150,6 +184,8 @@ pub struct PiiSummary {
     pub bytes_scanned: usize,
     /// Whether the supplied input was shortened.
     pub truncated: bool,
+    /// Configuration and execution state of the centralized custom collection.
+    pub custom_rules: CustomRuleSummary,
     /// Execution status independent of finding verdict.
     pub execution_status: ScanStatus,
     /// Input and detector completeness.

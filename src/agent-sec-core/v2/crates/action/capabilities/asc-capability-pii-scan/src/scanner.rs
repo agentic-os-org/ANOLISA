@@ -1,19 +1,20 @@
 //! Aggregate v1 findings while retaining explicit input coverage.
 
-use crate::builtin::{BuiltinDetector, PATTERNS, TYPES};
+use crate::custom;
 use crate::models::{
     Candidate, Coverage, CoverageStatus, PiiFinding, PiiScanOptions, PiiScanReport, PiiSummary,
     ScanError, ScanStatus, Severity, Verdict,
 };
 use crate::redact;
+use crate::rules::PiiRuleSet;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Reusable in-process scanner; construct once and share across requests.
 pub struct PiiScanner {
-    builtin: BuiltinDetector,
-    ruleset_id: String,
+    rules: Arc<PiiRuleSet>,
 }
 
 impl PiiScanner {
@@ -22,10 +23,12 @@ impl PiiScanner {
     /// # Errors
     /// Returns an input-independent error if the shipped patterns are invalid.
     pub fn new() -> Result<Self, ScanError> {
-        Ok(Self {
-            builtin: BuiltinDetector::new()?,
-            ruleset_id: digest(format!("pii-v2-1:{PATTERNS}:{}", TYPES.join(","))),
-        })
+        Ok(Self::with_rules(Arc::new(PiiRuleSet::builtin()?)))
+    }
+
+    /// Uses one previously loaded, immutable collection for every request.
+    pub fn with_rules(rules: Arc<PiiRuleSet>) -> Self {
+        Self { rules }
     }
 
     /// Scans text and returns the v1 response plus completeness metadata.
@@ -44,7 +47,15 @@ impl PiiScanner {
         }
         let text = &input[..boundary];
         let truncated = boundary < input.len() || options.input_truncated;
-        let findings = findings(self.builtin.detect(text)?, options);
+        let mut candidates = self.rules.builtin.detect(text)?;
+        let custom = custom::detect(text, &self.rules);
+        candidates.extend(custom.candidates);
+        let findings = findings(candidates, options);
+        let mut reasons = Vec::new();
+        if truncated {
+            reasons.push("input_truncated".to_owned());
+        }
+        reasons.extend(custom.reasons.into_iter().map(str::to_owned));
         let verdict = if findings.iter().any(|f| f.severity == Severity::Deny) {
             Verdict::Deny
         } else if findings.is_empty() {
@@ -85,23 +96,20 @@ impl PiiScanner {
                     bytes_scanned
                 },
                 truncated,
+                custom_rules: custom.summary,
                 execution_status: ScanStatus::Completed,
                 coverage: Coverage {
-                    status: if truncated {
-                        CoverageStatus::Partial
-                    } else {
+                    status: if reasons.is_empty() {
                         CoverageStatus::Complete
-                    },
-                    reasons: if truncated {
-                        vec!["input_truncated".into()]
                     } else {
-                        Vec::new()
+                        CoverageStatus::Partial
                     },
+                    reasons,
                 },
                 input_sha256: digest(input),
                 scanned_input_sha256: digest(text),
                 scanned_bytes: text.len(),
-                ruleset_id: self.ruleset_id.clone(),
+                ruleset_id: self.rules.id.clone(),
             },
             findings,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
