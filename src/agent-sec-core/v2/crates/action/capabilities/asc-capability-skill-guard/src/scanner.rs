@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Instant;
 
 pub use analyze::{AnalyzeResult, analyze};
+pub(crate) use input::EntryKind;
 pub(crate) use input::ScanTree;
 
 /// Default built-in scanner order retained by scan and baseline operations.

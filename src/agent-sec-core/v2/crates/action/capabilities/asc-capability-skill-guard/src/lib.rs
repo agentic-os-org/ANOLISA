@@ -7,13 +7,16 @@ pub mod config;
 mod filesystem;
 pub mod identity;
 pub mod integrity;
+mod ledger;
 pub mod models;
 pub mod scanner;
+pub mod service;
 
 pub use config::GuardConfig;
 pub use identity::SkillIdentity;
 pub use integrity::{FileHashes, HashDiff, KeyStore, SigningIdentity, hash_tree};
 pub use models::{DecisionAction, Finding, Manifest, ScanEntry, ScanStatus, UserDecision};
+pub use service::{ScanOptions, SkillGuardService, SkillRoot};
 
 /// Domain failures, kept separate from daemon transport errors and risk findings.
 #[derive(Debug, thiserror::Error)]

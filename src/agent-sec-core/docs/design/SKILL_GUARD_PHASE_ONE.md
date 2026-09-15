@@ -19,7 +19,7 @@ Phase-two policy integration is outside this PR.
 | --- | --- | --- | --- |
 | 1 | Types, canonical identity, system keys, Integrity | Implemented; Linux gates passed | Signature/tamper/replay checks, key permissions, source/snapshot path rules |
 | 2 | Scanner and analyze | Implemented; Linux gates passed | V1 result comparison, selection/aliases, incomplete coverage, errors, no Ledger writes |
-| 3 | Ledger and Service | Planned | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
+| 3 | Ledger and Service | Implemented; Linux gates passed | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
 | 4 | Activation | Planned | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
 | 5 | daemon, CLI and audit | Planned | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
 | 6 | SkillFS | Planned | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
@@ -160,3 +160,46 @@ Only elapsed time, engine version and language/platform diagnostic wording are n
 results and evidence are compared. Rust tests also cover scanner selection, disabled/import-only
 entries, parser fallback, aliases, invalid input, resource limits, deadlines and absence of state
 writes. Fixture generation is a developer tool; the deployed Rust binary never invokes Python.
+
+
+## Ledger and Service boundary in batch three
+
+`SkillGuardService` owns one lock per canonical Skill identity, shared by direct and resolved
+paths. Unused lock entries are discarded. A generation read lock protects operations against
+system key replacement; rotation will take the write side in batch five. Registration stores
+exact roots in private daemon state and never discovers siblings from a user-selected parent.
+Business roots cannot be inside `.skill-meta`; internal snapshot verification does not use this
+business-root entry point.
+
+Scan captures at most 2,000 regular files / 50 MiB / 10,000 directories / depth 32, excluding `.git` and `.skill-meta`.
+It scans a private staging tree, retains original symlink classifications for static findings,
+and rechecks live bytes, ordinary executable bits, directories, links and root identity after
+the temporary snapshot is written and verified, immediately before publication. Snapshots retain empty directories and strip setuid/setgid bits. A new snapshot is
+published before its signed version record and `latest.json`; each file uses an exclusive temporary
+file, fsync and atomic rename. An interrupted multi-file publication is detectable. Reconciliation
+and rollback orchestration are delivered in batch four, not claimed by this batch.
+
+Unchanged content reuses only a fully authenticated latest/version/snapshot tuple. Fill-in adds
+missing scanners; force replaces scanner results on the same version. Drift or tampering creates
+a new version linked to the newest fully verified predecessor. Both JSON and snapshot names reserve
+version slots, while an unauthenticated high number cannot force a numbering jump. `check` compares
+live hashes against the newest authenticated record without requiring snapshots. `audit` verifies
+parent signatures and optionally snapshots; unauthenticated records cannot supply public metadata.
+Without any Ledger artifacts, `check` returns `none` and an empty `audit` succeeds even before key
+initialization. These read-only queries do not create a key or Ledger; existing artifacts still
+require authentication.
+
+Export reads an authenticated snapshot and writes `snapshot/`, `manifest.json` and `findings.json`.
+The caller must first create an empty, caller-owned output directory outside Skill/state roots;
+peer UID, directory type and write permissions are checked by the service. No destination parent
+is created as root, and no symlink or existing destination file is followed or truncated. Newly
+created export files and directories are assigned to the authenticated caller so they can edit and
+remove the export. Snapshot and ledger storage remain daemon-owned. The
+`active` selector and rollback decision flow are added with Activation in batch four.
+
+`tests/reference_ledger.py` records ten V1 workflows with source hashes. The Rust tests compare
+business statuses, version IDs, scanner merging, file counts, drift lists and audit verdicts.
+Keys, manifest format and signatures intentionally differ between V1 and V2. Additional tests
+cover parallel certification, alias serialization, deadline expiry, staged-content mutation,
+missing/forged artifacts, safe export and exact registration. No daemon or Hook interface is
+registered by this batch.
