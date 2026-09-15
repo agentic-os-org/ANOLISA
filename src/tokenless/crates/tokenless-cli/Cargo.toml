@@ -17,6 +17,7 @@ tokenless-ccr = { path = "../tokenless-ccr" }
 tokenless-runtime = { path = "../tokenless-runtime" }
 dirs.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 toon-format.workspace = true
 chrono = { workspace = true, features = ["serde"] }

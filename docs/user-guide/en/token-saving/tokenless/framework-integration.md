@@ -261,7 +261,46 @@ The npm postinstall script attempts to copy adapter resources under:
 
 Confirm that this directory exists. Adapter copying is supplementary and fails open with a warning; a successful binary install can therefore exist without this copy. If it is absent, review the npm postinstall warning and prefer an anolisa-managed installation.
 
-An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
+An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it.
+
+### Quick setup with `tokenless init`
+
+After installing the npm package or building from source, run `tokenless init` to detect installed agent frameworks and guide adapter installation:
+
+```bash
+# Scan and display all framework statuses
+tokenless init --list
+
+# Install a specific adapter
+tokenless init --framework claude-code
+
+# Install all installable adapters (non-interactive)
+tokenless init --all
+
+# Interactive selection (when stdin is a terminal)
+tokenless init
+```
+
+`tokenless init` reads the adapter manifest, runs each framework's `detect.sh`, and reports whether the adapter is ready, installable, or missing prerequisites — then runs `install.sh` for the selected framework.
+
+If the adapter directory is absent, `tokenless init` exits with an error:
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+```
+
+Resolve this by installing the tokenless package first:
+
+```bash
+npm install -g anolisa-tokenless
+# or
+anolisa install tokenless
+```
+
+### Manual install scripts
+
+OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh

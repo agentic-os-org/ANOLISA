@@ -239,7 +239,46 @@ npm 的 postinstall 脚本会尝试把 Adapter 资源复制到：
 
 应确认该目录确实存在。Adapter 复制属于补充步骤，失败时只输出警告，不会让二进制安装失败；因此可能出现命令可用但这里没有资源副本的情况。目录缺失时应检查 npm postinstall 警告，并优先改用 anolisa 管理的安装。
 
-npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
+npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。
+
+### 使用 `tokenless init` 快速设置
+
+安装 npm 包或从源码构建后，运行 `tokenless init` 检测已安装的 Agent 框架并引导适配器安装：
+
+```bash
+# 扫描并显示所有框架状态
+tokenless init --list
+
+# 安装指定适配器
+tokenless init --framework claude-code
+
+# 安装所有可安装的适配器（非交互模式）
+tokenless init --all
+
+# 交互式选择（stdin 为终端时）
+tokenless init
+```
+
+`tokenless init` 读取适配器清单，运行各框架的 `detect.sh`，报告适配器状态（就绪 / 可安装 / 缺少前置依赖），然后为选定框架执行 `install.sh`。
+
+若适配器目录不存在，`tokenless init` 将报错退出：
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+```
+
+请先安装 tokenless 包再重试：
+
+```bash
+npm install -g anolisa-tokenless
+# 或
+anolisa install tokenless
+```
+
+### 手动安装脚本
+
+OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
