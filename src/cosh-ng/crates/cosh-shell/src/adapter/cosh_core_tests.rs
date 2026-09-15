@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::cosh_core::{CoshCoreAdapter, SessionRecoveryState, SessionRuntimeState};
 use super::{
     AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
-    FreshSessionOutcome,
+    CoreLiveness, FreshSessionOutcome,
 };
 use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
@@ -917,6 +917,74 @@ fn cancellable_runs_and_registry_share_one_persistent_core() {
     assert_eq!(first_info["pid"], second_info["pid"]);
     assert_eq!(first_info["turns"], 1);
     assert_eq!(second_info["turns"], 2);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The `/health` live probe must never count a short-lived `--registry`
+/// child as liveness evidence: without a persistent runtime the probe
+/// reports `NoRuntime`, not a successful short query (issue #3055).
+#[test]
+fn core_liveness_without_runtime_reports_no_runtime() {
+    let adapter = test_adapter();
+    assert_eq!(adapter.core_liveness(), CoreLiveness::NoRuntime);
+}
+
+/// A persistent core that answers a live registry query is the only state
+/// the `/health` live probe reports as `Live`.
+#[test]
+fn core_liveness_reports_live_when_persistent_core_answers() {
+    let (script, root) = persistent_mock_paths("liveness");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    std::fs::write(&gate, "ready").expect("open persistent mock gate");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(run
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    assert_eq!(adapter.core_liveness(), CoreLiveness::Live);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A persistent core that stops answering (hung registry request) yields
+/// `NoResponse` after the registry timeout — the `/health` live block then
+/// flags the degraded agent instead of silently falling back to a healthy
+/// short-lived child (issue #3055).
+#[test]
+fn core_liveness_reports_no_response_when_live_core_hangs() {
+    let (script, root) = persistent_mock_paths("liveness-hung");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    std::fs::write(&gate, "ready").expect("open persistent mock gate");
+    write_persistent_mock(&script, &gate, &started);
+    // Wrap the persistent mock so the first registry request never answers.
+    let source = std::fs::read_to_string(&script).expect("read persistent mock");
+    let hung = source.replace(
+        "printf '{\"type\":\"registry_response\",\"request_id\":\"%s\",\"success\":true,\"data\":{\"pid\":%s,\"turns\":%s,\"reloads\":%s,\"transport\":\"live\"}}\\n' \"$request_id\" \"$$\" \"$turns\" \"$reloads\"",
+        "sleep 60",
+    );
+    assert_ne!(hung, source, "registry response line must be replaced");
+    std::fs::write(&script, hung).expect("rewrite hung persistent mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(run
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    match adapter.core_liveness() {
+        CoreLiveness::NoResponse(reason) => {
+            assert!(reason.contains("timed out"), "{reason}");
+        }
+        other => panic!("expected NoResponse, got {other:?}"),
+    }
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
 }

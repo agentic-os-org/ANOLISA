@@ -19,11 +19,11 @@ const STALE_ENTRY_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Routing facts snapshot carried by a shell entry.
 ///
-/// Phase 1 carries only facts the host process observes itself: the effective
+/// Phase 1 carries facts the host process observes itself: the effective
 /// AI-enabled state, the integration mode, the assistance (routing) toggle,
-/// and the latest marker generation reported by the child shell. CNF handler
-/// ownership and recent route decisions live on the child-shell side and are
-/// not yet propagated through `ShellEnvironmentSnapshot`.
+/// and the latest marker generation reported by the child shell, plus the
+/// zsh `command_not_found_handler` ownership and the most recent routing
+/// decision observed from the child shell (no raw prompt text).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RoutingFacts {
     pub ai_enabled: bool,
@@ -32,6 +32,15 @@ pub(crate) struct RoutingFacts {
     pub assistance_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_generation: Option<u64>,
+    /// zsh `command_not_found_handler` ownership reported by the child shell:
+    /// `missing` | `native` | `wrapping-user` | `overridden` (None for bash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf_handler: Option<String>,
+    /// Most recent routing decision observed from the child shell, e.g.
+    /// `intercept:natural_language` or `fallback:natural_language` (user CNF
+    /// handler took precedence). Never carries the raw prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_route: Option<String>,
 }
 
 /// One registry entry as stored on disk. Both kinds share the shape so the
@@ -136,6 +145,7 @@ pub(crate) fn record_shell(
             integration: integration.to_string(),
             assistance_enabled: Some(assistance_enabled),
             marker_generation: None,
+            ..RoutingFacts::default()
         }),
     };
     let path = entry_path(&dir, "shell", pid);
@@ -189,6 +199,29 @@ pub(crate) fn update_assistance(enabled: bool) {
 /// Records the latest marker generation reported by the child shell.
 pub(crate) fn update_marker_generation(generation: u64) {
     update_routing(|facts| facts.marker_generation = Some(generation));
+}
+
+/// Records the zsh `command_not_found_handler` ownership reported by the
+/// child shell (`missing` | `native` | `wrapping-user` | `overridden`).
+pub(crate) fn update_cnf_handler(ownership: &str) {
+    update_routing(|facts| facts.cnf_handler = Some(ownership.to_string()));
+}
+
+/// Records the most recent routing decision observed from the child shell
+/// (category and reason, never the raw prompt).
+pub(crate) fn update_last_route(route: &str) {
+    update_routing(|facts| facts.last_route = Some(route.to_string()));
+}
+
+/// Process-local snapshot of this session's routing facts (None until
+/// [`record_shell`] ran). `/health` reads this for live facts instead of
+/// re-reading the on-disk entry.
+pub(crate) fn current_routing_facts() -> Option<RoutingFacts> {
+    shell_state().lock().ok().and_then(|state| {
+        state
+            .as_ref()
+            .and_then(|current| current.entry.routing.clone())
+    })
 }
 
 /// Best-effort removal on clean shutdown (main return, signal path, panic

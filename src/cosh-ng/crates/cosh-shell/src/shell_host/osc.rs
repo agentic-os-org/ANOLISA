@@ -562,6 +562,14 @@ impl OscParser {
             marker_sequence,
             generation,
             path: normalized,
+            // Precmd markers carry the CNF ownership; preexec markers do not,
+            // so retain the last reported value instead of clearing it.
+            cnf_handler: marker.cnf.clone().or_else(|| {
+                self.shell_environment_snapshot
+                    .as_ref()?
+                    .cnf_handler
+                    .clone()
+            }),
         };
         self.shell_environment_snapshot = Some(snapshot.clone());
         if let Some(observer) = &self.environment_observer {

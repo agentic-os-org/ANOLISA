@@ -58,6 +58,13 @@ pub(crate) struct PersistentCoshCoreRuntime {
 }
 
 impl PersistentCoshCoreRuntime {
+    /// Whether a persistent core runtime has been started, regardless of
+    /// whether it currently answers. The `/health` live probe uses this to
+    /// tell "no runtime yet" apart from "runtime exists but busy/unresponsive".
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
+
     pub(super) fn start_run(
         &self,
         run_id: String,
@@ -230,6 +237,12 @@ impl PersistentCoshCoreRuntime {
         }
         let timeout = registry_timeout(domain, action);
         Some(response_rx.recv_timeout(timeout).unwrap_or_else(|_| {
+            // The service loop releases `busy` once it processes the queued
+            // Registry command, but a hung or dead core can delay that
+            // indefinitely. Clear it here so the next probe retries the live
+            // path instead of permanently falling back to a short-lived child
+            // and reporting a dead core as healthy (issue #3055 /health probe).
+            self.busy.store(false, Ordering::SeqCst);
             Err(RegistryQueryError::Transport(
                 "live registry query timed out".to_string(),
             ))

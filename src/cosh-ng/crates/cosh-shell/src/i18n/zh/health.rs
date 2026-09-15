@@ -176,6 +176,35 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "配置服务状态异常",
         MessageId::HealthTryReasonHighLoad => "最近负载持续偏高",
         MessageId::HealthTryReasonMissingCoreCheck => "核心健康检查缺失",
+        MessageId::HealthLiveSectionTitle => "活会话",
+        MessageId::HealthLiveCoreAlive => "core：存活（live registry 响应正常）",
+        MessageId::HealthLiveCoreNoResponse => "core：无响应（{reason}）",
+        MessageId::HealthLiveCoreNoRuntime => "core：无持久运行时",
+        MessageId::HealthLiveRecovery => "恢复状态：{state}",
+        MessageId::HealthLiveRoutingFacts => {
+            "路由：ai={ai}，assistance={assistance}，integration={integration}，marker generation={generation}"
+        }
+        MessageId::HealthLiveCnfHandler => "command-not-found 处理器：{ownership}",
+        MessageId::HealthLiveLastRoute => "最近路由决策：{route}",
+        MessageId::HealthLiveRoutingHint => {
+            "live 事实未发现路由异常；若自然语言输入仍不路由，请检查 wrapper 覆盖与 marker generation"
+        }
+        MessageId::HealthFindingRouteFallback => {
+            "路由兼容性回退，非 provider 故障：{reason}"
+        }
+        MessageId::HealthFindingCoreNoResponse => "core 对 live 探测无响应：{reason}",
+        MessageId::HealthFindingRecoveryFailed => "会话恢复处于异常状态（{state}）",
+        MessageId::HealthRemediationRouteFallback => "参见排查文档的“输入路由”章节",
+        MessageId::HealthRemediationCoreNoResponse => {
+            "运行 `cosh-shell diagnostics export` 收集证据，然后重启 cosh-shell"
+        }
+        MessageId::HealthLiveReasonAiDisabled => "AI 已禁用",
+        MessageId::HealthLiveReasonAssistanceOff => "assistance（路由）已关闭",
+        MessageId::HealthLiveReasonUserCnf => "用户自定义 command-not-found handler 优先",
+        MessageId::HealthLiveReasonCnfOverridden => {
+            "command-not-found handler 在启动后被覆盖"
+        }
+        MessageId::HealthLiveReasonCnfMissing => "command-not-found handler 已被移除",
         _ => return None,
     })
 }

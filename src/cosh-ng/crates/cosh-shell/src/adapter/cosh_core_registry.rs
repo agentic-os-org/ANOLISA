@@ -32,6 +32,43 @@ impl RegistryQueryError {
     }
 }
 
+/// Outcome of the `/health` live-core probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CoreLiveness {
+    /// The persistent core answered a live registry query.
+    Live,
+    /// A persistent core exists but did not answer within the timeout:
+    /// busy inside a turn, hung, or transport broken.
+    NoResponse(String),
+    /// No persistent core runtime has been started in this session.
+    NoRuntime,
+}
+
+impl CoshCoreAdapter {
+    /// Probes the persistent core without falling back to a short-lived
+    /// child process.
+    ///
+    /// A `--registry` subprocess response proves the binary works but not
+    /// that the persistent agent process is alive, so it must never count as
+    /// liveness evidence (issue #3055 `/health` live probe).
+    pub(crate) fn core_liveness(&self) -> CoreLiveness {
+        match self
+            .runtime
+            .live_registry_query("auth", "state", Value::Null)
+        {
+            Some(Ok(_)) => CoreLiveness::Live,
+            Some(Err(error)) => CoreLiveness::NoResponse(error.into_message()),
+            None => {
+                if self.runtime.is_live() {
+                    CoreLiveness::NoResponse("core is busy in a turn".to_string())
+                } else {
+                    CoreLiveness::NoRuntime
+                }
+            }
+        }
+    }
+}
+
 impl CoshCoreAdapter {
     /// Routes registry requests through the live core, falling back before a runtime exists.
     pub fn registry_query(

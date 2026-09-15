@@ -188,6 +188,45 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "configured service state is unexpected",
         MessageId::HealthTryReasonHighLoad => "load is elevated across recent windows",
         MessageId::HealthTryReasonMissingCoreCheck => "a core health check is unavailable",
+        MessageId::HealthLiveSectionTitle => "live session",
+        MessageId::HealthLiveCoreAlive => "core: alive (live registry response)",
+        MessageId::HealthLiveCoreNoResponse => "core: no response ({reason})",
+        MessageId::HealthLiveCoreNoRuntime => "core: no persistent runtime",
+        MessageId::HealthLiveRecovery => "recovery: {state}",
+        MessageId::HealthLiveRoutingFacts => {
+            "routing: ai={ai}, assistance={assistance}, integration={integration}, marker generation={generation}"
+        }
+        MessageId::HealthLiveCnfHandler => "command-not-found handler: {ownership}",
+        MessageId::HealthLiveLastRoute => "last route: {route}",
+        MessageId::HealthLiveRoutingHint => {
+            "no routing anomaly in live facts; if natural-language input still does not route, check wrapper coverage and marker generation"
+        }
+        MessageId::HealthFindingRouteFallback => {
+            "routing compatibility fallback, not a provider failure: {reason}"
+        }
+        MessageId::HealthFindingCoreNoResponse => {
+            "core did not respond to the live probe: {reason}"
+        }
+        MessageId::HealthFindingRecoveryFailed => {
+            "session recovery is in an abnormal state ({state})"
+        }
+        MessageId::HealthRemediationRouteFallback => {
+            "see the troubleshooting guide section on input routing"
+        }
+        MessageId::HealthRemediationCoreNoResponse => {
+            "run `cosh-shell diagnostics export` to collect evidence, then restart cosh-shell"
+        }
+        MessageId::HealthLiveReasonAiDisabled => "AI is disabled",
+        MessageId::HealthLiveReasonAssistanceOff => "assistance (routing) is off",
+        MessageId::HealthLiveReasonUserCnf => {
+            "a user command-not-found handler takes precedence"
+        }
+        MessageId::HealthLiveReasonCnfOverridden => {
+            "the command-not-found handler was overridden after startup"
+        }
+        MessageId::HealthLiveReasonCnfMissing => {
+            "the command-not-found handler was removed"
+        }
         _ => return None,
     })
 }

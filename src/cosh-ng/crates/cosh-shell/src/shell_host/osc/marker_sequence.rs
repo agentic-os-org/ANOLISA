@@ -91,6 +91,9 @@ pub(super) struct Marker {
     /// Handoff claim token echoed by the approved handoff marker pair.
     #[serde(alias = "x")]
     pub(super) handoff: Option<String>,
+    /// zsh `command_not_found_handler` ownership (precmd markers only):
+    /// `missing` | `native` | `wrapping-user` | `overridden`.
+    pub(super) cnf: Option<String>,
 }
 
 impl Marker {

@@ -227,6 +227,9 @@ pub(crate) fn run_raw(
         let snapshot_publisher = inline_state.shell_rewrite.start_worker();
         config.set_shell_environment_observer(move |snapshot| {
             crate::diagnostics::run_registry::update_marker_generation(snapshot.generation);
+            if let Some(ownership) = snapshot.cnf_handler.as_deref() {
+                crate::diagnostics::run_registry::update_cnf_handler(ownership);
+            }
             snapshot_publisher.publish(snapshot);
         });
         if startup_health_scan_enabled_for_env(&cosh_config.health) {
