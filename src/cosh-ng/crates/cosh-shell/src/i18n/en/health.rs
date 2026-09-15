@@ -245,10 +245,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::DoctorLogsNoFiles => "no log files",
         MessageId::DoctorCrashesLine => "crashes: {count} in the last 24h{detail}",
         MessageId::DoctorExportHint => {
-            "next step: run `cosh-shell diagnostics export` to collect a redacted evidence bundle"
+            "next step: run `cosh-shell diagnostics export` to collect a redacted evidence bundle (see docs/user-guide/en/user-entrypoint/cosh-ng/troubleshooting.md)"
         }
         MessageId::HelpDiagnosticsHint => {
-            "Troubleshooting: run /health inside the session, or `cosh-shell doctor` after exit"
+            "Troubleshooting: run /health inside the session, or `cosh-shell doctor` after exit; see docs/user-guide/en/user-entrypoint/cosh-ng/troubleshooting.md"
         }
         _ => return None,
     })

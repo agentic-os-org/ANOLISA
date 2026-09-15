@@ -223,10 +223,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::DoctorLogsNoFiles => "无日志文件",
         MessageId::DoctorCrashesLine => "崩溃：24h 内 {count} 起{detail}",
         MessageId::DoctorExportHint => {
-            "下一步：运行 `cosh-shell diagnostics export` 收集脱敏证据包"
+            "下一步：运行 `cosh-shell diagnostics export` 收集脱敏证据包（排查指引见 docs/user-guide/zh/user-entrypoint/cosh-ng/troubleshooting.md）"
         }
         MessageId::HelpDiagnosticsHint => {
-            "遇到问题：先在会话内运行 /health，或退出后运行 `cosh-shell doctor`"
+            "遇到问题：先在会话内运行 /health，或退出后运行 `cosh-shell doctor`；排查指引见 docs/user-guide/zh/user-entrypoint/cosh-ng/troubleshooting.md"
         }
         _ => return None,
     })

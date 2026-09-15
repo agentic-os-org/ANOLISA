@@ -12,6 +12,7 @@ use the task-based links below for the feature or command you need.
 - [Model providers](core/providers.md) — configure authentication and select a provider.
 - [Configuration](configuration.md) — review files, settings, and precedence.
 - [Supported platforms](supported-distros.md) — check package and service backends.
+- [Troubleshooting](troubleshooting.md) — diagnose silent exits, leftover cores, and unresponsive input.
 
 ## Work in the terminal
 
