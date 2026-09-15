@@ -131,6 +131,7 @@ stage_payload() {
     # these dispatchers by symlink, so raw packages must carry regular files.
     materialize_hook "$stage" "claude-code/hooks/run-hook.sh"
     materialize_hook "$stage" "qwencode/hooks/run-hook.sh"
+    materialize_hook "$stage" "workbuddy/hooks/run-hook.sh"
 
     install -p -m 0644 \
         "$adapters/common/cosh-extension.json" \

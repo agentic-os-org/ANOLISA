@@ -176,3 +176,14 @@ dest = "{datadir}/adapters/{component}/qwencode/"
 
 [adapters.bundle]
 entry = "qwen-extension.json"
+
+# WorkBuddy (Tencent CodeBuddy) lifecycle-script adapter. Like OpenCode it
+# ships detect/install/uninstall scripts instead of a plugin bundle and is
+# not registered with the `anolisa adapter enable` driver set; the entry
+# exists so raw installs lay the scripts and hooks beside the other
+# adapters, which is what the user guide's
+# `bash .../adapters/tokenless/workbuddy/scripts/install.sh` path assumes.
+[[adapters]]
+framework = "workbuddy"
+source = "adapters/workbuddy"
+dest = "{datadir}/adapters/{component}/workbuddy/"

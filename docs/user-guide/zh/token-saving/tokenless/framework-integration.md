@@ -19,6 +19,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
+| WorkBuddy | `workbuddy` | 已硬关闭 | 默认透传 Bash 输入；设置 `TOKENLESS_WORKBUDDY_AUTO_ALLOW=1` 后才通过 `modifiedInput` 替换 | 在 CodeBuddy Code CLI 宿主上替换输出；其他 WorkBuddy 宿主原样透传 | 在响应压缩后尝试 | — |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -29,6 +30,9 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 `additionalContext` 是追加型 Hook 字段。共享 Hook 不会把压缩副本放入其中，否则原文
 仍然可见，总 Context 反而增加；该字段只用于追加环境错误指引。统计记录只能证明压缩候选
 内容变小了，不能单独证明宿主已经从模型请求中移除原文。
+
+WorkBuddy 当前使用下文说明的随附生命周期脚本，本版本尚未把它注册到
+`anolisa adapter enable` 的驱动集合。
 
 ## Adapter 处理规则
 
@@ -351,6 +355,29 @@ SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的
 透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，且保留结果头部（最近两条工具结果 50000 字节，更早的 3000
 字节，溢出部分写入 `tool_results/`），因此压缩结果末尾的恢复指令只在结果未超出该预算时可见；被省略的内容仍可用
 `tokenless retrieve` 从 Stash 取回。统计记录按 QwenPaw 工作区写入 `<workspace>/.tokenless`，运行 `tokenless stats list --data-dir` 时指向该目录。
+
+### WorkBuddy
+
+WorkBuddy（腾讯 CodeBuddy）的各产品形态共用同一套 Hook 协议：CodeBuddy Code CLI、WorkBuddy 桌面版（IDE）与 WorkBuddy 企业版都读取用户级 `~/.codebuddy/settings.json` 中的 `hooks` 键，其结构沿用 Claude Code 的 matcher 组形态。较新的 CodeBuddy CLI 版本虽然也提供了插件系统，但 `settings.json` Hook 仍是唯一同时覆盖三种宿主的集成面，因此随附的生命周期脚本把 Tokenless Hook 组合并进该文件：
+
+```bash
+# 先通过 `make -C src/tokenless install`（或 RPM）安装 Adapter 资源，然后：
+make -C src/tokenless workbuddy-install
+# 或直接运行脚本：
+bash ~/.local/share/anolisa/adapters/tokenless/workbuddy/scripts/install.sh
+# 移除：
+bash ~/.local/share/anolisa/adapters/tokenless/workbuddy/scripts/uninstall.sh
+```
+
+用户已有的 Hook 配置和其他所有设置键都会被保留；卸载脚本只移除 Tokenless 自己的条目。两个脚本都通过临时文件改写 `settings.json`，且从不放宽已有文件的权限位——`.codebuddy` 目录可能存放凭据（官方支持在 `settings.json.env` 中保存 `CODEBUDDY_API_KEY` 与认证 token）；新建的 `settings.json` 默认使用 `0600`。
+
+命令重写 Hook 输出 WorkBuddy 的 `modifiedInput` 部分字段覆盖，并同时返回官方 PreToolUse 契约要求参数修改生效所必须的 `permissionDecision: "allow"`（契约的故障排查明确：其他任何决策下工具都按原参数执行）。由于 `allow` 会绕过宿主的权限确认，Hook 只在重写获得背书时才输出它。Protocol v2 将 rtk 执行移入 Tokenless Core，而 Core 向 Hook 上报时刻意不区分 Allow 判定（rtk 权限规则批准）与 Ask/Default 判定（未背书），Hook 因此无法证明重写已获背书。WorkBuddy 契约无法把 `modifiedInput` 与确认弹窗组合使用（输出 `ask` 时参数修改会被静默丢弃），因此默认情况下，Hook 原样透传原始命令，保留宿主自身的权限流程。愿意跳过宿主确认运行重写的用户可以设置 `TOKENLESS_WORKBUDDY_AUTO_ALLOW=1`，此时 Hook 输出重写及 `allow`，决策原因中会明确记录该绕过。响应压缩在 CodeBuddy Code CLI 宿主下通过 `updatedToolOutput` 整体替换工具结果；CLI 宿主由多信号组合识别，且每个信号都向非 CLI 方向保守失败：`CODEBUDDY_FORCE_HEADLESS_BUNDLE`（自 CLI 2.136.0 起由 WorkBuddy 宿主在启动 headless bundle 前设置）是宿主持有的正向证据；`CODEBUDDY_SESSION_KIND=daemon` 标记常驻 daemon 工作进程（官方 Daemon Mode 参考将该变量记载为 worker 类型，`daemon start` fork 的常驻子进程会在参数前补 `--serve`）；进程祖先中的 CLI 二进制（`codebuddy` / `codebuddy-code` / `cbc`）若携带托管 sidecar 标志（`--prewarm` / `--prewarm-force` / `--teammate-mode`），即使在早于该 marker 的产物中也属于被托管的 headless 进程；不携带这些托管信号的 CLI 二进制祖先即为独立 CLI。此处刻意不要求控制终端——受支持的 headless 形态（用于 CI/CD 与 stdin 管道的 `-p` / `--print`，以及 `--acp`、`--bg` 和用户自启的 `--serve` Web UI）本来就没有 TTY，CLI Hooks 契约在这些场景下同样支持 `updatedToolOutput`。`--serve` 刻意不作为宿主证据：官方 Web UI 参考记载用户直接以 `codebuddy --serve` 启动 Web UI，该形态是独立 CLI 会话；参数形态完全相同的常驻 daemon 子进程改由上述 daemon 会话类型区分。除 `daemon` 之外的会话类型（`interactive` / `bg` / 未声明）绝不作为宿主证据——独立 CLI 自己的会话也会声明它们（如 `codebuddy --bg` 声明 `bg`）。marker 缺失绝不会被当作独立 CLI 的证明：它自 CLI 2.136.0 才存在，而声明的支持范围从 1.16.0 开始，更早的产物已经携带托管模式；早于 marker 且不携带上述任何托管信号的 sidecar 形态会按 CLI 处理——这是良性的，因为这类 bundle 执行的是同一份 CLI Hooks 契约。`CODEBUDDY_PROJECT_DIR` 同样无法区分，IDE Hooks 参考也为 IDE Hook 脚本列出了该变量（CLI 的 Hook 能力要求 CodeBuddy Code v1.16.0 及以上版本）。宿主分类在任何压缩动作之前完成，非 CLI 宿主不会承担压缩子进程延迟，也不会产生压缩统计或 stash 记录。IDE 与企业版宿主的 PostToolUse 契约只定义了追加式的 `additionalContext`，原始工具结果会保留，经由它压缩反而会让上下文变长，因此在这些宿主上压缩被禁用，只交付真正追加式的环境归因诊断。安装或移除后请重启 WorkBuddy/CodeBuddy；CodeBuddy CLI 的 `/hooks` 面板可能会要求你先审核外部添加的 Hook 才会生效。
+
+生命周期脚本由 `make -C src/tokenless install`、RPM、npm 的 postinstall 复制，以及 raw 方式的 `anolisa install` 组件契约安装——契约中的 `workbuddy` `[[adapters]]` 条目会把本 Adapter 目录与其他 Adapter 一起铺设。WorkBuddy 仍没有内置 anolisa 驱动，本版本也未注册进 `anolisa adapter enable`；请通过生命周期脚本安装或移除 Hook。
+
+`scripts/detect.sh` 是只读脚本，采用与其他生命周期 Adapter 一致的三态退出码汇报状态：`0` = 已检测到 WorkBuddy/CodeBuddy 且 Tokenless Hook 已安装；`1` = 已检测到但 Hook 尚未安装；`2` = 缺少前置条件。缺少 `~/.codebuddy` 视为未安装 WorkBuddy/CodeBuddy，`detect.sh` 返回 `2`；而 `install.sh` 对同样情况做优雅跳过（输出提示并以 `0` 退出），因此在没有 WorkBuddy 的主机上运行生命周期脚本不会失败。本版本中，缺少 `tokenless` 或 `rtk` 二进制同样按前置条件缺失（退出码 `2`）上报。
+
+RPM 卸载钩子（`%preun`）以 root 身份运行，因此只会清理 root 用户的 `~/.codebuddy/settings.json`。在多用户主机上，其他用户需要自行运行 `uninstall.sh`。
 
 ## AgentScope 框架集成
 

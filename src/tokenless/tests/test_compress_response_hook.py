@@ -16,15 +16,32 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import select
 import stat
 import subprocess
 import sys
 import shutil
 import tempfile
 import textwrap
+import time
 import types
 import unittest
 from unittest import mock
+
+# ``fcntl``, ``pty`` and ``termios`` are POSIX-only, and so is ``select.poll``.
+# Only the pty-based host-classification tests need them, and each of those is
+# guarded by ``skipIf(os.name == "nt" or pty is None, ...)``. Import them
+# defensively: an unconditional top-level import would make module collection
+# itself fail on a non-POSIX host, which defeats every skipIf guard below
+# (the whole file errors out instead of skipping).
+try:
+    import fcntl
+    import pty
+    import termios
+except ImportError:  # non-POSIX
+    fcntl = None
+    pty = None
+    termios = None
 
 
 def _make_large_json_payload(char_target: int = 500) -> dict:
@@ -173,27 +190,17 @@ def _create_mock_claude(tmpdir: str, version: str = "2.1.121") -> str:
     return mock_script
 
 
-def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
-              isolated_home: str = None) -> dict:
-    """Run the hook as a subprocess with mocked tokenless binary.
-
-    Args:
-        stdin_data: JSON payload to feed to the hook via stdin.
-        agent_id: The adapter agent ID (e.g. "claude-code").
-        mock_tokenless_path: Path to the mock tokenless binary.
-        isolated_home: Temporary HOME directory for the subprocess to avoid
-            touching the caller's ~/.tokenless state.
-
-    Returns:
-        Parsed JSON output dict from the hook, or a dict with ``_subprocess_error``
-        key when the hook exits non-zero.
-    """
+def _hook_script_path() -> str:
     hooks_dir = os.path.normpath(os.path.join(
         os.path.dirname(__file__),
         os.pardir, "adapters", "tokenless", "common", "hooks",
     ))
-    hook_path = os.path.join(hooks_dir, "compress_response_hook.py")
+    return os.path.join(hooks_dir, "compress_response_hook.py")
 
+
+def _build_hook_env(agent_id: str, mock_tokenless_path: str,
+                    isolated_home: str = None, extra_env: dict = None) -> dict:
+    """Build the environment for a hook subprocess (shared with pty runs)."""
     env = os.environ.copy()
     env["TOKENLESS_AGENT_ID"] = agent_id
     if agent_id == "cosh-ng":
@@ -202,9 +209,47 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
     # Isolate HOME so hook doesn't read/write ~/.tokenless/.claude-version
     if isolated_home:
         env["HOME"] = isolated_home
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
+              isolated_home: str = None, extra_env: dict = None,
+              ancestor_cmd: str = None, ancestor_args: list = None) -> dict:
+    """Run the hook as a subprocess with mocked tokenless binary.
+
+    Args:
+        stdin_data: JSON payload to feed to the hook via stdin.
+        agent_id: The adapter agent ID (e.g. "claude-code").
+        mock_tokenless_path: Path to the mock tokenless binary.
+        isolated_home: Temporary HOME directory for the subprocess to avoid
+            touching the caller's ~/.tokenless state.
+        extra_env: Extra environment variables for the hook subprocess; a
+            None value removes the variable from the inherited environment.
+        ancestor_cmd: Optional executable that runs the hook as its child,
+            placing itself in the hook's process ancestry (used to exercise
+            the WorkBuddy CLI host discriminator).
+        ancestor_args: Extra argv entries handed to ancestor_cmd before the
+            hook command (e.g. hosted-mode flags such as ``--serve``).
+
+    Returns:
+        Parsed JSON output dict from the hook, or a dict with ``_subprocess_error``
+        key when the hook exits non-zero.
+    """
+    hook_path = _hook_script_path()
+    env = _build_hook_env(agent_id, mock_tokenless_path, isolated_home,
+                          extra_env)
+
+    cmd = [sys.executable, hook_path]
+    if ancestor_cmd:
+        cmd = [ancestor_cmd] + list(ancestor_args or []) + cmd
 
     proc = subprocess.run(
-        [sys.executable, hook_path],
+        cmd,
         input=json.dumps(stdin_data),
         capture_output=True,
         text=True,
@@ -230,6 +275,110 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
         return json.loads(stdout)
     except json.JSONDecodeError:
         return {"_raw_stdout": stdout, "_stderr": proc.stderr}
+
+
+def _run_hook_in_pty(stdin_data: dict, env: dict, cmd: list) -> dict:
+    """Run the hook pipeline inside a fresh controlling terminal.
+
+    The child gets a new session whose controlling terminal is the pty —
+    the shape of an interactive CLI session, so the hook's ancestor walk
+    observes a controlling terminal on the CLI process regardless of
+    whether the test runner itself has one. Echo and output
+    post-processing are disabled before any data flows, and the hook's
+    stderr goes to /dev/null so only its stdout JSON is captured.
+
+    Callers guard with ``skipIf(os.name == "nt" or pty is None, ...)``; the
+    check below keeps an unguarded caller skipping instead of raising
+    ``AttributeError`` on a host without the POSIX modules.
+    """
+    if (
+        pty is None
+        or fcntl is None
+        or termios is None
+        or not hasattr(select, "poll")
+        or not hasattr(os, "fork")
+    ):
+        raise unittest.SkipTest("pty-based host classification needs POSIX")
+    payload = (json.dumps(stdin_data) + "\n").encode()
+    master_fd, slave_fd = pty.openpty()
+    attrs = termios.tcgetattr(slave_fd)
+    attrs[3] &= ~termios.ECHO   # payload must not bounce into the stream
+    attrs[1] &= ~termios.OPOST  # keep the hook's JSON byte-exact
+    termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    child_pid = os.fork()
+    if child_pid == 0:
+        try:
+            os.setsid()
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+            os.dup2(slave_fd, 0)
+            os.dup2(slave_fd, 1)
+            os.dup2(devnull, 2)
+            for fd in (slave_fd, master_fd, devnull):
+                if fd > 2:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            os.execvpe(cmd[0], cmd, env)
+        finally:
+            os._exit(127)
+
+    os.close(slave_fd)
+    os.close(devnull)
+
+    deadline = time.monotonic() + 30
+    buf = b""
+    try:
+        # Canonical mode: deliver the one-line payload, then VEOF flushes
+        # EOF to the hook's stdin. poll() (not select()): sandboxed hosts
+        # can allocate the master fd beyond FD_SETSIZE.
+        view = memoryview(payload)
+        while view:
+            written = os.write(master_fd, view)
+            view = view[written:]
+        os.write(master_fd, b"\x04")
+
+        poller = select.poll()
+        poller.register(master_fd, select.POLLIN)
+        reaped = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("pty hook run timed out")
+            try:
+                events = poller.poll(200)
+            except InterruptedError:
+                continue
+            got = False
+            for _fd, event in events:
+                if event & select.POLLIN:
+                    try:
+                        chunk = os.read(master_fd, 65536)
+                    except OSError:
+                        chunk = b""
+                    if chunk:
+                        buf += chunk
+                        got = True
+            if not reaped:
+                pid, _ = os.waitpid(child_pid, os.WNOHANG)
+                if pid == child_pid:
+                    reaped = True
+            if reaped and not got:
+                break
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+    out = buf.decode("utf-8", "replace").replace("\r", "").strip()
+    if not out or out == "{}":
+        return {}
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return {"_raw_stdout": out}
 
 
 _needs_py39 = sys.version_info < (3, 9)
@@ -1077,6 +1226,392 @@ class TestNonReplacementAdapters(unittest.TestCase):
         self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
         self.assertNotIn("updatedToolOutput", hso)
 
+    def _fake_codebuddy(self) -> str:
+        """Stage a ``codebuddy`` executable that runs the hook as its child.
+
+        The script forks the command it receives and waits, so the hook
+        process really has a ``codebuddy`` ancestor — the exact shape of
+        the CodeBuddy Code CLI running a settings.json hook command.
+        Leading ``--flags`` stay in the process argv (hosted-mode shapes)
+        but are skipped before executing the child command.
+        """
+        path = os.path.join(self.tmpdir, "codebuddy")
+        with open(path, "w") as f:
+            # Skip every leading flag (long ``--serve`` and short ``-p``
+            # alike) so the remaining words are executed as the child
+            # command, while the flags stay in this process' argv for the
+            # ancestor walk to observe.
+            f.write(
+                "#!/bin/sh\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -*) shift ;;\n"
+                "    *) break ;;\n"
+                "  esac\n"
+                "done\n"
+                "\"$@\"\n"
+            )
+        os.chmod(path, 0o755)
+        return path
+
+    def _pty_env(self, extra_env: dict) -> dict:
+        return _build_hook_env(
+            "workbuddy", self.mock_bin, self.isolated_home, extra_env
+        )
+
+    @unittest.skipIf(os.name == "nt" or pty is None,
+                     "interactive-shape test needs a POSIX pty")
+    def test_workbuddy_cli_uses_updated_tool_output(self):
+        """CodeBuddy Code CLI host: the compressed payload replaces the result.
+
+        The CodeBuddy CLI Hooks contract (v1.16.0+) defines
+        updatedToolOutput as a full replacement for built-in and MCP
+        tools; additionalContext would keep the original result and
+        append. Standalone detection classifies a CLI-binary ancestor
+        free of every hosted signal (launcher marker and hosted sidecar
+        argv flags); this test exercises the interactive terminal shape
+        under a real ``codebuddy`` ancestor in a fresh pty session, with
+        all hosted signals absent.
+        """
+        large_payload = _make_large_json_payload()
+        env = self._pty_env({
+            "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+            "CODEBUDDY_SESSION_KIND": None,
+        })
+        result = _run_hook_in_pty(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            env,
+            [self._fake_codebuddy(), sys.executable, _hook_script_path()],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertNotIn("_raw_stdout", result, f"unparsable output: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso,
+                      "CodeBuddy CLI should replace the tool result")
+        # The mock compresses long strings to 20 chars: the replacement is
+        # the compressed payload, not a copy of the original.
+        self.assertEqual(hso["updatedToolOutput"]["stdout"], "x" * 20)
+        # No additive duplicate of the compressed payload beside it.
+        self.assertNotIn("additionalContext", hso,
+                         "CLI replacement must not append the same payload")
+        # The CLI path still runs the compressor: exactly one unified
+        # entry-point invocation (the one-subprocess contract).
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    @unittest.skipIf(os.name == "nt", "process ancestry walk is POSIX-only")
+    def test_workbuddy_headless_cli_uses_updated_tool_output(self):
+        """Supported headless CLI shape (``codebuddy -p`` / ``--print``).
+
+        The Headless Mode documents ``codebuddy -p`` for CI/CD,
+        automation scripts and stdin pipelines, where the process
+        legitimately owns no controlling terminal; the CLI Hooks contract
+        still honors ``updatedToolOutput`` there. This test reproduces
+        that shape with a real ``--print`` codebuddy ancestor and no pty:
+        the host must be classified as a standalone CLI, the compressed
+        payload must replace the tool result, and the compressor must run.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+                "CODEBUDDY_SESSION_KIND": None,
+            },
+            ancestor_cmd=self._fake_codebuddy(),
+            ancestor_args=["--print", "-p"],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertNotIn("_raw_stdout", result, f"unparsable output: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso,
+                      "headless CLI must replace the tool result even "
+                      "without a controlling terminal")
+        self.assertEqual(hso["updatedToolOutput"]["stdout"], "x" * 20)
+        self.assertNotIn("additionalContext", hso,
+                         "CLI replacement must not append the same payload")
+        # The CLI path still runs the compressor: exactly one unified
+        # entry-point invocation (the one-subprocess contract).
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    @unittest.skipIf(os.name == "nt", "process ancestry walk is POSIX-only")
+    def test_workbuddy_bg_session_uses_updated_tool_output(self):
+        """First-class background session (``codebuddy --bg``).
+
+        The Daemon Mode reference documents the background session as a
+        first-class CLI task: the CLI forks it as ``--print -y`` and
+        declares CODEBUDDY_SESSION_KIND=bg, which the hook inherits. The
+        host must still be classified as a standalone CLI — the compressed
+        payload must replace the tool result and the compressor must run —
+        even though the session kind is ``bg`` and there is no TTY.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+                "CODEBUDDY_SESSION_KIND": "bg",
+            },
+            ancestor_cmd=self._fake_codebuddy(),
+            ancestor_args=["--print", "-y"],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertNotIn("_raw_stdout", result, f"unparsable output: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso,
+                      "bg session must replace the tool result even though "
+                      "CODEBUDDY_SESSION_KIND=bg and there is no TTY")
+        self.assertEqual(hso["updatedToolOutput"]["stdout"], "x" * 20)
+        self.assertNotIn("additionalContext", hso,
+                         "CLI replacement must not append the same payload")
+        # The CLI path still runs the compressor: exactly one unified
+        # entry-point invocation (the one-subprocess contract).
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    @unittest.skipIf(os.name == "nt" or pty is None,
+                     "interactive-shape test needs a POSIX pty")
+    def test_workbuddy_web_ui_serve_uses_updated_tool_output(self):
+        """User-started ``codebuddy --serve`` Web UI is a standalone CLI.
+
+        The official Web UI reference documents users launching
+        ``codebuddy --serve --port <port>`` directly; the CLI Hooks
+        contract honors ``updatedToolOutput`` in that host, so the serve
+        argv shape must NOT be treated as a spawned sidecar. The
+        resident daemon with an identical argv shape is separated by the
+        daemon session kind (covered separately). With no launcher
+        marker, no daemon kind and no hosted sidecar flag, the host is a
+        standalone CLI and the compressed payload replaces the result.
+        """
+        large_payload = _make_large_json_payload()
+        env = self._pty_env({
+            "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+            "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+            "CODEBUDDY_SESSION_KIND": None,
+        })
+        result = _run_hook_in_pty(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            env,
+            [self._fake_codebuddy(), "--serve",
+             sys.executable, _hook_script_path()],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertNotIn("_raw_stdout", result, f"unparsable output: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso,
+                      "user-started serve (Web UI) must receive the CLI "
+                      "replacement path")
+        self.assertEqual(hso["updatedToolOutput"]["stdout"], "x" * 20)
+        self.assertNotIn("additionalContext", hso,
+                         "CLI replacement must not append the same payload")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    @unittest.skipIf(os.name == "nt", "process ancestry walk is POSIX-only")
+    def test_workbuddy_daemon_worker_skips_replacement(self):
+        """Resident daemon worker: documented session kind, ``--serve`` argv.
+
+        ``daemon start`` forks the resident child with ``--serve``
+        prepended (Daemon Mode reference), so argv alone cannot separate
+        the daemon from a user-started Web UI; the documented
+        ``CODEBUDDY_SESSION_KIND=daemon`` worker-type variable is the
+        contract-backed discriminator and must classify the host as
+        non-CLI. Compression is disabled: Core is consulted once and
+        returns a passthrough.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+                "CODEBUDDY_SESSION_KIND": "daemon",
+            },
+            ancestor_cmd=self._fake_codebuddy(),
+            ancestor_args=["--serve"],
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertNotIn("updatedToolOutput", hso,
+                         "daemon workers must not receive the CLI-only "
+                         "field despite a CLI ancestor with --serve")
+        self.assertNotIn("additionalContext", hso)
+        self.assertEqual(result, {},
+                         "daemon workbuddy hosts pass the result through")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one Core passthrough; no compression applied")
+
+    def test_workbuddy_ide_host_skips_replacement(self):
+        """IDE host: CODEBUDDY_PROJECT_DIR set, no ``codebuddy`` ancestor.
+
+        The IDE Hooks reference lists CODEBUDDY_PROJECT_DIR among the
+        environment variables available to IDE hook scripts as well, so
+        the variable alone must not route the host to the CLI-only
+        updatedToolOutput path. The IDE PostToolUse contract documents
+        only the additive additionalContext, which keeps the original
+        tool result, so compressing through it would grow the context:
+        the hook fails open and passes the result through unchanged.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+            },
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertNotIn("updatedToolOutput", hso,
+                         "IDE hosts must not receive the CLI-only field")
+        self.assertNotIn("additionalContext", hso,
+                         "compressed payload must not be appended beside "
+                         "the original result on non-CLI hosts")
+        self.assertEqual(result, {},
+                         "Non-CLI workbuddy hosts pass the result through")
+        # Non-CLI hosts declare no replacement capability: Core is
+        # consulted once and returns a passthrough without running the
+        # compression pipeline.
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one Core passthrough; no compression applied")
+
+    @unittest.skipIf(os.name == "nt", "process ancestry walk is POSIX-only")
+    def test_workbuddy_desktop_sidecar_host_skips_replacement(self):
+        """WorkBuddy desktop: CLI sidecar ancestry + host launcher env.
+
+        WorkBuddy desktop runs its agent inside an embedded headless
+        CodeBuddy Code bundle: the host spawns ``cbc`` for the sidecar
+        and prewarm processes with CODEBUDDY_FORCE_HEADLESS_BUNDLE=1
+        (documented in the published CLI package's bin/codebuddy entry),
+        and the hook executor merges the bundle's process environment
+        into the hook environment. The hook's ancestor chain therefore
+        really contains the CLI binary on the desktop host — ancestry
+        alone would misroute it. The launcher variable must classify the
+        host as non-CLI; compression is disabled.
+        """
+        large_payload = _make_large_json_payload()
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": "1",
+            },
+            ancestor_cmd=self._fake_codebuddy(),
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertNotIn("updatedToolOutput", hso,
+                         "desktop host must not receive the CLI-only field "
+                         "despite CLI ancestry in its process tree")
+        self.assertNotIn("additionalContext", hso)
+        self.assertEqual(result, {},
+                         "desktop workbuddy hosts pass the result through")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one Core passthrough; no compression applied")
+
+    def test_workbuddy_non_cli_host_keeps_env_attribution(self):
+        """Non-CLI hosts still get genuinely additive env attribution."""
+        payload = {
+            "stdout": "x" * 500,
+            "stderr": "bash: foo: command not found",
+            "exit_code": 127,
+        }
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="workbuddy",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+            extra_env={
+                "CODEBUDDY_PROJECT_DIR": "/tmp/project",
+                "CODEBUDDY_FORCE_HEADLESS_BUNDLE": None,
+            },
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertNotIn("updatedToolOutput", hso)
+        context = hso.get("additionalContext", "")
+        self.assertIn("[tokenless:env]", context,
+                      "environment attribution is genuinely additive and "
+                      "supported by every workbuddy host")
+        # The compressed payload itself must not be appended beside the
+        # original result on hosts without a replacement contract.
+        self.assertNotIn("x" * 20, context)
+        # Attribution is owned by the PostTool service: the hook declares
+        # no replacement capability, Core's diagnosis is still delivered,
+        # and the compression pipeline never runs.
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one Core passthrough; no compression applied")
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestSingleSubprocess(unittest.TestCase):
@@ -1133,6 +1668,231 @@ class TestSingleSubprocess(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestWorkBuddyCliDetection(unittest.TestCase):
+    """Unit tests for the CodeBuddy Code CLI host discriminator."""
+
+    @staticmethod
+    def _hook() -> types.ModuleType:
+        hooks_dir = os.path.normpath(os.path.join(
+            os.path.dirname(__file__),
+            os.pardir, "adapters", "tokenless", "common", "hooks",
+        ))
+        sys.path.insert(0, hooks_dir)
+        try:
+            loader = importlib.machinery.SourceFileLoader(
+                "compress_response_hook_under_test",
+                os.path.join(hooks_dir, "compress_response_hook.py"),
+            )
+            spec = importlib.util.spec_from_loader(
+                "compress_response_hook_under_test", loader
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        return module
+
+    def test_cli_argv_shapes_match(self):
+        m = self._hook()
+        # The published CLI package registers three bin entries pointing
+        # at the same entry script: codebuddy, codebuddy-code and cbc.
+        for argv in (
+            ["codebuddy"],
+            ["codebuddy-code"],
+            ["cbc"],
+            ["/usr/local/bin/codebuddy", "--debug"],
+            ["/bin/sh", "/tmp/hooks/codebuddy", "python3", "hook.py"],
+            ["python3", "/opt/codebuddy-cli/codebuddy"],
+            ["node", "/usr/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"],
+        ):
+            self.assertTrue(m._argv_is_codebuddy_cli(argv), argv)
+
+    def test_non_cli_argv_shapes_do_not_match(self):
+        m = self._hook()
+        for argv in (
+            [],
+            ["bash", "-c", "codebuddy"],
+            ["/opt/codebuddy-ide/bin/codebuddy-ide"],
+            ["vim", "codebuddy-notes.md"],
+        ):
+            self.assertFalse(m._argv_is_codebuddy_cli(argv), argv)
+
+    def _cli_procs(self):
+        """A standalone-CLI-shaped ancestor tree: argv lists."""
+        return [
+            ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+            ["/usr/local/bin/codebuddy"],
+            ["/bin/bash", "-lc", "codebuddy"],
+        ]
+
+    def test_host_launcher_env_disables_cli_detection(self):
+        """CODEBUDDY_FORCE_HEADLESS_BUNDLE marks a WorkBuddy-host spawn.
+
+        The desktop host sets it before spawning the headless bundle and
+        the hook inherits it, so even a CLI-shaped ancestor chain must
+        not select the CLI-only replacement path. Values follow the
+        official entry script's parsing: 1 / true (any case) count,
+        anything else is ignored.
+        """
+        m = self._hook()
+        for value in ("1", "true", "TRUE", "True"):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(self._cli_procs())):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": value,
+                                      "CODEBUDDY_SESSION_KIND": ""}):
+                    self.assertFalse(m._workbuddy_cli_host(), value)
+        for value in ("0", "yes", "disabled", ""):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(self._cli_procs())):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": value,
+                                      "CODEBUDDY_SESSION_KIND": ""}):
+                    self.assertTrue(m._workbuddy_cli_host(), value)
+
+    def test_session_kind_daemon_disables_cli_detection(self):
+        """CODEBUDDY_SESSION_KIND=daemon marks the resident daemon worker.
+
+        The official Daemon Mode reference documents the session kind as
+        the worker type (interactive / bg / daemon), and the hook
+        inherits it from the daemon child that ``daemon start`` forks
+        with ``--serve`` prepended. The kind is the contract-backed
+        signal separating the daemon from a user-started ``--serve``
+        Web UI session, so it must route a CLI-shaped ancestor to the
+        non-CLI path; every other value (interactive / bg / teammate /
+        unset, any case) belongs to the standalone CLI's own sessions
+        and never disables detection.
+        """
+        m = self._hook()
+        for kind in ("daemon", "Daemon", "DAEMON", " daemon "):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(self._cli_procs())):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertFalse(m._workbuddy_cli_host(), kind)
+        for kind in ("interactive", "bg", "teammate", "BG", ""):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(self._cli_procs())):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertTrue(m._workbuddy_cli_host(), kind)
+
+    def test_bg_session_kind_is_standalone_cli(self):
+        """A real ``codebuddy --bg`` background session is a standalone CLI.
+
+        Reproduces the documented background-session shape: the CLI forks
+        the task as ``--print -y`` and declares CODEBUDDY_SESSION_KIND=bg,
+        which the hook inherits. The host must still be classified as a
+        standalone CLI (the Hooks contract honors updatedToolOutput there),
+        whether detected by the bg argv flag or by the declared kind.
+        """
+        m = self._hook()
+        bg_tree = [
+            ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+            ["/usr/local/bin/codebuddy", "--print", "-y", "--name", "task"],
+        ]
+        for kind in ("bg", "BG", ""):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(bg_tree)):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertTrue(m._workbuddy_cli_host(), kind)
+
+    def test_hosted_argv_shapes_disable_cli_detection(self):
+        """Hosted sidecar flags predate the launcher marker and must win.
+
+        Artifacts before 2.136.0 carry no CODEBUDDY_FORCE_HEADLESS_BUNDLE
+        but already ship the hosted prewarm and team-sidecar modes, so a
+        CLI ancestor with one of these flags stays non-CLI even though a
+        bare CLI ancestor would be treated as standalone. ``--serve`` is
+        deliberately absent: the Web UI reference documents users
+        starting ``codebuddy --serve`` directly (standalone CLI); the
+        daemon child with the same argv is excluded by the session kind.
+        """
+        m = self._hook()
+        for flag in ("--prewarm", "--prewarm-force", "--teammate-mode"):
+            tree = [
+                ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+                ["/usr/local/bin/codebuddy", flag, "--team-name", "t"],
+            ]
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(tree)):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": ""}):
+                    self.assertFalse(m._workbuddy_cli_host(), flag)
+
+    def test_serve_argv_without_daemon_kind_is_standalone_cli(self):
+        """``--serve`` alone is the user-started Web UI, not a sidecar."""
+        m = self._hook()
+        tree = [
+            ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+            ["/usr/local/bin/codebuddy", "--serve", "--port", "7890"],
+        ]
+        for kind in ("interactive", ""):
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(tree)):
+                with mock.patch.dict(os.environ,
+                                     {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                      "CODEBUDDY_SESSION_KIND": kind}):
+                    self.assertTrue(m._workbuddy_cli_host(), kind)
+
+    def test_env_var_alone_does_not_select_cli(self):
+        """CODEBUDDY_PROJECT_DIR also exists on IDE hosts (IDE Hooks
+        reference), so it must not select the CLI-only replacement path."""
+        m = self._hook()
+        ide_tree = [["/usr/bin/codebuddy-ide", "--project", "/tmp/p"]]
+        with mock.patch.object(m, "_ancestor_procs",
+                               return_value=iter(ide_tree)):
+            with mock.patch.dict(os.environ,
+                                 {"CODEBUDDY_PROJECT_DIR": "/tmp/p",
+                                  "CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                  "CODEBUDDY_SESSION_KIND": ""}):
+                self.assertFalse(m._workbuddy_cli_host())
+
+    def test_headless_cli_ancestor_selects_cli(self):
+        """A supported headless CLI shape is standalone even without a TTY.
+
+        The Headless Mode documents ``codebuddy -p`` / ``--print`` for
+        CI/CD, automation scripts and stdin pipelines — processes that
+        legitimately own no controlling terminal — and the CLI Hooks
+        contract still honors ``updatedToolOutput`` there. Such an
+        ancestor carries no hosted marker, no hosted session kind and no
+        hosted sidecar flag, so it must be classified as a standalone
+        CLI; a controlling terminal is not required.
+        """
+        m = self._hook()
+        env = {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+               "CODEBUDDY_SESSION_KIND": ""}
+        for argv in (
+            ["codebuddy", "-p", "fix the build"],
+            ["codebuddy", "--print", "--output-format", "json"],
+            ["cbc", "-p", "--resume", "abc123"],
+            ["/usr/local/bin/codebuddy", "--acp"],
+            ["codebuddy", "daemon", "start"],
+            ["codebuddy", "--bg", "run the tests"],
+        ):
+            tree = [
+                ["/bin/bash", "-c", "python3 compress_response_hook.py"],
+                argv,
+            ]
+            with mock.patch.object(m, "_ancestor_procs",
+                                   return_value=iter(tree)):
+                with mock.patch.dict(os.environ, env):
+                    self.assertTrue(m._workbuddy_cli_host(), argv)
+
+    def test_cli_ancestor_selects_cli(self):
+        m = self._hook()
+        with mock.patch.object(m, "_ancestor_procs",
+                               return_value=iter(self._cli_procs())):
+            with mock.patch.dict(os.environ,
+                                 {"CODEBUDDY_FORCE_HEADLESS_BUNDLE": "",
+                                  "CODEBUDDY_SESSION_KIND": ""}):
+                self.assertTrue(m._workbuddy_cli_host())
 
 if __name__ == "__main__":
     unittest.main()
