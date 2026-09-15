@@ -901,7 +901,7 @@ tool-output savings and retrieval overhead separately.
 | `make test-agentscope-integration` | Test both wheels with supported AgentScope versions |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests (Rust + hooks) |
-| `make test-hooks` | Run hook integration tests |
+| `make test-hooks` | Run hook integration tests against the installed `tokenless` binary, whose version must match this checkout (`TOKENLESS_ALLOW_VERSION_SKEW=1` overrides) |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
