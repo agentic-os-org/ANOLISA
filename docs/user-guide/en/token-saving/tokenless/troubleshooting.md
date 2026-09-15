@@ -196,6 +196,42 @@ anolisa adapter enable tokenless openclaw \
 
 The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches fixed `tokenless` and `rtk` child processes. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
 
+## QwenPaw install reports an unpublished SDK wheel
+
+The QwenPaw bundle installs the native Python SDK from a GitHub Release asset
+pinned to the package version, so the wheel and the RPM always carry the same
+version. When a version bump reaches `main` before the matching
+`tokenless/vX.Y.Z` release is published, that asset does not exist yet and the
+installer stops before handing anything to QwenPaw:
+
+```text
+[tokenless] The Tokenless 0.8.2 Python SDK wheel is not published yet (HTTP 404):
+[tokenless]   https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+[tokenless] Release `tokenless/v0.8.2` that carries the wheel assets does not exist.
+```
+
+This is a release-orchestration gap, not a broken host. Confirm it by requesting
+the URL from the message directly — `404` means the release is missing, `200`
+means the wheel exists and the failure has another cause:
+
+```bash
+curl -sIL -o /dev/null -w '%{http_code}\n' "<wheel URL from the message>"
+```
+
+- Maintainers: push the `tokenless/vX.Y.Z` tag and approve the `release`
+  environment so the publish workflow uploads the wheel assets, then rerun the
+  installer.
+- Everyone else: install a Tokenless package whose version already has a
+  published release.
+- Offline or mirrored networks, where the probe cannot reach GitHub but pip
+  resolves the wheel from a local mirror: rerun the installer with
+  `ANOLISA_SKIP_WHEEL_PREFLIGHT=1`. `ANOLISA_TOKENLESS_PROBE_TIMEOUT` bounds
+  each probe in seconds (default 15).
+
+The probe is advisory. Without `curl` or `python3`, when the release host is
+unreachable, or when it answers anything other than `404`, the installer leaves
+the verdict to pip and reports whatever pip reports.
+
 ## A command is not rewritten
 
 RTK does not have a rewrite rule for every command. Test it directly:

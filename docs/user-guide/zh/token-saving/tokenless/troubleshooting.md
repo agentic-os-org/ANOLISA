@@ -191,6 +191,35 @@ anolisa adapter enable tokenless openclaw \
 
 npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
 
+## QwenPaw 安装提示 SDK wheel 尚未发布
+
+QwenPaw 插件包会从 GitHub Release 资产安装原生 Python SDK，该资产的版本与软件包版本严格一致，
+因此 wheel 与 RPM 总是同版本。当版本号提升先合入 `main`、而对应的 `tokenless/vX.Y.Z`
+Release 尚未发布时，该资产还不存在，安装脚本会在把插件交给 QwenPaw 之前停止：
+
+```text
+[tokenless] The Tokenless 0.8.2 Python SDK wheel is not published yet (HTTP 404):
+[tokenless]   https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+[tokenless] Release `tokenless/v0.8.2` that carries the wheel assets does not exist.
+```
+
+这是发布编排缺口，不是主机环境损坏。直接请求报错中的 URL 即可确认——返回 `404`
+说明 Release 缺失，返回 `200` 说明 wheel 存在、失败另有原因：
+
+```bash
+curl -sIL -o /dev/null -w '%{http_code}\n' "<报错信息中的 wheel URL>"
+```
+
+- 维护者：推送 `tokenless/vX.Y.Z` tag 并审批 `release` environment，
+  让发布 workflow 上传 wheel 资产，然后重跑安装脚本。
+- 其他用户：安装版本已有对应 Release 的 Tokenless 软件包。
+- 离线或镜像网络（探测无法访问 GitHub，但 pip 能从本地镜像解析 wheel）：
+  用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 重跑安装脚本。
+  `ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。
+
+该探测只是前置提示：没有 `curl` 和 `python3`、Release 站点不可达、
+或返回非 `404` 的状态码时，安装脚本仍会把判定交给 pip，并原样输出 pip 的报错。
+
 ## 命令没有被重写
 
 不是所有命令都有 RTK 重写规则。先独立测试：

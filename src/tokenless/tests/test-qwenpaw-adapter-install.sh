@@ -75,7 +75,10 @@ DETECT_SH="$ADAPTER_DIR/qwenpaw/scripts/detect.sh"
 INSTALL_SH="$ADAPTER_DIR/qwenpaw/scripts/install.sh"
 UNINSTALL_SH="$ADAPTER_DIR/qwenpaw/scripts/uninstall.sh"
 
-run() { HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" "$@"; }
+run() { HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_SKIP_WHEEL_PREFLIGHT=1 "$@"; }
+# Same harness with the wheel preflight armed; every case below pins the probe
+# result through a stub, so the suite never reaches the network.
+run_probe() { HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_SKIP_WHEEL_PREFLIGHT=0 "$@"; }
 
 run bash "$DETECT_SH" >/dev/null 2>&1
 if [ "$?" -eq 1 ]; then
@@ -302,6 +305,123 @@ if [ "$?" -eq 2 ]; then
     pass "detect reports missing prerequisites without a qwenpaw CLI"
 else
     fail "detect did not report missing prerequisites without a qwenpaw CLI"
+fi
+
+# --- wheel preflight -------------------------------------------------------
+# The bundle pins anolisa_tokenless by GitHub Release URL. When the version
+# bump lands before the matching release is published the asset 404s, and
+# `qwenpaw plugin install` used to surface that as a bare pip HTTP error. The
+# installer now probes the asset for this host first and names the missing tag.
+case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64 | Linux/aarch64 | Darwin/arm64) PREFLIGHT_PLATFORM=1 ;;
+    *) PREFLIGHT_PLATFORM=0 ;;
+esac
+
+if [ "$PREFLIGHT_PLATFORM" -eq 0 ]; then
+    echo "[SKIP] this platform has no pinned wheel line; preflight not exercised"
+else
+    PROBE_BIN="$SANDBOX/probebin"
+    PY_BIN="$SANDBOX/pybin"
+    MIN_BIN="$SANDBOX/minbin"
+    PROBE_LOG="$SANDBOX/probe.log"
+    mkdir -p "$PROBE_BIN" "$PY_BIN" "$MIN_BIN"
+
+    # curl wins over python3 inside the installer, so the python3 branch needs
+    # a PATH that carries the interpreter stub and the core tools but no curl.
+    cat > "$PROBE_BIN/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+printf '%s\n' "curl $*" >> "${PROBE_LOG:-/dev/null}"
+printf '%s' "${PROBE_STATUS:-000}"
+CURLEOF
+    cat > "$PROBE_BIN/python3" <<'PYSTUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' "python3 $*" >> "${PROBE_LOG:-/dev/null}"
+printf '%s\n' "${PROBE_STATUS:-000}"
+PYSTUBEOF
+    chmod +x "$PROBE_BIN/curl" "$PROBE_BIN/python3"
+    cp "$PROBE_BIN/python3" "$PY_BIN/python3"
+    for tool in bash cat cmp cp dirname env grep head mkdir rm sed uname; do
+        tool_path="$(command -v "$tool" 2>/dev/null || true)"
+        [ -n "$tool_path" ] && ln -sf "$tool_path" "$MIN_BIN/$tool"
+    done
+
+    probe_case() {  # probe_case <status> [probe-bin]
+        local probe_path="$MIN_BIN"
+        if [ -n "${2:-}" ]; then
+            probe_path="$2:$MIN_BIN"
+        fi
+        rm -rf "$PLUGIN_DST"
+        : > "$STUB_LOG"
+        rm -f "$PROBE_LOG"
+        run_probe env PATH="$probe_path" PROBE_STATUS="$1" PROBE_LOG="$PROBE_LOG" \
+            bash "$INSTALL_SH" >"$SANDBOX/preflight.out" 2>&1
+        echo "$?"
+    }
+
+    status="$(probe_case 404 "$PROBE_BIN")"
+    if [ "$status" -ne 0 ] &&
+        grep -q 'is not published yet (HTTP 404)' "$SANDBOX/preflight.out" &&
+        grep -q 'tokenless/v0\.0\.0-test' "$SANDBOX/preflight.out" &&
+        grep -q 'ANOLISA_SKIP_WHEEL_PREFLIGHT=1' "$SANDBOX/preflight.out"; then
+        pass "installer names the unpublished release tag instead of a bare pip 404"
+    else
+        fail "installer did not explain the unpublished release (rc=$status)"
+    fi
+    if [ ! -d "$PLUGIN_DST" ] && ! grep -q '^plugin install ' "$STUB_LOG"; then
+        pass "installer fails before QwenPaw copies a bundle it cannot run"
+    else
+        fail "installer mutated QwenPaw state for an unpublished wheel"
+    fi
+
+    status="$(probe_case 200 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && [ -s "$PROBE_LOG" ]; then
+        pass "installer proceeds when the pinned wheel is published"
+    else
+        fail "installer blocked a published wheel (rc=$status)"
+    fi
+
+    status="$(probe_case 000 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ]; then
+        pass "installer leaves the verdict to pip when the wheel host is unreachable"
+    else
+        fail "installer treated an unreachable wheel host as unpublished (rc=$status)"
+    fi
+
+    status="$(probe_case 403 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] &&
+        grep -q 'Could not verify the SDK wheel' "$SANDBOX/preflight.out"; then
+        pass "installer warns and proceeds on an inconclusive wheel probe"
+    else
+        fail "installer mishandled an inconclusive wheel probe (rc=$status)"
+    fi
+
+    status="$(probe_case 404 "$PY_BIN")"
+    if [ "$status" -ne 0 ] && grep -q '^python3 ' "$PROBE_LOG" &&
+        grep -q 'is not published yet (HTTP 404)' "$SANDBOX/preflight.out"; then
+        pass "installer probes the wheel through python3 when curl is absent"
+    else
+        fail "python3 wheel probe did not report the unpublished release (rc=$status)"
+    fi
+
+    status="$(probe_case 404 "")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && [ ! -s "$PROBE_LOG" ]; then
+        pass "installer skips the probe when no probe tool is available"
+    else
+        fail "installer required a wheel probe tool (rc=$status)"
+    fi
+
+    rm -rf "$PLUGIN_DST"
+    : > "$STUB_LOG"
+    rm -f "$PROBE_LOG"
+    if run env PATH="$PROBE_BIN:$MIN_BIN" PROBE_STATUS=404 PROBE_LOG="$PROBE_LOG" \
+            bash "$INSTALL_SH" >/dev/null 2>&1 &&
+        [ -f "$PLUGIN_DST/plugin.json" ] && [ ! -s "$PROBE_LOG" ]; then
+        pass "ANOLISA_SKIP_WHEEL_PREFLIGHT=1 keeps an offline mirror installable"
+    else
+        fail "ANOLISA_SKIP_WHEEL_PREFLIGHT=1 did not bypass the probe"
+    fi
+    run bash "$UNINSTALL_SH" >/dev/null || fail "failed to uninstall after preflight coverage"
 fi
 
 echo ""
