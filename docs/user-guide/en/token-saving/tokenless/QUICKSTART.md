@@ -51,6 +51,8 @@ tokenless --version
 
 After installation, the adapter resources are located at `~/.local/share/anolisa/adapters/tokenless/`. An npm install creates no anolisa component record, so `anolisa adapter enable` does not apply to it — enable adapters as described in [Enable the adapter for your install method](#enable-the-adapter-for-your-install-method).
 
+That directory is shared with the anolisa CLI. When it already belongs to a managed component install, the package postinstall keeps it unchanged and says so instead of replacing resources a component record still refers to; pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take it over anyway.
+
 Supported platforms:
 
 | Platform | Architecture | npm package |

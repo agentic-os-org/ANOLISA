@@ -32,6 +32,12 @@
 #      neither adopted into the receipt nor destroyed, round trip included.
 #  12. Adapter deregistration removes framework registrations only, never the
 #      component binary the caller decided to keep.
+#  13. A replacement that fails halfway (missing tag, failing build) leaves the
+#      previous install working and its receipt accurate.
+#  14. A readlink(1) without -f (BSD, macOS before 12.3) still records and still
+#      rolls back the launcher links.
+#  15. A newer installation of the *same version* leaves byte-identical content
+#      behind; ownership, not the hash, decides what the uninstaller removes.
 
 set -euo pipefail
 
@@ -114,6 +120,17 @@ STUB
 
 cat > "$STUB_DIR/npm" <<'STUB'
 #!/usr/bin/env bash
+# NPM_STUB_BROKEN_BIN=1 ships a `tokenless` that fails when run, so the
+# installer's verify_cli gate trips *after* the links were written — the case a
+# rollback has to undo.
+write_bin() {
+  if [ "${NPM_STUB_BROKEN_BIN:-0}" = "1" ] && [ "$2" = "tokenless" ]; then
+    printf '#!/usr/bin/env bash\necho "%s %s-npm" >&2\nexit 1\n' "$2" "${FAKE_VERSION:-0.7.9}" > "$1"
+  else
+    printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$2" "${FAKE_VERSION:-0.7.9}" > "$1"
+  fi
+  chmod +x "$1"
+}
 pkg_prefix() {
   local prev="" a
   for a in "$@"; do
@@ -138,12 +155,10 @@ case "$1" in
         # installer's install directory.
         payload="$prefix/lib/node_modules/anolisa-tokenless/bin/$b"
         mkdir -p "$(dirname "$payload")"
-        printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$b" "${FAKE_VERSION:-0.7.9}" > "$payload"
-        chmod +x "$payload"
+        write_bin "$payload" "$b"
         ln -sfn "$payload" "$prefix/bin/$b"
       else
-        printf '#!/usr/bin/env bash\necho "%s %s-npm"\n' "$b" "${FAKE_VERSION:-0.7.9}" > "$prefix/bin/$b"
-        chmod +x "$prefix/bin/$b"
+        write_bin "$prefix/bin/$b" "$b"
       fi
     done
     # Mimic npm/scripts/postinstall.js: bundled adapters are copied into the
@@ -252,13 +267,37 @@ fi
 exec "$real" "$@"
 STUB
 
+# The BSD readlink(1) shipped with macOS before 12.3 has no -f. READLINK_STUB_NO_F=1
+# reproduces it, so the installer's portable resolution path is exercised on a
+# Linux host instead of only failing on a machine nobody tests on.
+cat > "$STUB_DIR/readlink" <<'STUB'
+#!/usr/bin/env bash
+if [ "${READLINK_STUB_NO_F:-0}" = "1" ]; then
+  case "${1:-}" in
+    -*)
+      echo "readlink: illegal option -- ${1#-}" >&2
+      echo "usage: readlink [-n] [file ...]" >&2
+      exit 1 ;;
+  esac
+fi
+real="${REAL_READLINK_BIN:-}"
+if [ -z "$real" ]; then
+  for c in /usr/bin/readlink /bin/readlink; do [ -x "$c" ] && real="$c" && break; done
+fi
+[ -n "$real" ] || { echo "readlink stub: no real readlink found" >&2; exit 127; }
+exec "$real" "$@"
+STUB
+
 REAL_INSTALL_BIN="$(command -v install || true)"
 REAL_LN_BIN="$(command -v ln || true)"
 REAL_UNAME_BIN="$(command -v uname || true)"
+REAL_READLINK_BIN="$(command -v readlink || true)"
 [ -n "$REAL_INSTALL_BIN" ] && [ -n "$REAL_LN_BIN" ] && [ -n "$REAL_UNAME_BIN" ] \
-  || { echo "FAIL the host provides no install(1), ln or uname" >&2; exit 1; }
+  && [ -n "$REAL_READLINK_BIN" ] \
+  || { echo "FAIL the host provides no install(1), ln, uname or readlink" >&2; exit 1; }
 chmod +x "$STUB_DIR/curl" "$STUB_DIR/npm" "$STUB_DIR/cargo" \
-         "$STUB_DIR/install" "$STUB_DIR/ln" "$STUB_DIR/qwen" "$STUB_DIR/uname"
+         "$STUB_DIR/install" "$STUB_DIR/ln" "$STUB_DIR/qwen" "$STUB_DIR/uname" \
+         "$STUB_DIR/readlink"
 
 # --- harness -----------------------------------------------------------------
 # run_script <script> <scenario> [ENV=VAL ...] [-- <script-arg> ...]
@@ -287,6 +326,7 @@ run_script() {
       CURL_LOG="$TEST_DIR/$scenario/curl.log" \
       CARGO_LOG="$TEST_DIR/$scenario/cargo.log" \
       REAL_UNAME_BIN="$REAL_UNAME_BIN" \
+      REAL_READLINK_BIN="$REAL_READLINK_BIN" \
       CURL_TAG_TARBALL="$FAKE_TARBALL" \
       CURL_MAIN_TARBALL="$DIST_DIR/main.tar.gz" \
       FAKE_VERSION="$FAKE_VERSION" \
@@ -551,7 +591,10 @@ assert_file "the CLI itself survives the switch" "$S10_DIR/tokenless"
 assert_no_file "removes the rtk link the npm method left behind" "$S10_DIR/rtk"
 assert_no_file "removes the npm global package the previous method installed" "$S10_NPM"
 assert_no_file "removes the adapter tree the previous method owned" "$S10_ADAPTERS"
-assert_contains "reports what it retired" "$RUN_OUTPUT" "left behind by the previous npm install"
+assert_contains "reports that the previous install was kept aside first" "$RUN_OUTPUT" \
+  "Kept the previous npm install aside"
+assert_contains "reports the npm package it retired" "$RUN_OUTPUT" \
+  "Removing the npm package left behind by the previous install"
 
 # The retired tree must also be gone for a later uninstall.sh run, and the new
 # receipt must not claim artefacts this run never created.
@@ -878,5 +921,173 @@ RUN_OUTPUT="$(
 assert_eq "an explicit --non-interactive Codex uninstall exits 0" "$RUN_STATUS" "0"
 assert_no_file "an explicit --non-interactive Codex uninstall still removes the binary" \
   "$S18_HOME/.local/bin/tokenless"
+
+# =============================================================================
+# Scenario 19 — a replacement that fails halfway keeps the previous install
+# =============================================================================
+# Retiring the previous npm install before the new one is verified used to leave
+# a machine with nothing at all when the replacement failed: the old CLI, the rtk
+# launcher and the global package were already gone, the run exited non-zero, and
+# the old receipt still described an installation that no longer existed.
+run_script "$INSTALL_SH" failed-upgrade "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "npm install exits 0 before the failed upgrade" "$RUN_STATUS" "0"
+S19_HOME="$TEST_DIR/failed-upgrade/home"
+S19_NPM="$TEST_DIR/failed-upgrade/npm-prefix"
+S19_ADAPTERS="$S19_HOME/.local/share/anolisa/adapters/tokenless"
+assert_contains "the CLI works before the upgrade" \
+  "$("$S19_HOME/.local/bin/tokenless" --version 2>&1)" "-npm"
+
+run_script "$INSTALL_SH" failed-upgrade \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1" \
+  "CURL_TAG_STATUS=22"
+assert_eq "a source build whose tag is missing exits non-zero" "$RUN_STATUS" "1"
+assert_file "keeps the CLI of the install it failed to replace" "$S19_HOME/.local/bin/tokenless"
+assert_file "keeps the rtk launcher of the install it failed to replace" "$S19_HOME/.local/bin/rtk"
+assert_contains "the kept CLI still runs" \
+  "$("$S19_HOME/.local/bin/tokenless" --version 2>&1)" "-npm"
+assert_file "keeps the npm global package" "$S19_NPM/lib/node_modules/anolisa-tokenless"
+assert_file "keeps the adapter resources" "$S19_ADAPTERS/manifest.json"
+assert_eq "the receipt still describes the install that is there" \
+  "$(receipt_value failed-upgrade method)" "npm"
+assert_contains "says the previous install was kept aside first" "$RUN_OUTPUT" \
+  "Kept the previous npm install aside"
+assert_contains "says it was put back" "$RUN_OUTPUT" "did not produce a working replacement"
+
+# Same guarantee when the download works but the build does not.
+run_script "$INSTALL_SH" failed-build "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "npm install exits 0 before the failed build" "$RUN_STATUS" "0"
+run_script "$INSTALL_SH" failed-build \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1" \
+  "CARGO_STUB_FAIL=1"
+assert_eq "a failing cargo build exits non-zero" "$RUN_STATUS" "1"
+assert_contains "the kept CLI still runs after a failed build" \
+  "$("$TEST_DIR/failed-build/home/.local/bin/tokenless" --version 2>&1)" "-npm"
+assert_file "keeps the rtk launcher after a failed build" \
+  "$TEST_DIR/failed-build/home/.local/bin/rtk"
+assert_eq "the receipt still records npm after a failed build" \
+  "$(receipt_value failed-build method)" "npm"
+
+# A successful replacement still retires what it superseded.
+run_script "$INSTALL_SH" failed-upgrade \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1"
+assert_eq "the retry with a reachable tag exits 0" "$RUN_STATUS" "0"
+assert_eq "receipt now records the source method" "$(receipt_value failed-upgrade method)" "source"
+assert_contains "the CLI is the source build now" \
+  "$("$S19_HOME/.local/bin/tokenless" --version 2>&1)" "-src"
+assert_no_file "retires the rtk launcher once the replacement worked" "$S19_HOME/.local/bin/rtk"
+assert_no_file "retires the npm global package once the replacement worked" \
+  "$S19_NPM/lib/node_modules/anolisa-tokenless"
+assert_no_file "retires the adapter tree once the replacement worked" "$S19_ADAPTERS"
+
+# =============================================================================
+# Scenario 20 — a readlink(1) without -f (BSD readlink, macOS before 12.3)
+# =============================================================================
+# `readlink -f` prints nothing and exits non-zero there. Every caller reads an
+# empty result as "this is not the path we wrote", so without a portable
+# resolution neither launcher would be recorded, the rollback could not identify
+# them either, and the run would fail leaving dangling links behind.
+run_script "$INSTALL_SH" bsd-readlink \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "READLINK_STUB_NO_F=1"
+assert_eq "npm install exits 0 without readlink -f" "$RUN_STATUS" "0"
+S20_HOME="$TEST_DIR/bsd-readlink/home"
+S20_NPM="$TEST_DIR/bsd-readlink/npm-prefix"
+assert_eq "receipt records the npm method" "$(receipt_value bsd-readlink method)" "npm"
+assert_eq "both launchers are recorded without readlink -f" "$(receipt_files bsd-readlink)" \
+  "$S20_HOME/.local/bin/tokenless
+$S20_HOME/.local/bin/rtk"
+assert_eq "the receipt records the resolved link target" \
+  "$(receipt_value bsd-readlink file_target)" "$S20_NPM/bin/tokenless"
+assert_contains "the recorded CLI runs" \
+  "$("$S20_HOME/.local/bin/tokenless" --version 2>&1)" "-npm"
+
+# The rollback path resolves links with the same helper, so a failed attempt is
+# undone on BSD readlink too: npm "succeeds", the CLI it shipped does not run,
+# and the source build has to take over with nothing left behind.
+run_script "$INSTALL_SH" bsd-rollback \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "READLINK_STUB_NO_F=1" \
+  "NPM_STUB_BROKEN_BIN=1"
+assert_eq "a broken npm CLI falls back to the source build" "$RUN_STATUS" "0"
+S20B_HOME="$TEST_DIR/bsd-rollback/home"
+assert_eq "receipt records the source method" "$(receipt_value bsd-rollback method)" "source"
+assert_contains "the CLI is the source build" \
+  "$("$S20B_HOME/.local/bin/tokenless" --version 2>&1)" "-src"
+assert_no_file "the rolled-back attempt left no rtk link" "$S20B_HOME/.local/bin/rtk"
+assert_no_file "the rolled-back attempt's package is gone" \
+  "$TEST_DIR/bsd-rollback/npm-prefix/lib/node_modules/anolisa-tokenless"
+assert_no_file "the rolled-back attempt's adapter tree is gone" \
+  "$S20B_HOME/.local/share/anolisa/adapters/tokenless"
+
+# =============================================================================
+# Scenario 21 — identical content placed by a newer install is not ours to delete
+# =============================================================================
+# Every copy of the same release is byte-identical, so a content hash cannot tell
+# "still the file this receipt recorded" from "a newer anolisa or npm install put
+# the same bytes here". Ownership is the recorded link target plus the marker the
+# installer stamped into the artefacts that can carry one.
+run_script "$INSTALL_SH" same-version "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "install exits 0" "$RUN_STATUS" "0"
+S21_HOME="$TEST_DIR/same-version/home"
+S21_NPM="$TEST_DIR/same-version/npm-prefix"
+S21_ADAPTERS="$S21_HOME/.local/share/anolisa/adapters/tokenless"
+S21_PKG="$S21_NPM/lib/node_modules/anolisa-tokenless"
+assert_eq "receipt claims the adapter tree" "$(receipt_value same-version adapters_dir)" "$S21_ADAPTERS"
+assert_contains "the adapter tree carries this run's ownership marker" \
+  "$(cat "$S21_ADAPTERS/.tokenless-owner")" "curl-installer:"
+assert_eq "the npm package carries this run's ownership marker" \
+  "$(head -n1 "$S21_PKG/.tokenless-owner")" "$(grep -m1 '^adapters_dir_owner=' "$(receipt_of same-version)" | cut -d= -f2-)"
+
+# A newer installation of the same version takes the paths over: byte-identical
+# launcher content at the recorded paths, and the same manifest in the adapter
+# tree. Every recorded sha256 still matches.
+rm -f "$S21_HOME/.local/bin/tokenless" "$S21_HOME/.local/bin/rtk"
+cp "$S21_NPM/bin/tokenless" "$S21_HOME/.local/bin/tokenless"
+cp "$S21_NPM/bin/rtk" "$S21_HOME/.local/bin/rtk"
+printf 'npm:anolisa-tokenless@%s\n' "$FAKE_VERSION" > "$S21_ADAPTERS/.tokenless-owner"
+printf 'npm:anolisa-tokenless@%s\n' "$FAKE_VERSION" > "$S21_PKG/.tokenless-owner"
+
+run_script "$UNINSTALL_SH" same-version
+assert_eq "uninstall over a same-version takeover exits 0" "$RUN_STATUS" "0"
+assert_file "keeps the launcher whose bytes match but whose identity does not" \
+  "$S21_HOME/.local/bin/tokenless"
+assert_file "keeps the rtk launcher a newer install placed" "$S21_HOME/.local/bin/rtk"
+assert_file "keeps the adapter tree a newer install replaced" "$S21_ADAPTERS/manifest.json"
+assert_eq "keeps the newer adapter ownership marker" \
+  "$(cat "$S21_ADAPTERS/.tokenless-owner")" "npm:anolisa-tokenless@$FAKE_VERSION"
+assert_file "keeps the npm package a newer install owns" "$S21_PKG"
+assert_contains "explains that the launcher identity changed" "$RUN_OUTPUT" \
+  "it is no longer the artefact this receipt recorded"
+assert_contains "explains that the adapter marker is newer" "$RUN_OUTPUT" \
+  "ownership marker belongs to a newer"
+assert_contains "explains that the npm package marker is newer" "$RUN_OUTPUT" \
+  "Skipping the npm package in"
+assert_not_contains "does not deregister frameworks it no longer owns" "$RUN_OUTPUT" \
+  "Deregistered the"
+assert_no_file "still removes the receipt" "$(receipt_of same-version)"
+
+# A schema-2 receipt carries no identity beyond content, and must keep working.
+S21_LEGACY="$TEST_DIR/legacy-schema2/home"
+mkdir -p "$S21_LEGACY/.local/share/tokenless" "$S21_LEGACY/.local/bin"
+printf '#!/bin/sh\necho legacy2\n' > "$S21_LEGACY/.local/bin/tokenless"
+chmod +x "$S21_LEGACY/.local/bin/tokenless"
+LEGACY_DIGEST="$(sha256sum "$S21_LEGACY/.local/bin/tokenless" | cut -d' ' -f1)"
+cat > "$S21_LEGACY/.local/share/tokenless/install-receipt" <<LEGACY2
+# Tokenless installer receipt (schema 2).
+schema=2
+method=source
+version=$FAKE_VERSION
+install_dir=$S21_LEGACY/.local/bin
+file=$S21_LEGACY/.local/bin/tokenless
+file_digest=$LEGACY_DIGEST
+LEGACY2
+run_script "$UNINSTALL_SH" legacy-schema2
+assert_eq "schema-2 uninstall exits 0" "$RUN_STATUS" "0"
+assert_contains "warns that a schema-2 receipt records no ownership" "$RUN_OUTPUT" \
+  "records content but no install ownership"
+assert_no_file "still removes the recorded path" "$S21_LEGACY/.local/bin/tokenless"
 
 echo "install-script test passed"

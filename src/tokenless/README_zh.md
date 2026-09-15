@@ -156,6 +156,16 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
 完整的方式对照见 `docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md`。
 
+`~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
+公开路径都不会盲目接管它。npm 的 postinstall 会保留属于受管组件安装的目录，并
+提示包内资源的位置；`ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` 可强制接管。curl 安装
+脚本会把其他所有者放置的目录恢复回去、不为它记录 Adapter 目录，并且用「每次安装
+专属的标记」（`.tokenless-owner`）而不只是内容哈希来证明自己记录的内容归自己所有
+——anolisa 或直接 npm
+安装同一版本会留下逐字相同的字节，此时它的文件、Adapter 资源、框架注册与 npm
+全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
+机器上没有可用 CLI。
+
 当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
 仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
 optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，

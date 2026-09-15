@@ -2,12 +2,20 @@
 # Uninstall a Tokenless CLI installation created by scripts/install.sh.
 #
 # The installer records every path it created in a receipt file, together with
-# the sha256 of each recorded file. This script removes exactly those recorded
-# paths and nothing else, so it stays symmetric with the install and never
-# deletes binaries, adapters, or data that belong to another installation
-# method (anolisa CLI, a manual `npm install -g`, or a custom
-# TOKENLESS_INSTALL_DIR you manage yourself). A recorded path whose content no
-# longer matches its digest was taken over by another installer after the
+# the sha256 of each recorded file, the link target each launcher resolves to,
+# and an install_id that ownership markers inside the adapter tree and the npm
+# module directory repeat. This script removes exactly those recorded paths and
+# nothing else, so it stays symmetric with the install and never deletes
+# binaries, adapters, or data that belong to another installation method
+# (anolisa CLI, a manual `npm install -g`, or a custom TOKENLESS_INSTALL_DIR you
+# manage yourself).
+#
+# Identity is checked, not just content. A later anolisa or npm install of the
+# same version reproduces byte-identical binaries and manifests, so a digest
+# match alone would let this script delete a newer installation's files, adapter
+# tree, framework registrations and npm package. A recorded path whose content no
+# longer matches, whose launcher no longer resolves to the recorded target, or
+# whose ownership marker belongs to a newer install was taken over after the
 # receipt was written, and is left alone.
 #
 # Usage:
@@ -35,6 +43,11 @@ MARKER="# Added by tokenless installer"
 # Identity anchor inside the npm-owned adapter tree, stamped with the release
 # version by npm/scripts/package-npm.js.
 ADAPTERS_IDENTITY_FILE="manifest.json"
+# Ownership marker written by scripts/install.sh into the artefacts that can
+# carry one. It lives where a foreign reinstall removes it, which is what makes
+# it evidence rather than a restatement of the content hash.
+OWNER_MARKER_FILE=".tokenless-owner"
+RECEIPT_SCHEMA_CURRENT=3
 
 DRY_RUN=0
 PURGE=0
@@ -70,6 +83,65 @@ run() {
   else
     "$@"
   fi
+}
+
+# Portable absolute-path resolution. GNU readlink(1) has -f; the BSD readlink
+# shipped with macOS only gained it in 12.3 and prints nothing where it is
+# missing, which every caller here would read as "not our link". Walk the
+# symlink chain and normalise with `cd -P` instead.
+resolve_path() {
+  local p="$1" out="" i=0 target dir base
+  if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  while [ -L "$p" ] && [ "$i" -lt 32 ]; do
+    target=$(readlink "$p" 2>/dev/null) || return 1
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -e "$p" ] || return 1
+  dir=$(dirname "$p")
+  base=$(basename "$p")
+  out=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$out" "$base"
+}
+
+owner_marker_read() {
+  [ -f "$1" ] || return 1
+  head -n 1 "$1" 2>/dev/null
+}
+
+# Ownership is the recorded identity, not merely the recorded content: a later
+# anolisa or npm install of the same version reproduces byte-identical binaries,
+# so a launcher also has to resolve to the target the installer linked it to. An
+# empty recorded target means a regular file was written there (source build),
+# and a symlink in that spot is therefore somebody else's launcher.
+owned_by_receipt() {
+  local path="$1" target="$2" resolved
+  if [ -n "$target" ]; then
+    [ -L "$path" ] || return 1
+    resolved=$(resolve_path "$path" 2>/dev/null || true)
+    [ -n "$resolved" ] && [ "$resolved" = "$target" ] && return 0
+    return 1
+  fi
+  if [ -L "$path" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# True when the receipt carries schema 3 fields, i.e. when the identity checks
+# above have evidence to work with. Older receipts record content only, and are
+# handled exactly as before rather than being refused.
+receipt_schema_at_least() {
+  case "${SCHEMA:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$SCHEMA" -ge "$1" ]
 }
 
 # sha256 of a file's content, following symlinks. Prints nothing when the file
@@ -122,15 +194,19 @@ deregister_framework_adapters() {
 }
 
 SCHEMA=""
+INSTALL_ID=""
 METHOD=""
 TL_VERSION=""
 INSTALL_DIR=""
 NPM_PREFIX=""
+NPM_PKG_OWNER=""
 ADAPTERS_DIR=""
 ADAPTERS_DIR_DIGEST=""
+ADAPTERS_OWNER=""
 PATH_RC=""
 FILES=()
 DIGESTS=()
+TARGETS=()
 
 if [ ! -f "$RECEIPT" ]; then
   err "No install receipt found at ${RECEIPT}"
@@ -150,15 +226,19 @@ while IFS= read -r line || [ -n "$line" ]; do
   value="${line#*=}"
   case "$key" in
     schema)              SCHEMA="$value" ;;
+    install_id)          INSTALL_ID="$value" ;;
     method)              METHOD="$value" ;;
     version)             TL_VERSION="$value" ;;
     install_dir)         INSTALL_DIR="$value" ;;
     npm_prefix)          NPM_PREFIX="$value" ;;
+    npm_pkg_owner)       NPM_PKG_OWNER="$value" ;;
     adapters_dir)        ADAPTERS_DIR="$value" ;;
     adapters_dir_digest) ADAPTERS_DIR_DIGEST="$value" ;;
+    adapters_dir_owner)  ADAPTERS_OWNER="$value" ;;
     path_rc_file)        PATH_RC="$value" ;;
     file)                FILES+=("$value") ;;
     file_digest)         DIGESTS+=("$value") ;;
+    file_target)         TARGETS+=("$value") ;;
   esac
 done < "$RECEIPT"
 
@@ -167,10 +247,24 @@ info "Receipt      : ${RECEIPT}"
 info "Method       : ${METHOD:-unknown}"
 info "Version      : ${TL_VERSION:-unknown}"
 info "Install dir  : ${INSTALL_DIR:-unknown}"
-if [ "$SCHEMA" != "2" ]; then
-  warn "Receipt schema is '${SCHEMA:-1}', which records no file identity."
-  warn "Recorded paths are removed on path alone; files another installer"
-  warn "placed at the same path afterwards cannot be told apart."
+info "Install id   : ${INSTALL_ID:-unknown}"
+if [ "$SCHEMA" != "$RECEIPT_SCHEMA_CURRENT" ]; then
+  case "$SCHEMA" in
+    ''|1)
+      warn "Receipt schema is '${SCHEMA:-1}', which records no file identity."
+      warn "Recorded paths are removed on path alone; files another installer"
+      warn "placed at the same path afterwards cannot be told apart."
+      ;;
+    2)
+      warn "Receipt schema is 2, which records content but no install ownership."
+      warn "A later anolisa or npm install of the same version leaves identical"
+      warn "bytes behind, so those paths cannot be told apart from this install's."
+      ;;
+    *)
+      warn "Receipt schema is '${SCHEMA}', which this uninstaller does not know;"
+      warn "it is read on a best-effort basis."
+      ;;
+  esac
 fi
 
 # 1. Recorded binaries in the install directory. Nothing else in that directory
@@ -181,6 +275,7 @@ if [ "${#FILES[@]}" -gt 0 ]; then
   idx=0
   for f in "${FILES[@]}"; do
     digest="${DIGESTS[$idx]:-}"
+    target="${TARGETS[$idx]:-}"
     idx=$((idx + 1))
     if [ ! -e "$f" ] && [ ! -L "$f" ]; then
       warn "Already gone, skipping: ${f}"
@@ -198,6 +293,14 @@ if [ "${#FILES[@]}" -gt 0 ]; then
         continue
       fi
     fi
+    # Identical content is not ownership: a newer anolisa or npm install of the
+    # same version reproduces these bytes, so the recorded link target has to
+    # match as well.
+    if receipt_schema_at_least 3 && ! owned_by_receipt "$f" "$target"; then
+      warn "Skipping ${f}: it is no longer the artefact this receipt recorded,"
+      warn "  so another installation has taken over that path."
+      continue
+    fi
     if [ "$DRY_RUN" = "1" ]; then
       info "[dry-run] would remove ${f}"
     else
@@ -209,9 +312,17 @@ else
   warn "Receipt lists no installed files"
 fi
 
-# 2. npm global package — only for the npm method, only from the recorded prefix.
+# 2. npm global package — only for the npm method, only from the recorded prefix,
+#    and only while the ownership marker the installer wrote is still there. A
+#    newer `npm install -g` of the same version replaces the module directory and
+#    the marker with it, which is the only way to tell the two apart.
 if [ "$METHOD" = "npm" ] && [ -n "$NPM_PREFIX" ]; then
-  if command -v npm &>/dev/null; then
+  pkg_marker="$(owner_marker_read "${NPM_PREFIX}/lib/node_modules/${NPM_PACKAGE}/${OWNER_MARKER_FILE}" 2>/dev/null || true)"
+  if [ -n "$NPM_PKG_OWNER" ] && [ "$pkg_marker" != "$NPM_PKG_OWNER" ]; then
+    warn "Skipping the npm package in ${NPM_PREFIX}: its ownership marker belongs to"
+    warn "  a newer installation. Remove it yourself if you no longer need it:"
+    warn "  npm uninstall -g ${NPM_PACKAGE} --prefix ${NPM_PREFIX}"
+  elif command -v npm &>/dev/null; then
     run npm uninstall -g "$NPM_PACKAGE" --prefix "$NPM_PREFIX"
     info "Uninstalled npm package ${NPM_PACKAGE} from prefix ${NPM_PREFIX}"
   else
@@ -233,6 +344,17 @@ if [ -n "$ADAPTERS_DIR" ]; then
         adapters_owned=0
         warn "Skipping ${ADAPTERS_DIR}: it no longer matches the receipt,"
         warn "  so another installation has taken over that adapter tree."
+      fi
+    fi
+    # The manifest is stamped with the release version, so a same-version install
+    # by anolisa or by a direct `npm install -g` reproduces it byte for byte. The
+    # ownership marker is what such a reinstall removes.
+    if [ "$adapters_owned" = "1" ] && [ -n "$ADAPTERS_OWNER" ]; then
+      marker="$(owner_marker_read "${ADAPTERS_DIR}/${OWNER_MARKER_FILE}" 2>/dev/null || true)"
+      if [ "$marker" != "$ADAPTERS_OWNER" ]; then
+        adapters_owned=0
+        warn "Skipping ${ADAPTERS_DIR}: its ownership marker belongs to a newer"
+        warn "  installation, so its resources and framework registrations are kept."
       fi
     fi
     if [ "$adapters_owned" = "1" ]; then

@@ -21,10 +21,20 @@
 #                          ${XDG_DATA_HOME:-$HOME/.local/share}/tokenless/install-receipt).
 #                          Records what this run created; consumed by
 #                          scripts/uninstall.sh. Re-running the installer with a
-#                          different method retires the previous receipt first,
-#                          so artefacts owned by the old method (npm global
-#                          package, `rtk` link, adapter tree) are removed
-#                          instead of being orphaned.
+#                          different method retires the previous receipt, so
+#                          artefacts owned by the old method (npm global package,
+#                          `rtk` link, adapter tree) are removed instead of being
+#                          orphaned — but only once the replacement is verified.
+#                          Until then the previous install is staged aside and
+#                          put back if this run fails, so a missing tag or a
+#                          build error cannot leave the machine without a CLI.
+#
+# Ownership: identical content is not proof of ownership. A later anolisa or npm
+# install of the same version reproduces byte-identical binaries and manifests,
+# so the receipt also records this run's install_id, each launcher's resolved
+# link target, and an ownership marker written into the artefacts that can carry
+# one (the adapter tree and the npm module directory). scripts/uninstall.sh
+# compares those, and leaves alone anything a newer installation has taken over.
 #
 # Installation methods and what each one produces:
 #   npm     prebuilt `tokenless` + `rtk` binaries and the bundled Agent adapters
@@ -47,19 +57,32 @@ NPM_REGISTRY="https://registry.npmjs.org"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 DEFAULT_DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
 RECEIPT_FILE="${TOKENLESS_RECEIPT:-${DEFAULT_DATA_DIR}/tokenless/install-receipt}"
-RECEIPT_SCHEMA=2
+RECEIPT_SCHEMA=3
 PATH_RC_MARKER="# Added by tokenless installer"
 # Identity anchor inside the npm-owned adapter tree: package-npm.js stamps this
 # manifest with the release version, so its digest tells "the tree this run
 # placed" from "a tree another installer replaced it with".
 ADAPTERS_IDENTITY_FILE="manifest.json"
+# Ownership marker written into artefacts that can carry one. It lives where a
+# foreign reinstall removes it, which is what makes it evidence: the same bytes
+# placed by somebody else arrive without this file, or with somebody else's id.
+OWNER_MARKER_FILE=".tokenless-owner"
+# Value this installer stamps into that marker. npm/scripts/postinstall.js
+# recognises the prefix as its own family, so a curl install over a direct
+# `npm install -g` refreshes the tree instead of treating it as foreign.
+OWNER_MARKER_PREFIX="curl-installer"
+OWNER_MARKER_VALUE=""
 
 # Shared state consumed by write_receipt(). Populated by the install helpers.
 INSTALL_METHOD=""
+INSTALL_ID=""
 INSTALLED_FILES=()
+INSTALLED_TARGETS=()
 NPM_PREFIX_USED=""
+NPM_PKG_OWNER=""
 ADAPTERS_DIR_USED=""
 ADAPTERS_DIR_DIGEST=""
+ADAPTERS_DIR_OWNER=""
 VERSION_PINNED=0
 SRC_TMPDIR=""
 CARRIED_PATH_RC=""
@@ -75,10 +98,15 @@ NPM_ATTEMPT_STARTED=0
 NPM_ATTEMPT_PREFIX=""
 NPM_PKG_PRE_EXISTED=0
 ADAPTERS_FOREIGN=0
-# Retirement of the *previous* receipt's npm package runs before this run writes
-# anything; see retire_previous_npm_package().
+# The previous receipt is read once; see load_previous_receipt().
 PREV_RECEIPT_LOADED=0
-PREV_NPM_RETIRED=0
+# Staging state for the previous install. It is moved aside before this run
+# writes anything and either dropped (new install verified) or moved back (this
+# run failed), so a broken upgrade cannot destroy a working install.
+STAGE_DIR=""
+STAGED_PATHS=()
+STAGED_STORED=()
+INSTALL_COMMITTED=0
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -102,7 +130,21 @@ cleanup_src_tmpdir() {
   ROLLBACK_DIR=""
 }
 
-trap cleanup_src_tmpdir EXIT
+# EXIT handler. Kept separate from cleanup_src_tmpdir because try_source_build
+# calls that one explicitly on success, and a successful run must not put the
+# staged previous install back.
+on_exit() {
+  # A run that never reached commit_previous_install left the previous install
+  # staged aside; put it back so the machine keeps a working CLI.
+  restore_previous_install
+  cleanup_src_tmpdir
+  if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
+    rm -rf "$STAGE_DIR" 2>/dev/null || true
+  fi
+  STAGE_DIR=""
+}
+
+trap on_exit EXIT
 
 detect_platform() {
   local os arch
@@ -152,6 +194,84 @@ file_digest() {
     { shasum -a 256 "$f" 2>/dev/null || true; } | cut -d' ' -f1
   fi
   return 0
+}
+
+# Portable absolute-path resolution.
+#
+# GNU readlink(1) has -f; the BSD readlink shipped with macOS only gained it in
+# 12.3, and where it is missing `readlink -f` prints nothing and exits non-zero.
+# Every caller here reads an empty result as "this is not the path we wrote", so
+# on such a machine no launcher would be recorded, the rollback could not
+# identify it either, and the run would fail leaving a dangling link behind.
+# Walk the symlink chain and normalise with `cd -P` instead, which every POSIX
+# shell provides.
+resolve_path() {
+  local p="$1" out="" i=0 target dir base
+  if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  while [ -L "$p" ] && [ "$i" -lt 32 ]; do
+    target=$(readlink "$p" 2>/dev/null) || return 1
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -e "$p" ] || return 1
+  dir=$(dirname "$p")
+  base=$(basename "$p")
+  out=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$out" "$base"
+}
+
+# Per-run ownership token recorded in the receipt and written into the artefacts
+# that can carry a marker.
+new_install_id() {
+  local rand=""
+  if [ -r /dev/urandom ]; then
+    rand=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fi
+  [ -n "$rand" ] || rand="$$"
+  printf '%s-%s-%s\n' "$(date -u '+%Y%m%d%H%M%S')" "$$" "$rand"
+}
+
+owner_marker_read() {
+  [ -f "$1" ] || return 1
+  head -n 1 "$1" 2>/dev/null
+}
+
+owner_marker_write() {
+  printf '%s\n' "$2" > "$1" 2>/dev/null
+}
+
+# Ownership is the recorded identity, not merely the recorded content: a later
+# anolisa or npm install of the same version reproduces byte-identical binaries,
+# so a launcher also has to resolve to the target this installer linked it to.
+# An empty recorded target means a regular file was written there (source build),
+# and a symlink in that spot is therefore somebody else's launcher.
+owned_by_receipt() {
+  local path="$1" target="$2" resolved
+  if [ -n "$target" ]; then
+    [ -L "$path" ] || return 1
+    resolved=$(resolve_path "$path" 2>/dev/null || true)
+    [ -n "$resolved" ] && [ "$resolved" = "$target" ] && return 0
+    return 1
+  fi
+  if [ -L "$path" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# True when the previous receipt carries schema 3 fields, i.e. when the identity
+# checks above have evidence to work with. Older receipts record content only.
+receipt_schema_at_least() {
+  case "${OLD_SCHEMA:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$OLD_SCHEMA" -ge "$1" ]
 }
 
 # Confirms the CLI this run wrote really exists and runs. Every install path is
@@ -217,14 +337,16 @@ deregister_framework_adapters() {
 
 # Parses a receipt into the OLD_* globals. Tolerates schema 1 receipts, which
 # carry no digests, and a truncated file.
-OLD_METHOD="" OLD_INSTALL_DIR="" OLD_NPM_PREFIX=""
-OLD_ADAPTERS_DIR="" OLD_ADAPTERS_DIR_DIGEST="" OLD_PATH_RC=""
-OLD_FILES=() OLD_DIGESTS=()
+OLD_SCHEMA="" OLD_INSTALL_ID="" OLD_METHOD="" OLD_INSTALL_DIR="" OLD_NPM_PREFIX=""
+OLD_ADAPTERS_DIR="" OLD_ADAPTERS_DIR_DIGEST="" OLD_ADAPTERS_OWNER=""
+OLD_NPM_PKG_OWNER="" OLD_PATH_RC=""
+OLD_FILES=() OLD_DIGESTS=() OLD_TARGETS=()
 read_receipt() {
   local path="$1" line key value
-  OLD_METHOD="" OLD_INSTALL_DIR="" OLD_NPM_PREFIX=""
-  OLD_ADAPTERS_DIR="" OLD_ADAPTERS_DIR_DIGEST="" OLD_PATH_RC=""
-  OLD_FILES=() OLD_DIGESTS=()
+  OLD_SCHEMA="" OLD_INSTALL_ID="" OLD_METHOD="" OLD_INSTALL_DIR="" OLD_NPM_PREFIX=""
+  OLD_ADAPTERS_DIR="" OLD_ADAPTERS_DIR_DIGEST="" OLD_ADAPTERS_OWNER=""
+  OLD_NPM_PKG_OWNER="" OLD_PATH_RC=""
+  OLD_FILES=() OLD_DIGESTS=() OLD_TARGETS=()
   [ -f "$path" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -233,14 +355,19 @@ read_receipt() {
     key="${line%%=*}"
     value="${line#*=}"
     case "$key" in
+      schema)              OLD_SCHEMA="$value" ;;
+      install_id)          OLD_INSTALL_ID="$value" ;;
       method)              OLD_METHOD="$value" ;;
       install_dir)         OLD_INSTALL_DIR="$value" ;;
       npm_prefix)          OLD_NPM_PREFIX="$value" ;;
+      npm_pkg_owner)       OLD_NPM_PKG_OWNER="$value" ;;
       adapters_dir)        OLD_ADAPTERS_DIR="$value" ;;
       adapters_dir_digest) OLD_ADAPTERS_DIR_DIGEST="$value" ;;
+      adapters_dir_owner)  OLD_ADAPTERS_OWNER="$value" ;;
       path_rc_file)        OLD_PATH_RC="$value" ;;
       file)                OLD_FILES+=("$value") ;;
       file_digest)         OLD_DIGESTS+=("$value") ;;
+      file_target)         OLD_TARGETS+=("$value") ;;
     esac
   done < "$path"
   return 0
@@ -269,13 +396,20 @@ load_previous_receipt() {
 # an anolisa component install, a direct `npm install -g`, a manual copy —
 # belongs to somebody else and has to survive this run unchanged.
 adapters_owned_by_previous_receipt() {
-  local dir="$1" current
+  local dir="$1" current marker
   load_previous_receipt
   [ -n "$OLD_ADAPTERS_DIR" ] || return 1
   [ "$OLD_ADAPTERS_DIR" = "$dir" ] || return 1
   if [ -n "$OLD_ADAPTERS_DIR_DIGEST" ]; then
     current=$(file_digest "${dir}/${ADAPTERS_IDENTITY_FILE}")
     [ "$current" = "$OLD_ADAPTERS_DIR_DIGEST" ] || return 1
+  fi
+  # Same bytes are not enough: an anolisa or direct npm install of the same
+  # version reproduces this manifest exactly. The marker this installer wrote
+  # into the tree is what a foreign reinstall removes.
+  if [ -n "$OLD_ADAPTERS_OWNER" ]; then
+    marker=$(owner_marker_read "${dir}/${OWNER_MARKER_FILE}" 2>/dev/null || true)
+    [ "$marker" = "$OLD_ADAPTERS_OWNER" ] || return 1
   fi
   return 0
 }
@@ -300,7 +434,7 @@ remove_npm_package() {
   for bin in tokenless rtk; do
     link="${prefix}/bin/${bin}"
     [ -L "$link" ] || continue
-    resolved=$(readlink -f "$link" 2>/dev/null || true)
+    resolved=$(resolve_path "$link" 2>/dev/null || true)
     case "$resolved" in
       "${pkg_dir}"*) rm -f "$link" 2>/dev/null || warn "Could not remove ${link}; remove it manually." ;;
     esac
@@ -311,53 +445,121 @@ remove_npm_package() {
   return 0
 }
 
-# Removes the previous run's recorded launcher links that point into <prefix>,
-# before that prefix is retired. Retiring the package takes its bin directory
-# with it, and a link left dangling has no content left to digest — the
-# ownership check in retire_previous_receipt would then read the recorded path
-# as "another installation took this over" and keep the broken link.
-drop_links_into() {
-  local prefix="$1" i=0 path digest resolved
+# Moves the previous run's launcher files out of the way instead of deleting
+# them. Deleting or uninstalling up front is what used to break a machine when
+# the replacement failed halfway: a missing tag, a build error or an unwritable
+# directory left no CLI at all while the old receipt still described one. What
+# is staged here comes back on any exit path that does not reach
+# commit_previous_install, and is dropped once the new install is verified.
+stage_previous_install() {
+  load_previous_receipt
   [ "${#OLD_FILES[@]}" -gt 0 ] || return 0
+  if ! STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-staged.XXXXXX" 2>/dev/null); then
+    STAGE_DIR=""
+    warn "Cannot create a staging directory under ${TMPDIR:-/tmp}; the previous"
+    warn "install cannot be kept aside, so a failed run may leave it incomplete."
+    return 0
+  fi
+  local i=0 path digest target stored n=0
   for path in "${OLD_FILES[@]}"; do
     digest="${OLD_DIGESTS[$i]:-}"
+    target="${OLD_TARGETS[$i]:-}"
     i=$((i + 1))
-    [ -L "$path" ] || continue
-    resolved=$(readlink -f "$path" 2>/dev/null || true)
-    case "$resolved" in
-      "${prefix}"/*) ;;
-      *) continue ;;
-    esac
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      continue
+    fi
     if [ -n "$digest" ] && [ "$(file_digest "$path")" != "$digest" ]; then
       warn "Keeping ${path}: it no longer matches the previous receipt, so another installation owns it now."
       continue
     fi
-    if rm -f "$path" 2>/dev/null; then
-      info "Removed ${path} left behind by the previous ${OLD_METHOD:-unknown} install"
+    if receipt_schema_at_least 3 && ! owned_by_receipt "$path" "$target"; then
+      warn "Keeping ${path}: it is no longer the artefact the previous receipt recorded, so another installation owns it now."
+      continue
+    fi
+    stored="${STAGE_DIR}/staged-${n}"
+    if cp -a "$path" "$stored" 2>/dev/null && rm -f "$path" 2>/dev/null; then
+      STAGED_PATHS+=("$path")
+      STAGED_STORED+=("$stored")
+      n=$((n + 1))
     else
-      warn "Could not remove ${path} left behind by the previous install; remove it manually."
+      warn "Could not stage ${path} aside; leaving it in place."
     fi
   done
+  if [ "$n" -gt 0 ]; then
+    info "Kept the previous ${OLD_METHOD:-unknown} install aside (install_id ${OLD_INSTALL_ID:-unknown}); it is restored if this run fails."
+  fi
   return 0
 }
 
-# Retires the npm global package of the previous run *before* this run writes
-# anything. <prospective> is the prefix this run is about to install into, and
-# empty when it will not take the npm route at all. An unchanged prefix is left
-# to the npm install that follows, which replaces that package in place.
-retire_previous_npm_package() {
-  local prospective="${1:-}"
-  load_previous_receipt
-  [ "$OLD_METHOD" = "npm" ] || return 0
-  [ -n "$OLD_NPM_PREFIX" ] || return 0
-  if [ -n "$prospective" ] && [ "$prospective" = "$OLD_NPM_PREFIX" ]; then
+# The new install is verified and recorded, so what was staged aside is genuinely
+# superseded. From here the exit trap stops trying to put it back.
+commit_previous_install() {
+  INSTALL_COMMITTED=1
+  STAGED_PATHS=()
+  STAGED_STORED=()
+  if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
+    rm -rf "$STAGE_DIR" 2>/dev/null || true
+  fi
+  STAGE_DIR=""
+  return 0
+}
+
+# Puts the staged previous install back. Runs from the EXIT trap on every path
+# that did not commit; a staged copy that cannot be restored is reported with its
+# location rather than silently dropped.
+restore_previous_install() {
+  [ "$INSTALL_COMMITTED" = "1" ] && return 0
+  [ "${#STAGED_PATHS[@]}" -gt 0 ] || return 0
+  local i restored=0
+  for i in "${!STAGED_PATHS[@]}"; do
+    if [ ! -e "${STAGED_STORED[$i]}" ] && [ ! -L "${STAGED_STORED[$i]}" ]; then
+      continue
+    fi
+    mkdir -p "$(dirname "${STAGED_PATHS[$i]}")" 2>/dev/null || true
+    rm -f "${STAGED_PATHS[$i]}" 2>/dev/null || true
+    if cp -a "${STAGED_STORED[$i]}" "${STAGED_PATHS[$i]}" 2>/dev/null; then
+      restored=$((restored + 1))
+      info "Restored ${STAGED_PATHS[$i]}: this run did not produce a working replacement."
+    else
+      warn "Could not restore ${STAGED_PATHS[$i]}; the previous file is kept at ${STAGED_STORED[$i]}."
+    fi
+  done
+  if [ "$restored" -gt 0 ]; then
+    warn "The previous install receipt still describes it; this run changed nothing."
+  fi
+  STAGED_PATHS=()
+  STAGED_STORED=()
+  return 0
+}
+
+# The contract anolisa writes next to the shared adapter resources when it
+# installs or adopts the component ({datadir}/components/tokenless/component.toml,
+# {datadir} being ~/.local/share/anolisa in user mode). While it is there the tree
+# belongs to a managed component installation, whatever any marker says.
+anolisa_component_contract() {
+  local contract="${HOME}/.local/share/anolisa/components/tokenless/component.toml"
+  [ -f "$contract" ] || return 1
+  printf '%s\n' "$contract"
+  return 0
+}
+
+# True when the shared adapter tree belongs to this installer's own family: a
+# previous run of this script whose recorded identity still matches, or the npm
+# package this script is about to install. Anything else — an anolisa component
+# install, a hand-made copy — is foreign and has to survive the run unchanged.
+adapters_owned_by_us() {
+  local dir="$1" marker
+  if anolisa_component_contract >/dev/null 2>&1; then
+    return 1
+  fi
+  if adapters_owned_by_previous_receipt "$dir"; then
     return 0
   fi
-  drop_links_into "$OLD_NPM_PREFIX"
-  info "Removing the npm package left behind by the previous install..."
-  remove_npm_package "$OLD_NPM_PREFIX" "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-  PREV_NPM_RETIRED=1
-  return 0
+  marker=$(owner_marker_read "${dir}/${OWNER_MARKER_FILE}" 2>/dev/null || true)
+  case "$marker" in
+    "${OWNER_MARKER_PREFIX}:"*|"npm:"*) return 0 ;;
+  esac
+  return 1
 }
 
 # Snapshots everything the npm route is about to replace: the launcher links in
@@ -384,7 +586,7 @@ begin_npm_attempt() {
     NPM_PKG_PRE_EXISTED=1
   fi
   if [ -d "$adapters_dir" ]; then
-    if ! adapters_owned_by_previous_receipt "$adapters_dir"; then
+    if ! adapters_owned_by_us "$adapters_dir"; then
       ADAPTERS_FOREIGN=1
     fi
     if ! cp -a "$adapters_dir" "${ROLLBACK_DIR}/adapters-tokenless" 2>/dev/null; then
@@ -441,12 +643,13 @@ rollback_npm_attempt() {
         || warn "Could not restore ${install_dir}/${bin} after the failed npm attempt."
     elif [ -L "${install_dir}/${bin}" ]; then
       # Written by this attempt, and nothing was there before it.
-      case "$(readlink -f "${install_dir}/${bin}" 2>/dev/null || true)" in
+      case "$(resolve_path "${install_dir}/${bin}" 2>/dev/null || true)" in
         "${prefix}"/*) rm -f "${install_dir}/${bin}" 2>/dev/null || true ;;
       esac
     fi
   done
   INSTALLED_FILES=()
+  INSTALLED_TARGETS=()
 
   if [ -d "${ROLLBACK_DIR}/adapters-tokenless" ]; then
     rm -rf "$adapters_dir" 2>/dev/null || true
@@ -483,10 +686,11 @@ retire_previous_receipt() {
   [ -f "$RECEIPT_FILE" ] || return 0
   load_previous_receipt
 
-  local i=0 path digest current adapters_owned
+  local i=0 path digest target current adapters_owned marker
   if [ "${#OLD_FILES[@]}" -gt 0 ]; then
     for path in "${OLD_FILES[@]}"; do
       digest="${OLD_DIGESTS[$i]:-}"
+      target="${OLD_TARGETS[$i]:-}"
       i=$((i + 1))
       if in_new_files "$path"; then
         continue
@@ -501,6 +705,10 @@ retire_previous_receipt() {
           continue
         fi
       fi
+      if receipt_schema_at_least 3 && ! owned_by_receipt "$path" "$target"; then
+        warn "Keeping ${path}: it is no longer the artefact the previous receipt recorded, so another installation owns it now."
+        continue
+      fi
       if rm -f "$path" 2>/dev/null; then
         info "Removed ${path} left behind by the previous ${OLD_METHOD:-unknown} install"
       else
@@ -509,16 +717,23 @@ retire_previous_receipt() {
     done
   fi
 
-  # The npm global package of a previous npm run. Normally already retired
-  # before this run wrote anything (retire_previous_npm_package); this is the
-  # path that is left when the npm route was attempted into the very same
-  # prefix and then failed, so the fallback owns the install directory now.
-  # Skipped when this run reused the prefix successfully — the package there is
-  # the one just installed.
+  # The npm global package of a previous npm run. Skipped when this run reused
+  # the same prefix — the package there is the one just installed. This runs
+  # only after the new install verified itself, so a failed run never loses the
+  # package it still needs.
   if [ "$OLD_METHOD" = "npm" ] && [ -n "$OLD_NPM_PREFIX" ] \
-     && [ "$OLD_NPM_PREFIX" != "$NPM_PREFIX_USED" ] && [ "$PREV_NPM_RETIRED" != "1" ]; then
-    info "Removing the npm package left behind by the previous install..."
-    remove_npm_package "$OLD_NPM_PREFIX" "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+     && [ "$OLD_NPM_PREFIX" != "$NPM_PREFIX_USED" ]; then
+    # A newer `npm install -g` of the same version leaves byte-identical files in
+    # this prefix, so the ownership marker decides, not the content.
+    marker=$(owner_marker_read "${OLD_NPM_PREFIX}/lib/node_modules/${NPM_PACKAGE}/${OWNER_MARKER_FILE}" 2>/dev/null || true)
+    if [ -n "$OLD_NPM_PKG_OWNER" ] && [ "$marker" != "$OLD_NPM_PKG_OWNER" ]; then
+      warn "Keeping the npm package in ${OLD_NPM_PREFIX}: its ownership marker belongs to a newer installation."
+      warn "Remove it yourself if you no longer need it:"
+      warn "  npm uninstall -g ${NPM_PACKAGE} --prefix ${OLD_NPM_PREFIX}"
+    else
+      info "Removing the npm package left behind by the previous install..."
+      remove_npm_package "$OLD_NPM_PREFIX" "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+    fi
   fi
 
   # The adapter tree of a previous npm run, deregistered before it is deleted.
@@ -531,6 +746,13 @@ retire_previous_receipt() {
       if [ "$current" != "$OLD_ADAPTERS_DIR_DIGEST" ]; then
         adapters_owned=0
         warn "Keeping ${OLD_ADAPTERS_DIR}: it no longer matches the previous receipt, so another installation owns it now."
+      fi
+    fi
+    if [ "$adapters_owned" = "1" ] && [ -n "$OLD_ADAPTERS_OWNER" ]; then
+      marker=$(owner_marker_read "${OLD_ADAPTERS_DIR}/${OWNER_MARKER_FILE}" 2>/dev/null || true)
+      if [ "$marker" != "$OLD_ADAPTERS_OWNER" ]; then
+        adapters_owned=0
+        warn "Keeping ${OLD_ADAPTERS_DIR}: its ownership marker belongs to a newer installation."
       fi
     fi
     if [ "$adapters_owned" = "1" ]; then
@@ -565,7 +787,7 @@ retire_previous_receipt() {
 # took over the same path.
 write_receipt() {
   local method="$1"
-  local receipt_dir entry digest
+  local receipt_dir entry digest i=0 target
 
   # Retire the previous method's artefacts before this run truncates the only
   # record of what they were.
@@ -582,19 +804,26 @@ write_receipt() {
     printf '# Tokenless installer receipt (schema %s).\n' "$RECEIPT_SCHEMA"
     printf '# Written by scripts/install.sh, consumed by scripts/uninstall.sh.\n'
     printf '# Only the paths listed below belong to this installation.\n'
-    printf '# Every file= line is followed by its file_digest= line: the sha256 of the\n'
-    printf '# installed content. An empty digest means it could not be computed, and\n'
-    printf '# uninstall.sh then has to fall back to the path alone.\n'
+    printf '# Every file= line is followed by its file_digest= line (the sha256 of the\n'
+    printf '# installed content) and its file_target= line (the absolute path a launcher\n'
+    printf '# symlink resolves to, empty for a regular file). An empty digest means it\n'
+    printf '# could not be computed, and uninstall.sh then falls back to the path alone.\n'
+    printf '# Content alone does not prove ownership: a later anolisa or npm install of\n'
+    printf '# the same version reproduces the same bytes. install_id and the *_owner keys\n'
+    printf '# are the marker this run wrote into the artefacts that can carry one.\n'
     printf 'schema=%s\n' "$RECEIPT_SCHEMA"
+    printf 'install_id=%s\n' "$INSTALL_ID"
     printf 'method=%s\n' "$method"
     printf 'version=%s\n' "$VERSION"
     printf 'install_dir=%s\n' "${TOKENLESS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
     if [ -n "$NPM_PREFIX_USED" ]; then
       printf 'npm_prefix=%s\n' "$NPM_PREFIX_USED"
+      printf 'npm_pkg_owner=%s\n' "$NPM_PKG_OWNER"
     fi
     if [ -n "$ADAPTERS_DIR_USED" ]; then
       printf 'adapters_dir=%s\n' "$ADAPTERS_DIR_USED"
       printf 'adapters_dir_digest=%s\n' "$ADAPTERS_DIR_DIGEST"
+      printf 'adapters_dir_owner=%s\n' "$ADAPTERS_DIR_OWNER"
     fi
     printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     if [ -n "$CARRIED_PATH_RC" ]; then
@@ -603,8 +832,11 @@ write_receipt() {
     if [ "${#INSTALLED_FILES[@]}" -gt 0 ]; then
       for entry in "${INSTALLED_FILES[@]}"; do
         digest=$(file_digest "$entry")
+        target="${INSTALLED_TARGETS[$i]:-}"
+        i=$((i + 1))
         printf 'file=%s\n' "$entry"
         printf 'file_digest=%s\n' "$digest"
+        printf 'file_target=%s\n' "$target"
       done
     fi
   } > "$RECEIPT_FILE"; then
@@ -676,12 +908,14 @@ try_npm_install() {
   # `toon` is no longer a standalone binary (see the tokenless-cli crate), so
   # only the binaries the npm package actually ships are linked and recorded.
   INSTALLED_FILES=()
+  INSTALLED_TARGETS=()
   local bin link_target link_path resolved
   for bin in tokenless rtk; do
     if [ ! -f "${npm_bin}/${bin}" ] && [ ! -L "${npm_bin}/${bin}" ]; then
       continue
     fi
-    link_target=$(readlink -f "${npm_bin}/${bin}" 2>/dev/null || printf '%s' "${npm_bin}/${bin}")
+    link_target=$(resolve_path "${npm_bin}/${bin}" 2>/dev/null || true)
+    [ -n "$link_target" ] || link_target="${npm_bin}/${bin}"
     link_path="${install_dir}/${bin}"
     if ! ln -sf "$link_target" "$link_path" 2>/dev/null; then
       warn "Cannot write ${link_path} (is ${install_dir} writable?)"
@@ -691,12 +925,13 @@ try_npm_install() {
     # Verify the link that is now at that path really is the one just written.
     # A pre-existing file from another method survives a failed `ln`, and must
     # never be recorded as this run's artefact.
-    resolved=$(readlink -f "$link_path" 2>/dev/null || true)
+    resolved=$(resolve_path "$link_path" 2>/dev/null || true)
     if [ "$resolved" != "$link_target" ] || [ ! -x "$link_path" ]; then
       warn "${link_path} does not point at the binary this run installed; not recording it"
       continue
     fi
     INSTALLED_FILES+=("$link_path")
+    INSTALLED_TARGETS+=("$link_target")
   done
 
   if [ "${#INSTALLED_FILES[@]}" -eq 0 ]; then
@@ -711,6 +946,19 @@ try_npm_install() {
   fi
 
   NPM_PREFIX_USED="$npm_prefix"
+  # The global package needs a marker too: identical content is what a later
+  # `npm install -g` of the same version leaves behind, and uninstall.sh must
+  # not run `npm uninstall -g` against a prefix it no longer owns.
+  local npm_pkg_dir="${npm_prefix}/lib/node_modules/${NPM_PACKAGE}"
+  if [ -d "$npm_pkg_dir" ]; then
+    if owner_marker_write "${npm_pkg_dir}/${OWNER_MARKER_FILE}" "$OWNER_MARKER_VALUE"; then
+      NPM_PKG_OWNER="$OWNER_MARKER_VALUE"
+    else
+      warn "Could not write the ownership marker into ${npm_pkg_dir}."
+      warn "scripts/uninstall.sh will then leave that npm package alone; remove it"
+      warn "yourself with: npm uninstall -g ${NPM_PACKAGE} --prefix ${npm_prefix}"
+    fi
+  fi
 
   # The package postinstall copies the bundled adapters into the shared
   # directory and replaces whatever was there. That makes the tree this run's
@@ -747,6 +995,15 @@ try_npm_install() {
     # recorded.
     ADAPTERS_DIR_USED="$adapters_dir"
     ADAPTERS_DIR_DIGEST=$(file_digest "${adapters_dir}/${ADAPTERS_IDENTITY_FILE}")
+    # The manifest digest describes content, not owner: an anolisa or direct npm
+    # install of the same version reproduces it byte for byte. Stamp this run's
+    # id so uninstall.sh can tell the two apart.
+    if owner_marker_write "${adapters_dir}/${OWNER_MARKER_FILE}" "$OWNER_MARKER_VALUE"; then
+      ADAPTERS_DIR_OWNER="$OWNER_MARKER_VALUE"
+    else
+      warn "Could not write the ownership marker into ${adapters_dir}."
+      warn "scripts/uninstall.sh will fall back to the manifest digest alone."
+    fi
   fi
   end_npm_attempt
   write_receipt npm
@@ -850,9 +1107,14 @@ try_source_build() {
   fi
 
   INSTALLED_FILES=("${install_dir}/tokenless")
+  # A source build writes a regular file, so the recorded link target is empty —
+  # which is itself evidence: a symlink at that path belongs to somebody else.
+  INSTALLED_TARGETS=("")
   NPM_PREFIX_USED=""
+  NPM_PKG_OWNER=""
   ADAPTERS_DIR_USED=""
   ADAPTERS_DIR_DIGEST=""
+  ADAPTERS_DIR_OWNER=""
   write_receipt source
 
   info "Installed tokenless to ${install_dir}/tokenless"
@@ -905,16 +1167,13 @@ main() {
   info "Platform: ${PLATFORM_KEY}"
   info "Install directory: ${install_dir}"
 
-  # Retire the previous run's npm global package before anything new is written.
-  # `npm uninstall -g --prefix P` also removes P/bin/tokenless, so when P/bin is
-  # this run's install directory, doing it after the install would delete the CLI
-  # the source build has just placed there and fail the whole run.
-  local prospective_prefix=""
-  if [ "${TOKENLESS_FORCE_BUILD:-0}" != "1" ] && [ "${MUSL_LINUX:-0}" != "1" ] \
-     && command -v npm >/dev/null 2>&1; then
-    prospective_prefix=$(npm config get prefix 2>/dev/null || true)
-  fi
-  retire_previous_npm_package "$prospective_prefix"
+  INSTALL_ID=$(new_install_id)
+  OWNER_MARKER_VALUE="${OWNER_MARKER_PREFIX}:${INSTALL_ID}"
+
+  # Move the previous install aside rather than deleting it. Nothing is retired
+  # until a replacement has been verified, so a missing tag, a failed build or an
+  # unwritable directory leaves the machine exactly as it was.
+  stage_previous_install
 
   if [ "${TOKENLESS_FORCE_BUILD:-0}" = "1" ]; then
     try_source_build || die "Source build failed"
@@ -927,6 +1186,10 @@ main() {
       die "All installation methods failed"
     fi
   fi
+
+  # The new install is verified and its receipt is written, so what was staged
+  # aside is genuinely superseded and the previous npm package can go.
+  commit_previous_install
 
   ensure_path
 

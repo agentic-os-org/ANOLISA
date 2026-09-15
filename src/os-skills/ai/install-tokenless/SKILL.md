@@ -63,6 +63,8 @@ npm install -g anolisa-tokenless
 
 This automatically installs the `tokenless` and `rtk` binaries plus the framework adapter resources. (`toon` is no longer a standalone binary — TOON encoding is a `tokenless` subcommand.)
 
+The adapter resources land in `~/.local/share/anolisa/adapters/tokenless`, which is shared with the anolisa CLI. If that directory already belongs to a managed anolisa component install, the package postinstall **keeps it unchanged** and says so, rather than replacing resources that a component record and every framework registration still point at; the copy this package ships stays available inside the package under `adapters/tokenless`. Pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway.
+
 The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
 Intel macOS (x86_64) has no published platform package yet either: `@anolisa/tokenless-darwin-x64` is a
 release build target, not a registry artifact, so Intel macOS has **no supported install route in this release**.
@@ -218,14 +220,25 @@ Before deleting the adapter directory the uninstaller runs each bundled
 framework's own `scripts/uninstall.sh`, so an enabled framework registration is
 removed rather than left pointing at a deleted directory.
 
-Re-running the installer with a different method retires the previous receipt
-first, so switching npm → source does not orphan the `rtk` launcher, the npm
-global package or the adapter tree. The previous npm package is retired before
-the new files are written, which matters when its prefix and the install
-directory overlap (`--prefix ~/.local` with `~/.local/bin`): `npm uninstall`
-would otherwise take the freshly installed CLI with it. A failed npm attempt is
-rolled back the same way, so the source-build fallback never inherits an
-unowned package, `rtk` link or adapter tree.
+Content alone is not proof of ownership — a newer anolisa or npm install of the
+same version leaves byte-identical binaries and manifests behind. So the receipt
+also records this install's id, the link target each launcher resolves to, and an
+ownership marker (`.tokenless-owner`) inside the adapter tree and the npm module
+directory. A path whose recorded identity or marker no longer matches belongs to
+that newer install and is kept, including its framework registrations and its npm
+package.
+
+Re-running the installer with a different method retires the previous receipt, so
+switching npm → source does not orphan the `rtk` launcher, the npm global package
+or the adapter tree — but only once the replacement is verified. The previous
+install is moved aside first and put back if the new one fails, so a missing tag,
+a build error or an unwritable directory leaves the working install and its
+receipt exactly as they were. Where the previous npm prefix and the install
+directory overlap (`--prefix ~/.local` with `~/.local/bin`), that package is
+retired by hand instead of through `npm uninstall`, which would otherwise take the
+freshly installed CLI with it. A failed npm attempt is rolled back the same way,
+so the source-build fallback never inherits an unowned package, `rtk` link or
+adapter tree.
 
 **Direct npm installation (Method B), not through the curl script:** no receipt
 exists, so undo the three things the install did, in this order. Deregister the
@@ -248,7 +261,9 @@ rm -rf ~/.local/share/anolisa/adapters/tokenless
 This is the order the receipt-driven uninstaller uses internally, and the order
 the Tokenless troubleshooting page prescribes for an npm installation. Step 3
 also removes the resources a Method C npm install writes, so skip it when
-another Tokenless installation on this machine still needs them.
+another Tokenless installation on this machine still needs them — and skip it
+whenever the postinstall reported that it kept a managed adapter tree, because
+that directory was never this npm install's to delete.
 
 If the receipt is missing (for example after a manual cleanup), the uninstaller
 exits with an error rather than guessing; remove `<install-dir>/tokenless` and

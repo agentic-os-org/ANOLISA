@@ -383,6 +383,8 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 Run this only after confirming that the directory belongs to this Tokenless npm installation. A manually installed cosh Extension must be separately confirmed and removed from `~/.copilot-shell/extensions/tokenless`.
 
+The package postinstall makes that confirmation for you: `~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI, so when it already belongs to a managed component install the postinstall keeps it unchanged and prints where the resources inside the package are instead of replacing a tree that a component record and framework registrations still point at. Pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway, in which case re-run `anolisa adapter scan` afterwards so the component record matches what is on disk.
+
 ### curl standalone installation
 
 The standalone installer records every path it created in a receipt at `~/.local/share/tokenless/install-receipt`: the method it ended up taking (npm or source build), the version, the install directory, the npm prefix, the adapter directory, the rc file it appended a PATH line to, and each installed file together with its sha256.
@@ -393,9 +395,11 @@ Upgrade by re-running the installer. It overwrites the recorded paths and rewrit
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
 
-Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — first retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. A recorded path whose content no longer matches its digest was taken over by another installer and is left alone.
+Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
 
-The previous npm package is retired **before** the new files are written, which matters when its prefix and the install directory overlap — `npm install -g --prefix ~/.local` puts its bin links in `~/.local/bin`, the installer's default install directory, and `npm uninstall --prefix ~/.local` removes them again. Retiring first is what keeps a source build that writes `~/.local/bin/tokenless` from having it deleted afterwards. An npm attempt that fails part-way is rolled back the same way, so the source-build fallback never inherits an unowned package, launcher link or adapter tree.
+Where the previous npm prefix and the install directory overlap — `npm install -g --prefix ~/.local` puts its bin links in `~/.local/bin`, the installer's default install directory — that package is retired by hand instead of through `npm uninstall --prefix ~/.local`, which would remove the CLI the new install just placed there. An npm attempt that fails part-way is rolled back the same way, so the source-build fallback never inherits an unowned package, launcher link or adapter tree.
+
+Ownership is checked, not just content. A newer anolisa or npm install of the same version reproduces byte-identical binaries and manifests, so the receipt also records this install's id, the link target each launcher resolves to, and an ownership marker (`.tokenless-owner`) inside the adapter tree and the npm module directory. The uninstaller keeps anything whose recorded identity or marker no longer matches — files, adapter resources, framework registrations and the npm package alike.
 
 The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS has no published npm package either, so it currently has no supported route — see the platform table in the [Quick Start](QUICKSTART.md#platform-support).
 

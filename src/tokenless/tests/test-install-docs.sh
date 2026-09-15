@@ -205,7 +205,7 @@ has "$OS_SKILLS_INDEX_ZH" "**install-tokenless**" "zh OS Skills index lists the 
 has_re "$INSTALL_SH" '-maxdepth ([4-9]|[1-9][0-9]+) ' "install.sh searches deep enough for src/tokenless/Cargo.toml"
 hasnt "$INSTALL_SH" "archive/refs/heads/main" "install.sh never downloads the main branch archive"
 hasnt "$INSTALL_SH" "local tmpdir" "install.sh keeps the temp dir in a variable the EXIT trap can read"
-has "$INSTALL_SH" "trap cleanup_src_tmpdir EXIT" "install.sh registers its cleanup trap at top level"
+has "$INSTALL_SH" "trap on_exit EXIT" "install.sh registers its cleanup trap at top level"
 has "$INSTALL_SH" "write_receipt" "install.sh records what it created"
 has "$INSTALL_SH" "Windows is not supported" "install.sh rejects Windows as documented"
 hasnt "$INSTALL_SH" "for bin in tokenless rtk toon" "install.sh does not link the retired toon binary"
@@ -260,14 +260,63 @@ has "$DOC_ZH_TROUBLE" '绝不会执行 `cargo`' "zh troubleshooting states macOS
 # --- installer: the npm route is a transaction, not a best effort ------------
 has "$INSTALL_SH" "begin_npm_attempt" "install.sh snapshots the npm route before changing anything"
 has "$INSTALL_SH" "rollback_npm_attempt" "install.sh rolls a failed npm attempt back"
-has "$INSTALL_SH" "retire_previous_npm_package" "install.sh retires the previous package before writing new files"
 has "$INSTALL_SH" "remove_npm_package" "install.sh can retire a package whose prefix overlaps the install directory"
-has "$INSTALL_SH" "drop_links_into" "install.sh drops recorded links before their target package goes"
+# A replacement is only allowed to retire what it superseded once it works, so a
+# failed upgrade cannot leave a machine with no CLI and a receipt describing one.
+has "$INSTALL_SH" "stage_previous_install" "install.sh keeps the previous install aside while it replaces it"
+has "$INSTALL_SH" "commit_previous_install" "install.sh retires the previous install only after the new one verified"
+has "$INSTALL_SH" "restore_previous_install" "install.sh puts the previous install back when the run fails"
+has "$INSTALL_SH" "trap on_exit EXIT" "install.sh restores the staged install on every exit path"
+hasnt "$INSTALL_SH" "retire_previous_npm_package" "install.sh no longer retires the previous package up front"
 
 # --- installer: a shared adapter directory is not claimed for existing -------
 has "$INSTALL_SH" "shared_adapters_dir" "install.sh names the shared adapter directory once"
+# Identical content is what a same-version reinstall by anolisa or npm leaves
+# behind, so ownership has to be proven by something a reinstall removes.
+for script in "$INSTALL_SH" "$UNINSTALL_SH"; do
+  name=$(basename "$script")
+  has "$script" "OWNER_MARKER_FILE" "$name knows the ownership marker file"
+  has "$script" "owned_by_receipt" "$name checks recorded identity, not just recorded content"
+  has "$script" "resolve_path" "$name resolves symlinks without depending on GNU readlink"
+  hasnt "$script" 'readlink -f "' "$name does not call readlink -f directly"
+done
+has "$INSTALL_SH" "new_install_id" "install.sh stamps a per-run ownership id"
+has "$INSTALL_SH" "RECEIPT_SCHEMA=3" "install.sh writes the ownership-aware receipt schema"
+has "$UNINSTALL_SH" "npm_pkg_owner" "uninstall.sh checks the npm package ownership marker"
+has "$UNINSTALL_SH" "adapters_dir_owner" "uninstall.sh checks the adapter tree ownership marker"
+has "$UNINSTALL_SH" "file_target" "uninstall.sh checks the recorded launcher link target"
+POSTINSTALL_JS="$TOKENLESS_ROOT/npm/scripts/postinstall.js"
+has "$POSTINSTALL_JS" "foreignAdapterOwner" "postinstall.js identifies the adapter tree's owner before replacing it"
+has "$POSTINSTALL_JS" "components', 'tokenless', 'component.toml'" \
+  "postinstall.js recognises an anolisa-managed component install"
+has "$POSTINSTALL_JS" "ANOLISA_TOKENLESS_FORCE_ADAPTERS" "postinstall.js documents the takeover override"
+
+# --- docs: the shared adapter directory and the ownership model --------------
+for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
+  name="$(basename "$(dirname "$(dirname "$(dirname "$doc")")")")/$(basename "$doc")"
+  has "$doc" "ANOLISA_TOKENLESS_FORCE_ADAPTERS=1" "$name documents the adapter takeover override"
+done
+for doc in "$DOC_SKILL" "$DOC_README_EN" "$DOC_README_ZH" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
+  name=$(basename "$doc")
+  has "$doc" ".tokenless-owner" "$name names the ownership marker"
+done
+# The docs must not still promise the round-3 behaviour, where the previous
+# package was retired before the replacement was known to work.
+hasnt "$DOC_EN_TROUBLE" "retired **before** the new files are written" \
+  "en troubleshooting no longer promises an up-front retirement"
+hasnt "$DOC_ZH_TROUBLE" "会在写入新文件**之前**回收" \
+  "zh troubleshooting no longer promises an up-front retirement"
+has "$DOC_EN_TROUBLE" "moved aside first and put back if the new one fails" \
+  "en troubleshooting documents that a failed replacement restores the old install"
+has "$DOC_ZH_TROUBLE" "先把原安装挪到一边" \
+  "zh troubleshooting documents that a failed replacement restores the old install"
+has "$DOC_SKILL" "moved aside first and put back if the new one fails" \
+  "SKILL documents that a failed replacement restores the old install"
+has "$DOC_SKILL" "keeps it unchanged" "SKILL documents that npm preserves a managed adapter tree"
 has "$INSTALL_SH" "adapters_owned_by_previous_receipt" \
   "install.sh proves adapter ownership before claiming the tree"
+has "$INSTALL_SH" "adapters_owned_by_us" "install.sh recognises its own family's adapter tree"
+has "$INSTALL_SH" "anolisa_component_contract" "install.sh detects an anolisa-managed component install"
 has "$INSTALL_SH" "ADAPTERS_FOREIGN" "install.sh tells a foreign adapter tree from its own"
 has "$DOC_SKILL" "shared with the anolisa CLI" "SKILL says the adapter directory is shared"
 has "$DOC_EN_TROUBLE" "shared with the anolisa CLI" "en troubleshooting says the adapter directory is shared"

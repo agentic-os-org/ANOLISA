@@ -376,6 +376,8 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 该命令只应在确认目录属于本次 Tokenless npm 安装后执行。cosh 的手动 Extension 需要单独确认并移除 `~/.copilot-shell/extensions/tokenless`。
 
+这一步的确认由包的 postinstall 代劳：`~/.local/share/anolisa/adapters/tokenless` 与 anolisa CLI 共享，当它已属于受管组件安装时，postinstall 会保持原样不动，并打印包内资源的位置，而不是替换掉组件记录与框架注册仍然指向的目录。确需接管时设置 `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1`，之后请重跑 `anolisa adapter scan`，让组件记录与磁盘内容一致。
+
 ### curl 独立安装
 
 独立安装脚本会把创建的每一个路径记录到 `~/.local/share/tokenless/install-receipt`：最终走的方式（npm 或源码构建）、版本、安装目录、npm prefix、Adapter 目录、追加过 PATH 的 rc 文件，以及每个安装的文件及其 sha256。
@@ -386,9 +388,11 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
 ```
 
-在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会先回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。若某个记录路径的内容已与其 sha256 不一致，说明它已被另一种安装接管，脚本会保留它。
+在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。回收只在新安装验证通过之后发生：脚本先把原安装挪到一边，新安装失败时再原样放回，因此 tag 缺失、构建失败或目录不可写都不会破坏原本可用的 CLI，receipt 也仍然与现实一致。若某个记录路径的身份已不再匹配，说明它已被另一种安装接管，脚本会保留它。
 
-上一个 npm 全局包会在写入新文件**之前**回收。当它的 prefix 与安装目录重叠时这一点很关键——`npm install -g --prefix ~/.local` 会把 bin 链接放进 `~/.local/bin`，也就是安装脚本的默认安装目录，而 `npm uninstall --prefix ~/.local` 又会把它们删掉。先回收，才能避免源码构建刚写入的 `~/.local/bin/tokenless` 随后被删除。中途失败的 npm 尝试也会按同样方式回滚，因此源码构建回退不会接手无主的软件包、启动器链接或 Adapter 目录。
+当上一个 npm prefix 与安装目录重叠时——`npm install -g --prefix ~/.local` 会把 bin 链接放进 `~/.local/bin`，也就是安装脚本的默认安装目录——脚本改为手工回收该全局包，而不执行 `npm uninstall --prefix ~/.local`，否则新安装刚写入的 `~/.local/bin/tokenless` 会被一并删掉。中途失败的 npm 尝试也会按同样方式回滚，因此源码构建回退不会接手无主的软件包、启动器链接或 Adapter 目录。
+
+所有权看的是身份而不只是内容。anolisa 或直接 npm 安装同一版本会留下逐字相同的二进制与 manifest，因此 receipt 还会记录本次安装的 id、每个启动器解析到的链接目标，以及写进 Adapter 目录和 npm 模块目录的所有权标记（`.tokenless-owner`）。凡身份或标记不再匹配的内容，卸载脚本都会保留——文件、Adapter 资源、框架注册与 npm 全局包都一样。
 
 源码构建回退只支持 Linux。在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会执行 `cargo`。Intel Mac 也没有已发布的 npm 软件包，因此目前没有受支持的安装路径——见[快速开始](QUICKSTART.md#平台适配性)中的平台表格。
 

@@ -49,6 +49,8 @@ tokenless --version
 
 安装完成后，Adapter 资源位于 `~/.local/share/anolisa/adapters/tokenless/`。npm 安装不会生成 anolisa 组件记录，因此 `anolisa adapter enable` 不适用于这条路径，请按[按安装方式启用 Adapter](#按安装方式启用-adapter)启用。
 
+该目录与 anolisa CLI 共享。当它已属于受管组件安装时，包的 postinstall 会保持原样并给出提示，而不是替换组件记录仍然指向的资源；确需接管时设置 `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1`。
+
 支持的平台：
 
 | 平台 | 架构 | npm 包 |

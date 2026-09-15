@@ -192,6 +192,19 @@ consumes to remove exactly those paths; its source-build path is CLI-only
 `install-tokenless` OS Skill. The full method matrix lives in
 `docs/user-guide/en/token-saving/tokenless/QUICKSTART.md`.
 
+`~/.local/share/anolisa/adapters/tokenless` is shared with anolisa-managed
+installs, so neither public route takes it over blindly. The npm postinstall
+keeps a tree that belongs to a managed component install and reports where the
+resources inside the package are; `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` overrides
+that. The curl installer restores a tree another owner placed there, records no
+adapter directory for it, and proves ownership of everything it does record with
+a per-install marker (`.tokenless-owner`) rather than a content hash alone — a
+later anolisa or npm
+install of the same version reproduces the same bytes, and its files, adapter
+resources, framework registrations and npm package are left alone. A replacement
+that fails halfway (a missing tag, a build error) puts the previous install back
+instead of leaving the machine without a CLI.
+
 Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
 macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
 optional-dependency entry describes a release build target, not a registry
