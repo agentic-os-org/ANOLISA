@@ -16,7 +16,7 @@ use rustix::fs::{
     AtFlags, Dir, DirEntry, FileType, FlockOperation, Mode, OFlags, RenameFlags, Stat, flock,
     fstat, fsync, mkdirat, open, openat, renameat, renameat_with, statat, unlinkat,
 };
-use rustix::io::Errno;
+use rustix::io::{Errno, dup};
 use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
@@ -39,7 +39,14 @@ pub struct StateStore {
 struct StateStoreInner {
     configured_root: PathBuf,
     root: OwnedFd,
+    _coordination_root: Option<OwnedFd>,
     run_dirs: Mutex<HashMap<Uuid, RunDirEntry>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanMaintenance {
+    RemoveOwnedStaging,
+    ReadOnly,
 }
 
 enum RunDirEntry {
@@ -109,7 +116,11 @@ impl fmt::Debug for OwnedStateDirectory {
 }
 
 impl StateStore {
-    /// Open and exclusively own the configured state directory.
+    /// Open and exclusively own the standard state directory.
+    ///
+    /// Provider namespaces are inspected read-only before startup can continue.
+    /// Active or uncertain foreign ownership rejects startup rather than
+    /// importing those resources into the standard daemon's inventory.
     pub fn open(root: PathBuf) -> Result<Self> {
         Self::open_with_lock(root, true)
     }
@@ -119,30 +130,103 @@ impl StateStore {
         Self::open_with_lock(root, false).expect("open test state store")
     }
 
+    /// Open one provider-specific state root while retaining exclusive
+    /// ownership of the configured outer state root.
+    pub(crate) fn open_provider_namespace(
+        configured_root: PathBuf,
+        namespace: &str,
+    ) -> Result<Self> {
+        Self::open_provider_namespace_with_hook(configured_root, namespace, || Ok(()))
+    }
+
+    fn open_provider_namespace_with_hook<F>(
+        configured_root: PathBuf,
+        namespace: &str,
+        before_namespace_revalidation: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        if crate::parse_build_time_provider_state_namespace(namespace).is_none() {
+            return Err(BlazeDaemonError::Internal(format!(
+                "invalid build-time provider state namespace {namespace:?}"
+            )));
+        }
+        let coordination_root = open(
+            &configured_root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        lock_state_directory(&coordination_root, &configured_root)?;
+
+        match mkdirat(&coordination_root, namespace, Mode::RWXU) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        let namespaced_root = configured_root.join(namespace);
+        let directory = openat(
+            &coordination_root,
+            namespace,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        lock_state_directory(&directory, &namespaced_root)?;
+        fsync(&coordination_root).map_err(std::io::Error::from)?;
+
+        reject_active_foreign_state(
+            &configured_root,
+            &coordination_root,
+            Some((namespace, &directory)),
+            before_namespace_revalidation,
+        )?;
+
+        Ok(Self::from_opened_root(
+            namespaced_root,
+            directory,
+            Some(coordination_root),
+        ))
+    }
+
     fn open_with_lock(root: PathBuf, lock: bool) -> Result<Self> {
+        Self::open_with_lock_and_hook(root, lock, || Ok(()))
+    }
+
+    fn open_with_lock_and_hook<F>(
+        root: PathBuf,
+        lock: bool,
+        before_namespace_revalidation: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         let directory = open(
             &root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(std::io::Error::from)?;
-        if lock && let Err(error) = flock(&directory, FlockOperation::NonBlockingLockExclusive) {
-            return if error == Errno::WOULDBLOCK {
-                Err(BlazeDaemonError::Conflict(format!(
-                    "state directory {} is already owned by another daemon",
-                    root.display()
-                )))
-            } else {
-                Err(std::io::Error::from(error).into())
-            };
+        if lock {
+            lock_state_directory(&directory, &root)?;
+            reject_active_foreign_state(&root, &directory, None, before_namespace_revalidation)?;
         }
-        Ok(Self {
+        Ok(Self::from_opened_root(root, directory, None))
+    }
+
+    fn from_opened_root(
+        configured_root: PathBuf,
+        root: OwnedFd,
+        coordination_root: Option<OwnedFd>,
+    ) -> Self {
+        Self {
             inner: Arc::new(StateStoreInner {
-                configured_root: root,
-                root: directory,
+                configured_root,
+                root,
+                _coordination_root: coordination_root,
                 run_dirs: Mutex::new(HashMap::new()),
             }),
-        })
+        }
     }
 
     /// Create or open the daemon-owned checkpoint namespace relative to the
@@ -197,6 +281,18 @@ impl StateStore {
 
     /// Persist one lifecycle record below the owned state root.
     pub fn persist(&self, instance: &SandboxInstance) -> Result<()> {
+        instance.validate_provider_operation().map_err(|error| {
+            BlazeDaemonError::RecoveryRequired(format!(
+                "refusing to persist inconsistent lifecycle record {}: {error}",
+                instance.id
+            ))
+        })?;
+        instance.validate_provider_transition().map_err(|error| {
+            BlazeDaemonError::RecoveryRequired(format!(
+                "refusing to persist inconsistent provider transition {}: {error}",
+                instance.id
+            ))
+        })?;
         let json = serde_json::to_vec_pretty(instance)?;
         let run_dir = {
             let mut run_dirs = self.inner.run_dirs.lock().map_err(|_| {
@@ -267,14 +363,26 @@ impl StateStore {
         Ok(())
     }
 
-    /// Load one lifecycle record from the owned sandbox directory.
-    #[cfg(test)]
+    /// Reload one lifecycle record through an opened sandbox-directory owner.
+    ///
+    /// Active records use the owner retained by the store. Terminal records do
+    /// not keep that owner alive, so loading one reopens the canonical UUID
+    /// entry relative to the retained state-root descriptor and verifies the
+    /// directory identity before reading its state record.
     pub fn load(&self, id: Uuid) -> Result<SandboxInstance> {
-        let run_dir = match self.cached_run_dir(id)? {
+        let retained = self.cached_run_dir(id)?;
+        let run_dir = match retained {
             Some(run_dir) => run_dir,
             None => self.open_run_dir_object(id)?,
         };
-        Self::load_from(&run_dir)
+        let (instance, _) = Self::load_from_with_identity(&run_dir)?;
+        if instance.id != id {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "persisted instance id {} does not match owned directory {id}",
+                instance.id
+            )));
+        }
+        Ok(instance)
     }
 
     /// Validate and load every owned lifecycle record before request handling.
@@ -285,7 +393,16 @@ impl StateStore {
     /// ownership after a concurrent terminal commit. The production store's
     /// state-root lock excludes other cooperating Blaze daemons.
     pub fn scan(&self) -> Result<HashMap<Uuid, SandboxInstance>> {
-        self.scan_with_hooks(|_| Ok(()), || Ok(()), |_| Ok(()))
+        self.scan_with_hooks(
+            ScanMaintenance::RemoveOwnedStaging,
+            |_| Ok(()),
+            || Ok(()),
+            |_| Ok(()),
+        )
+    }
+
+    fn scan_read_only(&self) -> Result<HashMap<Uuid, SandboxInstance>> {
+        self.scan_with_hooks(ScanMaintenance::ReadOnly, |_| Ok(()), || Ok(()), |_| Ok(()))
     }
 
     #[cfg(test)]
@@ -293,7 +410,12 @@ impl StateStore {
     where
         F: FnMut(Uuid) -> Result<()>,
     {
-        self.scan_with_hooks(&mut after_owner, || Ok(()), |_| Ok(()))
+        self.scan_with_hooks(
+            ScanMaintenance::RemoveOwnedStaging,
+            &mut after_owner,
+            || Ok(()),
+            |_| Ok(()),
+        )
     }
 
     #[cfg(test)]
@@ -304,7 +426,12 @@ impl StateStore {
     where
         F: FnMut() -> Result<()>,
     {
-        self.scan_with_hooks(|_| Ok(()), &mut before_validation, |_| Ok(()))
+        self.scan_with_hooks(
+            ScanMaintenance::RemoveOwnedStaging,
+            |_| Ok(()),
+            &mut before_validation,
+            |_| Ok(()),
+        )
     }
 
     #[cfg(test)]
@@ -315,11 +442,17 @@ impl StateStore {
     where
         F: FnMut(&[Uuid]) -> Result<()>,
     {
-        self.scan_with_hooks(|_| Ok(()), || Ok(()), &mut after_final_enumeration)
+        self.scan_with_hooks(
+            ScanMaintenance::RemoveOwnedStaging,
+            |_| Ok(()),
+            || Ok(()),
+            &mut after_final_enumeration,
+        )
     }
 
     fn scan_with_hooks<F, G, H>(
         &self,
+        maintenance: ScanMaintenance,
         mut after_owner: F,
         mut before_validation: G,
         mut after_final_enumeration: H,
@@ -348,6 +481,12 @@ impl StateStore {
                 continue;
             };
             if is_state_staging_name(name) {
+                if maintenance == ScanMaintenance::ReadOnly {
+                    return Err(BlazeDaemonError::RecoveryRequired(format!(
+                        "state namespace {} contains uncertain publication staging {name}",
+                        self.inner.configured_root.display()
+                    )));
+                }
                 if let Err(error) = self.remove_stale_staging(name) {
                     tracing::warn!(entry = name, %error, "failed to remove stale state staging");
                 }
@@ -367,12 +506,19 @@ impl StateStore {
                     "cannot open persisted instance directory {id}: {error}"
                 ))
             })?;
-            if let Err(error) = remove_file_if_exists(&run_dir.inner.directory, TEMP_STATE_FILE) {
-                tracing::warn!(
-                    instance = %id,
-                    %error,
-                    "failed to remove stale state record temporary file"
-                );
+            if maintenance == ScanMaintenance::ReadOnly {
+                reject_existing_entry(
+                    &run_dir.inner.directory,
+                    TEMP_STATE_FILE,
+                    &format!(
+                        "state namespace {} contains an uncertain temporary record for instance {id}",
+                        self.inner.configured_root.display()
+                    ),
+                )?;
+            } else if let Err(error) =
+                remove_file_if_exists(&run_dir.inner.directory, TEMP_STATE_FILE)
+            {
+                tracing::warn!(instance = %id, %error, "failed to remove stale state record temporary file");
             }
             let (instance, record_identity) =
                 Self::load_from_with_identity(&run_dir).map_err(|error| {
@@ -398,7 +544,11 @@ impl StateStore {
             after_owner(id)?;
         }
         before_validation()?;
-        self.revalidate_scanned_inventory(&scanned_owners, &mut after_final_enumeration)?;
+        self.revalidate_scanned_inventory(
+            &scanned_owners,
+            maintenance,
+            &mut after_final_enumeration,
+        )?;
         *run_dirs = scanned_run_dirs;
         tracing::info!(
             instances = instances.len(),
@@ -455,16 +605,31 @@ impl StateStore {
         }
     }
 
-    #[cfg(test)]
     fn open_run_dir_object(&self, id: Uuid) -> Result<OwnedRunDir> {
         let name = id.to_string();
-        let directory = openat(
+        let inspected = match statat(&self.inner.root, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(inspected) => inspected,
+            Err(Errno::NOENT) => {
+                return Err(BlazeDaemonError::NotFound(format!(
+                    "owned runtime directory for instance {id} is unavailable"
+                )));
+            }
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        };
+        if !is_directory(&inspected) {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "owned state path {id} is not a directory"
+            )));
+        }
+        let changed = format!("owned state path {id} changed while it was opened");
+        let directory = open_inspected_object(
             &self.inner.root,
             name.as_str(),
+            &inspected,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?;
+            is_directory,
+            &changed,
+        )?;
         Ok(OwnedRunDir::new(
             id,
             self.inner.configured_root.join(&name),
@@ -730,6 +895,7 @@ impl StateStore {
     fn revalidate_scanned_inventory<F>(
         &self,
         scanned_owners: &[(Uuid, OwnedRunDir, Stat)],
+        maintenance: ScanMaintenance,
         after_final_enumeration: &mut F,
     ) -> Result<()>
     where
@@ -747,6 +913,12 @@ impl StateStore {
                 continue;
             };
             if is_state_staging_name(name) {
+                if maintenance == ScanMaintenance::ReadOnly {
+                    return Err(BlazeDaemonError::RecoveryRequired(format!(
+                        "state namespace {} gained uncertain publication staging {name}",
+                        self.inner.configured_root.display()
+                    )));
+                }
                 continue;
             }
             let Ok(id) = Uuid::parse_str(name) else {
@@ -781,6 +953,16 @@ impl StateStore {
         // Set completeness is now established; validate every retained object
         // against the handles and record identity captured by the initial scan.
         for (id, (run_dir, record_identity)) in scanned_owners {
+            if maintenance == ScanMaintenance::ReadOnly {
+                reject_existing_entry(
+                    &run_dir.inner.directory,
+                    TEMP_STATE_FILE,
+                    &format!(
+                        "state namespace {} gained an uncertain temporary record for instance {id}",
+                        self.inner.configured_root.display()
+                    ),
+                )?;
+            }
             self.revalidate_scanned_owner(id, run_dir, record_identity)?;
         }
         Ok(())
@@ -857,6 +1039,195 @@ impl StateStore {
     }
 }
 
+struct ProviderNamespaceEntry {
+    name: String,
+    identity: Stat,
+}
+
+fn lock_state_directory(directory: &OwnedFd, path: &Path) -> Result<()> {
+    if let Err(error) = flock(directory, FlockOperation::NonBlockingLockExclusive) {
+        return if error == Errno::WOULDBLOCK {
+            Err(BlazeDaemonError::Conflict(format!(
+                "state directory {} is already owned by another daemon",
+                path.display()
+            )))
+        } else {
+            Err(std::io::Error::from(error).into())
+        };
+    }
+    Ok(())
+}
+
+fn reject_active_foreign_state<F>(
+    configured_root: &Path,
+    coordination_root: &OwnedFd,
+    selected_provider: Option<(&str, &OwnedFd)>,
+    before_namespace_revalidation: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    // Standard startup owns the outer records and must recover them normally.
+    // Provider startup instead treats that same inventory as foreign.
+    if selected_provider.is_some() {
+        reject_active_records(
+            configured_root,
+            coordination_root,
+            "the standard state root",
+        )?;
+    }
+
+    let observed = inspect_provider_namespace_entries(configured_root, coordination_root)?;
+    if let Some((selected_namespace, selected_directory)) = selected_provider {
+        let selected_identity = fstat(selected_directory).map_err(std::io::Error::from)?;
+        let selected = observed
+            .iter()
+            .find(|entry| entry.name == selected_namespace)
+            .ok_or_else(|| {
+                BlazeDaemonError::RecoveryRequired(format!(
+                    "selected provider state namespace {selected_namespace} disappeared during startup"
+                ))
+            })?;
+        if !same_stat_object(&selected.identity, &selected_identity) {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "selected provider state namespace {selected_namespace} changed during startup"
+            )));
+        }
+    }
+
+    let mut foreign_directories = Vec::new();
+    for entry in observed.iter().filter(|entry| {
+        selected_provider.is_none_or(|(selected_namespace, _)| entry.name != selected_namespace)
+    }) {
+        let path = configured_root.join(&entry.name);
+        let changed = format!(
+            "provider state namespace {} changed while it was opened",
+            path.display()
+        );
+        let directory = open_inspected_object(
+            coordination_root,
+            &entry.name,
+            &entry.identity,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            is_directory,
+            &changed,
+        )?;
+        lock_state_directory(&directory, &path)?;
+        reject_active_records(&path, &directory, "another provider state namespace")?;
+        let current = statat(
+            coordination_root,
+            entry.name.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(std::io::Error::from)?;
+        if !is_directory(&current) || !same_stat_object(&entry.identity, &current) {
+            return Err(BlazeDaemonError::RecoveryRequired(changed));
+        }
+        foreign_directories.push((path, directory));
+    }
+
+    before_namespace_revalidation()?;
+
+    // Retain child locks through the final check. Advisory locks exclude
+    // cooperating daemons, not arbitrary writers; repeat the read-only checks
+    // to catch ownership records added during namespace inspection.
+    for (path, directory) in &foreign_directories {
+        reject_active_records(path, directory, "another provider state namespace")?;
+    }
+    if selected_provider.is_some() {
+        reject_active_records(
+            configured_root,
+            coordination_root,
+            "the standard state root",
+        )?;
+    }
+
+    let current = inspect_provider_namespace_entries(configured_root, coordination_root)?;
+    if observed.len() != current.len()
+        || observed.iter().any(|expected| {
+            current
+                .iter()
+                .find(|candidate| candidate.name == expected.name)
+                .is_none_or(|candidate| !same_stat_object(&expected.identity, &candidate.identity))
+        })
+    {
+        return Err(BlazeDaemonError::RecoveryRequired(
+            "provider state namespace set changed during startup".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_active_records(root: &Path, directory: &OwnedFd, source: &str) -> Result<()> {
+    let store = StateStore::from_opened_root(
+        root.to_path_buf(),
+        dup(directory).map_err(std::io::Error::from)?,
+        None,
+    );
+    let instances = store.scan_read_only().map_err(|error| {
+        BlazeDaemonError::RecoveryRequired(format!(
+            "cannot prove that {source} {} is inactive: {error}",
+            root.display()
+        ))
+    })?;
+    if let Some(instance) = instances
+        .values()
+        .find(|instance| instance.state != SandboxState::Destroyed)
+    {
+        return Err(BlazeDaemonError::Conflict(format!(
+            "{source} {} still owns non-terminal instance {}; retain the provider identity or complete cleanup before selecting another provider or the standard daemon",
+            root.display(),
+            instance.id
+        )));
+    }
+    Ok(())
+}
+
+fn inspect_provider_namespace_entries(
+    configured_root: &Path,
+    coordination_root: &OwnedFd,
+) -> Result<Vec<ProviderNamespaceEntry>> {
+    let mut namespaces = Vec::new();
+    let entries = Dir::read_from(coordination_root).map_err(std::io::Error::from)?;
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !name.starts_with(crate::BUILD_TIME_PROVIDER_STATE_PREFIX) {
+            continue;
+        }
+        if crate::parse_build_time_provider_state_namespace(name).is_none() {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "state root {} contains malformed provider state namespace {name:?}",
+                configured_root.display()
+            )));
+        }
+        let identity = statat(coordination_root, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)?;
+        if !is_directory(&identity) || identity.st_ino != entry.ino() {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "provider state namespace {} is not the directory observed during startup",
+                configured_root.join(name).display()
+            )));
+        }
+        namespaces.push(ProviderNamespaceEntry {
+            name: name.to_string(),
+            identity,
+        });
+    }
+    namespaces.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    Ok(namespaces)
+}
+
+fn reject_existing_entry(directory: &OwnedFd, name: &str, message: &str) -> Result<()> {
+    match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Err(BlazeDaemonError::RecoveryRequired(message.to_string())),
+        Err(Errno::NOENT) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error).into()),
+    }
+}
+
 fn is_directory(metadata: &Stat) -> bool {
     FileType::from_raw_mode(metadata.st_mode) == FileType::Directory
 }
@@ -886,6 +1257,18 @@ fn same_stat_object(left: &Stat, right: &Stat) -> bool {
 }
 
 fn validate_terminal_record(instance: &SandboxInstance) -> Result<()> {
+    instance.validate_provider_operation().map_err(|error| {
+        BlazeDaemonError::RecoveryRequired(format!(
+            "persisted instance {} has an inconsistent provider operation: {error}",
+            instance.id
+        ))
+    })?;
+    instance.validate_provider_transition().map_err(|error| {
+        BlazeDaemonError::RecoveryRequired(format!(
+            "persisted instance {} has an inconsistent provider transition: {error}",
+            instance.id
+        ))
+    })?;
     if instance.state != SandboxState::Destroyed {
         return Ok(());
     }
@@ -893,14 +1276,28 @@ fn validate_terminal_record(instance: &SandboxInstance) -> Result<()> {
         instance.backend_ownership,
         BackendOwnership::NotStarted | BackendOwnership::Stopped
     ) && instance.operation.is_none()
+        && instance.provider_transition.is_none()
+        && instance.data_plane_lease.is_none()
+        && instance.replacement_data_plane_lease.is_none()
+        && instance.pending_provider_retirements.is_empty()
+        && instance.provider_suspension.is_none()
+        && instance.pending_provider_suspension_retirements.is_empty()
+        && instance.backend_runtime.is_none()
     {
         return Ok(());
     }
     Err(BlazeDaemonError::RecoveryRequired(format!(
-        "destroyed instance {} does not prove completed cleanup: backend ownership {:?}, active operation {:?}",
+        "destroyed instance {} does not prove completed cleanup: backend ownership {:?}, active operation {:?}, provider transition retained {}, provider lease retained {}, replacement lease retained {}, pending provider retirements {}, provider suspension retained {}, pending provider suspension retirements {}, backend identity retained {}",
         instance.id,
         instance.backend_ownership,
-        instance.operation.as_ref().map(|operation| operation.kind)
+        instance.operation.as_ref().map(|operation| operation.kind),
+        instance.provider_transition.is_some(),
+        instance.data_plane_lease.is_some(),
+        instance.replacement_data_plane_lease.is_some(),
+        instance.pending_provider_retirements.len(),
+        instance.provider_suspension.is_some(),
+        instance.pending_provider_suspension_retirements.len(),
+        instance.backend_runtime.is_some()
     )))
 }
 
@@ -1081,8 +1478,11 @@ impl OwnedStateDirectory {
 
 #[cfg(test)]
 mod tests {
+    mod standard_startup;
+
     use blaze_core::backend::BackendKind;
     use blaze_core::policy::WorkloadClass;
+    use blaze_provider_api::{PROVIDER_CONTRACT_VERSION, ProviderDescriptor};
 
     use super::*;
 
@@ -1093,6 +1493,13 @@ mod tests {
             "sha256:test".into(),
             "default".into(),
         )
+    }
+
+    fn provider_namespace(provider_instance_id: Uuid) -> String {
+        crate::build_time_provider_state_namespace(ProviderDescriptor {
+            contract_version: PROVIDER_CONTRACT_VERSION,
+            provider_instance_id,
+        })
     }
 
     fn scan_root(root: &Path) -> Result<HashMap<Uuid, SandboxInstance>> {
@@ -1761,6 +2168,59 @@ mod tests {
         assert_eq!(loaded.policy_name, stored.policy_name);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn uncached_load_rejects_a_symbolic_link_owner() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let external = tempfile::tempdir().expect("external directory");
+        let stored = instance();
+        stored.persist(external.path()).expect("external state");
+        symlink(
+            external.path().join(stored.id.to_string()),
+            temporary.path().join(stored.id.to_string()),
+        )
+        .expect("UUID-shaped link");
+        let store = StateStore::new(temporary.path().to_path_buf());
+
+        let error = store
+            .load(stored.id)
+            .expect_err("uncached load must not follow an owner link");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("is not a directory")
+        ));
+    }
+
+    #[test]
+    fn uncached_load_rejects_a_record_owned_by_another_uuid() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("stored state");
+        let requested_id = Uuid::new_v4();
+        std::fs::rename(
+            temporary.path().join(stored.id.to_string()),
+            temporary.path().join(requested_id.to_string()),
+        )
+        .expect("rename owner directory");
+        let store = StateStore::new(temporary.path().to_path_buf());
+
+        let error = store
+            .load(requested_id)
+            .expect_err("uncached load must reject a mismatched record");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains(&requested_id.to_string())
+        ));
+    }
+
     #[test]
     fn store_centralizes_record_io_scan_and_run_directory_derivation() {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -2233,6 +2693,225 @@ mod tests {
 
         assert!(matches!(error, BlazeDaemonError::Conflict(_)));
         drop(owner);
+    }
+
+    #[test]
+    fn standard_scan_does_not_enter_provider_state_namespace() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let namespace = provider_namespace(Uuid::new_v4());
+        let provider = StateStore::open_provider_namespace(root.clone(), &namespace)
+            .expect("provider state owner");
+        let provider_instance = instance();
+        provider
+            .persist(&provider_instance)
+            .expect("provider lifecycle record");
+        let provider_record = root
+            .join(&namespace)
+            .join(provider_instance.id.to_string())
+            .join(STATE_FILE);
+        std::fs::write(&provider_record, b"{future-provider-state\n")
+            .expect("newer provider-only record");
+
+        let standard = StateStore::new(root.clone());
+        let scanned = standard.scan().expect("standard state scan");
+
+        assert!(scanned.is_empty());
+        assert_eq!(
+            std::fs::read(provider_record).expect("provider state remains untouched"),
+            b"{future-provider-state\n"
+        );
+    }
+
+    #[test]
+    fn provider_state_owner_retains_outer_and_inner_locks() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let namespace = provider_namespace(Uuid::new_v4());
+        let provider = StateStore::open_provider_namespace(root.clone(), &namespace)
+            .expect("provider state owner");
+
+        let outer_error = StateStore::open(root.clone()).expect_err("outer owner must conflict");
+        let inner_error =
+            StateStore::open(root.join(&namespace)).expect_err("inner owner must conflict");
+
+        assert!(matches!(outer_error, BlazeDaemonError::Conflict(_)));
+        assert!(matches!(inner_error, BlazeDaemonError::Conflict(_)));
+        drop(provider);
+    }
+
+    #[test]
+    fn provider_namespace_set_change_during_open_fails_closed() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let selected = provider_namespace(Uuid::new_v4());
+        let injected = provider_namespace(Uuid::new_v4());
+
+        let error = StateStore::open_provider_namespace_with_hook(root.clone(), &selected, || {
+            std::fs::create_dir(root.join(&injected))?;
+            Ok(())
+        })
+        .expect_err("a concurrent namespace addition must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains("namespace set changed")
+        ));
+    }
+
+    #[test]
+    fn selected_provider_namespace_replacement_during_open_fails_closed() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let selected = provider_namespace(Uuid::new_v4());
+        let selected_path = root.join(&selected);
+        let displaced = root.join("displaced-provider-state");
+
+        let error = StateStore::open_provider_namespace_with_hook(root, &selected, || {
+            std::fs::rename(&selected_path, &displaced)?;
+            std::fs::create_dir(&selected_path)?;
+            Ok(())
+        })
+        .expect_err("a concurrent namespace replacement must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains("namespace set changed")
+        ));
+    }
+
+    #[test]
+    fn provider_state_io_stays_bound_after_namespace_path_replacement() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let namespace = provider_namespace(Uuid::new_v4());
+        let provider = StateStore::open_provider_namespace(root.clone(), &namespace)
+            .expect("provider state owner");
+        let configured = root.join(&namespace);
+        let retained = root.join("retained-provider-state");
+        std::fs::rename(&configured, &retained).expect("move provider namespace");
+        std::fs::create_dir(&configured).expect("replacement provider namespace");
+        let provider_instance = instance();
+
+        provider
+            .persist(&provider_instance)
+            .expect("persist through retained namespace");
+
+        assert!(
+            retained
+                .join(provider_instance.id.to_string())
+                .join(STATE_FILE)
+                .is_file()
+        );
+        assert!(!configured.join(provider_instance.id.to_string()).exists());
+    }
+
+    #[test]
+    fn provider_identity_change_rejects_active_foreign_namespace() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let old_namespace = provider_namespace(Uuid::new_v4());
+        let old_provider = StateStore::open_provider_namespace(root.clone(), &old_namespace)
+            .expect("old provider state owner");
+        let active = instance();
+        old_provider
+            .persist(&active)
+            .expect("active lifecycle record");
+        drop(old_provider);
+        let new_namespace = provider_namespace(Uuid::new_v4());
+
+        let error = StateStore::open_provider_namespace(root.clone(), &new_namespace)
+            .expect_err("active foreign provider state must stop startup");
+
+        assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+        assert!(
+            root.join(old_namespace)
+                .join(active.id.to_string())
+                .join(STATE_FILE)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn provider_identity_change_allows_proven_terminal_foreign_namespace() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let old_namespace = provider_namespace(Uuid::new_v4());
+        let old_provider = StateStore::open_provider_namespace(root.clone(), &old_namespace)
+            .expect("old provider state owner");
+        let mut destroyed = instance();
+        destroyed
+            .transition(SandboxState::Destroyed)
+            .expect("destroy transition");
+        old_provider
+            .persist(&destroyed)
+            .expect("terminal lifecycle record");
+        drop(old_provider);
+        let new_namespace = provider_namespace(Uuid::new_v4());
+
+        let new_provider = StateStore::open_provider_namespace(root, &new_namespace)
+            .expect("terminal foreign state is inactive");
+
+        assert!(new_provider.scan().expect("new provider scan").is_empty());
+    }
+
+    #[test]
+    fn provider_start_rejects_active_standard_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let standard = StateStore::new(root.clone());
+        let active = instance();
+        standard
+            .persist(&active)
+            .expect("standard lifecycle record");
+        drop(standard);
+
+        let error = StateStore::open_provider_namespace(root, &provider_namespace(Uuid::new_v4()))
+            .expect_err("active standard state must stop provider startup");
+
+        assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+    }
+
+    #[test]
+    fn foreign_namespace_inspection_does_not_remove_uncertain_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let old_namespace = provider_namespace(Uuid::new_v4());
+        let old_provider = StateStore::open_provider_namespace(root.clone(), &old_namespace)
+            .expect("old provider state owner");
+        let mut destroyed = instance();
+        destroyed
+            .transition(SandboxState::Destroyed)
+            .expect("destroy transition");
+        old_provider
+            .persist(&destroyed)
+            .expect("terminal lifecycle record");
+        drop(old_provider);
+        let temporary_record = root
+            .join(&old_namespace)
+            .join(destroyed.id.to_string())
+            .join(TEMP_STATE_FILE);
+        std::fs::write(&temporary_record, b"uncertain\n").expect("temporary state record");
+
+        let error = StateStore::open_provider_namespace(root, &provider_namespace(Uuid::new_v4()))
+            .expect_err("uncertain foreign state must stop startup");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert_eq!(
+            std::fs::read(temporary_record).expect("foreign temporary remains"),
+            b"uncertain\n"
+        );
     }
 
     #[cfg(feature = "test-failpoints")]

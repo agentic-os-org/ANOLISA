@@ -3,32 +3,63 @@
 //! rootfs and memory files on a local filesystem. Base images and mutable
 //! instance slots use separate roots.
 
-use std::ffi::OsString;
-use std::io::{Read, Seek, SeekFrom};
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rustix::fs::{
-    AtFlags, Mode, OFlags, RenameFlags, fstat, fsync, open, openat, renameat_with, statat, unlinkat,
+    AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, Stat, flock, fstat, fsync,
+    mkdirat, open, openat, renameat_with, statat, unlinkat,
 };
+use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use blaze_core::data_plane::DataPlaneLeaseState;
 use blaze_core::error::{BlazeError, Result};
 use blaze_core::storage::{
-    AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageRestoreTransaction,
-    StorageSlot, TemplateArtifact, TemplateStorage, TemplateStorageSlot,
+    AcquireOpts, OwnedStorageSlot, PoolStatus, StorageAcquireError, StorageOwnershipClaim,
+    StorageOwnershipKey, StorageOwnershipLookup, StorageOwnershipPhase, StorageOwnershipRequest,
+    StorageProvider, StorageRestoreTransaction, StorageSlot, StorageSlotIdentity, TemplateArtifact,
+    TemplateStorage, TemplateStorageSlot,
 };
 
 mod restore;
+
+const OWNERSHIP_LEDGER_DIRECTORY: &str = ".blaze-storage-ownership";
+const OWNERSHIP_MANIFEST_FORMAT: u32 = 3;
+const MAX_OWNERSHIP_MANIFEST_BYTES: u64 = 16 * 1024;
+const MAX_SLOT_REMOVAL_DEPTH: usize = 64;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileStorageOwnershipManifest {
+    format: u32,
+    claim: StorageOwnershipClaim,
+}
+
+struct StorageOwnershipLedger {
+    root: OpenedStorageDirectory,
+    directory: OpenedStorageDirectory,
+    operations: Mutex<()>,
+}
+
+struct OpenedStorageDirectory {
+    descriptor: OwnedFd,
+    configured_path: PathBuf,
+    identity: Stat,
+}
 
 /// A filesystem-based provider that copies base artifacts when available and
 /// otherwise creates sparse rootfs and memory files at configured sizes.
 pub struct FileStorageProvider {
     images_dir: PathBuf,
     instances_dir: PathBuf,
+    ownership_ledger: Mutex<Option<Arc<StorageOwnershipLedger>>>,
     #[cfg(test)]
     artifact_sync_open_hook: Option<std::sync::Arc<ArtifactSyncOpenHook>>,
 }
@@ -88,6 +119,7 @@ impl FileStorageProvider {
         Self {
             images_dir: instances_dir.clone(),
             instances_dir,
+            ownership_ledger: Mutex::new(None),
             artifact_sync_open_hook: None,
         }
     }
@@ -97,6 +129,7 @@ impl FileStorageProvider {
         Self {
             images_dir,
             instances_dir,
+            ownership_ledger: Mutex::new(None),
             #[cfg(test)]
             artifact_sync_open_hook: None,
         }
@@ -111,6 +144,7 @@ impl FileStorageProvider {
         Self {
             images_dir,
             instances_dir,
+            ownership_ledger: Mutex::new(None),
             artifact_sync_open_hook: Some(hook),
         }
     }
@@ -131,6 +165,49 @@ impl FileStorageProvider {
             rootfs_diff_path: instance_dir.join("rootfs.diff"),
             instance_dir,
         })
+    }
+
+    fn ownership_ledger(&self) -> Result<Arc<StorageOwnershipLedger>> {
+        let mut retained = self.ownership_ledger.lock().map_err(|_| {
+            storage_error(
+                "lock storage ownership ledger",
+                &self.instances_dir,
+                "the in-process ownership lock is poisoned",
+            )
+        })?;
+        if let Some(ledger) = retained.as_ref() {
+            return Ok(ledger.clone());
+        }
+        let ledger = Arc::new(open_ownership_ledger(&self.instances_dir)?);
+        *retained = Some(ledger.clone());
+        Ok(ledger)
+    }
+
+    fn reject_owned_legacy_release(&self, instance_id: &str) -> Result<()> {
+        let Ok(instance_id) = Uuid::parse_str(instance_id) else {
+            return Ok(());
+        };
+        let ledger = self.ownership_ledger()?;
+        let _operation = ledger.operations.lock().map_err(|_| {
+            ownership_error(
+                &instance_id.to_string(),
+                "the ownership operation lock is poisoned",
+            )
+        })?;
+        if read_ownership_manifest(&ledger, instance_id)?.is_some() {
+            return Err(ownership_error(
+                &instance_id.to_string(),
+                "request-scoped storage must be removed through its exact lease binding",
+            ));
+        }
+        let slot = self.slot_for_id(&instance_id.to_string())?;
+        if open_slot_directory(&ledger.root, &slot)?.is_some() {
+            return Err(ownership_error(
+                &instance_id.to_string(),
+                "a request-scoped slot exists without an ownership record",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -154,6 +231,1323 @@ impl RequiredPathType {
             Self::File => metadata.is_file(),
         }
     }
+}
+
+impl OpenedStorageDirectory {
+    fn same_object(&self, stat: &Stat) -> bool {
+        self.identity.st_dev == stat.st_dev && self.identity.st_ino == stat.st_ino
+    }
+}
+
+struct UnpublishedOwnership<'a> {
+    parent: &'a OwnedFd,
+    file: std::fs::File,
+    identity: Stat,
+    temporary_name: OsString,
+    published: bool,
+}
+
+impl UnpublishedOwnership<'_> {
+    fn file_mut(&mut self) -> &mut std::fs::File {
+        &mut self.file
+    }
+
+    fn mark_published(&mut self) {
+        self.published = true;
+    }
+
+    fn linked_at(&self, name: &OsStr) -> std::io::Result<bool> {
+        match statat(self.parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => {
+                Ok(stat.st_dev == self.identity.st_dev && stat.st_ino == self.identity.st_ino)
+            }
+            Err(Errno::NOENT) => Ok(false),
+            Err(error) => Err(std::io::Error::from(error)),
+        }
+    }
+}
+
+impl Drop for UnpublishedOwnership<'_> {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        if self.linked_at(&self.temporary_name).unwrap_or(false)
+            && unlinkat(self.parent, &self.temporary_name, AtFlags::empty()).is_ok()
+        {
+            let _ = fsync(self.parent);
+        }
+    }
+}
+
+fn storage_error(operation: &str, path: &Path, source: impl std::fmt::Display) -> BlazeError {
+    BlazeError::StorageError {
+        msg: format!("{operation} {}: {source}", path.display()),
+    }
+}
+
+fn ownership_error(instance_id: &str, message: impl std::fmt::Display) -> BlazeError {
+    BlazeError::StorageError {
+        msg: format!("storage ownership for '{instance_id}' is not trustworthy: {message}"),
+    }
+}
+
+fn same_identity(left: &Stat, right: &Stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
+}
+
+fn same_opened_file(left: &Stat, right: &Stat) -> bool {
+    same_identity(left, right) && left.st_size == right.st_size
+}
+
+fn slot_identity(stat: &Stat) -> StorageSlotIdentity {
+    #[cfg(target_os = "linux")]
+    let device = stat.st_dev;
+    #[cfg(not(target_os = "linux"))]
+    let device = stat.st_dev as u64;
+    StorageSlotIdentity {
+        device,
+        inode: stat.st_ino,
+    }
+}
+
+fn provider_instance_id(root: &OpenedStorageDirectory) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"blaze.file-provider-instance.v1\0");
+    hasher.update(storage_domain(root));
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // RFC 9562 version 8 reserves the payload bits for application-defined
+    // deterministic UUIDs. The remaining bits retain the storage-domain hash.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn open_storage_root(path: &Path) -> Result<OpenedStorageDirectory> {
+    let descriptor = open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| storage_error("open storage root", path, source))?;
+    let identity =
+        fstat(&descriptor).map_err(|source| storage_error("inspect storage root", path, source))?;
+    if identity.st_mode & 0o022 != 0 {
+        return Err(storage_error(
+            "verify storage root permissions",
+            path,
+            "group-writable or other-writable instances roots are not allowed",
+        ));
+    }
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|source| storage_error("canonicalize storage root", path, source))?;
+    let canonical_descriptor = open(
+        &canonical_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| storage_error("open canonical storage root", &canonical_path, source))?;
+    let canonical_identity = fstat(&canonical_descriptor).map_err(|source| {
+        storage_error("inspect canonical storage root", &canonical_path, source)
+    })?;
+    if !same_identity(&identity, &canonical_identity) {
+        return Err(storage_error(
+            "verify storage root",
+            path,
+            "configured path and canonical path identify different directories",
+        ));
+    }
+    Ok(OpenedStorageDirectory {
+        descriptor,
+        configured_path: canonical_path,
+        identity,
+    })
+}
+
+fn open_ownership_ledger(instances_dir: &Path) -> Result<StorageOwnershipLedger> {
+    let root = open_storage_root(instances_dir)?;
+    if let Err(source) = flock(&root.descriptor, FlockOperation::NonBlockingLockExclusive) {
+        let message = if source == Errno::WOULDBLOCK {
+            "another cooperating process already owns this instances root".to_string()
+        } else {
+            source.to_string()
+        };
+        return Err(storage_error(
+            "lock storage ownership root",
+            &root.configured_path,
+            message,
+        ));
+    }
+    match mkdirat(&root.descriptor, OWNERSHIP_LEDGER_DIRECTORY, Mode::RWXU) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(source) => {
+            return Err(storage_error(
+                "create storage ownership ledger",
+                &root.configured_path.join(OWNERSHIP_LEDGER_DIRECTORY),
+                source,
+            ));
+        }
+    }
+    let directory = open_child_storage_directory(&root, OsStr::new(OWNERSHIP_LEDGER_DIRECTORY))?;
+    if directory.identity.st_mode & 0o077 != 0 {
+        return Err(storage_error(
+            "verify storage ownership ledger",
+            &directory.configured_path,
+            "group or other permissions are not allowed",
+        ));
+    }
+    remove_stale_ownership_temporaries(&directory)?;
+    fsync(&root.descriptor).map_err(|source| {
+        storage_error(
+            "sync storage ownership ledger parent",
+            &root.configured_path,
+            source,
+        )
+    })?;
+    Ok(StorageOwnershipLedger {
+        root,
+        directory,
+        operations: Mutex::new(()),
+    })
+}
+
+fn storage_domain(root: &OpenedStorageDirectory) -> [u8; 32] {
+    let path = root.configured_path.as_os_str().as_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"blaze.file-storage-domain.v1\0");
+    hasher.update(u64::try_from(path.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(path);
+    hasher.update(root.identity.st_dev.to_be_bytes());
+    hasher.update(root.identity.st_ino.to_be_bytes());
+    hasher.finalize().into()
+}
+
+fn validate_ownership_request(instance_id: &str, request: StorageOwnershipRequest) -> Result<()> {
+    let context = request.key.context;
+    if request.key.provider_instance_id.is_nil()
+        || context.instance_id.is_nil()
+        || context.request_id.is_nil()
+        || context.operation_id.is_nil()
+        || context.lease_id.is_nil()
+        || context.generation == 0
+        || context.generation.checked_add(4).is_none()
+        || request.root_filesystem_bytes == 0
+        || request.guest_memory_bytes == 0
+        || request.template_vmstate_bytes == Some(0)
+        || context.instance_id.to_string() != instance_id
+    {
+        return Err(ownership_error(
+            instance_id,
+            "the published request identity or logical extent is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn open_slot_directory(
+    root: &OpenedStorageDirectory,
+    slot: &StorageSlot,
+) -> Result<Option<OpenedStorageDirectory>> {
+    let name = OsStr::new(&slot.id);
+    let linked = match statat(&root.descriptor, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(source) => {
+            return Err(storage_error(
+                "inspect storage slot",
+                &slot.instance_dir,
+                source,
+            ));
+        }
+    };
+    if FileType::from_raw_mode(linked.st_mode as _) != FileType::Directory {
+        return Err(BlazeError::StorageIncomplete {
+            instance_id: slot.id.clone(),
+            path: slot.instance_dir.clone(),
+            expected: "plain directory",
+        });
+    }
+    let descriptor = openat(
+        &root.descriptor,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| storage_error("open storage slot", &slot.instance_dir, source))?;
+    let identity = fstat(&descriptor).map_err(|source| {
+        storage_error("inspect opened storage slot", &slot.instance_dir, source)
+    })?;
+    if !same_identity(&linked, &identity) {
+        return Err(ownership_error(
+            &slot.id,
+            "the slot directory changed identity while it was opened",
+        ));
+    }
+    Ok(Some(OpenedStorageDirectory {
+        descriptor,
+        configured_path: slot.instance_dir.clone(),
+        identity,
+    }))
+}
+
+fn require_regular_slot_entry(
+    directory: &OpenedStorageDirectory,
+    slot: &StorageSlot,
+    name: &'static str,
+    path: &Path,
+) -> Result<Stat> {
+    let stat =
+        statat(&directory.descriptor, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|source| {
+            if source == Errno::NOENT {
+                BlazeError::StorageIncomplete {
+                    instance_id: slot.id.clone(),
+                    path: path.to_path_buf(),
+                    expected: "plain file",
+                }
+            } else {
+                storage_error("inspect storage artifact", path, source)
+            }
+        })?;
+    if FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {
+        return Err(BlazeError::StorageIncomplete {
+            instance_id: slot.id.clone(),
+            path: path.to_path_buf(),
+            expected: "plain file",
+        });
+    }
+    Ok(stat)
+}
+
+fn require_logical_length(
+    slot: &StorageSlot,
+    path: &Path,
+    stat: &Stat,
+    expected: u64,
+) -> Result<()> {
+    let actual = u64::try_from(stat.st_size).map_err(|_| {
+        ownership_error(
+            &slot.id,
+            format!("{} has a negative logical length", path.display()),
+        )
+    })?;
+    if actual != expected {
+        return Err(ownership_error(
+            &slot.id,
+            format!(
+                "{} has logical length {actual}; expected {expected}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_slot_artifacts(
+    directory: &OpenedStorageDirectory,
+    slot: &StorageSlot,
+    claim: StorageOwnershipClaim,
+) -> Result<()> {
+    let rootfs = require_regular_slot_entry(directory, slot, "rootfs.ext4", &slot.rootfs_path)?;
+    require_logical_length(
+        slot,
+        &slot.rootfs_path,
+        &rootfs,
+        claim.request.root_filesystem_bytes,
+    )?;
+    let memory = require_regular_slot_entry(directory, slot, "mem.bin", &slot.mem_path)?;
+    require_logical_length(
+        slot,
+        &slot.mem_path,
+        &memory,
+        claim.request.guest_memory_bytes,
+    )?;
+    require_regular_slot_entry(directory, slot, "mem.diff", &slot.mem_diff_path)?;
+    require_regular_slot_entry(directory, slot, "rootfs.diff", &slot.rootfs_diff_path)?;
+
+    if let Some(vmstate_bytes) = claim.request.template_vmstate_bytes {
+        let backend = open_child_storage_directory(directory, OsStr::new("backend"))?;
+        let vmstate_path = backend.configured_path.join("vmstate.snap");
+        let vmstate = require_regular_slot_entry(&backend, slot, "vmstate.snap", &vmstate_path)?;
+        require_logical_length(slot, &vmstate_path, &vmstate, vmstate_bytes)?;
+        let restore_memory_path = backend.configured_path.join("memory.snap");
+        let restore_memory =
+            require_regular_slot_entry(&backend, slot, "memory.snap", &restore_memory_path)?;
+        require_logical_length(
+            slot,
+            &restore_memory_path,
+            &restore_memory,
+            claim.request.guest_memory_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn ownership_manifest_name(instance_id: Uuid) -> OsString {
+    OsString::from(format!("{instance_id}.json"))
+}
+
+fn ownership_temporary_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(name) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((instance_id, temporary_id)) = name.split_once(".json.") else {
+        return false;
+    };
+    Uuid::parse_str(instance_id).is_ok_and(|parsed| parsed.to_string() == instance_id)
+        && Uuid::parse_str(temporary_id).is_ok_and(|parsed| parsed.to_string() == temporary_id)
+}
+
+fn remove_stale_ownership_temporaries(directory: &OpenedStorageDirectory) -> Result<()> {
+    let mut removed = false;
+    for name in directory_entry_names(directory)? {
+        if !ownership_temporary_name(&name) {
+            continue;
+        }
+        let path = directory.configured_path.join(&name);
+        let stat = statat(&directory.descriptor, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| storage_error("inspect stale ownership temporary", &path, source))?;
+        if FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile || stat.st_nlink != 1
+        {
+            return Err(storage_error(
+                "remove stale ownership temporary",
+                &path,
+                "entry is not a singly linked plain file",
+            ));
+        }
+        unlinkat(&directory.descriptor, &name, AtFlags::empty())
+            .map_err(|source| storage_error("remove stale ownership temporary", &path, source))?;
+        removed = true;
+    }
+    if removed {
+        fsync(&directory.descriptor).map_err(|source| {
+            storage_error(
+                "sync stale ownership temporary removal",
+                &directory.configured_path,
+                source,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn expected_lease_generation(initial: u64, state: DataPlaneLeaseState) -> Option<u64> {
+    let offset = match state {
+        DataPlaneLeaseState::Prepared => 0,
+        DataPlaneLeaseState::Committed => 1,
+        DataPlaneLeaseState::Finalized => 2,
+        DataPlaneLeaseState::Stopped => 3,
+        DataPlaneLeaseState::Released | DataPlaneLeaseState::Quarantined => return None,
+    };
+    initial.checked_add(offset)
+}
+
+fn read_ownership_manifest(
+    ledger: &StorageOwnershipLedger,
+    instance_id: Uuid,
+) -> Result<Option<StorageOwnershipClaim>> {
+    let name = ownership_manifest_name(instance_id);
+    let path = ledger.directory.configured_path.join(&name);
+    let linked = match statat(
+        &ledger.directory.descriptor,
+        &name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(stat) => stat,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(source) => return Err(storage_error("inspect ownership manifest", &path, source)),
+    };
+    if FileType::from_raw_mode(linked.st_mode as _) != FileType::RegularFile || linked.st_nlink != 1
+    {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest is not a singly linked plain file",
+        ));
+    }
+    let size = u64::try_from(linked.st_size).map_err(|_| {
+        ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest has an invalid size",
+        )
+    })?;
+    if size == 0 || size > MAX_OWNERSHIP_MANIFEST_BYTES {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            format!("the ownership manifest has unsupported size {size}"),
+        ));
+    }
+    let descriptor = openat(
+        &ledger.directory.descriptor,
+        &name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|source| storage_error("open ownership manifest", &path, source))?;
+    let opened = fstat(&descriptor)
+        .map_err(|source| storage_error("inspect opened ownership manifest", &path, source))?;
+    if !same_identity(&linked, &opened) {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest changed identity while it was opened",
+        ));
+    }
+    let mut file = std::fs::File::from(descriptor);
+    let mut contents = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    (&mut file)
+        .take(MAX_OWNERSHIP_MANIFEST_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|source| storage_error("read ownership manifest", &path, source))?;
+    let bytes_read = u64::try_from(contents.len()).map_err(|_| {
+        ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest is too large",
+        )
+    })?;
+    if bytes_read != size || bytes_read > MAX_OWNERSHIP_MANIFEST_BYTES {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest changed size while it was read",
+        ));
+    }
+    let opened_after = fstat(&file)
+        .map_err(|source| storage_error("reinspect opened ownership manifest", &path, source))?;
+    if !same_opened_file(&opened, &opened_after) {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the opened ownership manifest changed while it was read",
+        ));
+    }
+    let current = statat(
+        &ledger.directory.descriptor,
+        &name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(|source| storage_error("reinspect ownership manifest", &path, source))?;
+    if !same_identity(&opened, &current) {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest changed identity while it was read",
+        ));
+    }
+    let manifest: FileStorageOwnershipManifest = serde_json::from_slice(&contents)
+        .map_err(|source| storage_error("decode ownership manifest", &path, source))?;
+    if manifest.format != OWNERSHIP_MANIFEST_FORMAT {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            format!("unsupported manifest format {}", manifest.format),
+        ));
+    }
+    validate_ownership_request(&instance_id.to_string(), manifest.claim.request)?;
+    if manifest.claim.storage_domain != storage_domain(&ledger.root) {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership manifest belongs to a different storage domain",
+        ));
+    }
+    if expected_lease_generation(
+        manifest.claim.request.key.context.generation,
+        manifest.claim.state,
+    ) != Some(manifest.claim.generation)
+        || (manifest.claim.phase == StorageOwnershipPhase::Preparing
+            && (manifest.claim.state != DataPlaneLeaseState::Prepared
+                || manifest.claim.generation != manifest.claim.request.key.context.generation))
+        || (manifest.claim.phase == StorageOwnershipPhase::Ready
+            && manifest.claim.slot_identity.is_none())
+    {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the ownership phase, state, or generation is invalid",
+        ));
+    }
+    Ok(Some(manifest.claim))
+}
+
+fn verify_ownership_key(claim: StorageOwnershipClaim, key: StorageOwnershipKey) -> Result<()> {
+    if claim.request.key == key {
+        return Ok(());
+    }
+    Err(ownership_error(
+        &key.context.instance_id.to_string(),
+        "the ownership manifest belongs to a different provider request",
+    ))
+}
+
+fn verify_slot_identity(
+    claim: StorageOwnershipClaim,
+    directory: &OpenedStorageDirectory,
+) -> Result<()> {
+    let instance_id = claim.request.key.context.instance_id.to_string();
+    let Some(expected) = claim.slot_identity else {
+        return Err(ownership_error(
+            &instance_id,
+            "the ownership record does not identify a concrete slot directory",
+        ));
+    };
+    if slot_identity(&directory.identity) != expected {
+        return Err(ownership_error(
+            &instance_id,
+            "the linked slot directory is not the object recorded by the ownership ledger",
+        ));
+    }
+    Ok(())
+}
+
+fn write_ownership_manifest(
+    ledger: &StorageOwnershipLedger,
+    claim: StorageOwnershipClaim,
+    replace: bool,
+) -> Result<()> {
+    let name = ownership_manifest_name(claim.request.key.context.instance_id);
+    let temporary_name = OsString::from(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let descriptor = openat(
+        &ledger.directory.descriptor,
+        &temporary_name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|source| {
+        storage_error(
+            "create ownership manifest temporary file",
+            &ledger.directory.configured_path.join(&temporary_name),
+            source,
+        )
+    })?;
+    let identity = fstat(&descriptor).map_err(|source| {
+        storage_error(
+            "inspect ownership manifest temporary file",
+            &ledger.directory.configured_path.join(&temporary_name),
+            source,
+        )
+    })?;
+    let mut unpublished = UnpublishedOwnership {
+        parent: &ledger.directory.descriptor,
+        file: std::fs::File::from(descriptor),
+        identity,
+        temporary_name,
+        published: false,
+    };
+    let mut encoded = serde_json::to_vec(&FileStorageOwnershipManifest {
+        format: OWNERSHIP_MANIFEST_FORMAT,
+        claim,
+    })
+    .map_err(|source| {
+        ownership_error(
+            &claim.request.key.context.instance_id.to_string(),
+            format!("encode manifest: {source}"),
+        )
+    })?;
+    encoded.push(b'\n');
+    unpublished
+        .file_mut()
+        .write_all(&encoded)
+        .map_err(|source| {
+            storage_error(
+                "write ownership manifest",
+                &ledger.directory.configured_path,
+                source,
+            )
+        })?;
+    unpublished.file_mut().sync_all().map_err(|source| {
+        storage_error(
+            "sync ownership manifest",
+            &ledger.directory.configured_path,
+            source,
+        )
+    })?;
+    renameat_with(
+        &ledger.directory.descriptor,
+        &unpublished.temporary_name,
+        &ledger.directory.descriptor,
+        &name,
+        if replace {
+            RenameFlags::empty()
+        } else {
+            RenameFlags::NOREPLACE
+        },
+    )
+    .map_err(|source| {
+        storage_error(
+            "publish ownership manifest",
+            &ledger.directory.configured_path,
+            source,
+        )
+    })?;
+    let published = statat(
+        &ledger.directory.descriptor,
+        &name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(|source| {
+        storage_error(
+            "verify published ownership manifest",
+            &ledger.directory.configured_path,
+            source,
+        )
+    })?;
+    if !same_identity(&unpublished.identity, &published)
+        || unpublished
+            .linked_at(&unpublished.temporary_name)
+            .map_err(|source| {
+                storage_error(
+                    "verify ownership manifest temporary name",
+                    &ledger.directory.configured_path,
+                    source,
+                )
+            })?
+    {
+        return Err(ownership_error(
+            &claim.request.key.context.instance_id.to_string(),
+            "the ownership manifest publication result is ambiguous",
+        ));
+    }
+    unpublished.mark_published();
+    fsync(&ledger.directory.descriptor).map_err(|source| {
+        storage_error(
+            "sync storage ownership ledger",
+            &ledger.directory.configured_path,
+            source,
+        )
+    })
+}
+
+fn reserve_ownership_manifest(
+    ledger: &StorageOwnershipLedger,
+    request: StorageOwnershipRequest,
+) -> Result<StorageOwnershipClaim> {
+    let instance_id = request.key.context.instance_id;
+    validate_ownership_request(&instance_id.to_string(), request)?;
+    let _operation = ledger.operations.lock().map_err(|_| {
+        ownership_error(
+            &instance_id.to_string(),
+            "the ownership operation lock is poisoned",
+        )
+    })?;
+    if let Some(existing) = read_ownership_manifest(ledger, instance_id)? {
+        if existing.request != request {
+            return Err(ownership_error(
+                &instance_id.to_string(),
+                "an ownership record already exists for different immutable request facts",
+            ));
+        }
+        if existing.phase == StorageOwnershipPhase::Deleting {
+            return Err(ownership_error(
+                &instance_id.to_string(),
+                "the prior ownership record is still being deleted",
+            ));
+        }
+        return Ok(existing);
+    }
+    let slot = StorageSlot {
+        id: instance_id.to_string(),
+        rootfs_path: PathBuf::new(),
+        mem_path: PathBuf::new(),
+        mem_diff_path: PathBuf::new(),
+        rootfs_diff_path: PathBuf::new(),
+        instance_dir: ledger.root.configured_path.join(instance_id.to_string()),
+    };
+    if open_slot_directory(&ledger.root, &slot)?.is_some() {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "a same-named slot exists without an ownership record",
+        ));
+    }
+    let claim = StorageOwnershipClaim {
+        request,
+        storage_domain: storage_domain(&ledger.root),
+        slot_identity: None,
+        phase: StorageOwnershipPhase::Preparing,
+        state: DataPlaneLeaseState::Prepared,
+        generation: request.key.context.generation,
+    };
+    crate::failpoint::storage("storage-ownership-before-reserve")?;
+    write_ownership_manifest(ledger, claim, false)?;
+    crate::failpoint::storage("storage-ownership-after-reserve")?;
+    Ok(claim)
+}
+
+struct SlotDirectoryAcquireFailure {
+    source: Box<BlazeError>,
+    created: bool,
+}
+
+impl SlotDirectoryAcquireFailure {
+    fn into_acquire_error(self, slot: StorageSlot) -> StorageAcquireError {
+        if self.created {
+            StorageAcquireError::with_residual(*self.source, slot)
+        } else {
+            StorageAcquireError::clean(*self.source)
+        }
+    }
+}
+
+fn create_acquired_slot_directory(
+    ledger: &StorageOwnershipLedger,
+    slot: &StorageSlot,
+    operation: &str,
+) -> std::result::Result<bool, SlotDirectoryAcquireFailure> {
+    let mut created = false;
+    let result = (|| -> Result<bool> {
+        let _operation = ledger
+            .operations
+            .lock()
+            .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+        let durable_owner = match Uuid::parse_str(&slot.id) {
+            Ok(instance_id) if instance_id.to_string() == slot.id => {
+                read_ownership_manifest(ledger, instance_id)?
+            }
+            _ => None,
+        };
+        if let Some(claim) = durable_owner {
+            if claim.phase != StorageOwnershipPhase::Preparing || claim.slot_identity.is_some() {
+                return Err(ownership_error(
+                    &slot.id,
+                    "the ownership reservation does not authorize a new slot directory",
+                ));
+            }
+        }
+
+        crate::failpoint::storage("storage-acquire-before-mkdir")?;
+        match mkdirat(&ledger.root.descriptor, OsStr::new(&slot.id), Mode::RWXU) {
+            Ok(()) => created = true,
+            Err(Errno::EXIST) => {
+                return Err(BlazeError::StorageError {
+                    msg: format!(
+                        "{operation} '{}': instance directory already exists",
+                        slot.id
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(BlazeError::StorageError {
+                    msg: format!("{operation} '{}': create dir: {source}", slot.id),
+                });
+            }
+        }
+        fsync(&ledger.root.descriptor).map_err(|source| {
+            storage_error(
+                "sync acquired storage directory",
+                &ledger.root.configured_path,
+                source,
+            )
+        })?;
+        // This fault boundary intentionally precedes durable directory
+        // identity publication. Recovery must retain the ambiguous directory,
+        // never infer ownership from its pathname.
+        crate::failpoint::storage("storage-acquire-after-mkdir")?;
+        let directory = open_slot_directory(&ledger.root, slot)?.ok_or_else(|| {
+            ownership_error(&slot.id, "the newly created slot directory disappeared")
+        })?;
+        linked_directory_is_current(&ledger.root, OsStr::new(&slot.id), &directory)?;
+        if let Some(claim) = durable_owner {
+            let identified = StorageOwnershipClaim {
+                slot_identity: Some(slot_identity(&directory.identity)),
+                ..claim
+            };
+            crate::failpoint::storage("storage-ownership-before-slot-identity")?;
+            write_ownership_manifest(ledger, identified, true)?;
+            crate::failpoint::storage("storage-ownership-after-slot-identity")?;
+            linked_directory_is_current(&ledger.root, OsStr::new(&slot.id), &directory)?;
+        }
+        Ok(durable_owner.is_some())
+    })();
+    match result {
+        Ok(owned) => Ok(owned),
+        Err(source) => Err(SlotDirectoryAcquireFailure {
+            source: Box::new(source),
+            created,
+        }),
+    }
+}
+
+fn publish_ready_ownership_manifest(
+    ledger: &StorageOwnershipLedger,
+    slot: &StorageSlot,
+    request: StorageOwnershipRequest,
+) -> Result<StorageOwnershipClaim> {
+    validate_ownership_request(&slot.id, request)?;
+    let _operation = ledger
+        .operations
+        .lock()
+        .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+    let current =
+        read_ownership_manifest(ledger, request.key.context.instance_id)?.ok_or_else(|| {
+            ownership_error(&slot.id, "the write-ahead ownership reservation is missing")
+        })?;
+    if current.request != request {
+        return Err(ownership_error(
+            &slot.id,
+            "the write-ahead ownership reservation belongs to a different request",
+        ));
+    }
+    if !matches!(
+        current.phase,
+        StorageOwnershipPhase::Preparing | StorageOwnershipPhase::Ready
+    ) {
+        return Err(ownership_error(
+            &slot.id,
+            "the ownership record is being deleted",
+        ));
+    }
+    let directory =
+        open_slot_directory(&ledger.root, slot)?.ok_or_else(|| BlazeError::StorageIncomplete {
+            instance_id: slot.id.clone(),
+            path: slot.instance_dir.clone(),
+            expected: "plain directory",
+        })?;
+    verify_slot_identity(current, &directory)?;
+    verify_slot_artifacts(&directory, slot, current)?;
+    linked_directory_is_current(&ledger.root, OsStr::new(&slot.id), &directory)?;
+    if current.phase == StorageOwnershipPhase::Ready {
+        return Ok(current);
+    }
+    let ready = StorageOwnershipClaim {
+        phase: StorageOwnershipPhase::Ready,
+        ..current
+    };
+    crate::failpoint::storage("storage-ownership-before-ready")?;
+    write_ownership_manifest(ledger, ready, true)?;
+    crate::failpoint::storage("storage-ownership-after-ready")?;
+    Ok(ready)
+}
+
+fn reconstruct_owned_slot(
+    ledger: &StorageOwnershipLedger,
+    slot: StorageSlot,
+    key: StorageOwnershipKey,
+) -> Result<Option<OwnedStorageSlot>> {
+    let _operation = ledger
+        .operations
+        .lock()
+        .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+    let Some(claim) = read_ownership_manifest(ledger, key.context.instance_id)? else {
+        if open_slot_directory(&ledger.root, &slot)?.is_some() {
+            return Err(ownership_error(
+                &slot.id,
+                "a same-named slot exists without an ownership record",
+            ));
+        }
+        return Ok(None);
+    };
+    verify_ownership_key(claim, key)?;
+    verify_claim_slot(ledger, &slot, claim)?;
+    Ok(Some(OwnedStorageSlot {
+        storage: slot,
+        ownership: claim,
+    }))
+}
+
+fn verify_claim_slot(
+    ledger: &StorageOwnershipLedger,
+    slot: &StorageSlot,
+    claim: StorageOwnershipClaim,
+) -> Result<()> {
+    match open_slot_directory(&ledger.root, slot)? {
+        Some(directory) => {
+            verify_slot_identity(claim, &directory)?;
+            linked_directory_is_current(&ledger.root, OsStr::new(&slot.id), &directory)?;
+            if claim.phase == StorageOwnershipPhase::Ready {
+                verify_slot_artifacts(&directory, slot, claim)?;
+            }
+            Ok(())
+        }
+        None if claim.phase != StorageOwnershipPhase::Ready => Ok(()),
+        None => Err(BlazeError::StorageIncomplete {
+            instance_id: slot.id.clone(),
+            path: slot.instance_dir.clone(),
+            expected: "owned slot directory",
+        }),
+    }
+}
+
+fn ownership_manifest_instance_id(name: &OsStr) -> Option<Uuid> {
+    let text = name.to_str()?.strip_suffix(".json")?;
+    Uuid::parse_str(text)
+        .ok()
+        .filter(|parsed| parsed.to_string() == text)
+}
+
+fn lookup_owned_slot(
+    ledger: &StorageOwnershipLedger,
+    slot: StorageSlot,
+    key: StorageOwnershipKey,
+) -> Result<StorageOwnershipLookup> {
+    let _operation = ledger
+        .operations
+        .lock()
+        .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+    let mut exact = None;
+    let mut conflict = false;
+    for name in directory_entry_names(&ledger.directory)? {
+        let Some(instance_id) = ownership_manifest_instance_id(&name) else {
+            continue;
+        };
+        let claim = read_ownership_manifest(ledger, instance_id)?.ok_or_else(|| {
+            ownership_error(
+                &slot.id,
+                format!("ownership manifest {instance_id} vanished during the ledger scan"),
+            )
+        })?;
+        let candidate = claim.request.key;
+        if candidate == key {
+            if exact.replace(claim).is_some() {
+                return Err(ownership_error(
+                    &slot.id,
+                    "the ownership ledger contains duplicate exact records",
+                ));
+            }
+        } else if candidate.context.instance_id == key.context.instance_id
+            || candidate.context.lease_id == key.context.lease_id
+        {
+            conflict = true;
+        }
+    }
+    if conflict {
+        return Ok(StorageOwnershipLookup::Conflict);
+    }
+    if let Some(claim) = exact {
+        verify_claim_slot(ledger, &slot, claim)?;
+        return Ok(StorageOwnershipLookup::Owned(Box::new(OwnedStorageSlot {
+            storage: slot,
+            ownership: claim,
+        })));
+    }
+    if open_slot_directory(&ledger.root, &slot)?.is_some() {
+        return Err(ownership_error(
+            &slot.id,
+            "a same-named slot exists without an ownership record",
+        ));
+    }
+    Ok(StorageOwnershipLookup::Absent)
+}
+
+fn lease_transition_is_valid(expected: DataPlaneLeaseState, next: DataPlaneLeaseState) -> bool {
+    matches!(
+        (expected, next),
+        (
+            DataPlaneLeaseState::Prepared,
+            DataPlaneLeaseState::Committed
+        ) | (
+            DataPlaneLeaseState::Committed,
+            DataPlaneLeaseState::Finalized
+        ) | (DataPlaneLeaseState::Finalized, DataPlaneLeaseState::Stopped)
+    )
+}
+
+fn advance_ownership_manifest(
+    ledger: &StorageOwnershipLedger,
+    key: StorageOwnershipKey,
+    expected_state: DataPlaneLeaseState,
+    expected_generation: u64,
+    next_state: DataPlaneLeaseState,
+    next_generation: u64,
+) -> Result<StorageOwnershipClaim> {
+    let instance_id = key.context.instance_id;
+    let _operation = ledger.operations.lock().map_err(|_| {
+        ownership_error(
+            &instance_id.to_string(),
+            "the ownership operation lock is poisoned",
+        )
+    })?;
+    let current = read_ownership_manifest(ledger, instance_id)?.ok_or_else(|| {
+        ownership_error(&instance_id.to_string(), "the ownership record is missing")
+    })?;
+    verify_ownership_key(current, key)?;
+    if current.phase != StorageOwnershipPhase::Ready
+        || current.state != expected_state
+        || current.generation != expected_generation
+        || !lease_transition_is_valid(expected_state, next_state)
+        || expected_generation.checked_add(1) != Some(next_generation)
+    {
+        return Err(ownership_error(
+            &instance_id.to_string(),
+            "the durable lease state does not authorize the requested transition",
+        ));
+    }
+    let next = StorageOwnershipClaim {
+        state: next_state,
+        generation: next_generation,
+        ..current
+    };
+    crate::failpoint::storage("storage-ownership-before-state-update")?;
+    write_ownership_manifest(ledger, next, true)?;
+    crate::failpoint::storage("storage-ownership-after-state-update")?;
+    Ok(next)
+}
+
+fn linked_directory_is_current(
+    parent: &OpenedStorageDirectory,
+    name: &OsStr,
+    directory: &OpenedStorageDirectory,
+) -> Result<()> {
+    let linked = statat(&parent.descriptor, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|source| {
+        storage_error(
+            "verify owned storage directory",
+            &directory.configured_path,
+            source,
+        )
+    })?;
+    if FileType::from_raw_mode(linked.st_mode as _) != FileType::Directory
+        || !directory.same_object(&linked)
+    {
+        return Err(storage_error(
+            "verify owned storage directory",
+            &directory.configured_path,
+            "directory identity changed before removal",
+        ));
+    }
+    Ok(())
+}
+
+fn directory_entry_names(directory: &OpenedStorageDirectory) -> Result<Vec<OsString>> {
+    let scan = openat(
+        &directory.descriptor,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| {
+        storage_error(
+            "open storage directory scan",
+            &directory.configured_path,
+            source,
+        )
+    })?;
+    let entries = Dir::read_from(&scan).map_err(|source| {
+        storage_error("scan storage directory", &directory.configured_path, source)
+    })?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| {
+            storage_error("read storage directory", &directory.configured_path, source)
+        })?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes != b"." && bytes != b".." {
+            names.push(OsStr::from_bytes(bytes).to_os_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn open_child_storage_directory(
+    parent: &OpenedStorageDirectory,
+    name: &OsStr,
+) -> Result<OpenedStorageDirectory> {
+    let path = parent.configured_path.join(name);
+    let linked = statat(&parent.descriptor, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|source| storage_error("inspect storage child directory", &path, source))?;
+    if FileType::from_raw_mode(linked.st_mode as _) != FileType::Directory {
+        return Err(storage_error(
+            "open storage child directory",
+            &path,
+            "entry is no longer a directory",
+        ));
+    }
+    let descriptor = openat(
+        &parent.descriptor,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| storage_error("open storage child directory", &path, source))?;
+    let identity = fstat(&descriptor)
+        .map_err(|source| storage_error("inspect opened storage child directory", &path, source))?;
+    if !same_identity(&linked, &identity) {
+        return Err(storage_error(
+            "open storage child directory",
+            &path,
+            "directory identity changed while it was opened",
+        ));
+    }
+    Ok(OpenedStorageDirectory {
+        descriptor,
+        configured_path: path,
+        identity,
+    })
+}
+
+fn remove_owned_slot_directory(
+    parent: &OpenedStorageDirectory,
+    name: &OsStr,
+    directory: OpenedStorageDirectory,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_SLOT_REMOVAL_DEPTH {
+        return Err(storage_error(
+            "remove owned storage directory",
+            &directory.configured_path,
+            "directory nesting exceeds the safety limit",
+        ));
+    }
+    linked_directory_is_current(parent, name, &directory)?;
+    for entry in directory_entry_names(&directory)? {
+        let path = directory.configured_path.join(&entry);
+        let stat = statat(&directory.descriptor, &entry, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| storage_error("inspect owned storage entry", &path, source))?;
+        crate::failpoint::storage("storage-release-during-slot-remove")?;
+        if FileType::from_raw_mode(stat.st_mode as _) == FileType::Directory {
+            let child = open_child_storage_directory(&directory, &entry)?;
+            remove_owned_slot_directory(&directory, &entry, child, depth + 1)?;
+        } else {
+            unlinkat(&directory.descriptor, &entry, AtFlags::empty())
+                .map_err(|source| storage_error("remove owned storage entry", &path, source))?;
+        }
+    }
+    fsync(&directory.descriptor).map_err(|source| {
+        storage_error(
+            "sync removed storage directory",
+            &directory.configured_path,
+            source,
+        )
+    })?;
+    linked_directory_is_current(parent, name, &directory)?;
+    unlinkat(&parent.descriptor, name, AtFlags::REMOVEDIR).map_err(|source| {
+        storage_error(
+            "remove owned storage directory",
+            &directory.configured_path,
+            source,
+        )
+    })?;
+    fsync(&parent.descriptor).map_err(|source| {
+        storage_error(
+            "sync storage directory removal",
+            &parent.configured_path,
+            source,
+        )
+    })
+}
+
+fn release_legacy_slot_by_id(ledger: &StorageOwnershipLedger, slot: StorageSlot) -> Result<()> {
+    let _operation = ledger
+        .operations
+        .lock()
+        .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+    if let Ok(instance_id) = Uuid::parse_str(&slot.id)
+        && read_ownership_manifest(ledger, instance_id)?.is_some()
+    {
+        return Err(ownership_error(
+            &slot.id,
+            "request-scoped storage must be removed through its exact lease binding",
+        ));
+    }
+    let Some(directory) = open_slot_directory(&ledger.root, &slot)? else {
+        return Ok(());
+    };
+    // Records written before request-scoped ownership do not have a storage
+    // manifest. Recovery is nevertheless authorized by the accepted lifecycle
+    // record. Keep that compatibility path separate from `release`, and bind
+    // recursive removal to the directory object opened under the configured
+    // storage root so a path replacement cannot redirect cleanup.
+    remove_owned_slot_directory(&ledger.root, OsStr::new(&slot.id), directory, 0)
+}
+
+fn release_owned_slot(
+    ledger: &StorageOwnershipLedger,
+    slot: StorageSlot,
+    key: StorageOwnershipKey,
+    expected_state: DataPlaneLeaseState,
+    expected_generation: u64,
+) -> Result<bool> {
+    let _operation = ledger
+        .operations
+        .lock()
+        .map_err(|_| ownership_error(&slot.id, "the ownership operation lock is poisoned"))?;
+    let Some(current) = read_ownership_manifest(ledger, key.context.instance_id)? else {
+        if open_slot_directory(&ledger.root, &slot)?.is_some() {
+            return Err(ownership_error(
+                &slot.id,
+                "a same-named slot exists without an ownership record",
+            ));
+        }
+        fsync(&ledger.root.descriptor).map_err(|source| {
+            storage_error(
+                "sync absent storage slot parent",
+                &ledger.root.configured_path,
+                source,
+            )
+        })?;
+        fsync(&ledger.directory.descriptor).map_err(|source| {
+            storage_error(
+                "sync absent storage ownership record",
+                &ledger.directory.configured_path,
+                source,
+            )
+        })?;
+        return Ok(false);
+    };
+    verify_ownership_key(current, key)?;
+    if current.state != expected_state || current.generation != expected_generation {
+        return Err(ownership_error(
+            &slot.id,
+            "the durable lease state does not authorize removal",
+        ));
+    }
+    if let Some(directory) = open_slot_directory(&ledger.root, &slot)? {
+        verify_slot_identity(current, &directory)?;
+        linked_directory_is_current(&ledger.root, OsStr::new(&slot.id), &directory)?;
+    }
+    if current.phase != StorageOwnershipPhase::Deleting {
+        let deleting = StorageOwnershipClaim {
+            phase: StorageOwnershipPhase::Deleting,
+            ..current
+        };
+        crate::failpoint::storage("storage-release-before-mark-deleting")?;
+        write_ownership_manifest(ledger, deleting, true)?;
+        crate::failpoint::storage("storage-release-after-mark-deleting")?;
+    }
+
+    if let Some(directory) = open_slot_directory(&ledger.root, &slot)? {
+        verify_slot_identity(current, &directory)?;
+        remove_owned_slot_directory(&ledger.root, OsStr::new(&slot.id), directory, 0)?;
+    }
+    if open_slot_directory(&ledger.root, &slot)?.is_some() {
+        return Err(ownership_error(
+            &slot.id,
+            "the slot remained linked after recursive removal",
+        ));
+    }
+    fsync(&ledger.root.descriptor).map_err(|source| {
+        storage_error(
+            "sync empty storage slot parent",
+            &ledger.root.configured_path,
+            source,
+        )
+    })?;
+    crate::failpoint::storage("storage-release-after-slot-remove")?;
+
+    let manifest_name = ownership_manifest_name(key.context.instance_id);
+    unlinkat(
+        &ledger.directory.descriptor,
+        &manifest_name,
+        AtFlags::empty(),
+    )
+    .map_err(|source| {
+        storage_error(
+            "remove storage ownership manifest",
+            &ledger.directory.configured_path.join(&manifest_name),
+            source,
+        )
+    })?;
+    fsync(&ledger.directory.descriptor).map_err(|source| {
+        storage_error(
+            "sync removed storage ownership manifest",
+            &ledger.directory.configured_path,
+            source,
+        )
+    })?;
+    crate::failpoint::storage("storage-release-after-ledger-remove")?;
+    Ok(true)
 }
 
 struct UnpublishedCheckpoint {
@@ -306,8 +1700,17 @@ async fn require_slot_path(
 
 #[async_trait]
 impl StorageProvider for FileStorageProvider {
+    fn ownership_domain_id(&self) -> Result<Option<Uuid>> {
+        let ledger = self.ownership_ledger()?;
+        Ok(Some(provider_instance_id(&ledger.root)))
+    }
+
     async fn probe(&self) -> Result<bool> {
-        Ok(self.images_dir.exists() && self.instances_dir.exists())
+        if !self.images_dir.exists() || !self.instances_dir.exists() {
+            return Ok(false);
+        }
+        self.ownership_ledger()?;
+        Ok(true)
     }
 
     async fn acquire(
@@ -318,23 +1721,9 @@ impl StorageProvider for FileStorageProvider {
         let slot = self.slot_for_id(&opts.instance_id)?;
         let instance_dir = slot.instance_dir.clone();
 
-        // Atomic: create_dir fails with AlreadyExists if concurrent acquire races
-        match tokio::fs::create_dir(&instance_dir).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(StorageAcquireError::clean(BlazeError::StorageError {
-                    msg: format!(
-                        "acquire '{}': instance directory already exists",
-                        opts.instance_id
-                    ),
-                }));
-            }
-            Err(e) => {
-                return Err(StorageAcquireError::clean(BlazeError::StorageError {
-                    msg: format!("acquire '{}': create dir: {}", opts.instance_id, e),
-                }));
-            }
-        }
+        let ledger = self.ownership_ledger()?;
+        let durably_owned = create_acquired_slot_directory(&ledger, &slot, "acquire")
+            .map_err(|failure| failure.into_acquire_error(slot.clone()))?;
 
         // Create rootfs + mem; rollback dir on failure
         let result = async {
@@ -358,6 +1747,9 @@ impl StorageProvider for FileStorageProvider {
         .await;
 
         if let Err(e) = result {
+            if durably_owned {
+                return Err(StorageAcquireError::with_residual(e, slot));
+            }
             let rollback = match crate::failpoint::storage("storage-acquire-rollback") {
                 Ok(()) => tokio::fs::remove_dir_all(&instance_dir)
                     .await
@@ -413,25 +1805,9 @@ impl StorageProvider for FileStorageProvider {
         let slot = self.slot_for_id(&opts.instance_id)?;
         let instance_dir = slot.instance_dir.clone();
 
-        match tokio::fs::create_dir(&instance_dir).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(StorageAcquireError::clean(BlazeError::StorageError {
-                    msg: format!(
-                        "acquire template '{}': instance directory already exists",
-                        opts.instance_id
-                    ),
-                }));
-            }
-            Err(error) => {
-                return Err(StorageAcquireError::clean(BlazeError::StorageError {
-                    msg: format!(
-                        "acquire template '{}': create dir: {error}",
-                        opts.instance_id
-                    ),
-                }));
-            }
-        }
+        let ledger = self.ownership_ledger()?;
+        let durably_owned = create_acquired_slot_directory(&ledger, &slot, "acquire template")
+            .map_err(|failure| failure.into_acquire_error(slot.clone()))?;
 
         let payload_dir = instance_dir.join("backend");
         let snapshot_path = payload_dir.join("vmstate.snap");
@@ -461,6 +1837,9 @@ impl StorageProvider for FileStorageProvider {
         .await;
 
         if let Err(error) = result {
+            if durably_owned {
+                return Err(StorageAcquireError::with_residual(error, slot));
+            }
             let rollback = match crate::failpoint::storage("storage-acquire-rollback") {
                 Ok(()) => tokio::fs::remove_dir_all(&instance_dir)
                     .await
@@ -500,6 +1879,7 @@ impl StorageProvider for FileStorageProvider {
 
     async fn release(&self, slot: StorageSlot) -> Result<()> {
         crate::failpoint::storage("storage-release")?;
+        self.reject_owned_legacy_release(&slot.id)?;
         // Re-derive the canonical path from instances_dir + slot.id. Do not
         // trust path strings carried in a persisted or externally built slot.
         let canonical_dir = self.slot_for_id(&slot.id)?.instance_dir;
@@ -514,8 +1894,14 @@ impl StorageProvider for FileStorageProvider {
     }
 
     async fn release_by_id(&self, instance_id: &str) -> Result<()> {
+        crate::failpoint::storage("storage-release")?;
         let slot = self.slot_for_id(instance_id)?;
-        self.release(slot).await
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || release_legacy_slot_by_id(&ledger, slot))
+            .await
+            .map_err(|source| BlazeError::StorageError {
+                msg: format!("release legacy storage task failed: {source}"),
+            })?
     }
 
     async fn reconstruct(&self, instance_id: &str) -> Result<StorageSlot> {
@@ -530,6 +1916,107 @@ impl StorageProvider for FileStorageProvider {
             require_slot_path(instance_id, path, RequiredPathType::File).await?;
         }
         Ok(slot)
+    }
+
+    async fn reserve_ownership(
+        &self,
+        request: StorageOwnershipRequest,
+    ) -> Result<StorageOwnershipClaim> {
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || reserve_ownership_manifest(&ledger, request))
+            .await
+            .map_err(|source| BlazeError::StorageError {
+                msg: format!("reserve storage ownership task failed: {source}"),
+            })?
+    }
+
+    async fn publish_ownership(
+        &self,
+        slot: &StorageSlot,
+        request: StorageOwnershipRequest,
+    ) -> Result<StorageOwnershipClaim> {
+        let canonical = self.slot_for_id(&slot.id)?;
+        if canonical != *slot {
+            return Err(ownership_error(
+                &slot.id,
+                "the runtime storage slot does not match the configured storage root",
+            ));
+        }
+        self.sync_artifacts(&canonical).await?;
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || {
+            publish_ready_ownership_manifest(&ledger, &canonical, request)
+        })
+        .await
+        .map_err(|source| BlazeError::StorageError {
+            msg: format!("publish storage ownership task failed: {source}"),
+        })?
+    }
+
+    async fn advance_ownership(
+        &self,
+        key: StorageOwnershipKey,
+        expected_state: DataPlaneLeaseState,
+        expected_generation: u64,
+        next_state: DataPlaneLeaseState,
+        next_generation: u64,
+    ) -> Result<StorageOwnershipClaim> {
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || {
+            advance_ownership_manifest(
+                &ledger,
+                key,
+                expected_state,
+                expected_generation,
+                next_state,
+                next_generation,
+            )
+        })
+        .await
+        .map_err(|source| BlazeError::StorageError {
+            msg: format!("advance storage ownership task failed: {source}"),
+        })?
+    }
+
+    async fn reconstruct_owned(
+        &self,
+        key: StorageOwnershipKey,
+    ) -> Result<Option<OwnedStorageSlot>> {
+        let slot = self.slot_for_id(&key.context.instance_id.to_string())?;
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || reconstruct_owned_slot(&ledger, slot, key))
+            .await
+            .map_err(|source| BlazeError::StorageError {
+                msg: format!("reconstruct owned storage task failed: {source}"),
+            })?
+    }
+
+    async fn lookup_ownership(&self, key: StorageOwnershipKey) -> Result<StorageOwnershipLookup> {
+        let slot = self.slot_for_id(&key.context.instance_id.to_string())?;
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || lookup_owned_slot(&ledger, slot, key))
+            .await
+            .map_err(|source| BlazeError::StorageError {
+                msg: format!("lookup owned storage task failed: {source}"),
+            })?
+    }
+
+    async fn release_owned(
+        &self,
+        key: StorageOwnershipKey,
+        expected_state: DataPlaneLeaseState,
+        expected_generation: u64,
+    ) -> Result<bool> {
+        crate::failpoint::storage("storage-release")?;
+        let slot = self.slot_for_id(&key.context.instance_id.to_string())?;
+        let ledger = self.ownership_ledger()?;
+        crate::failpoint::spawn_blocking(move || {
+            release_owned_slot(&ledger, slot, key, expected_state, expected_generation)
+        })
+        .await
+        .map_err(|source| BlazeError::StorageError {
+            msg: format!("release owned storage task failed: {source}"),
+        })?
     }
 
     async fn sync_artifacts(&self, slot: &StorageSlot) -> Result<()> {
@@ -792,7 +2279,28 @@ async fn create_or_copy(
     size: u64,
 ) -> std::io::Result<()> {
     if source.is_file() && source != target {
-        tokio::fs::copy(source, target).await?;
+        let source_len = tokio::fs::metadata(source).await?.len();
+        if source_len != size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "base image {} has logical length {source_len}; requested contract requires {size}",
+                    source.display()
+                ),
+            ));
+        }
+        let copied = tokio::fs::copy(source, target).await?;
+        let target_len = tokio::fs::metadata(target).await?.len();
+        if copied != size || target_len != size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "base image copy {} -> {} produced {target_len} bytes; expected {size}",
+                    source.display(),
+                    target.display()
+                ),
+            ));
+        }
         return Ok(());
     }
     let file = tokio::fs::File::create(target).await?;
@@ -1217,6 +2725,43 @@ fn validate_instance_id(instance_id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn ownership_request(
+        provider: &FileStorageProvider,
+        instance_id: Uuid,
+        template_vmstate_bytes: Option<u64>,
+    ) -> StorageOwnershipRequest {
+        StorageOwnershipRequest {
+            key: StorageOwnershipKey {
+                provider_instance_id: provider
+                    .ownership_domain_id()
+                    .expect("storage domain")
+                    .expect("file storage domain"),
+                context: blaze_core::data_plane::DataPlaneRequestContextRecord {
+                    instance_id,
+                    request_id: Uuid::new_v4(),
+                    operation_id: Uuid::new_v4(),
+                    lease_id: Uuid::new_v4(),
+                    generation: 1,
+                },
+            },
+            root_filesystem_bytes: 64,
+            guest_memory_bytes: 32,
+            source_fingerprint: [7; 32],
+            template_vmstate_bytes,
+        }
+    }
+
+    fn template_artifact(path: &Path, contents: &[u8]) -> TemplateArtifact {
+        std::fs::write(path, contents).expect("template artifact");
+        let mut digest = Sha256::new();
+        digest.update(contents);
+        TemplateArtifact {
+            file: std::fs::File::open(path).expect("open template artifact"),
+            size_bytes: contents.len() as u64,
+            sha256: format!("{:x}", digest.finalize()),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn sha256_file(path: &Path) -> String {
         use std::io::Read;
@@ -1291,6 +2836,50 @@ mod tests {
             tokio::fs::metadata(&slot.mem_path).await.unwrap().len(),
             512
         );
+    }
+
+    #[tokio::test]
+    async fn acquire_rejects_a_base_image_whose_length_disagrees_with_the_contract() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let images = temp.path().join("images");
+        let instances = temp.path().join("instances");
+        std::fs::create_dir(&images).expect("images");
+        std::fs::create_dir(&instances).expect("instances");
+        std::fs::write(images.join("rootfs.ext4"), vec![0_u8; 63]).expect("base rootfs");
+        let provider = FileStorageProvider::with_images(images, instances.clone());
+
+        let error = provider
+            .acquire(&AcquireOpts {
+                instance_id: "wrong-base-length".to_string(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .expect_err("mismatched base length");
+
+        assert!(error.to_string().contains("requires 64"), "{error}");
+        assert!(!instances.join("wrong-base-length").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_rejects_a_group_or_other_writable_instances_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        std::fs::create_dir(&instances).expect("instances");
+        std::fs::set_permissions(&instances, std::fs::Permissions::from_mode(0o777))
+            .expect("writable permissions");
+        let provider = FileStorageProvider::new(instances.clone());
+
+        let error = provider
+            .probe()
+            .await
+            .expect_err("unsafe instances root permissions");
+
+        assert!(error.to_string().contains("group-writable"), "{error}");
+        assert!(!instances.join(OWNERSHIP_LEDGER_DIRECTORY).exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -1400,6 +2989,235 @@ mod tests {
         assert!(dir.exists());
         provider.release(slot).await.unwrap();
         assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn release_by_id_removes_a_legacy_uuid_slot_without_an_ownership_record() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let instance_id = Uuid::new_v4().to_string();
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: instance_id.clone(),
+                rootfs_size: 1024,
+                mem_size: 512,
+            })
+            .await
+            .expect("legacy storage slot");
+
+        provider
+            .release_by_id(&instance_id)
+            .await
+            .expect("legacy recovery release");
+
+        assert!(!slot.instance_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn release_by_id_never_bypasses_request_scoped_ownership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let instance_id = Uuid::new_v4();
+        let request = ownership_request(&provider, instance_id, None);
+        provider
+            .reserve_ownership(request)
+            .await
+            .expect("reserve owner");
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: instance_id.to_string(),
+                rootfs_size: 1024,
+                mem_size: 512,
+            })
+            .await
+            .expect("request-scoped storage slot");
+
+        let error = provider
+            .release_by_id(&instance_id.to_string())
+            .await
+            .expect_err("request-scoped storage requires its exact lease binding");
+
+        assert!(error.to_string().contains("exact lease binding"));
+        assert!(slot.instance_dir.is_dir());
+    }
+
+    #[tokio::test]
+    async fn ownership_ledger_never_deletes_an_unrecorded_request_scoped_slot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let instance_id = Uuid::new_v4().to_string();
+        let slot = provider.slot_for_id(&instance_id).expect("canonical slot");
+        std::fs::create_dir(&slot.instance_dir).expect("unrecorded slot");
+
+        let error = provider
+            .release(slot.clone())
+            .await
+            .expect_err("an unrecorded request-scoped slot must fail closed");
+
+        assert!(error.to_string().contains("without an ownership record"));
+        assert!(slot.instance_dir.is_dir());
+    }
+
+    #[tokio::test]
+    async fn preparing_owner_never_deletes_a_directory_that_won_the_name_before_mkdir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let instance_id = Uuid::new_v4();
+        let request = ownership_request(&provider, instance_id, None);
+        provider
+            .reserve_ownership(request)
+            .await
+            .expect("reserve owner");
+        let foreign = tmp.path().join(instance_id.to_string());
+        std::fs::create_dir(&foreign).expect("foreign colliding directory");
+        std::fs::write(foreign.join("operator-data"), b"retain").expect("foreign data");
+
+        let error = provider
+            .acquire(&AcquireOpts {
+                instance_id: instance_id.to_string(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .expect_err("directory collision");
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let cleanup = provider
+            .release_owned(
+                request.key,
+                DataPlaneLeaseState::Prepared,
+                request.key.context.generation,
+            )
+            .await
+            .expect_err("unidentified directory must not be removed");
+        assert!(
+            cleanup.to_string().contains("concrete slot directory"),
+            "{cleanup}"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("operator-data")).expect("retained data"),
+            b"retain"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_owner_rejects_a_replacement_directory_before_inspection_or_deletion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let instance_id = Uuid::new_v4();
+        let request = ownership_request(&provider, instance_id, None);
+        provider
+            .reserve_ownership(request)
+            .await
+            .expect("reserve owner");
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: instance_id.to_string(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .expect("acquire slot");
+        let ready = provider
+            .publish_ownership(&slot, request)
+            .await
+            .expect("publish owner");
+        let retained_original = tmp.path().join("retained-original");
+        std::fs::rename(&slot.instance_dir, &retained_original).expect("retain original");
+        std::fs::create_dir(&slot.instance_dir).expect("replacement directory");
+        std::fs::write(slot.instance_dir.join("foreign"), b"retain").expect("foreign data");
+
+        assert!(provider.reconstruct_owned(request.key).await.is_err());
+        assert!(
+            provider
+                .release_owned(request.key, ready.state, ready.generation)
+                .await
+                .is_err()
+        );
+        assert!(retained_original.is_dir());
+        assert_eq!(
+            std::fs::read(slot.instance_dir.join("foreign")).expect("foreign data retained"),
+            b"retain"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_owner_validates_lengths_and_template_restore_payload() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let sources = temp.path().join("sources");
+        std::fs::create_dir(&instances).expect("instances");
+        std::fs::create_dir(&sources).expect("sources");
+        let provider = FileStorageProvider::new(instances);
+        let instance_id = Uuid::new_v4();
+        let vmstate = b"vm-state";
+        let request = ownership_request(&provider, instance_id, Some(vmstate.len() as u64));
+        provider
+            .reserve_ownership(request)
+            .await
+            .expect("reserve owner");
+        let materialized = provider
+            .acquire_template(
+                &AcquireOpts {
+                    instance_id: instance_id.to_string(),
+                    rootfs_size: 64,
+                    mem_size: 32,
+                },
+                TemplateStorage {
+                    vmstate: template_artifact(&sources.join("vmstate"), vmstate),
+                    memory: template_artifact(&sources.join("memory"), &[2_u8; 32]),
+                    rootfs: template_artifact(&sources.join("rootfs"), &[3_u8; 64]),
+                },
+            )
+            .await
+            .expect("materialize template");
+        provider
+            .publish_ownership(&materialized.storage, request)
+            .await
+            .expect("publish owner");
+
+        std::fs::remove_file(materialized.payload_dir.join("vmstate.snap"))
+            .expect("remove restore VM state");
+        let missing_payload = provider
+            .reconstruct_owned(request.key)
+            .await
+            .expect_err("missing restore payload");
+        assert!(missing_payload.to_string().contains("vmstate.snap"));
+
+        std::fs::write(materialized.payload_dir.join("vmstate.snap"), vmstate)
+            .expect("restore VM state");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&materialized.storage.rootfs_path)
+            .expect("open rootfs")
+            .set_len(63)
+            .expect("change rootfs length");
+        let wrong_length = provider
+            .reconstruct_owned(request.key)
+            .await
+            .expect_err("wrong logical length");
+        assert!(wrong_length.to_string().contains("expected 64"));
+    }
+
+    #[test]
+    fn ownership_ledger_removes_only_its_stale_temporary_records_after_restart() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        {
+            let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+            provider.ownership_ledger().expect("create ledger");
+        }
+        let ledger = tmp.path().join(OWNERSHIP_LEDGER_DIRECTORY);
+        let stale = ledger.join(format!(".{}.json.{}.tmp", Uuid::new_v4(), Uuid::new_v4()));
+        let unrelated = ledger.join("operator-note");
+        std::fs::write(&stale, b"partial manifest").expect("stale temporary");
+        std::fs::write(&unrelated, b"retain").expect("unrelated ledger entry");
+
+        let restarted = FileStorageProvider::new(tmp.path().to_path_buf());
+        restarted
+            .ownership_ledger()
+            .expect("recover ownership ledger");
+
+        assert!(!stale.exists());
+        assert!(unrelated.is_file());
     }
 
     #[test]

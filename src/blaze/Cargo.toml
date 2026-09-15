@@ -3,6 +3,8 @@
 resolver = "2"
 members = [
     "crates/blaze-core",
+    "crates/blaze-provider-api",
+    "crates/blaze-provider-conformance",
     "crates/blazed",
 ]
 
@@ -46,9 +48,12 @@ semver = "1.0"
 base64 = "0.22"
 rustix = { version = "1.1", features = ["fs"] }
 sha2 = "0.10"
+getrandom = "0.4"
 
-# Internal crates
+# Workspace crates
 blaze-core = { path = "crates/blaze-core" }
+blaze-provider-api = { path = "crates/blaze-provider-api" }
+blaze-provider-conformance = { path = "crates/blaze-provider-conformance" }
 
 [profile.release]
 lto = "thin"

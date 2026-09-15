@@ -91,8 +91,11 @@ pub struct SpawnRequest {
     pub instance_id: Uuid,
     /// Backend executable selected during daemon startup.
     pub binary_path: PathBuf,
-    /// Storage resources owned by this sandbox.
-    pub storage: StorageSlot,
+    /// Path-backed storage resources owned by this sandbox.
+    ///
+    /// Cold starts require this value. A restore may omit it only when the
+    /// daemon-local request carries a validated opened-resource collection.
+    pub storage: Option<StorageSlot>,
     /// Backend-specific policy configuration.
     pub backend: BackendConfigs,
     /// Generic VM resource configuration.
@@ -108,6 +111,12 @@ pub struct RestoreCapability {
     pub version: Option<String>,
     /// Snapshot flavor accepted by the adapter.
     pub snapshot_kind: SnapshotKind,
+    /// Whether this adapter consumes typed, already-opened restore attachments.
+    ///
+    /// A provider may transfer such attachments only when this is `true`.
+    /// Path-only adapters must leave it `false` so callers can reject an
+    /// incompatible provider before the provider allocates resources.
+    pub consumes_typed_opened_attachments: bool,
 }
 
 /// Complete input for restoring an owned backend instance.
@@ -117,8 +126,11 @@ pub struct RestoreRequest {
     pub instance_id: Uuid,
     /// Backend executable selected from the current daemon configuration.
     pub binary_path: PathBuf,
-    /// Storage resources reconstructed for this sandbox.
-    pub storage: StorageSlot,
+    /// Path-backed storage resources reconstructed for this sandbox.
+    ///
+    /// Opened-resource restores omit this value and carry typed descriptors in
+    /// the daemon-local restore wrapper instead.
+    pub storage: Option<StorageSlot>,
     /// Backend-owned payload subtree from a committed checkpoint. The
     /// layout inside is whatever the same backend wrote during capture.
     pub payload_dir: PathBuf,

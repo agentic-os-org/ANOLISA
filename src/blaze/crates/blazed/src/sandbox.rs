@@ -4,6 +4,8 @@
 mod checkpoint;
 mod hibernate;
 mod manager;
+#[cfg(test)]
+mod provider_recovery_tests;
 mod restore;
 mod storage_sync;
 pub(crate) mod template;

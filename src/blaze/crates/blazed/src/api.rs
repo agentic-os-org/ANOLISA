@@ -12,10 +12,15 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
-use blaze_core::checkpoint::CheckpointMetadata;
-use blaze_core::lifecycle::{SandboxInstance, StartPath};
+use blaze_core::backend::{BackendKind, BackendStatus, SnapshotKind, select_backend};
+use blaze_core::checkpoint::{CheckpointArtifact, CheckpointMetadata};
+use blaze_core::lifecycle::{
+    BackendOwnership, OperationJournal, OperationKind, OperationPhase, SandboxInstance,
+    SandboxState, StartPath,
+};
 use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
+use blaze_provider_api::{CapacityScope, CapacitySnapshot, DrainRequest, DrainResult};
+use chrono::{DateTime, Utc};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
@@ -175,10 +180,13 @@ async fn dispatch(
         ("POST", ["v1", "sandboxes", id, "hibernate"]) => hibernate(state, id).await,
         ("POST", ["v1", "sandboxes", id, "resume"]) => resume(state, id).await,
         ("DELETE", ["v1", "sandboxes", id]) => destroy_sandbox(state, id).await,
-        ("GET", ["v1", "pools"])
-        | ("GET", ["v1", "pools", _, _])
-        | ("POST", ["v1", "pools", _, _, "drain"])
-        | ("PUT", ["v1", "pools", _, _, "sizing"]) => pool_operation_unavailable(),
+        ("GET", ["v1", "pools", backend, class]) => pool_capacity(state, backend, class).await,
+        ("POST", ["v1", "pools", backend, class, "drain"]) => {
+            drain_pool_capacity(state, backend, class, &body).await
+        }
+        ("GET", ["v1", "pools"]) | ("PUT", ["v1", "pools", _, _, "sizing"]) => {
+            pool_operation_unavailable()
+        }
         ("GET", ["v1", "templates"]) => list_templates(state).await,
         ("GET", ["v1", "templates", name]) => get_template(state, name).await,
         ("POST", ["v1", "templates", "import"]) => import_template(state, &body).await,
@@ -251,10 +259,77 @@ struct CreateInstanceReq {
 
 #[derive(Debug, Serialize)]
 struct CreateInstanceResp {
-    instance: SandboxInstance,
+    instance: SandboxResp,
     decision: RuntimeDecision,
     start_path: StartPath,
     selected_backend: BackendKind,
+}
+
+/// Stable management representation of a sandbox.
+///
+/// The daemon can persist additional ownership and recovery records without
+/// extending the management API. Only fields intentionally listed here are
+/// returned to API clients.
+#[derive(Debug, Serialize)]
+struct SandboxResp {
+    id: Uuid,
+    state: SandboxState,
+    backend: BackendKind,
+    workload_class: WorkloadClass,
+    image_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    start_path: StartPath,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    policy_name: String,
+    backend_ownership: BackendOwnership,
+    operation: Option<OperationResp>,
+    last_checkpoint: Option<String>,
+}
+
+/// Stable management representation of an in-progress sandbox operation.
+///
+/// The persisted journal may contain write-ahead recovery records. Keeping a
+/// separate response type prevents those records, and future recovery-only
+/// journal fields, from silently becoming part of the management API.
+#[derive(Debug, Serialize)]
+struct OperationResp {
+    kind: OperationKind,
+    started_at: DateTime<Utc>,
+    checkpoint_id: Option<String>,
+    phase: Option<OperationPhase>,
+}
+
+impl From<OperationJournal> for OperationResp {
+    fn from(operation: OperationJournal) -> Self {
+        Self {
+            kind: operation.kind,
+            started_at: operation.started_at,
+            checkpoint_id: operation.checkpoint_id,
+            phase: operation.phase,
+        }
+    }
+}
+
+impl From<SandboxInstance> for SandboxResp {
+    fn from(instance: SandboxInstance) -> Self {
+        Self {
+            id: instance.id,
+            state: instance.state,
+            backend: instance.backend,
+            workload_class: instance.workload_class,
+            image_digest: instance.image_digest,
+            template: instance.template,
+            start_path: instance.start_path,
+            created_at: instance.created_at,
+            updated_at: instance.updated_at,
+            policy_name: instance.policy_name,
+            backend_ownership: instance.backend_ownership,
+            operation: instance.operation.map(OperationResp::from),
+            last_checkpoint: instance.last_checkpoint,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -262,15 +337,58 @@ struct CheckpointResp {
     checkpoint_id: String,
     instance_id: Uuid,
     #[serde(flatten)]
-    checkpoint: CheckpointMetadata,
+    checkpoint: CheckpointMetadataResp,
+}
+
+/// Stable management representation of committed checkpoint metadata.
+///
+/// Provider ownership records remain durable state and are intentionally not
+/// part of the management response.
+#[derive(Debug, Serialize)]
+struct CheckpointMetadataResp {
+    format_version: u32,
+    id: String,
+    parent: Option<String>,
+    sandbox_id: Uuid,
+    policy_name: String,
+    image_digest: String,
+    backend: BackendKind,
+    backend_version: Option<String>,
+    created_at: DateTime<Utc>,
+    snapshot_kind: SnapshotKind,
+    artifacts: Vec<CheckpointArtifact>,
+}
+
+impl From<CheckpointMetadata> for CheckpointMetadataResp {
+    fn from(checkpoint: CheckpointMetadata) -> Self {
+        Self {
+            format_version: checkpoint.format_version,
+            id: checkpoint.id,
+            parent: checkpoint.parent,
+            sandbox_id: checkpoint.sandbox_id,
+            policy_name: checkpoint.policy_name,
+            image_digest: checkpoint.image_digest,
+            backend: checkpoint.backend,
+            backend_version: checkpoint.backend_version,
+            created_at: checkpoint.created_at,
+            snapshot_kind: checkpoint.snapshot_kind,
+            artifacts: checkpoint.artifacts,
+        }
+    }
 }
 
 fn list_sandboxes(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    json_ok(&state.manager.list()?)
+    let sandboxes = state
+        .manager
+        .list()?
+        .into_iter()
+        .map(SandboxResp::from)
+        .collect::<Vec<_>>();
+    json_ok(&sandboxes)
 }
 
 fn get_sandbox(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    json_ok(&state.manager.get(parse_uuid(id)?)?)
+    json_ok(&SandboxResp::from(state.manager.get(parse_uuid(id)?)?))
 }
 
 async fn create_sandbox(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
@@ -356,7 +474,7 @@ async fn create_sandbox(state: &Arc<ServerState>, body: &[u8]) -> Result<Respons
         .await?;
     json_created(&CreateInstanceResp {
         start_path: created.instance.start_path,
-        instance: created.instance,
+        instance: SandboxResp::from(created.instance),
         decision,
         selected_backend: created.selected_backend,
     })
@@ -368,7 +486,7 @@ async fn checkpoint(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<
     json_ok(&CheckpointResp {
         checkpoint_id: checkpoint.id.clone(),
         instance_id: checkpoint.sandbox_id,
-        checkpoint,
+        checkpoint: CheckpointMetadataResp::from(checkpoint),
     })
 }
 
@@ -422,24 +540,22 @@ async fn hibernate(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<B
     let uuid = parse_uuid(id)?;
     let instance = state.manager.get(uuid)?;
     let binary_path = configured_backend_path(state, instance.backend)?;
-    json_ok(
-        &state
-            .manager
-            .hibernate(uuid, HibernateSandbox { binary_path })
-            .await?,
-    )
+    let instance = state
+        .manager
+        .hibernate(uuid, HibernateSandbox { binary_path })
+        .await?;
+    json_ok(&SandboxResp::from(instance))
 }
 
 async fn resume(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
     let uuid = parse_uuid(id)?;
     let instance = state.manager.get(uuid)?;
     let binary_path = configured_backend_path(state, instance.backend)?;
-    json_ok(
-        &state
-            .manager
-            .resume(uuid, ResumeSandbox { binary_path })
-            .await?,
-    )
+    let instance = state
+        .manager
+        .resume(uuid, ResumeSandbox { binary_path })
+        .await?;
+    json_ok(&SandboxResp::from(instance))
 }
 
 fn configured_backend_path(
@@ -574,8 +690,165 @@ fn decode_guest_file(encoded: &str, limit: usize) -> Result<Vec<u8>> {
 
 fn pool_operation_unavailable() -> Result<Response<Full<Bytes>>> {
     Err(BlazeDaemonError::UnsupportedOperation(
-        "warm pool management is not implemented".to_string(),
+        "pool inventory or sizing is not implemented".to_string(),
     ))
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PoolCapacityResp {
+    backend: BackendKind,
+    class_sha256: String,
+    root_filesystem_capacity_bytes: u64,
+    guest_memory_capacity_bytes: u64,
+    revision: u64,
+    ready: u64,
+    building: u64,
+    in_use: u64,
+    draining: u64,
+    quarantined: u64,
+    total: u64,
+    accepting_allocations: bool,
+}
+
+impl PoolCapacityResp {
+    fn from_snapshot(snapshot: CapacitySnapshot) -> Result<Self> {
+        Ok(Self {
+            backend: snapshot.scope.backend,
+            class_sha256: encode_capacity_class_digest(snapshot.scope.class_digest),
+            root_filesystem_capacity_bytes: snapshot.class.root_filesystem_capacity_bytes,
+            guest_memory_capacity_bytes: snapshot.class.guest_memory_capacity_bytes,
+            revision: snapshot.revision,
+            ready: snapshot.ready,
+            building: snapshot.building,
+            in_use: snapshot.in_use,
+            draining: snapshot.draining,
+            quarantined: snapshot.quarantined,
+            total: snapshot.checked_total().ok_or_else(|| {
+                BlazeDaemonError::DataPlane(blaze_provider_api::ProviderError::InvalidResponse)
+            })?,
+            accepting_allocations: snapshot.accepting_allocations,
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DrainPoolCapacityReq {
+    #[serde(default)]
+    operation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct DrainPoolCapacityResp {
+    operation_id: Uuid,
+    removed_ready: u64,
+    deferred_in_use: u64,
+    capacity: PoolCapacityResp,
+}
+
+fn parse_capacity_scope(state: &ServerState, backend: &str, class: &str) -> Result<CapacityScope> {
+    let backend = backend
+        .parse::<BackendKind>()
+        .map_err(|_| BlazeDaemonError::BadRequest(format!("unknown pool backend {backend}")))?;
+    if backend != state.active_backend {
+        return Err(BlazeDaemonError::NotFound(format!(
+            "pool backend {backend}"
+        )));
+    }
+    Ok(CapacityScope {
+        backend,
+        class_digest: decode_capacity_class_digest(class)?,
+    })
+}
+
+fn decode_capacity_class_digest(value: &str) -> Result<[u8; 32]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return Err(BlazeDaemonError::BadRequest(
+            "pool class must be a 64-character lowercase SHA-256 digest".to_string(),
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, output) in digest.iter_mut().enumerate() {
+        let high = decode_lower_hex(bytes[index * 2]).ok_or_else(|| {
+            BlazeDaemonError::BadRequest(
+                "pool class must be a 64-character lowercase SHA-256 digest".to_string(),
+            )
+        })?;
+        let low = decode_lower_hex(bytes[index * 2 + 1]).ok_or_else(|| {
+            BlazeDaemonError::BadRequest(
+                "pool class must be a 64-character lowercase SHA-256 digest".to_string(),
+            )
+        })?;
+        *output = (high << 4) | low;
+    }
+    if digest == [0; 32] {
+        return Err(BlazeDaemonError::BadRequest(
+            "pool class must not be the all-zero digest".to_string(),
+        ));
+    }
+    Ok(digest)
+}
+
+const fn decode_lower_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn encode_capacity_class_digest(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+async fn pool_capacity(
+    state: &Arc<ServerState>,
+    backend: &str,
+    class: &str,
+) -> Result<Response<Full<Bytes>>> {
+    let scope = parse_capacity_scope(state, backend, class)?;
+    let snapshot = state.manager.provider_capacity(scope).await?;
+    json_ok(&PoolCapacityResp::from_snapshot(snapshot)?)
+}
+
+async fn drain_pool_capacity(
+    state: &Arc<ServerState>,
+    backend: &str,
+    class: &str,
+    body: &[u8],
+) -> Result<Response<Full<Bytes>>> {
+    let scope = parse_capacity_scope(state, backend, class)?;
+    let request = if body.is_empty() {
+        DrainPoolCapacityReq::default()
+    } else {
+        serde_json::from_slice(body).map_err(|error| {
+            BlazeDaemonError::BadRequest(format!("invalid pool drain body: {error}"))
+        })?
+    };
+    let result = state
+        .manager
+        .drain_provider_capacity(DrainRequest {
+            scope,
+            operation_id: request.operation_id.unwrap_or_else(Uuid::new_v4),
+        })
+        .await?;
+    drain_pool_capacity_response(result)
+}
+
+fn drain_pool_capacity_response(result: DrainResult) -> Result<Response<Full<Bytes>>> {
+    json_ok(&DrainPoolCapacityResp {
+        operation_id: result.operation_id,
+        removed_ready: result.removed_ready,
+        deferred_in_use: result.deferred_in_use,
+        capacity: PoolCapacityResp::from_snapshot(result.snapshot)?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +969,8 @@ fn error_response(err: &BlazeDaemonError) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    mod provider_contract;
+    mod unsafe_prepare;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -711,6 +986,11 @@ mod tests {
     #[cfg(feature = "test-failpoints")]
     use blaze_core::checkpoint::CommitCheckpoint;
     use blaze_core::config::DaemonConfig;
+    use blaze_core::data_plane::{
+        BackendProcessIdentity, BackendRuntimeRecord, DataPlaneLeaseState,
+        DataPlaneRequestContextRecord, PendingProviderOperationKind,
+        PendingProviderOperationRecord,
+    };
     use blaze_core::kernel::HookRegistry;
     #[cfg(feature = "test-failpoints")]
     use blaze_core::lifecycle::OperationPhase;
@@ -720,7 +1000,22 @@ mod tests {
         PolicySelect, WorkloadClass,
     };
     use blaze_core::storage::{
-        AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
+        AcquireOpts, OwnedStorageSlot, PoolStatus, StorageAcquireError, StorageOwnershipClaim,
+        StorageOwnershipKey, StorageOwnershipRequest, StorageProvider, StorageSlot,
+    };
+    use blaze_provider_api::{
+        AbortRequest, AbortResult, BeginInventoryRequest, CapacityClass, CapacityRequest,
+        CapacitySnapshot, CheckpointSubmission, CommitRequest, CommittedLease, DataPlaneCapacity,
+        DataPlaneCheckpoint, DataPlaneInventory, DataPlaneProvider, DataPlaneSuspend, DrainRequest,
+        DrainResult, FinalizeRequest, FinalizedLease, InspectRequest, InventoryLease,
+        InventoryPage, InventoryPageRequest, InventorySnapshot, LeaseBinding, LeaseState,
+        ObservedLease, PrepareRequest, PrepareSource, PreparedLease, PreparedResources,
+        ProviderCapabilities, ProviderCheckpointRef, ProviderCheckpointRequest, ProviderDescriptor,
+        ProviderError, ProviderSuspensionRef, PublicTransitionRef, ReconcileAction,
+        ReconcileRequest, ReconcileResult, ReleaseRequest, ReleaseResult, RequestContext,
+        RestoreCheckpointRequest, ResumeRequest as ProviderResumeRequest, RetireCheckpointRequest,
+        RetireCheckpointResult, RetireSuspensionRequest, RetireSuspensionResult, StopRequest,
+        StoppedLease, SuspendRequest, SuspensionSubmission,
     };
     use sha2::{Digest, Sha256};
 
@@ -790,6 +1085,45 @@ mod tests {
         .expect("request")
     }
 
+    fn assert_sandbox_management_shape(value: &serde_json::Value) {
+        let mut actual = value
+            .as_object()
+            .expect("sandbox response object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut expected = vec![
+            "backend",
+            "backend_ownership",
+            "created_at",
+            "id",
+            "image_digest",
+            "last_checkpoint",
+            "operation",
+            "policy_name",
+            "start_path",
+            "state",
+            "updated_at",
+            "workload_class",
+        ];
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "management API sandbox fields changed");
+    }
+
+    fn assert_operation_management_shape(value: &serde_json::Value) {
+        let mut actual = value
+            .as_object()
+            .expect("operation response object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut expected = vec!["checkpoint_id", "kind", "phase", "started_at"];
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "management API operation fields changed");
+    }
+
     fn configured_state_dir(state: &ServerState) -> PathBuf {
         state
             .config
@@ -798,6 +1132,20 @@ mod tests {
             .daemon
             .state_dir
             .clone()
+    }
+
+    fn uuid_directory_count(root: &Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("directory")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
+            })
+            .count()
     }
 
     fn build_test_state(
@@ -818,6 +1166,386 @@ mod tests {
             )
             .expect("state"),
         )
+    }
+
+    fn build_test_state_with_provider(
+        config: DaemonConfig,
+        policy: PolicyFile,
+        registry: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+        data_plane: Arc<dyn DataPlaneProvider>,
+    ) -> Arc<ServerState> {
+        Arc::new(
+            ServerState::build_with_provider(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                HookRegistry::new(),
+                registry,
+                active_backend,
+                storage,
+                data_plane,
+            )
+            .expect("state"),
+        )
+    }
+
+    /// Materialize the same durable file-provider ownership that a successful
+    /// create transaction would publish before a restart test takes over the
+    /// lifecycle record. Tests that call `StorageProvider::acquire` directly
+    /// bypass the ownership ledger and therefore no longer describe a resource
+    /// that startup is allowed to delete.
+    async fn attach_finalized_file_lease(
+        storage: Arc<dyn StorageProvider>,
+        state_dir: &Path,
+        instance: &mut SandboxInstance,
+        root_filesystem_bytes: u64,
+        guest_memory_bytes: u64,
+    ) {
+        let provider = crate::data_plane::FileDataPlaneProvider::new(storage);
+        let context = RequestContext {
+            instance_id: instance.id,
+            request_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+        };
+        let prepared = provider
+            .prepare(PrepareRequest {
+                context,
+                source: PrepareSource::Image {
+                    image_digest: instance.image_digest.clone(),
+                },
+                root_filesystem_bytes,
+                guest_memory_bytes,
+            })
+            .await
+            .expect("prepare provider-owned test storage");
+        let committed = provider
+            .commit(CommitRequest {
+                binding: prepared.binding,
+            })
+            .await
+            .expect("commit provider-owned test storage");
+        instance.data_plane_lease = Some(
+            committed
+                .binding
+                .to_record(root_filesystem_bytes, guest_memory_bytes),
+        );
+        instance
+            .persist(state_dir)
+            .expect("persist committed public owner");
+        let finalized = provider
+            .finalize(FinalizeRequest {
+                binding: committed.binding,
+                public_transition: PublicTransitionRef {
+                    instance_id: instance.id,
+                    operation_id: context.operation_id,
+                },
+            })
+            .await
+            .expect("finalize provider-owned test storage");
+        instance.data_plane_lease = Some(
+            finalized
+                .binding
+                .to_record(root_filesystem_bytes, guest_memory_bytes),
+        );
+        instance
+            .persist(state_dir)
+            .expect("persist finalized public owner");
+    }
+
+    struct ManagedStorageToggleProvider {
+        inner: crate::data_plane::FileDataPlaneProvider,
+        images: AtomicBool,
+        daemon_managed_storage: AtomicBool,
+        opened_template_restore_resources: AtomicBool,
+        prepare_calls: AtomicUsize,
+    }
+
+    impl ManagedStorageToggleProvider {
+        fn new(storage: Arc<dyn StorageProvider>) -> Self {
+            Self {
+                inner: crate::data_plane::FileDataPlaneProvider::new(storage),
+                images: AtomicBool::new(true),
+                daemon_managed_storage: AtomicBool::new(true),
+                opened_template_restore_resources: AtomicBool::new(false),
+                prepare_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn set_daemon_managed_storage(&self, enabled: bool) {
+            self.daemon_managed_storage
+                .store(enabled, Ordering::Release);
+        }
+
+        fn set_images(&self, enabled: bool) {
+            self.images.store(enabled, Ordering::Release);
+        }
+
+        fn set_opened_restore_resources(&self, enabled: bool) {
+            self.opened_template_restore_resources
+                .store(enabled, Ordering::Release);
+        }
+
+        fn prepare_calls(&self) -> usize {
+            self.prepare_calls.load(Ordering::Acquire)
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneProvider for ManagedStorageToggleProvider {
+        fn descriptor(&self) -> ProviderDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                images: self.images.load(Ordering::Acquire),
+                daemon_managed_storage: self.daemon_managed_storage.load(Ordering::Acquire),
+                opened_template_restore_resources: self
+                    .opened_template_restore_resources
+                    .load(Ordering::Acquire),
+                ..self.inner.capabilities()
+            }
+        }
+
+        async fn probe(&self) -> std::result::Result<(), ProviderError> {
+            self.inner.probe().await
+        }
+
+        async fn prepare(
+            &self,
+            request: PrepareRequest,
+        ) -> std::result::Result<PreparedLease, ProviderError> {
+            self.prepare_calls.fetch_add(1, Ordering::AcqRel);
+            self.inner.prepare(request).await
+        }
+
+        async fn inspect(
+            &self,
+            request: InspectRequest,
+        ) -> std::result::Result<ObservedLease, ProviderError> {
+            self.inner.inspect(request).await
+        }
+
+        async fn commit(
+            &self,
+            request: CommitRequest,
+        ) -> std::result::Result<CommittedLease, ProviderError> {
+            self.inner.commit(request).await
+        }
+
+        async fn finalize(
+            &self,
+            request: FinalizeRequest,
+        ) -> std::result::Result<FinalizedLease, ProviderError> {
+            self.inner.finalize(request).await
+        }
+
+        async fn abort(
+            &self,
+            request: AbortRequest,
+        ) -> std::result::Result<AbortResult, ProviderError> {
+            self.inner.abort(request).await
+        }
+
+        async fn stop(
+            &self,
+            request: StopRequest,
+        ) -> std::result::Result<StoppedLease, ProviderError> {
+            self.inner.stop(request).await
+        }
+
+        async fn release(
+            &self,
+            request: ReleaseRequest,
+        ) -> std::result::Result<ReleaseResult, ProviderError> {
+            self.inner.release(request).await
+        }
+    }
+
+    struct CapacityTestProvider {
+        inner: crate::data_plane::FileDataPlaneProvider,
+        capacity: std::sync::Mutex<CapacitySnapshot>,
+        drains: std::sync::Mutex<HashMap<Uuid, DrainResult>>,
+        response_error: std::sync::Mutex<Option<ProviderError>>,
+        drain_response: std::sync::Mutex<Option<DrainResult>>,
+        drain_calls: AtomicUsize,
+    }
+
+    impl CapacityTestProvider {
+        fn new(storage: Arc<dyn StorageProvider>) -> Self {
+            let inner = crate::data_plane::FileDataPlaneProvider::new(storage);
+            let provider_instance_id = inner.descriptor().provider_instance_id;
+            let class = CapacityClass {
+                root_filesystem_capacity_bytes: 4 * 1024 * 1024 * 1024,
+                guest_memory_capacity_bytes: 512 * 1024 * 1024,
+            };
+            Self {
+                inner,
+                capacity: std::sync::Mutex::new(CapacitySnapshot {
+                    provider_instance_id,
+                    scope: CapacityScope {
+                        backend: BackendKind::Mock,
+                        class_digest: class.digest(),
+                    },
+                    class,
+                    revision: 1,
+                    ready: 3,
+                    building: 1,
+                    in_use: 2,
+                    draining: 0,
+                    quarantined: 1,
+                    accepting_allocations: true,
+                }),
+                drains: std::sync::Mutex::new(HashMap::new()),
+                response_error: std::sync::Mutex::new(None),
+                drain_response: std::sync::Mutex::new(None),
+                drain_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneProvider for CapacityTestProvider {
+        fn descriptor(&self) -> ProviderDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn capacity_control(&self) -> Option<&dyn DataPlaneCapacity> {
+            Some(self)
+        }
+
+        async fn probe(&self) -> std::result::Result<(), ProviderError> {
+            self.inner.probe().await
+        }
+
+        async fn prepare(
+            &self,
+            request: PrepareRequest,
+        ) -> std::result::Result<PreparedLease, ProviderError> {
+            self.inner.prepare(request).await
+        }
+
+        async fn inspect(
+            &self,
+            request: InspectRequest,
+        ) -> std::result::Result<ObservedLease, ProviderError> {
+            self.inner.inspect(request).await
+        }
+
+        async fn commit(
+            &self,
+            request: CommitRequest,
+        ) -> std::result::Result<CommittedLease, ProviderError> {
+            self.inner.commit(request).await
+        }
+
+        async fn finalize(
+            &self,
+            request: FinalizeRequest,
+        ) -> std::result::Result<FinalizedLease, ProviderError> {
+            self.inner.finalize(request).await
+        }
+
+        async fn abort(
+            &self,
+            request: AbortRequest,
+        ) -> std::result::Result<AbortResult, ProviderError> {
+            self.inner.abort(request).await
+        }
+
+        async fn stop(
+            &self,
+            request: StopRequest,
+        ) -> std::result::Result<StoppedLease, ProviderError> {
+            self.inner.stop(request).await
+        }
+
+        async fn release(
+            &self,
+            request: ReleaseRequest,
+        ) -> std::result::Result<ReleaseResult, ProviderError> {
+            self.inner.release(request).await
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneCapacity for CapacityTestProvider {
+        async fn capacity(
+            &self,
+            request: CapacityRequest,
+        ) -> std::result::Result<CapacitySnapshot, ProviderError> {
+            if let Some(error) = *self.response_error.lock().expect("response error") {
+                return Err(error);
+            }
+            let snapshot = *self.capacity.lock().expect("provider capacity");
+            if snapshot.scope != request.scope {
+                return Err(ProviderError::NotFound);
+            }
+            Ok(snapshot)
+        }
+
+        async fn drain(
+            &self,
+            request: DrainRequest,
+        ) -> std::result::Result<DrainResult, ProviderError> {
+            self.drain_calls.fetch_add(1, Ordering::AcqRel);
+            if let Some(error) = *self.response_error.lock().expect("response error") {
+                return Err(error);
+            }
+            if let Some(response) = *self.drain_response.lock().expect("drain response") {
+                return Ok(response);
+            }
+            if request.operation_id.is_nil() {
+                return Err(ProviderError::Conflict);
+            }
+            if let Some(result) = self
+                .drains
+                .lock()
+                .expect("provider drain results")
+                .get(&request.operation_id)
+                .copied()
+            {
+                return Ok(result);
+            }
+
+            let mut snapshot = self.capacity.lock().expect("provider capacity");
+            if snapshot.scope != request.scope {
+                return Err(ProviderError::NotFound);
+            }
+            let removed_ready = snapshot.ready;
+            let deferred_in_use = snapshot.in_use;
+            snapshot.revision = snapshot
+                .revision
+                .checked_add(1)
+                .ok_or(ProviderError::InvalidResponse)?;
+            snapshot.draining = snapshot
+                .draining
+                .checked_add(snapshot.building)
+                .and_then(|count| count.checked_add(snapshot.in_use))
+                .ok_or(ProviderError::InvalidResponse)?;
+            snapshot.ready = 0;
+            snapshot.building = 0;
+            snapshot.in_use = 0;
+            snapshot.accepting_allocations = false;
+            let result = DrainResult {
+                operation_id: request.operation_id,
+                removed_ready,
+                deferred_in_use,
+                snapshot: *snapshot,
+            };
+            self.drains
+                .lock()
+                .expect("provider drain results")
+                .insert(request.operation_id, result);
+            Ok(result)
+        }
     }
 
     fn mock_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
@@ -871,7 +1599,7 @@ mod tests {
         let slot = state.storage.reconstruct(id).await.expect("storage slot");
         tokio::fs::write(&slot.rootfs_path, b"checkpoint-rootfs")
             .await
-            .expect("rootfs");
+            .expect("write rootfs fixture");
         slot
     }
 
@@ -978,6 +1706,7 @@ mod tests {
                         backend: instance.backend,
                         backend_version: Some("mock-v1".to_string()),
                         snapshot_kind: SnapshotKind::Full,
+                        provider_checkpoint: None,
                     },
                 )
                 .expect("published checkpoint");
@@ -1032,6 +1761,58 @@ mod tests {
 
         async fn reconstruct(&self, instance_id: &str) -> blaze_core::Result<StorageSlot> {
             self.inner.reconstruct(instance_id).await
+        }
+
+        async fn reserve_ownership(
+            &self,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.reserve_ownership(request).await
+        }
+
+        async fn publish_ownership(
+            &self,
+            slot: &StorageSlot,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.publish_ownership(slot, request).await
+        }
+
+        async fn reconstruct_owned(
+            &self,
+            key: StorageOwnershipKey,
+        ) -> blaze_core::Result<Option<OwnedStorageSlot>> {
+            self.inner.reconstruct_owned(key).await
+        }
+
+        async fn advance_ownership(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+            next_state: DataPlaneLeaseState,
+            next_generation: u64,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner
+                .advance_ownership(
+                    key,
+                    expected_state,
+                    expected_generation,
+                    next_state,
+                    next_generation,
+                )
+                .await
+        }
+
+        async fn release_owned(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+        ) -> blaze_core::Result<bool> {
+            self.inner
+                .release_owned(key, expected_state, expected_generation)
+                .await
         }
 
         async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
@@ -1143,6 +1924,58 @@ mod tests {
 
         async fn reconstruct(&self, instance_id: &str) -> blaze_core::Result<StorageSlot> {
             self.inner.reconstruct(instance_id).await
+        }
+
+        async fn reserve_ownership(
+            &self,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.reserve_ownership(request).await
+        }
+
+        async fn publish_ownership(
+            &self,
+            slot: &StorageSlot,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.publish_ownership(slot, request).await
+        }
+
+        async fn reconstruct_owned(
+            &self,
+            key: StorageOwnershipKey,
+        ) -> blaze_core::Result<Option<OwnedStorageSlot>> {
+            self.inner.reconstruct_owned(key).await
+        }
+
+        async fn advance_ownership(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+            next_state: DataPlaneLeaseState,
+            next_generation: u64,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner
+                .advance_ownership(
+                    key,
+                    expected_state,
+                    expected_generation,
+                    next_state,
+                    next_generation,
+                )
+                .await
+        }
+
+        async fn release_owned(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+        ) -> blaze_core::Result<bool> {
+            self.inner
+                .release_owned(key, expected_state, expected_generation)
+                .await
         }
 
         async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
@@ -1342,6 +2175,739 @@ mod tests {
         orphan_cleanup_count: Arc<AtomicUsize>,
     }
 
+    struct AdoptableOwner {
+        instance_id: Uuid,
+        process: BackendProcessIdentity,
+        running: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BackendInstance for AdoptableOwner {
+        fn instance_id(&self) -> Uuid {
+            self.instance_id
+        }
+
+        fn backend(&self) -> BackendKind {
+            BackendKind::Mock
+        }
+
+        fn version(&self) -> Option<&str> {
+            Some("adoptable-mock-v1")
+        }
+
+        fn runtime_record(&self) -> BackendRuntimeRecord {
+            BackendRuntimeRecord {
+                process: Some(self.process),
+                version: self.version().map(str::to_owned),
+                guest_transport: false,
+                network_slot: false,
+                console_log: false,
+            }
+        }
+
+        async fn try_wait(&self) -> blaze_core::Result<Option<SpawnResult>> {
+            Ok(
+                (!self.running.load(Ordering::Acquire)).then_some(SpawnResult {
+                    instance_id: self.instance_id,
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+            )
+        }
+
+        async fn kill(&self) -> blaze_core::Result<()> {
+            self.running.store(false, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct AdoptableSpawner {
+        owners: std::sync::Mutex<HashMap<Uuid, DynBackendInstance>>,
+    }
+
+    #[async_trait]
+    impl BackendSpawner for AdoptableSpawner {
+        async fn spawn(
+            &self,
+            request: BackendSpawnRequest,
+        ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+            let pid = request.instance_id.as_u128() as u32 | 1;
+            let owner: DynBackendInstance = Arc::new(AdoptableOwner {
+                instance_id: request.instance_id,
+                process: BackendProcessIdentity {
+                    pid,
+                    start_time_ticks: 17,
+                },
+                running: AtomicBool::new(true),
+            });
+            self.owners
+                .lock()
+                .expect("adoptable owners")
+                .insert(request.instance_id, owner.clone());
+            Ok(owner)
+        }
+
+        async fn adopt(
+            &self,
+            instance_id: Uuid,
+            runtime: &BackendRuntimeRecord,
+            _run_dir: OwnedRunDir,
+            _guest_memory_bytes: u64,
+        ) -> blaze_core::Result<Option<DynBackendInstance>> {
+            let owner = self
+                .owners
+                .lock()
+                .expect("adoptable owners")
+                .get(&instance_id)
+                .cloned();
+            if owner
+                .as_ref()
+                .is_some_and(|owner| owner.runtime_record() != *runtime)
+            {
+                return Err(BlazeError::BackendError {
+                    msg: "durable mock identity changed".to_string(),
+                });
+            }
+            Ok(owner)
+        }
+
+        async fn probe(&self, _binary_path: &Path) -> blaze_core::Result<bool> {
+            Ok(true)
+        }
+
+        async fn cleanup_orphan(
+            &self,
+            instance_id: Uuid,
+            _run_dir: &OwnedRunDir,
+        ) -> blaze_core::Result<()> {
+            let owner = self
+                .owners
+                .lock()
+                .expect("adoptable owners")
+                .remove(&instance_id);
+            if let Some(owner) = owner {
+                owner.kill().await?;
+            }
+            Ok(())
+        }
+    }
+
+    struct InventoryTestProvider {
+        inner: crate::data_plane::FileDataPlaneProvider,
+        snapshot_id: Uuid,
+        inventory_enabled: AtomicBool,
+        prepared_response_fault: std::sync::Mutex<Option<unsafe_prepare::PreparedResponseFault>>,
+        absent_prepare_context: std::sync::Mutex<Option<RequestContext>>,
+        unsafe_inspect_calls: AtomicUsize,
+        abort_calls: AtomicUsize,
+        bindings: std::sync::Mutex<HashMap<Uuid, LeaseBinding>>,
+        checkpoints: std::sync::Mutex<HashMap<Uuid, ProviderCheckpointRef>>,
+        suspensions: std::sync::Mutex<HashMap<Uuid, ProviderSuspensionRef>>,
+        extents: std::sync::Mutex<HashMap<Uuid, (u64, u64)>>,
+        opened_checkpoint_restore_resources: AtomicBool,
+        opened_suspension_restore_resources: AtomicBool,
+        restore_checkpoint_calls: AtomicUsize,
+        resume_calls: AtomicUsize,
+        reject_suspension_retirement: AtomicBool,
+        suspension_retirement_calls: AtomicUsize,
+        suspension_public_owner_path: std::sync::Mutex<Option<PathBuf>>,
+        retired_suspension_while_public_owner_existed: AtomicBool,
+        capture_fault: std::sync::Mutex<Option<provider_contract::CaptureFault>>,
+        checkpoint_retirement_fault: std::sync::Mutex<Option<provider_contract::ReceiptFault>>,
+        suspension_retirement_fault: std::sync::Mutex<Option<provider_contract::ReceiptFault>>,
+        opened_file_identities: std::sync::Mutex<HashMap<Uuid, Vec<(u64, u64)>>>,
+    }
+
+    impl InventoryTestProvider {
+        fn new(storage: Arc<dyn StorageProvider>) -> Self {
+            Self {
+                inner: crate::data_plane::FileDataPlaneProvider::new(storage),
+                snapshot_id: Uuid::new_v4(),
+                inventory_enabled: AtomicBool::new(true),
+                prepared_response_fault: std::sync::Mutex::new(None),
+                absent_prepare_context: std::sync::Mutex::new(None),
+                unsafe_inspect_calls: AtomicUsize::new(0),
+                abort_calls: AtomicUsize::new(0),
+                bindings: std::sync::Mutex::new(HashMap::new()),
+                checkpoints: std::sync::Mutex::new(HashMap::new()),
+                suspensions: std::sync::Mutex::new(HashMap::new()),
+                extents: std::sync::Mutex::new(HashMap::new()),
+                opened_checkpoint_restore_resources: AtomicBool::new(false),
+                opened_suspension_restore_resources: AtomicBool::new(false),
+                restore_checkpoint_calls: AtomicUsize::new(0),
+                resume_calls: AtomicUsize::new(0),
+                reject_suspension_retirement: AtomicBool::new(false),
+                suspension_retirement_calls: AtomicUsize::new(0),
+                suspension_public_owner_path: std::sync::Mutex::new(None),
+                retired_suspension_while_public_owner_existed: AtomicBool::new(false),
+                capture_fault: std::sync::Mutex::new(None),
+                checkpoint_retirement_fault: std::sync::Mutex::new(None),
+                suspension_retirement_fault: std::sync::Mutex::new(None),
+                opened_file_identities: std::sync::Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn record(&self, binding: LeaseBinding) {
+            self.bindings
+                .lock()
+                .expect("inventory bindings")
+                .insert(binding.context.lease_id, binding);
+        }
+
+        fn binding(&self, lease_id: Uuid) -> Option<LeaseBinding> {
+            self.bindings
+                .lock()
+                .expect("inventory bindings")
+                .get(&lease_id)
+                .copied()
+        }
+
+        fn checkpoint_count(&self) -> usize {
+            self.checkpoints.lock().expect("provider checkpoints").len()
+        }
+
+        fn suspension_count(&self) -> usize {
+            self.suspensions.lock().expect("provider suspensions").len()
+        }
+
+        fn advertise_opened_checkpoint_restore_resources(&self) {
+            self.opened_checkpoint_restore_resources
+                .store(true, Ordering::Release);
+        }
+
+        fn advertise_opened_suspension_restore_resources(&self) {
+            self.opened_suspension_restore_resources
+                .store(true, Ordering::Release);
+        }
+
+        fn restore_checkpoint_calls(&self) -> usize {
+            self.restore_checkpoint_calls.load(Ordering::Acquire)
+        }
+
+        fn resume_calls(&self) -> usize {
+            self.resume_calls.load(Ordering::Acquire)
+        }
+
+        fn observe_suspension_public_owner(&self, path: PathBuf) {
+            *self
+                .suspension_public_owner_path
+                .lock()
+                .expect("suspension public owner path") = Some(path);
+        }
+
+        fn reject_suspension_retirement(&self, reject: bool) {
+            self.reject_suspension_retirement
+                .store(reject, Ordering::Release);
+        }
+
+        fn transition(
+            &self,
+            binding: LeaseBinding,
+            state: LeaseState,
+            remove: bool,
+        ) -> std::result::Result<LeaseBinding, ProviderError> {
+            let mut bindings = self.bindings.lock().expect("inventory bindings");
+            if bindings.get(&binding.context.lease_id) != Some(&binding) {
+                return Err(ProviderError::Conflict);
+            }
+            let next = LeaseBinding {
+                generation: binding.generation + 1,
+                state,
+                ..binding
+            };
+            if remove {
+                bindings.remove(&binding.context.lease_id);
+            } else {
+                bindings.insert(binding.context.lease_id, next);
+            }
+            Ok(next)
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneProvider for InventoryTestProvider {
+        fn descriptor(&self) -> ProviderDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                opened_checkpoint_restore_resources: self
+                    .opened_checkpoint_restore_resources
+                    .load(Ordering::Acquire),
+                opened_suspension_restore_resources: self
+                    .opened_suspension_restore_resources
+                    .load(Ordering::Acquire),
+                ..self.inner.capabilities()
+            }
+        }
+
+        fn inventory(&self) -> Option<&dyn DataPlaneInventory> {
+            self.inventory_enabled
+                .load(Ordering::Acquire)
+                .then_some(self)
+        }
+
+        fn checkpoints(&self) -> Option<&dyn DataPlaneCheckpoint> {
+            Some(self)
+        }
+
+        fn suspension(&self) -> Option<&dyn DataPlaneSuspend> {
+            Some(self)
+        }
+
+        async fn probe(&self) -> std::result::Result<(), ProviderError> {
+            self.inner.probe().await
+        }
+
+        async fn prepare(
+            &self,
+            request: PrepareRequest,
+        ) -> std::result::Result<PreparedLease, ProviderError> {
+            let lease_id = request.context.lease_id;
+            let extents = (request.root_filesystem_bytes, request.guest_memory_bytes);
+            let prepared = self.inner.prepare(request).await?;
+            self.record(prepared.binding);
+            self.extents
+                .lock()
+                .expect("provider extents")
+                .insert(lease_id, extents);
+            Ok(self.inject_prepared_response_fault(prepared))
+        }
+
+        async fn inspect(
+            &self,
+            request: InspectRequest,
+        ) -> std::result::Result<ObservedLease, ProviderError> {
+            if *self.absent_prepare_context.lock().expect("absent context") == Some(request.context)
+            {
+                self.unsafe_inspect_calls.fetch_add(1, Ordering::AcqRel);
+                return Err(ProviderError::NotFound);
+            }
+            let Some(binding) = self.binding(request.context.lease_id) else {
+                return Err(ProviderError::NotFound);
+            };
+            if binding.context != request.context {
+                return Err(ProviderError::Conflict);
+            }
+            Ok(ObservedLease { binding })
+        }
+
+        async fn commit(
+            &self,
+            request: CommitRequest,
+        ) -> std::result::Result<CommittedLease, ProviderError> {
+            Ok(CommittedLease {
+                binding: self.transition(request.binding, LeaseState::Committed, false)?,
+            })
+        }
+
+        async fn finalize(
+            &self,
+            request: FinalizeRequest,
+        ) -> std::result::Result<FinalizedLease, ProviderError> {
+            Ok(FinalizedLease {
+                binding: self.transition(request.binding, LeaseState::Finalized, false)?,
+            })
+        }
+
+        async fn abort(
+            &self,
+            request: AbortRequest,
+        ) -> std::result::Result<AbortResult, ProviderError> {
+            self.abort_calls.fetch_add(1, Ordering::AcqRel);
+            let binding = self.transition(request.binding, LeaseState::Released, true)?;
+            self.extents
+                .lock()
+                .expect("provider extents")
+                .remove(&binding.context.lease_id);
+            Ok(AbortResult { binding })
+        }
+
+        async fn stop(
+            &self,
+            request: StopRequest,
+        ) -> std::result::Result<StoppedLease, ProviderError> {
+            Ok(StoppedLease {
+                binding: self.transition(request.binding, LeaseState::Stopped, false)?,
+            })
+        }
+
+        async fn release(
+            &self,
+            request: ReleaseRequest,
+        ) -> std::result::Result<ReleaseResult, ProviderError> {
+            let binding = self.transition(request.binding, LeaseState::Released, true)?;
+            self.extents
+                .lock()
+                .expect("provider extents")
+                .remove(&binding.context.lease_id);
+            Ok(ReleaseResult { binding })
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneInventory for InventoryTestProvider {
+        async fn begin_inventory(
+            &self,
+            _request: BeginInventoryRequest,
+        ) -> std::result::Result<InventorySnapshot, ProviderError> {
+            Ok(InventorySnapshot {
+                provider_instance_id: self.descriptor().provider_instance_id,
+                snapshot_id: self.snapshot_id,
+            })
+        }
+
+        async fn inventory_page(
+            &self,
+            request: InventoryPageRequest,
+        ) -> std::result::Result<InventoryPage, ProviderError> {
+            if request.snapshot_id != self.snapshot_id || request.cursor.is_some() {
+                return Err(ProviderError::Conflict);
+            }
+            let leases = self
+                .bindings
+                .lock()
+                .expect("inventory bindings")
+                .values()
+                .copied()
+                .map(|binding| InventoryLease { binding })
+                .collect();
+            Ok(InventoryPage {
+                leases,
+                next_cursor: None,
+            })
+        }
+
+        async fn reconcile(
+            &self,
+            request: ReconcileRequest,
+        ) -> std::result::Result<ReconcileResult, ProviderError> {
+            let mut bindings = self.bindings.lock().expect("inventory bindings");
+            if bindings.get(&request.observed.context.lease_id) != Some(&request.observed) {
+                return Err(ProviderError::Conflict);
+            }
+            if matches!(request.action, ReconcileAction::Adopt { .. })
+                && request.expected != Some(request.observed)
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let state = match request.action {
+                ReconcileAction::Adopt { .. } => LeaseState::Finalized,
+                ReconcileAction::Quarantine => LeaseState::Quarantined,
+            };
+            let binding = LeaseBinding {
+                generation: request.observed.generation + 1,
+                state,
+                ..request.observed
+            };
+            if state == LeaseState::Released {
+                bindings.remove(&binding.context.lease_id);
+            } else {
+                bindings.insert(binding.context.lease_id, binding);
+            }
+            Ok(ReconcileResult { binding })
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneCheckpoint for InventoryTestProvider {
+        async fn checkpoint(
+            &self,
+            request: ProviderCheckpointRequest,
+        ) -> std::result::Result<CheckpointSubmission, ProviderError> {
+            if request.binding.state != LeaseState::Finalized
+                || self.binding(request.binding.context.lease_id) != Some(request.binding)
+                || request.parent.as_ref().is_some_and(|parent| {
+                    parent.provider_instance_id != request.binding.provider_instance_id
+                })
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let binding = self.transition(request.binding, LeaseState::Finalized, false)?;
+            let checkpoint = ProviderCheckpointRef {
+                provider_instance_id: binding.provider_instance_id,
+                public_checkpoint_id: request.checkpoint_id,
+                reference_id: Uuid::new_v4(),
+                content_digest: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(request.checkpoint_id.as_bytes())
+                ),
+                parent_reference_id: request.parent.map(|parent| parent.reference_id),
+                source_lease_id: binding.context.lease_id,
+                source_generation: binding.generation,
+            };
+            self.checkpoints
+                .lock()
+                .expect("provider checkpoints")
+                .insert(checkpoint.public_checkpoint_id, checkpoint.clone());
+            let mut checkpoint = checkpoint;
+            if let Some(fault) = *self.capture_fault.lock().expect("capture fault") {
+                fault.apply(&mut checkpoint);
+            }
+            Ok(CheckpointSubmission {
+                binding,
+                checkpoint,
+            })
+        }
+
+        async fn restore_checkpoint(
+            &self,
+            request: RestoreCheckpointRequest,
+        ) -> std::result::Result<PreparedLease, ProviderError> {
+            self.restore_checkpoint_calls.fetch_add(1, Ordering::AcqRel);
+            if self
+                .checkpoints
+                .lock()
+                .expect("provider checkpoints")
+                .get(&request.checkpoint.public_checkpoint_id)
+                != Some(&request.checkpoint)
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let binding = LeaseBinding {
+                provider_instance_id: self.descriptor().provider_instance_id,
+                context: request.context,
+                generation: request.context.generation,
+                state: LeaseState::Prepared,
+            };
+            self.record(binding);
+            self.extents.lock().expect("provider extents").insert(
+                binding.context.lease_id,
+                (request.root_filesystem_bytes, request.guest_memory_bytes),
+            );
+            let id = request.context.instance_id.to_string();
+            Ok(self.inject_prepared_response_fault(PreparedLease {
+                binding,
+                resources: if self
+                    .opened_checkpoint_restore_resources
+                    .load(Ordering::Acquire)
+                {
+                    PreparedResources::CheckpointRestore {
+                        storage: None,
+                        attachments: self.opened_resources(
+                            binding,
+                            request.root_filesystem_bytes,
+                            request.guest_memory_bytes,
+                        ),
+                    }
+                } else {
+                    PreparedResources::CheckpointRestore {
+                        storage: Some(StorageSlot {
+                            id,
+                            rootfs_path: PathBuf::new(),
+                            mem_path: PathBuf::new(),
+                            mem_diff_path: PathBuf::new(),
+                            rootfs_diff_path: PathBuf::new(),
+                            instance_dir: PathBuf::new(),
+                        }),
+                        attachments: Vec::new(),
+                    }
+                },
+            }))
+        }
+
+        async fn retire_checkpoint(
+            &self,
+            request: RetireCheckpointRequest,
+        ) -> std::result::Result<RetireCheckpointResult, ProviderError> {
+            if let Some(fault) = *self
+                .checkpoint_retirement_fault
+                .lock()
+                .expect("retirement fault")
+            {
+                let (public_checkpoint_id, reference_id) =
+                    fault.identities(request.public_checkpoint_id, request.reference_id);
+                return Ok(RetireCheckpointResult {
+                    public_checkpoint_id,
+                    reference_id,
+                    retired: true,
+                });
+            }
+            if request.provider_instance_id != self.descriptor().provider_instance_id
+                || request.public_checkpoint_id.is_nil()
+                || request
+                    .reference_id
+                    .is_some_and(|reference_id| reference_id.is_nil())
+                || request.operation_id.is_nil()
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let mut checkpoints = self.checkpoints.lock().expect("provider checkpoints");
+            if let (Some(expected), Some(actual)) = (
+                request.reference_id,
+                checkpoints.get(&request.public_checkpoint_id),
+            ) && expected != actual.reference_id
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let retired = checkpoints.remove(&request.public_checkpoint_id);
+            Ok(RetireCheckpointResult {
+                public_checkpoint_id: request.public_checkpoint_id,
+                reference_id: request.reference_id,
+                retired: retired.is_some(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneSuspend for InventoryTestProvider {
+        async fn suspend(
+            &self,
+            request: SuspendRequest,
+        ) -> std::result::Result<SuspensionSubmission, ProviderError> {
+            if request.binding.state != LeaseState::Finalized
+                || self.binding(request.binding.context.lease_id) != Some(request.binding)
+                || request.suspension_id.is_nil()
+                || self
+                    .extents
+                    .lock()
+                    .expect("provider extents")
+                    .get(&request.binding.context.lease_id)
+                    != Some(&(request.root_filesystem_bytes, request.guest_memory_bytes))
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let binding = self.transition(request.binding, LeaseState::Finalized, false)?;
+            let suspension = ProviderSuspensionRef {
+                provider_instance_id: binding.provider_instance_id,
+                suspension_id: request.suspension_id,
+                reference_id: Uuid::new_v4(),
+                content_digest: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(request.suspension_id.as_bytes())
+                ),
+                source_lease_id: binding.context.lease_id,
+                source_generation: binding.generation,
+                root_filesystem_bytes: request.root_filesystem_bytes,
+                guest_memory_bytes: request.guest_memory_bytes,
+            };
+            self.suspensions
+                .lock()
+                .expect("provider suspensions")
+                .insert(request.suspension_id, suspension.clone());
+            Ok(SuspensionSubmission {
+                binding,
+                suspension,
+            })
+        }
+
+        async fn resume(
+            &self,
+            request: ProviderResumeRequest,
+        ) -> std::result::Result<PreparedLease, ProviderError> {
+            self.resume_calls.fetch_add(1, Ordering::AcqRel);
+            if self
+                .suspensions
+                .lock()
+                .expect("provider suspensions")
+                .get(&request.suspension.suspension_id)
+                != Some(&request.suspension)
+                || request.root_filesystem_bytes != request.suspension.root_filesystem_bytes
+                || request.guest_memory_bytes != request.suspension.guest_memory_bytes
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let binding = LeaseBinding {
+                provider_instance_id: self.descriptor().provider_instance_id,
+                context: request.context,
+                generation: request.context.generation,
+                state: LeaseState::Prepared,
+            };
+            self.record(binding);
+            self.extents.lock().expect("provider extents").insert(
+                binding.context.lease_id,
+                (request.root_filesystem_bytes, request.guest_memory_bytes),
+            );
+            Ok(self.inject_prepared_response_fault(PreparedLease {
+                binding,
+                resources: if self
+                    .opened_suspension_restore_resources
+                    .load(Ordering::Acquire)
+                {
+                    PreparedResources::SuspensionRestore {
+                        storage: None,
+                        attachments: self.opened_resources(
+                            binding,
+                            request.root_filesystem_bytes,
+                            request.guest_memory_bytes,
+                        ),
+                    }
+                } else {
+                    PreparedResources::SuspensionRestore {
+                        storage: Some(StorageSlot {
+                            id: request.context.instance_id.to_string(),
+                            rootfs_path: PathBuf::new(),
+                            mem_path: PathBuf::new(),
+                            mem_diff_path: PathBuf::new(),
+                            rootfs_diff_path: PathBuf::new(),
+                            instance_dir: PathBuf::new(),
+                        }),
+                        attachments: Vec::new(),
+                    }
+                },
+            }))
+        }
+
+        async fn retire_suspension(
+            &self,
+            request: RetireSuspensionRequest,
+        ) -> std::result::Result<RetireSuspensionResult, ProviderError> {
+            if let Some(fault) = *self
+                .suspension_retirement_fault
+                .lock()
+                .expect("retirement fault")
+            {
+                let (suspension_id, reference_id) =
+                    fault.identities(request.suspension_id, request.reference_id);
+                return Ok(RetireSuspensionResult {
+                    suspension_id,
+                    reference_id,
+                    retired: true,
+                });
+            }
+            self.suspension_retirement_calls
+                .fetch_add(1, Ordering::AcqRel);
+            if self
+                .suspension_public_owner_path
+                .lock()
+                .map_err(|_| ProviderError::OutcomeUnknown)?
+                .as_ref()
+                .is_some_and(|path| path.exists())
+            {
+                self.retired_suspension_while_public_owner_existed
+                    .store(true, Ordering::Release);
+            }
+            if self.reject_suspension_retirement.load(Ordering::Acquire) {
+                return Err(ProviderError::OutcomeUnknown);
+            }
+            if request.provider_instance_id != self.descriptor().provider_instance_id
+                || request.suspension_id.is_nil()
+                || request
+                    .reference_id
+                    .is_some_and(|reference_id| reference_id.is_nil())
+                || request.operation_id.is_nil()
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let mut suspensions = self.suspensions.lock().expect("provider suspensions");
+            if let (Some(expected), Some(actual)) = (
+                request.reference_id,
+                suspensions.get(&request.suspension_id),
+            ) && expected != actual.reference_id
+            {
+                return Err(ProviderError::Conflict);
+            }
+            let retired = suspensions.remove(&request.suspension_id);
+            Ok(RetireSuspensionResult {
+                suspension_id: request.suspension_id,
+                reference_id: request.reference_id,
+                retired: retired.is_some(),
+            })
+        }
+    }
+
     #[async_trait]
     impl BackendSpawner for CountingSpawner {
         async fn spawn(
@@ -1417,6 +2983,7 @@ mod tests {
                 backend: BackendKind::Mock,
                 version: Some("guest-mock-v1".to_string()),
                 snapshot_kind: blaze_core::backend::SnapshotKind::Full,
+                consumes_typed_opened_attachments: false,
             }))
         }
 
@@ -1424,6 +2991,12 @@ mod tests {
             &self,
             request: crate::spawner::BackendRestoreRequest,
         ) -> crate::spawner::RestoreResult {
+            if request.provider_attachments.is_some() {
+                return Err(SpawnFailure::clean(BlazeError::BackendError {
+                    msg: "transport-dropping restore does not consume typed opened attachments"
+                        .to_string(),
+                }));
+            }
             // Start an owner through the plain mock spawn path so the
             // replacement deliberately lacks the guest transport the captured
             // runtime exposed. `MockSpawner::restore` would reject the
@@ -1444,6 +3017,151 @@ mod tests {
 
         async fn probe(&self, _binary_path: &Path) -> blaze_core::Result<bool> {
             Ok(true)
+        }
+
+        async fn cleanup_orphan(
+            &self,
+            instance_id: Uuid,
+            run_dir: &OwnedRunDir,
+        ) -> blaze_core::Result<()> {
+            GuestMockSpawner.cleanup_orphan(instance_id, run_dir).await
+        }
+    }
+
+    struct KillGateOwner {
+        inner: DynBackendInstance,
+        kill_allowed: Arc<AtomicBool>,
+        kill_attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl BackendInstance for KillGateOwner {
+        fn instance_id(&self) -> Uuid {
+            self.inner.instance_id()
+        }
+
+        fn backend(&self) -> BackendKind {
+            self.inner.backend()
+        }
+
+        fn version(&self) -> Option<&str> {
+            self.inner.version()
+        }
+
+        fn supports_checkpoint_capture(&self) -> bool {
+            self.inner.supports_checkpoint_capture()
+        }
+
+        fn guest_socket_path(&self) -> &Path {
+            self.inner.guest_socket_path()
+        }
+
+        fn holds_network_slot(&self) -> bool {
+            self.inner.holds_network_slot()
+        }
+
+        fn records_console_log(&self) -> bool {
+            self.inner.records_console_log()
+        }
+
+        fn runtime_record(&self) -> BackendRuntimeRecord {
+            self.inner.runtime_record()
+        }
+
+        async fn try_wait(&self) -> blaze_core::Result<Option<SpawnResult>> {
+            self.inner.try_wait().await
+        }
+
+        async fn pause(&self) -> blaze_core::Result<()> {
+            self.inner.pause().await
+        }
+
+        async fn resume(&self) -> blaze_core::Result<()> {
+            self.inner.resume().await
+        }
+
+        async fn quiesce_for_capture(&self) -> blaze_core::Result<()> {
+            self.inner.quiesce_for_capture().await
+        }
+
+        async fn unquiesce_after_capture(&self) -> blaze_core::Result<()> {
+            self.inner.unquiesce_after_capture().await
+        }
+
+        async fn snapshot(
+            &self,
+            request: blaze_core::backend::SnapshotRequest,
+        ) -> blaze_core::Result<()> {
+            self.inner.snapshot(request).await
+        }
+
+        async fn kill(&self) -> blaze_core::Result<()> {
+            self.kill_attempts.fetch_add(1, Ordering::AcqRel);
+            if !self.kill_allowed.load(Ordering::Acquire) {
+                return Err(BlazeError::BackendError {
+                    msg: format!("instance {} termination blocked", self.instance_id()),
+                });
+            }
+            self.inner.kill().await
+        }
+    }
+
+    struct KillGateSpawner {
+        current_kill_allowed: Arc<AtomicBool>,
+        current_kill_attempts: Arc<AtomicUsize>,
+        replacement_kill_allowed: Arc<AtomicBool>,
+        replacement_kill_attempts: Arc<AtomicUsize>,
+    }
+
+    impl KillGateSpawner {
+        fn gate(
+            owner: DynBackendInstance,
+            kill_allowed: Arc<AtomicBool>,
+            kill_attempts: Arc<AtomicUsize>,
+        ) -> DynBackendInstance {
+            Arc::new(KillGateOwner {
+                inner: owner,
+                kill_allowed,
+                kill_attempts,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl BackendSpawner for KillGateSpawner {
+        async fn spawn(
+            &self,
+            request: BackendSpawnRequest,
+        ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+            let owner = GuestMockSpawner.spawn(request).await?;
+            Ok(Self::gate(
+                owner,
+                self.current_kill_allowed.clone(),
+                self.current_kill_attempts.clone(),
+            ))
+        }
+
+        async fn restore_capability(
+            &self,
+            executable: Option<&crate::spawner::PinnedExecutable>,
+        ) -> blaze_core::Result<Option<blaze_core::backend::RestoreCapability>> {
+            GuestMockSpawner.restore_capability(executable).await
+        }
+
+        async fn restore(
+            &self,
+            request: crate::spawner::BackendRestoreRequest,
+        ) -> crate::spawner::RestoreResult {
+            let owner = GuestMockSpawner.restore(request).await?;
+            Ok(Self::gate(
+                owner,
+                self.replacement_kill_allowed.clone(),
+                self.replacement_kill_attempts.clone(),
+            ))
+        }
+
+        async fn probe(&self, binary_path: &Path) -> blaze_core::Result<bool> {
+            GuestMockSpawner.probe(binary_path).await
         }
 
         async fn cleanup_orphan(
@@ -1520,6 +3238,59 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
+        async fn reserve_ownership(
+            &self,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.reserve_ownership(request).await
+        }
+
+        async fn publish_ownership(
+            &self,
+            slot: &StorageSlot,
+            request: StorageOwnershipRequest,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner.publish_ownership(slot, request).await
+        }
+
+        async fn reconstruct_owned(
+            &self,
+            key: StorageOwnershipKey,
+        ) -> blaze_core::Result<Option<OwnedStorageSlot>> {
+            self.inner.reconstruct_owned(key).await
+        }
+
+        async fn advance_ownership(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+            next_state: DataPlaneLeaseState,
+            next_generation: u64,
+        ) -> blaze_core::Result<StorageOwnershipClaim> {
+            self.inner
+                .advance_ownership(
+                    key,
+                    expected_state,
+                    expected_generation,
+                    next_state,
+                    next_generation,
+                )
+                .await
+        }
+
+        async fn release_owned(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+        ) -> blaze_core::Result<bool> {
+            self.release_count.fetch_add(1, Ordering::AcqRel);
+            self.inner
+                .release_owned(key, expected_state, expected_generation)
+                .await
+        }
+
         async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
             self.inner.sync_artifacts(slot).await
         }
@@ -1529,7 +3300,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "test-failpoints")]
     fn counting_state(
         temp: &tempfile::TempDir,
     ) -> (
@@ -1565,6 +3335,69 @@ mod tests {
         (state, kill_count, orphan_cleanup_count, release_count)
     }
 
+    fn replace_durable_provider_identity(state: &Arc<ServerState>, id: Uuid) -> serde_json::Value {
+        let mut instance = state.manager.get(id).expect("sandbox lifecycle");
+        let lease = instance
+            .data_plane_lease
+            .as_mut()
+            .expect("durable data-plane lease");
+        let original_provider = lease.provider_instance_id;
+        lease.provider_instance_id = Uuid::new_v4();
+        assert_ne!(lease.provider_instance_id, original_provider);
+        state
+            .state_store
+            .persist(&instance)
+            .expect("persist foreign provider fixture");
+        state
+            .instances
+            .lock()
+            .expect("instances")
+            .insert(id, instance.clone());
+        serde_json::to_value(instance).expect("serialize lifecycle fixture")
+    }
+
+    #[test]
+    fn sandbox_management_response_does_not_expose_provider_journal() {
+        let mut instance = SandboxInstance::new(
+            BackendKind::Mock,
+            WorkloadClass::AgentTool,
+            "sha256:management-shape".to_string(),
+            "management-shape".to_string(),
+        );
+        instance.begin_operation(OperationKind::Create);
+        instance
+            .begin_provider_operation(PendingProviderOperationRecord {
+                provider_instance_id: Uuid::new_v4(),
+                context: DataPlaneRequestContextRecord {
+                    instance_id: instance.id,
+                    request_id: Uuid::new_v4(),
+                    operation_id: Uuid::new_v4(),
+                    lease_id: Uuid::new_v4(),
+                    generation: 1,
+                },
+                generation_before_call: 0,
+                root_filesystem_bytes: 4096,
+                guest_memory_bytes: 8192,
+                kind: PendingProviderOperationKind::PrepareLease,
+            })
+            .expect("provider write-ahead record");
+
+        let persisted = serde_json::to_value(&instance).expect("persisted sandbox shape");
+        assert!(
+            persisted["operation"]["provider_operation"].is_object(),
+            "the fixture must include a persisted provider write-ahead record"
+        );
+
+        let response =
+            serde_json::to_value(SandboxResp::from(instance)).expect("management sandbox shape");
+        assert_sandbox_management_shape(&response);
+        assert_operation_management_shape(&response["operation"]);
+        assert!(
+            response["operation"].get("provider_operation").is_none(),
+            "provider write-ahead records must not enter the management API"
+        );
+    }
+
     #[tokio::test]
     async fn sandbox_routes_cover_lifecycle_and_guest_operations() {
         let temp = tempfile::tempdir().expect("temp");
@@ -1585,6 +3418,7 @@ mod tests {
             dispatched_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(created["instance"]["state"], "running");
+        assert_sandbox_management_shape(&created["instance"]);
         assert!(created["decision"].is_object());
         assert_eq!(created["start_path"], "cold");
         assert_eq!(created["selected_backend"], "mock");
@@ -1592,22 +3426,35 @@ mod tests {
             .as_str()
             .expect("sandbox id")
             .to_string();
+        let durable = state
+            .manager
+            .get(Uuid::parse_str(&id).expect("sandbox UUID"))
+            .expect("durable sandbox");
+        assert!(
+            durable.data_plane_lease.is_some(),
+            "the response test must cover a durable provider lease"
+        );
+        assert!(
+            durable.backend_runtime.is_some(),
+            "the response test must cover a durable backend identity"
+        );
         let item = format!("/v1/sandboxes/{id}");
 
         let (status, sandboxes) =
             dispatched_json(&state, Method::GET, "/v1/sandboxes", Vec::new()).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(
-            sandboxes
-                .as_array()
-                .expect("sandbox list")
-                .iter()
-                .any(|candidate| candidate["id"] == id)
-        );
+        let listed = sandboxes
+            .as_array()
+            .expect("sandbox list")
+            .iter()
+            .find(|candidate| candidate["id"] == id)
+            .expect("created sandbox in list");
+        assert_sandbox_management_shape(listed);
 
         let (status, fetched) = dispatched_json(&state, Method::GET, &item, Vec::new()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(fetched["id"], id);
+        assert_sandbox_management_shape(&fetched);
 
         let (status, executed) = dispatched_json(
             &state,
@@ -1664,25 +3511,124 @@ mod tests {
             storage,
         );
 
+        let class = "2a".repeat(32);
         for (method, path) in [
-            (Method::GET, "/v1/pools"),
-            (Method::GET, "/v1/pools/mock/agent-tool"),
-            (Method::POST, "/v1/pools/mock/agent-tool/drain"),
-            (Method::PUT, "/v1/pools/mock/agent-tool/sizing"),
+            (Method::GET, "/v1/pools".to_string()),
+            (Method::GET, format!("/v1/pools/mock/{class}")),
+            (Method::POST, format!("/v1/pools/mock/{class}/drain")),
+            (Method::PUT, format!("/v1/pools/mock/{class}/sizing")),
         ] {
-            let (status, body) = handled_json(&state, method, path, Vec::new()).await;
+            let (status, body) = handled_json(&state, method, &path, Vec::new()).await;
             assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
             assert_eq!(body["status"], 501, "{path}");
-            assert!(
-                body["error"]
-                    .as_str()
-                    .expect("error")
-                    .contains("warm pool management is not implemented"),
-                "{path}"
-            );
         }
 
         let (status, body) = handled_json(&state, Method::GET, "/v1/pools/mock", Vec::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn provider_capacity_routes_report_and_idempotently_drain_one_partition() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(CapacityTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider,
+        );
+
+        let capacity_class = CapacityClass {
+            root_filesystem_capacity_bytes: 4 * 1024 * 1024 * 1024,
+            guest_memory_capacity_bytes: 512 * 1024 * 1024,
+        };
+        let class = encode_capacity_class_digest(capacity_class.digest());
+        let item = format!("/v1/pools/mock/{class}");
+        let (status, capacity) = handled_json(&state, Method::GET, &item, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capacity["backend"], "mock");
+        assert_eq!(capacity["class_sha256"], class);
+        assert_eq!(
+            capacity["root_filesystem_capacity_bytes"],
+            4_294_967_296_u64
+        );
+        assert_eq!(capacity["guest_memory_capacity_bytes"], 536_870_912_u64);
+        assert_eq!(capacity["revision"], 1);
+        assert_eq!(capacity["ready"], 3);
+        assert_eq!(capacity["building"], 1);
+        assert_eq!(capacity["in_use"], 2);
+        assert_eq!(capacity["draining"], 0);
+        assert_eq!(capacity["quarantined"], 1);
+        assert_eq!(capacity["total"], 7);
+        assert_eq!(capacity["accepting_allocations"], true);
+        assert!(capacity.get("provider_instance_id").is_none());
+
+        let operation_id = Uuid::new_v4();
+        let body =
+            serde_json::to_vec(&json!({"operation_id": operation_id})).expect("drain request");
+        for _ in 0..2 {
+            let (status, drained) =
+                handled_json(&state, Method::POST, &format!("{item}/drain"), body.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(drained["operation_id"], operation_id.to_string());
+            assert_eq!(drained["removed_ready"], 3);
+            assert_eq!(drained["deferred_in_use"], 2);
+            assert_eq!(drained["capacity"]["revision"], 2);
+            assert_eq!(drained["capacity"]["ready"], 0);
+            assert_eq!(drained["capacity"]["building"], 0);
+            assert_eq!(drained["capacity"]["in_use"], 0);
+            assert_eq!(drained["capacity"]["draining"], 3);
+            assert_eq!(drained["capacity"]["quarantined"], 1);
+            assert_eq!(drained["capacity"]["total"], 4);
+            assert_eq!(drained["capacity"]["accepting_allocations"], false);
+        }
+
+        let (status, body) = handled_json(
+            &state,
+            Method::GET,
+            &format!("/v1/pools/firecracker/{class}"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+
+        let (status, body) = handled_json(
+            &state,
+            Method::GET,
+            &format!("/v1/pools/not-a-backend/{class}"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+
+        let (status, body) = handled_json(
+            &state,
+            Method::GET,
+            "/v1/pools/mock/not-a-digest",
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+
+        let unknown = "5a".repeat(32);
+        let (status, body) = handled_json(
+            &state,
+            Method::GET,
+            &format!("/v1/pools/mock/{unknown}"),
+            Vec::new(),
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["status"], 404);
     }
@@ -1922,6 +3868,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_rejects_unmanaged_storage_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        write_checkpoint_fixture(&state, id).await;
+        let state_path = configured_state_dir(&state).join(id).join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted state");
+        provider.set_daemon_managed_storage(false);
+
+        let error = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect_err("unmanaged storage must not use the standard checkpoint path");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not use daemon-managed storage for checkpoint capture")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted state"),
+            persisted_before
+        );
+        assert!(state.manager.backend_owner(uuid).is_some());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restore_rejects_unmanaged_storage_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        write_checkpoint_fixture(&state, id).await;
+        let checkpoint = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("standard checkpoint");
+        let state_path = configured_state_dir(&state).join(id).join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted state");
+        let owner = state.manager.backend_owner(uuid).expect("backend owner");
+        provider.set_daemon_managed_storage(false);
+
+        let error = state
+            .manager
+            .restore(
+                uuid,
+                RestoreSandbox {
+                    checkpoint_id: checkpoint.id.clone(),
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("unmanaged storage must not use the standard restore path");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not use daemon-managed storage for checkpoint restore")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert_eq!(
+            lifecycle.last_checkpoint.as_deref(),
+            Some(checkpoint.id.as_str())
+        );
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted state"),
+            persisted_before
+        );
+        let retained = state.manager.backend_owner(uuid).expect("retained backend");
+        assert!(Arc::ptr_eq(&owner, &retained));
+    }
+
+    #[tokio::test]
     async fn checkpoint_rejects_unsupported_backend_without_mutation() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -2062,6 +4119,461 @@ mod tests {
                 .exists(),
             "destroy must remove the complete checkpoint namespace"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_pairs_backend_artifacts_with_an_opaque_reference() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+
+        let checkpoint = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("provider checkpoint");
+
+        let provider_record = checkpoint
+            .provider_checkpoint
+            .as_ref()
+            .expect("provider checkpoint record");
+        assert_eq!(
+            format!("ckpt-{}", provider_record.public_checkpoint_id),
+            checkpoint.id
+        );
+        assert_eq!(provider.checkpoint_count(), 1);
+        assert!(
+            checkpoint
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.name.starts_with("backend/"))
+        );
+        assert!(
+            !configured_state_dir(&state)
+                .join("checkpoints")
+                .join(id.to_string())
+                .join(&checkpoint.id)
+                .join("storage/rootfs.snap")
+                .exists()
+        );
+        let lifecycle = state.manager.get(id).expect("lifecycle");
+        assert!(lifecycle.pending_provider_retirements.is_empty());
+        assert_eq!(
+            lifecycle.data_plane_lease.map(|lease| lease.generation),
+            Some(provider_record.source_generation)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_response_omits_provider_ownership_record() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let (status, created) =
+            dispatched_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["instance"]["id"].as_str().expect("sandbox id");
+
+        let (status, checkpoint) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoint"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            checkpoint.get("provider_checkpoint").is_none(),
+            "provider ownership must not extend the checkpoint response"
+        );
+        assert_eq!(
+            provider.checkpoint_count(),
+            1,
+            "the test must exercise a provider-owned checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_restore_replaces_the_lease_after_backend_readiness() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let checkpoint = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("provider checkpoint");
+        let old_lease = state
+            .manager
+            .get(id)
+            .expect("before restore")
+            .data_plane_lease
+            .expect("old lease")
+            .lease_id;
+
+        let restored = state
+            .manager
+            .restore(
+                id,
+                RestoreSandbox {
+                    checkpoint_id: checkpoint.id.clone(),
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider restore");
+
+        let replacement = restored
+            .instance
+            .data_plane_lease
+            .expect("replacement lease");
+        assert_ne!(replacement.lease_id, old_lease);
+        assert_eq!(
+            replacement.state,
+            blaze_core::data_plane::DataPlaneLeaseState::Finalized
+        );
+        assert_eq!(replacement.generation, 3);
+        assert!(restored.instance.replacement_data_plane_lease.is_none());
+        assert_eq!(restored.instance.state, SandboxState::Running);
+        assert!(state.manager.backend_owner(id).is_some());
+        assert!(provider.binding(old_lease).is_none());
+        assert_eq!(
+            provider
+                .binding(replacement.lease_id)
+                .map(|binding| binding.state),
+            Some(LeaseState::Finalized)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_restore_rejects_unconsumable_opened_resources_before_prepare() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let checkpoint = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("provider checkpoint");
+        let before = state.manager.get(id).expect("running lifecycle");
+        let state_path = configured_state_dir(&state)
+            .join(id.to_string())
+            .join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted lifecycle");
+        let owner = state.manager.backend_owner(id).expect("running owner");
+        provider.advertise_opened_checkpoint_restore_resources();
+
+        let error = state
+            .manager
+            .restore(
+                id,
+                RestoreSandbox {
+                    checkpoint_id: checkpoint.id,
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("the backend cannot consume typed opened attachments");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert_eq!(provider.restore_checkpoint_calls(), 0);
+        let after = state.manager.get(id).expect("unchanged lifecycle");
+        assert_eq!(after.state, SandboxState::Running);
+        assert_eq!(after.operation, before.operation);
+        assert_eq!(after.data_plane_lease, before.data_plane_lease);
+        assert!(after.replacement_data_plane_lease.is_none());
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted lifecycle"),
+            persisted_before
+        );
+        let retained_owner = state.manager.backend_owner(id).expect("running owner");
+        assert!(Arc::ptr_eq(&owner, &retained_owner));
+    }
+
+    #[tokio::test]
+    async fn provider_restore_stop_failure_retains_current_owner_and_replacement_lease() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let current_kill_allowed = Arc::new(AtomicBool::new(false));
+        let current_kill_attempts = Arc::new(AtomicUsize::new(0));
+        let replacement_kill_allowed = Arc::new(AtomicBool::new(true));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(
+                BackendKind::Mock,
+                Arc::new(KillGateSpawner {
+                    current_kill_allowed: current_kill_allowed.clone(),
+                    current_kill_attempts: current_kill_attempts.clone(),
+                    replacement_kill_allowed,
+                    replacement_kill_attempts: Arc::new(AtomicUsize::new(0)),
+                }),
+            ),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let checkpoint = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("provider checkpoint");
+        let current_owner = state.manager.backend_owner(id).expect("current owner");
+
+        let error = state
+            .manager
+            .restore(
+                id,
+                RestoreSandbox {
+                    checkpoint_id: checkpoint.id,
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("uncertain backend stop must fail closed");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(current_kill_attempts.load(Ordering::Acquire) >= 1);
+        let retained_owner = state
+            .manager
+            .backend_owner(id)
+            .expect("retained current owner");
+        assert!(Arc::ptr_eq(&current_owner, &retained_owner));
+        let lifecycle = state.manager.get(id).expect("retained lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert!(lifecycle.backend_runtime.is_some());
+        let replacement = lifecycle
+            .replacement_data_plane_lease
+            .expect("retained replacement lease");
+        assert!(provider.binding(replacement.lease_id).is_some());
+
+        current_kill_allowed.store(true, Ordering::Release);
+        assert!(state.manager.destroy(id).await.expect("destroy"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn provider_restore_cleanup_failure_retains_replacement_owner_and_lease() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let replacement_kill_allowed = Arc::new(AtomicBool::new(false));
+        let replacement_kill_attempts = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(
+                BackendKind::Mock,
+                Arc::new(KillGateSpawner {
+                    current_kill_allowed: Arc::new(AtomicBool::new(true)),
+                    current_kill_attempts: Arc::new(AtomicUsize::new(0)),
+                    replacement_kill_allowed: replacement_kill_allowed.clone(),
+                    replacement_kill_attempts: replacement_kill_attempts.clone(),
+                }),
+            ),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let checkpoint = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("provider checkpoint");
+        let hook = crate::failpoint::TestFailpoint::new(&["restore-guest-ready"]);
+
+        let error = hook
+            .run(state.manager.restore(
+                id,
+                RestoreSandbox {
+                    checkpoint_id: checkpoint.id,
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("uncertain replacement cleanup must fail closed");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(replacement_kill_attempts.load(Ordering::Acquire) >= 1);
+        assert!(state.manager.backend_owner(id).is_some());
+        let lifecycle = state.manager.get(id).expect("retained lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert!(lifecycle.backend_runtime.is_some());
+        let replacement = lifecycle
+            .replacement_data_plane_lease
+            .expect("retained replacement lease");
+        assert!(provider.binding(replacement.lease_id).is_some());
+
+        replacement_kill_allowed.store(true, Ordering::Release);
+        assert!(state.manager.destroy(id).await.expect("destroy"));
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_prune_retires_content_after_catalog_removal() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let root = state.manager.checkpoint(id).await.expect("root checkpoint");
+        let unreachable = state
+            .manager
+            .checkpoint(id)
+            .await
+            .expect("child checkpoint");
+        state
+            .manager
+            .restore(
+                id,
+                RestoreSandbox {
+                    checkpoint_id: root.id.clone(),
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("restore root");
+
+        let removed = state
+            .manager
+            .prune_checkpoints(id)
+            .await
+            .expect("provider prune");
+
+        assert_eq!(removed, vec![unreachable.id]);
+        assert_eq!(provider.checkpoint_count(), 1);
+        assert!(
+            state
+                .manager
+                .get(id)
+                .expect("lifecycle")
+                .pending_provider_retirements
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn provider_checkpoint_publication_failure_retires_unpublished_content() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let hook = crate::failpoint::TestFailpoint::new(&["checkpoint-publish"]);
+
+        let error = hook
+            .run(state.manager.checkpoint(id))
+            .await
+            .expect_err("publication failure");
+
+        assert!(!matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert_eq!(provider.checkpoint_count(), 0);
+        let lifecycle = state.manager.get(id).expect("compensated lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert!(lifecycle.pending_provider_retirements.is_empty());
+        assert!(state.manager.backend_owner(id).is_some());
     }
 
     #[tokio::test]
@@ -2584,6 +5096,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hibernate_rejects_unmanaged_storage_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let state_path = configured_state_dir(&state).join(id).join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted state");
+        let owner = state.manager.backend_owner(uuid).expect("backend owner");
+        provider.set_daemon_managed_storage(false);
+
+        let error = state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("unmanaged storage must not use the standard hibernation path");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not use daemon-managed storage for hibernation")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted state"),
+            persisted_before
+        );
+        let retained = state.manager.backend_owner(uuid).expect("retained backend");
+        assert!(Arc::ptr_eq(&owner, &retained));
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_unmanaged_storage_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("standard hibernation");
+        let state_path = configured_state_dir(&state).join(id).join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted state");
+        provider.set_daemon_managed_storage(false);
+
+        let error = state
+            .manager
+            .resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("unmanaged storage must not use the standard resume path");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not use daemon-managed storage for resume")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Hibernated);
+        assert!(lifecycle.operation.is_none());
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted state"),
+            persisted_before
+        );
+        assert!(state.manager.backend_owner(uuid).is_none());
+    }
+
+    #[tokio::test]
     async fn hibernate_releases_the_backend_and_resume_survives_restart() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -2629,7 +5255,11 @@ mod tests {
         ] {
             assert!(hibernate_dir.join(name).is_file(), "{name} is missing");
         }
-        let report = state.manager.reconcile_startup().await;
+        let report = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
         assert_eq!(report.attempted, 0);
         assert!(report.failures.is_empty());
         drop(state);
@@ -2649,7 +5279,11 @@ mod tests {
             restarted.manager.get(uuid).expect("loaded state").state,
             SandboxState::Hibernated
         );
-        let report = restarted.manager.reconcile_startup().await;
+        let report = restarted
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
         assert_eq!(report.attempted, 0);
         assert!(report.failures.is_empty());
 
@@ -2676,6 +5310,561 @@ mod tests {
         );
         assert!(restarted.manager.destroy(uuid).await.expect("destroy"));
         assert!(!hibernate_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn provider_hibernation_releases_active_lease_and_resumes_with_a_fresh_lease() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let original_lease = state
+            .manager
+            .get(uuid)
+            .expect("created lifecycle")
+            .data_plane_lease
+            .expect("created provider lease")
+            .lease_id;
+
+        let hibernated = state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider hibernate");
+        assert_eq!(hibernated.state, SandboxState::Hibernated);
+        assert_eq!(hibernated.backend_ownership, BackendOwnership::Stopped);
+        assert!(hibernated.data_plane_lease.is_none());
+        let suspension = hibernated
+            .provider_suspension
+            .clone()
+            .expect("durable provider suspension");
+        assert_eq!(provider.suspension_count(), 1);
+        assert!(provider.binding(original_lease).is_none());
+        drop(state);
+
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let restarted = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let report = restarted
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("restart reconciliation");
+        assert_eq!(report.attempted, 0);
+        assert!(report.failures.is_empty());
+
+        let resumed = restarted
+            .manager
+            .resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider resume");
+        assert_eq!(resumed.state, SandboxState::Running);
+        assert_eq!(resumed.provider_suspension, Some(suspension));
+        let resumed_lease = resumed.data_plane_lease.expect("fresh provider lease");
+        assert_ne!(resumed_lease.lease_id, original_lease);
+        assert_eq!(
+            resumed_lease.state,
+            blaze_core::data_plane::DataPlaneLeaseState::Finalized
+        );
+        assert_eq!(provider.suspension_count(), 1);
+
+        assert!(restarted.manager.destroy(uuid).await.expect("destroy"));
+        assert_eq!(provider.suspension_count(), 0);
+        let destroyed = restarted.manager.get(uuid).expect("destroyed lifecycle");
+        assert!(destroyed.data_plane_lease.is_none());
+        assert!(destroyed.provider_suspension.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_resume_rejects_unconsumable_opened_resources_before_prepare() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        state
+            .manager
+            .hibernate(
+                id,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider hibernate");
+        let before = state.manager.get(id).expect("hibernated lifecycle");
+        let state_path = configured_state_dir(&state)
+            .join(id.to_string())
+            .join("state.json");
+        let persisted_before = std::fs::read(&state_path).expect("persisted lifecycle");
+        let suspension = before
+            .provider_suspension
+            .clone()
+            .expect("provider suspension");
+        assert!(state.manager.backend_owner(id).is_none());
+        provider.advertise_opened_suspension_restore_resources();
+
+        let error = state
+            .manager
+            .resume(
+                id,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("the backend cannot consume typed opened attachments");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert_eq!(provider.resume_calls(), 0);
+        let after = state.manager.get(id).expect("unchanged lifecycle");
+        assert_eq!(after.state, SandboxState::Hibernated);
+        assert!(after.operation.is_none());
+        assert_eq!(after.provider_suspension, Some(suspension));
+        assert!(after.data_plane_lease.is_none());
+        assert!(after.replacement_data_plane_lease.is_none());
+        assert_eq!(
+            std::fs::read(state_path).expect("persisted lifecycle"),
+            persisted_before
+        );
+        assert!(state.manager.backend_owner(id).is_none());
+        assert_eq!(provider.suspension_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn destroy_removes_the_hibernation_owner_before_retiring_provider_content() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let hibernated = state
+            .manager
+            .hibernate(
+                id,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider hibernate");
+        let suspension = hibernated
+            .provider_suspension
+            .clone()
+            .expect("provider suspension");
+        let hibernate_dir = config
+            .daemon
+            .state_dir
+            .join(id.to_string())
+            .join("hibernate");
+        assert!(hibernate_dir.join("manifest.json").is_file());
+        provider.observe_suspension_public_owner(hibernate_dir.clone());
+        provider.reject_suspension_retirement(true);
+
+        let error = state
+            .manager
+            .destroy(id)
+            .await
+            .expect_err("retirement failure must retain a retry ledger");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(
+            !hibernate_dir.exists(),
+            "hibernation owner still exists after destroy failed: {error}; lifecycle: {:?}",
+            state.manager.get(id).expect("retained lifecycle")
+        );
+        assert!(provider.suspension_retirement_calls.load(Ordering::Acquire) >= 1);
+        assert!(
+            !provider
+                .retired_suspension_while_public_owner_existed
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(provider.suspension_count(), 1);
+        let retained = state.manager.get(id).expect("retained retirement ledger");
+        assert!(retained.provider_suspension.is_none());
+        assert!(
+            retained
+                .pending_provider_suspension_retirements
+                .contains(&suspension)
+        );
+
+        provider.reject_suspension_retirement(false);
+        assert!(state.manager.destroy(id).await.expect("retry destroy"));
+        assert_eq!(provider.suspension_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_reads_the_hibernation_manifest_before_retrying_retirement() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        state
+            .manager
+            .hibernate(
+                id,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider hibernate");
+        let hibernate_dir = config
+            .daemon
+            .state_dir
+            .join(id.to_string())
+            .join("hibernate");
+        let mut interrupted = state.manager.get(id).expect("hibernated lifecycle");
+        let suspension = interrupted
+            .provider_suspension
+            .take()
+            .expect("provider suspension");
+        interrupted
+            .pending_provider_suspension_retirements
+            .push(suspension);
+        interrupted
+            .persist(&config.daemon.state_dir)
+            .expect("persist crash boundary after lifecycle owner removal");
+        drop(state);
+
+        provider.observe_suspension_public_owner(hibernate_dir.clone());
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let restarted = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+
+        restarted
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup cleanup");
+
+        assert!(!hibernate_dir.exists());
+        assert!(provider.suspension_retirement_calls.load(Ordering::Acquire) >= 1);
+        assert!(
+            !provider
+                .retired_suspension_while_public_owner_existed
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(provider.suspension_count(), 0);
+        assert_eq!(
+            restarted.manager.get(id).expect("terminal lifecycle").state,
+            SandboxState::Destroyed
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_suspension_stays_out_of_hibernate_and_resume_responses() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let (status, created) =
+            dispatched_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["instance"]["id"].as_str().expect("sandbox id");
+        let uuid = Uuid::parse_str(id).expect("sandbox UUID");
+        let item = format!("/v1/sandboxes/{id}");
+
+        let (status, hibernated) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("{item}/hibernate"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hibernated["state"], "hibernated");
+        assert_sandbox_management_shape(&hibernated);
+        assert!(
+            state
+                .manager
+                .get(uuid)
+                .expect("durable hibernated sandbox")
+                .provider_suspension
+                .is_some(),
+            "the test must cover a durable provider suspension"
+        );
+        assert_eq!(provider.suspension_count(), 1);
+
+        let (status, resumed) =
+            dispatched_json(&state, Method::POST, &format!("{item}/resume"), Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resumed["state"], "running");
+        assert_sandbox_management_shape(&resumed);
+
+        state.manager.destroy(uuid).await.expect("destroy sandbox");
+        assert_eq!(provider.suspension_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_hibernation_requires_guest_hooks_before_provider_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let before = state.manager.get(uuid).expect("created lifecycle");
+
+        let error = state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("guest transport is mandatory");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        let after = state.manager.get(uuid).expect("retained lifecycle");
+        assert_eq!(after.state, SandboxState::Running);
+        assert_eq!(after.operation, None);
+        assert_eq!(after.data_plane_lease, before.data_plane_lease);
+        assert_eq!(provider.suspension_count(), 0);
+        assert!(state.manager.backend_owner(uuid).is_some());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn provider_resume_start_failure_preserves_immutable_content_for_retry() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let hibernated = state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("hibernate");
+        let suspension = hibernated
+            .provider_suspension
+            .clone()
+            .expect("provider suspension");
+        let hook = crate::failpoint::TestFailpoint::new(&["resume-backend-start"]);
+
+        hook.run(state.manager.resume(
+            uuid,
+            ResumeSandbox {
+                binary_path: PathBuf::new(),
+            },
+        ))
+        .await
+        .expect_err("resume start failure");
+
+        let retained = state.manager.get(uuid).expect("retained hibernation");
+        assert_eq!(retained.state, SandboxState::Hibernated);
+        assert_eq!(retained.provider_suspension, Some(suspension));
+        assert!(retained.data_plane_lease.is_none());
+        assert!(retained.replacement_data_plane_lease.is_none());
+        assert_eq!(provider.suspension_count(), 1);
+        assert!(state.manager.backend_owner(uuid).is_none());
+
+        let resumed = state
+            .manager
+            .resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("retry resume");
+        assert_eq!(resumed.state, SandboxState::Running);
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn provider_resume_cleanup_failure_retains_replacement_owner_and_lease() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let replacement_kill_allowed = Arc::new(AtomicBool::new(false));
+        let replacement_kill_attempts = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(
+                BackendKind::Mock,
+                Arc::new(KillGateSpawner {
+                    current_kill_allowed: Arc::new(AtomicBool::new(true)),
+                    current_kill_attempts: Arc::new(AtomicUsize::new(0)),
+                    replacement_kill_allowed: replacement_kill_allowed.clone(),
+                    replacement_kill_attempts: replacement_kill_attempts.clone(),
+                }),
+            ),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        state
+            .manager
+            .hibernate(
+                id,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("provider hibernate");
+        let hook = crate::failpoint::TestFailpoint::new(&["resume-guest-ready"]);
+
+        let error = hook
+            .run(state.manager.resume(
+                id,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("uncertain replacement cleanup must fail closed");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(replacement_kill_attempts.load(Ordering::Acquire) >= 1);
+        assert!(state.manager.backend_owner(id).is_some());
+        let lifecycle = state.manager.get(id).expect("retained lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert!(lifecycle.backend_runtime.is_some());
+        let replacement = lifecycle
+            .replacement_data_plane_lease
+            .expect("retained replacement lease");
+        assert!(provider.binding(replacement.lease_id).is_some());
+
+        replacement_kill_allowed.store(true, Ordering::Release);
+        assert!(state.manager.destroy(id).await.expect("destroy"));
     }
 
     #[tokio::test]
@@ -2794,6 +5983,14 @@ mod tests {
             .expect("creating");
         instance.transition(SandboxState::Running).expect("running");
         instance.backend_ownership = BackendOwnership::Running;
+        attach_finalized_file_lease(
+            storage.clone(),
+            &config.daemon.state_dir,
+            &mut instance,
+            4096,
+            4096,
+        )
+        .await;
         instance
             .begin_hibernate_operation()
             .expect("begin hibernation");
@@ -2801,14 +5998,6 @@ mod tests {
             .transition(SandboxState::Hibernating)
             .expect("hibernating");
         instance.persist(&config.daemon.state_dir).expect("persist");
-        storage
-            .acquire(&AcquireOpts {
-                instance_id: instance.id.to_string(),
-                rootfs_size: 4096,
-                mem_size: 4096,
-            })
-            .await
-            .expect("storage");
         let id = instance.id;
         let state = build_test_state(
             config,
@@ -2818,7 +6007,11 @@ mod tests {
             storage,
         );
 
-        let report = state.manager.reconcile_startup().await;
+        let report = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
         assert_eq!(report.attempted, 0);
         assert!(report.failures.is_empty());
         let retained = state.manager.get(id).expect("retained lifecycle");
@@ -5117,7 +8310,9 @@ mod tests {
             (OperationPhase::CheckpointHeadUpdated, SandboxState::Paused),
         ] {
             let restart_temp = tempfile::tempdir().expect("restart temp");
-            let config = test_config(&restart_temp);
+            let mut config = test_config(&restart_temp);
+            config.storage.rootfs_size = 64;
+            config.storage.mem_size = 32;
             let restart_state = mock_state_from_config(config.clone());
             let created = created_json(&restart_state, &test_request()).await;
             let restart_id = created["instance"]["id"]
@@ -5125,8 +8320,16 @@ mod tests {
                 .expect("restart id")
                 .to_string();
             let restart_uuid = Uuid::parse_str(&restart_id).expect("restart uuid");
-            write_checkpoint_fixture(&restart_state, &restart_id).await;
+            let slot = write_checkpoint_fixture(&restart_state, &restart_id).await;
             persist_crashed_checkpoint_phase(&restart_state, restart_uuid, phase).await;
+            let rootfs = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&slot.rootfs_path)
+                .expect("open restart rootfs fixture");
+            rootfs
+                .set_len(config.storage.rootfs_size)
+                .expect("restore restart rootfs extent");
+            rootfs.sync_all().expect("sync restart rootfs extent");
             drop(restart_state);
 
             let restarted = mock_state_from_config(config);
@@ -5141,7 +8344,11 @@ mod tests {
             );
             assert!(restarted.manager.backend_owner(restart_uuid).is_none());
 
-            let report = restarted.manager.reconcile_startup().await;
+            let report = restarted
+                .manager
+                .reconcile_startup()
+                .await
+                .expect("startup reconciliation");
             assert_eq!(report.attempted, 1);
             assert_eq!(report.completed, 1);
             assert!(report.failures.is_empty());
@@ -5665,6 +8872,193 @@ mod tests {
         assert!(observed.load(Ordering::Acquire));
     }
 
+    #[tokio::test]
+    async fn restart_adopts_matching_provider_and_backend_ownership() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let spawner = Arc::new(AdoptableSpawner::default());
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner.clone()),
+            BackendKind::Mock,
+            storage.clone(),
+            provider.clone(),
+        );
+
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let before = SandboxInstance::load(&config.daemon.state_dir, id).expect("durable state");
+        assert_eq!(
+            before.data_plane_lease.map(|lease| lease.state),
+            Some(blaze_core::data_plane::DataPlaneLeaseState::Finalized)
+        );
+        assert!(
+            before
+                .backend_runtime
+                .and_then(|runtime| runtime.process)
+                .is_some()
+        );
+        drop(state);
+
+        let recovered = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner),
+            BackendKind::Mock,
+            storage,
+            provider,
+        );
+        let report = recovered
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("restart reconciliation");
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 1);
+        assert!(report.failures.is_empty());
+        let adopted = recovered.manager.get(id).expect("adopted sandbox");
+        assert_eq!(adopted.state, SandboxState::Running);
+        assert_eq!(
+            adopted.data_plane_lease.map(|lease| lease.generation),
+            Some(4)
+        );
+        assert!(recovered.manager.backend_owner(id).is_some());
+    }
+
+    #[tokio::test]
+    async fn restart_completes_adoption_from_a_committed_lease() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let spawner = Arc::new(AdoptableSpawner::default());
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner.clone()),
+            BackendKind::Mock,
+            storage.clone(),
+            provider.clone(),
+        );
+
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let mut interrupted =
+            SandboxInstance::load(&config.daemon.state_dir, id).expect("durable finalized state");
+        let mut committed = interrupted.data_plane_lease.expect("durable lease");
+        committed.state = blaze_core::data_plane::DataPlaneLeaseState::Committed;
+        committed.generation -= 1;
+        interrupted.data_plane_lease = Some(committed);
+        interrupted
+            .persist(&config.daemon.state_dir)
+            .expect("persist committed crash boundary");
+        provider.record(LeaseBinding::from_record(id, committed));
+        drop(state);
+
+        let recovered = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner),
+            BackendKind::Mock,
+            storage,
+            provider,
+        );
+        let report = recovered
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("restart reconciliation");
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 1);
+        assert!(report.failures.is_empty());
+        let adopted = recovered.manager.get(id).expect("adopted sandbox");
+        assert_eq!(
+            adopted.data_plane_lease.map(|lease| lease.state),
+            Some(blaze_core::data_plane::DataPlaneLeaseState::Finalized)
+        );
+        assert_eq!(
+            adopted.data_plane_lease.map(|lease| lease.generation),
+            Some(committed.generation + 1)
+        );
+        assert!(recovered.manager.backend_owner(id).is_some());
+    }
+
+    #[tokio::test]
+    async fn restart_quarantines_provider_identity_drift() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(InventoryTestProvider::new(storage.clone()));
+        let spawner = Arc::new(AdoptableSpawner::default());
+        let state = build_test_state_with_provider(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner.clone()),
+            BackendKind::Mock,
+            storage.clone(),
+            provider.clone(),
+        );
+
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let mut corrupted =
+            SandboxInstance::load(&config.daemon.state_dir, id).expect("durable finalized state");
+        let mut durable = corrupted.data_plane_lease.expect("durable lease");
+        let lease_id = durable.lease_id;
+        durable.request_id = Uuid::new_v4();
+        corrupted.data_plane_lease = Some(durable);
+        corrupted
+            .persist(&config.daemon.state_dir)
+            .expect("persist identity drift");
+        drop(state);
+
+        let recovered = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, spawner),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
+        );
+        let report = recovered
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("restart reconciliation");
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 0);
+        assert_eq!(report.failures.len(), 1);
+        let quarantined = recovered.manager.get(id).expect("quarantined sandbox");
+        assert_eq!(quarantined.state, SandboxState::RecoveryRequired);
+        assert_eq!(
+            quarantined.data_plane_lease.map(|lease| lease.state),
+            Some(blaze_core::data_plane::DataPlaneLeaseState::Quarantined)
+        );
+        assert_eq!(
+            provider.binding(lease_id).map(|binding| binding.state),
+            Some(LeaseState::Quarantined)
+        );
+        assert!(recovered.manager.backend_owner(id).is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn restart_reconciles_durable_starting_before_spawn() {
@@ -5746,7 +9140,11 @@ mod tests {
             recovered_storage,
         );
 
-        let report = recovered.manager.reconcile_startup().await;
+        let report = recovered
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(report.attempted, 1);
         assert_eq!(report.completed, 1);
@@ -5842,7 +9240,11 @@ mod tests {
             storage,
         );
 
-        let first = state.manager.reconcile_startup().await;
+        let first = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(first.attempted, 1);
         assert_eq!(first.completed, 0);
@@ -5867,10 +9269,14 @@ mod tests {
         assert!(state.state_store.run_dir(instance.id).is_ok());
 
         drop(handoff);
-        let retry = state.manager.reconcile_startup().await;
+        let retry = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(retry.attempted, 1);
-        assert_eq!(retry.completed, 1);
+        assert_eq!(retry.completed, 1, "retry report: {retry:?}");
         assert!(retry.failures.is_empty());
         assert_eq!(
             state
@@ -5968,15 +9374,50 @@ mod tests {
             .expect("creating");
         instance.transition(SandboxState::Running).expect("running");
         instance.backend_ownership = BackendOwnership::Running;
-        instance.persist(&config.daemon.state_dir).expect("persist");
-        storage
-            .acquire(&AcquireOpts {
-                instance_id: instance.id.to_string(),
-                rootfs_size: 4096,
-                mem_size: 4096,
+        let provider = crate::data_plane::FileDataPlaneProvider::new(storage.clone());
+        let context = RequestContext {
+            instance_id: instance.id,
+            request_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+        };
+        let prepared = provider
+            .prepare(PrepareRequest {
+                context,
+                source: PrepareSource::Image {
+                    image_digest: instance.image_digest.clone(),
+                },
+                root_filesystem_bytes: 4096,
+                guest_memory_bytes: 4096,
             })
             .await
-            .expect("storage");
+            .expect("prepare provider-owned storage");
+        let committed = provider
+            .commit(CommitRequest {
+                binding: prepared.binding,
+            })
+            .await
+            .expect("commit provider-owned storage");
+        instance.data_plane_lease = Some(committed.binding.to_record(4096, 4096));
+        instance
+            .persist(&config.daemon.state_dir)
+            .expect("persist public transition");
+        let finalized = provider
+            .finalize(FinalizeRequest {
+                binding: committed.binding,
+                public_transition: PublicTransitionRef {
+                    instance_id: instance.id,
+                    operation_id: context.operation_id,
+                },
+            })
+            .await
+            .expect("finalize provider-owned storage");
+        instance.data_plane_lease = Some(finalized.binding.to_record(4096, 4096));
+        instance
+            .persist(&config.daemon.state_dir)
+            .expect("persist finalized provider ownership");
+        drop(provider);
 
         let active_cleanups = Arc::new(AtomicUsize::new(0));
         let persisted_cleanups = Arc::new(AtomicUsize::new(0));
@@ -6318,12 +9759,7 @@ mod tests {
                 .next()
                 .is_none()
         );
-        assert!(
-            std::fs::read_dir(temp.path().join("instances"))
-                .expect("instance directory")
-                .next()
-                .is_none()
-        );
+        assert_eq!(uuid_directory_count(&temp.path().join("instances")), 0);
 
         let created = created_json(&state, &test_request()).await;
         assert_eq!(created["instance"]["state"], "running");
@@ -6522,6 +9958,110 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn direct_destroy_rejects_a_foreign_provider_lease_without_cleanup() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, kill_count, orphan_cleanup_count, release_count) = counting_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let before = replace_durable_provider_identity(&state, id);
+
+        let error = state
+            .manager
+            .destroy(id)
+            .await
+            .expect_err("foreign provider ownership must stop destroy");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains("another provider")
+                    && message.contains("records were retained")
+        ));
+        assert_eq!(kill_count.load(Ordering::Acquire), 0);
+        assert_eq!(orphan_cleanup_count.load(Ordering::Acquire), 0);
+        assert_eq!(release_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            serde_json::to_value(state.manager.get(id).expect("retained lifecycle"))
+                .expect("serialize retained lifecycle"),
+            before
+        );
+        assert!(temp.path().join("instances").join(id.to_string()).is_dir());
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_a_foreign_provider_lease_without_cleanup() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, kill_count, orphan_cleanup_count, release_count) = counting_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let before = replace_durable_provider_identity(&state, id);
+
+        let error = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect_err("foreign provider ownership must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains("another provider")
+                    && message.contains("records were retained")
+        ));
+        assert_eq!(kill_count.load(Ordering::Acquire), 0);
+        assert_eq!(orphan_cleanup_count.load(Ordering::Acquire), 0);
+        assert_eq!(release_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            serde_json::to_value(state.manager.get(id).expect("retained lifecycle"))
+                .expect("serialize retained lifecycle"),
+            before
+        );
+        assert!(temp.path().join("instances").join(id.to_string()).is_dir());
+    }
+
+    #[tokio::test]
+    async fn startup_recognizes_a_standard_file_lease_after_restart() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (first, _, _, _) = counting_state(&temp);
+        let created = created_json(&first, &test_request()).await;
+        let id = Uuid::parse_str(created["instance"]["id"].as_str().expect("sandbox id"))
+            .expect("sandbox UUID");
+        let original_owner = first
+            .manager
+            .get(id)
+            .expect("created lifecycle")
+            .data_plane_lease
+            .expect("durable data-plane lease")
+            .provider_instance_id;
+        drop(first);
+
+        let (restarted, _, _, _) = counting_state(&temp);
+        let loaded_owner = restarted
+            .manager
+            .get(id)
+            .expect("reloaded lifecycle")
+            .data_plane_lease
+            .expect("reloaded data-plane lease")
+            .provider_instance_id;
+        assert_eq!(loaded_owner, original_owner);
+
+        let report = restarted
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("the standard provider must retain its identity across restart");
+        assert_eq!(report.attempted, 1);
+        assert!(
+            report
+                .failures
+                .iter()
+                .all(|failure| !failure.error.contains("another provider"))
+        );
+    }
+
     #[cfg(feature = "test-failpoints")]
     #[tokio::test]
     async fn destroy_intent_failure_does_not_touch_owned_resources() {
@@ -6686,7 +10226,7 @@ mod tests {
 
     #[cfg(feature = "test-failpoints")]
     #[tokio::test]
-    async fn acquire_rollback_failure_retains_a_destroyable_record() {
+    async fn acquire_failure_is_released_through_its_durable_owner() {
         let temp = tempfile::tempdir().expect("temp");
         let state = mock_state(&temp);
         let acquire_hook = crate::failpoint::TestFailpoint::new(&[
@@ -6696,8 +10236,14 @@ mod tests {
         let error = acquire_hook
             .run(create_sandbox(&state, &test_request()))
             .await
-            .expect_err("residual slot must require recovery");
-        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+            .expect_err("failed acquire must report provider unavailability");
+        assert!(
+            matches!(
+                error,
+                BlazeDaemonError::DataPlane(ProviderError::Unavailable)
+            ),
+            "unexpected create failure: {error:?}"
+        );
 
         let instance = state
             .instances
@@ -6706,22 +10252,30 @@ mod tests {
             .values()
             .next()
             .cloned()
-            .expect("recovery record");
-        assert_eq!(instance.state, SandboxState::RecoveryRequired);
-        assert_eq!(instance.backend_ownership, BackendOwnership::NotStarted);
-        assert_eq!(
-            instance.operation.as_ref().map(|operation| operation.kind),
-            Some(OperationKind::Create)
-        );
+            .expect("terminal create record");
+        assert_eq!(instance.state, SandboxState::Destroyed);
+        assert_eq!(instance.backend_ownership, BackendOwnership::Stopped);
+        assert!(instance.operation.is_none());
+        assert!(instance.data_plane_lease.is_none());
+        assert!(instance.backend_runtime.is_none());
         assert!(
-            temp.path()
+            !temp
+                .path()
                 .join("instances")
                 .join(instance.id.to_string())
-                .is_dir()
+                .exists()
         );
-        destroy_sandbox(&state, &instance.id.to_string())
-            .await
-            .expect("destroy residual slot");
+        assert!(
+            !temp
+                .path()
+                .join("instances/.blaze-storage-ownership")
+                .join(format!("{}.json", instance.id))
+                .exists()
+        );
+        assert!(matches!(
+            state.state_store.run_dir(instance.id),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -6845,15 +10399,14 @@ mod tests {
                 .expect("creating");
             instance.transition(SandboxState::Running).expect("running");
             instance.backend_ownership = BackendOwnership::Running;
-            instance.persist(&config.daemon.state_dir).expect("persist");
-            storage
-                .acquire(&AcquireOpts {
-                    instance_id: id.to_string(),
-                    rootfs_size: 64,
-                    mem_size: 32,
-                })
-                .await
-                .expect("storage");
+            attach_finalized_file_lease(
+                storage.clone(),
+                &config.daemon.state_dir,
+                &mut instance,
+                64,
+                32,
+            )
+            .await;
         }
         let cleanup_count = Arc::new(AtomicUsize::new(0));
         let state = build_test_state(
@@ -6870,7 +10423,11 @@ mod tests {
             storage,
         );
 
-        let report = state.manager.reconcile_startup().await;
+        let report = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(report.attempted, 2);
         assert_eq!(report.completed, 1);
@@ -6924,6 +10481,24 @@ mod tests {
         for state_name in ["reset", "warm"] {
             let id = Uuid::new_v4();
             ids.push(id);
+            let mut owner = SandboxInstance::new(
+                BackendKind::Mock,
+                WorkloadClass::AgentTool,
+                "sha256:legacy".into(),
+                "legacy".into(),
+            );
+            owner.id = id;
+            owner.transition(SandboxState::Creating).expect("creating");
+            owner.transition(SandboxState::Running).expect("running");
+            owner.backend_ownership = BackendOwnership::Running;
+            attach_finalized_file_lease(
+                storage.clone(),
+                &config.daemon.state_dir,
+                &mut owner,
+                64,
+                32,
+            )
+            .await;
             let now = chrono::Utc::now();
             let record = json!({
                 "id": id,
@@ -6935,23 +10510,15 @@ mod tests {
                 "created_at": now,
                 "updated_at": now,
                 "policy_name": "legacy",
-                "backend_ownership": "running"
+                "backend_ownership": "running",
+                "data_plane_lease": owner.data_plane_lease
             });
             let run_dir = config.daemon.state_dir.join(id.to_string());
-            std::fs::create_dir(&run_dir).expect("legacy run directory");
             std::fs::write(
                 run_dir.join("state.json"),
                 serde_json::to_vec_pretty(&record).expect("legacy state JSON"),
             )
             .expect("legacy state record");
-            storage
-                .acquire(&AcquireOpts {
-                    instance_id: id.to_string(),
-                    rootfs_size: 64,
-                    mem_size: 32,
-                })
-                .await
-                .expect("legacy storage");
         }
 
         let kill_count = Arc::new(AtomicUsize::new(0));
@@ -6970,7 +10537,11 @@ mod tests {
             storage,
         );
 
-        let report = state.manager.reconcile_startup().await;
+        let report = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(report.attempted, 2);
         assert_eq!(report.completed, 2);
@@ -7016,6 +10587,14 @@ mod tests {
         not_started
             .transition(SandboxState::Creating)
             .expect("creating");
+        attach_finalized_file_lease(
+            storage.clone(),
+            &config.daemon.state_dir,
+            &mut not_started,
+            64,
+            32,
+        )
+        .await;
         not_started
             .persist(&config.daemon.state_dir)
             .expect("persist");
@@ -7032,18 +10611,15 @@ mod tests {
             .expect("creating");
         stopped.transition(SandboxState::Running).expect("running");
         stopped.backend_ownership = BackendOwnership::Stopped;
+        attach_finalized_file_lease(
+            storage.clone(),
+            &config.daemon.state_dir,
+            &mut stopped,
+            64,
+            32,
+        )
+        .await;
         stopped.persist(&config.daemon.state_dir).expect("persist");
-
-        for id in [not_started_id, stopped_id] {
-            storage
-                .acquire(&AcquireOpts {
-                    instance_id: id.to_string(),
-                    rootfs_size: 64,
-                    mem_size: 32,
-                })
-                .await
-                .expect("storage");
-        }
         let kill_count = Arc::new(AtomicUsize::new(0));
         let orphan_cleanup_count = Arc::new(AtomicUsize::new(0));
         let state = build_test_state(
@@ -7060,7 +10636,11 @@ mod tests {
             storage,
         );
 
-        let report = state.manager.reconcile_startup().await;
+        let report = state
+            .manager
+            .reconcile_startup()
+            .await
+            .expect("startup reconciliation");
 
         assert_eq!(report.attempted, 2);
         assert_eq!(report.completed, 2);
@@ -7299,6 +10879,7 @@ mod tests {
                 backend: BackendKind::Mock,
                 version: Some("guest-mock-v1".to_string()),
                 snapshot_kind: blaze_core::backend::SnapshotKind::Full,
+                consumes_typed_opened_attachments: false,
             }))
         }
 
@@ -7306,6 +10887,17 @@ mod tests {
             &self,
             request: crate::spawner::BackendRestoreRequest,
         ) -> crate::spawner::RestoreResult {
+            if request.provider_attachments.is_some() {
+                return Err(SpawnFailure::clean(BlazeError::BackendError {
+                    msg: "template test restore does not consume typed opened attachments"
+                        .to_string(),
+                }));
+            }
+            let storage = request.storage.clone().ok_or_else(|| {
+                SpawnFailure::clean(BlazeError::BackendError {
+                    msg: "template observation requires path-backed storage".to_string(),
+                })
+            })?;
             let observed = ObservedTemplateRestore {
                 instance_id: request.instance_id,
                 preserve_network: request.preserve_network,
@@ -7315,7 +10907,7 @@ mod tests {
                 memory: tokio::fs::read(request.payload_dir.join("memory.snap"))
                     .await
                     .map_err(SpawnFailure::from)?,
-                rootfs: tokio::fs::read(&request.storage.rootfs_path)
+                rootfs: tokio::fs::read(&storage.rootfs_path)
                     .await
                     .map_err(SpawnFailure::from)?,
             };
@@ -7324,7 +10916,7 @@ mod tests {
                 blaze_core::backend::SpawnRequest {
                     instance_id: request.instance_id,
                     binary_path: request.binary_path.clone(),
-                    storage: request.storage.clone(),
+                    storage: Some(storage),
                     backend: BackendConfigs::default(),
                     vm: None,
                 },
@@ -7353,10 +10945,12 @@ mod tests {
         temp: &tempfile::TempDir,
         allowed: bool,
         expose_guest_socket: bool,
+        opened_restore_resources: bool,
     ) -> (
         Arc<ServerState>,
         Arc<std::sync::Mutex<Option<ObservedTemplateRestore>>>,
         DaemonConfig,
+        Arc<ManagedStorageToggleProvider>,
     ) {
         let mut config = test_config(temp);
         // The catalog refuses symlink components in its root. Resolve the
@@ -7384,13 +10978,15 @@ mod tests {
             config.storage.images_dir.clone(),
             config.storage.instances_dir.clone(),
         ));
+        let data_plane = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        data_plane.set_opened_restore_resources(opened_restore_resources);
         let observed = Arc::new(std::sync::Mutex::new(None));
         let mut policy = test_policy(BackendKind::Mock);
         if allowed {
             policy.select.templates =
                 vec!["runtime-base".to_string(), "missing-template".to_string()];
         }
-        let state = build_test_state(
+        let state = build_test_state_with_provider(
             config.clone(),
             policy,
             spawners(
@@ -7401,6 +10997,7 @@ mod tests {
             ),
             BackendKind::Mock,
             storage,
+            data_plane.clone(),
         );
         state
             .manager
@@ -7411,13 +11008,14 @@ mod tests {
             )
             .await
             .expect("import template");
-        (state, observed, config)
+        (state, observed, config, data_plane)
     }
 
     #[tokio::test]
     async fn template_create_restores_independent_sandboxes() {
         let temp = tempfile::tempdir().expect("temp");
-        let (state, observed, config) = template_test_state(&temp, true, false).await;
+        let (state, observed, config, _data_plane) =
+            template_test_state(&temp, true, false, false).await;
         let request = serde_json::to_vec(&json!({
             "workload_class": "agent-tool",
             "image_digest": "sha256:template-image",
@@ -7476,7 +11074,8 @@ mod tests {
     #[tokio::test]
     async fn template_create_is_rejected_when_policy_disallows_it() {
         let temp = tempfile::tempdir().expect("temp");
-        let (state, observed, config) = template_test_state(&temp, false, false).await;
+        let (state, observed, config, _data_plane) =
+            template_test_state(&temp, false, false, false).await;
         let instances_dir = config.storage.instances_dir.clone();
 
         let error = create_sandbox(
@@ -7494,16 +11093,81 @@ mod tests {
         assert!(matches!(error, BlazeDaemonError::Conflict(_)));
         assert!(observed.lock().expect("observation").is_none());
         assert!(state.manager.list().expect("instances").is_empty());
-        assert_eq!(
-            std::fs::read_dir(instances_dir).expect("instances").count(),
-            0
+        assert_eq!(uuid_directory_count(&instances_dir), 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_create_rejects_undeclared_image_support_before_lifecycle_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage_instances_dir = config.storage.instances_dir.clone();
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let provider = Arc::new(ManagedStorageToggleProvider::new(storage.clone()));
+        provider.set_images(false);
+        let state = build_test_state_with_provider(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+            provider.clone(),
         );
+
+        let error = create_sandbox(&state, &test_request())
+            .await
+            .expect_err("ordinary images require an explicit provider capability");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not support ordinary images")
+        );
+        assert_eq!(provider.prepare_calls(), 0);
+        assert!(state.manager.list().expect("instances").is_empty());
+        assert_eq!(uuid_directory_count(&storage_instances_dir), 0);
+        assert_eq!(uuid_directory_count(&configured_state_dir(&state)), 0);
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_unconsumable_opened_resources_before_provider_prepare() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, observed, config, data_plane) =
+            template_test_state(&temp, true, false, true).await;
+        let instances_dir = config.storage.instances_dir.clone();
+        assert_eq!(data_plane.prepare_calls(), 0);
+
+        let error = create_sandbox(
+            &state,
+            &serde_json::to_vec(&json!({
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:template-image",
+                "template": "runtime-base"
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect_err("the selected backend cannot consume opened resources");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert_eq!(
+            data_plane.prepare_calls(),
+            0,
+            "provider preparation must not run before backend compatibility is proven"
+        );
+        assert!(observed.lock().expect("observation").is_none());
+        assert!(state.manager.list().expect("instances").is_empty());
+        assert_eq!(uuid_directory_count(&instances_dir), 0);
     }
 
     #[tokio::test]
     async fn template_create_rejects_mismatched_image_without_lifecycle_state() {
         let temp = tempfile::tempdir().expect("temp");
-        let (state, observed, config) = template_test_state(&temp, true, false).await;
+        let (state, observed, config, _data_plane) =
+            template_test_state(&temp, true, false, false).await;
         let instances_dir = config.storage.instances_dir.clone();
 
         let error = create_sandbox(
@@ -7521,16 +11185,14 @@ mod tests {
         assert!(matches!(error, BlazeDaemonError::Conflict(_)));
         assert!(observed.lock().expect("observation").is_none());
         assert!(state.manager.list().expect("instances").is_empty());
-        assert_eq!(
-            std::fs::read_dir(instances_dir).expect("instances").count(),
-            0
-        );
+        assert_eq!(uuid_directory_count(&instances_dir), 0);
     }
 
     #[tokio::test]
     async fn template_create_rejects_unsupported_mock_guest_socket_without_lifecycle_state() {
         let temp = tempfile::tempdir().expect("temp");
-        let (state, observed, config) = template_test_state(&temp, true, true).await;
+        let (state, observed, config, _data_plane) =
+            template_test_state(&temp, true, true, false).await;
         let instances_dir = config.storage.instances_dir.clone();
 
         let error = create_sandbox(
@@ -7548,9 +11210,6 @@ mod tests {
         assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
         assert!(observed.lock().expect("observation").is_none());
         assert!(state.manager.list().expect("instances").is_empty());
-        assert_eq!(
-            std::fs::read_dir(instances_dir).expect("instances").count(),
-            0
-        );
+        assert_eq!(uuid_directory_count(&instances_dir), 0);
     }
 }

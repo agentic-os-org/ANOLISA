@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use blaze_core::backend::{
     BackendKind, RestoreCapability, RestoreRequest, SnapshotKind, SnapshotRequest, SpawnRequest,
 };
+use blaze_core::data_plane::{BackendProcessIdentity, BackendRuntimeRecord};
 use blaze_core::policy::{
     BackendConfigs, FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil,
 };
@@ -31,9 +32,11 @@ use super::netns::{NetworkManager, NetworkSlot};
 use super::terminate_recorded_process;
 use super::{
     BackendInstance, BackendRestoreRequest, BackendSpawnRequest, BackendSpawner,
-    DynBackendInstance, OwnedRunDir, PinnedExecutable, RestoreResult, SpawnFailure, SpawnResult,
-    configure_pid_handoff, prepare_pid_handoff, record_backend_stopped, remove_file_if_exists,
-    spawn_result, stopped_marker, terminate_child,
+    DynBackendInstance, OwnedRunDir, PinnedExecutable, ProviderAttachmentAccess,
+    ProviderAttachmentRole, ProviderAttachmentSharing, ProviderRestoreAttachment,
+    ProviderRestoreAttachments, RestoreResult, SpawnFailure, SpawnResult, configure_pid_handoff,
+    opened_attachment_access, opened_attachment_kind, prepare_pid_handoff, record_backend_stopped,
+    remove_file_if_exists, spawn_result, stopped_marker, terminate_child,
 };
 
 const NETWORK_BOOT_IP: &str = "ip=169.254.0.2::169.254.0.1:255.255.255.252::eth0:off";
@@ -165,11 +168,40 @@ impl FirecrackerSpawner {
         if restore.is_none() {
             validate_regular_file(&request.binary_path, "firecracker binary")?;
         }
-        validate_regular_file(&request.storage.rootfs_path, "rootfs")?;
+        let provider_attachments = restore
+            .as_ref()
+            .and_then(|context| context.restore.provider_attachments.as_ref());
+        let (rootfs_source, rootfs_target) = match provider_attachments {
+            Some(attachments) => {
+                validate_provider_restore_attachments(attachments, request.instance_id)?;
+                let rootfs =
+                    required_provider_attachment(attachments, ProviderAttachmentRole::RootDrive)?;
+                let rootfs_target = required_consumer_path(rootfs)?;
+                validate_provider_rootfs_target(rootfs_target)?;
+                (
+                    inherited_resource_path(&rootfs.file)?,
+                    rootfs_target.to_path_buf(),
+                )
+            }
+            None => {
+                let storage = request
+                    .storage
+                    .as_ref()
+                    .ok_or_else(|| BlazeError::BackendError {
+                        msg: "a cold start or path-backed restore requires storage resources"
+                            .to_string(),
+                    })?;
+                validate_regular_file(&storage.rootfs_path, "rootfs")?;
+                prepare_portable_view_target().await?;
+                (
+                    storage.rootfs_path.clone(),
+                    PathBuf::from(PORTABLE_ROOTFS_PATH),
+                )
+            }
+        };
         if restore.is_none() {
             validate_regular_file(&self.images_dir.join("vmlinux"), "vmlinux")?;
         }
-        prepare_portable_view_target().await?;
         let api_socket = request.run_dir.path().join("api.sock");
         let guest_socket = request.run_dir.path().join("vsock.uds");
         let pid_file = request.run_dir.path().join("firecracker.pid");
@@ -289,9 +321,7 @@ impl FirecrackerSpawner {
         // into a restored owner and leave a later capture of a large guest with
         // the minimum deadline.
         let memory_bytes = match restore.as_ref() {
-            Some(context) => std::fs::metadata(&context.restore.memory)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
+            Some(context) => context.restore.memory_size_bytes(),
             None => resolve_memory(&fc_config, request.vm.as_ref())
                 .map(|mib| mib.saturating_mul(1024 * 1024))
                 .unwrap_or(0),
@@ -308,11 +338,15 @@ impl FirecrackerSpawner {
             network.as_ref(),
             &api_socket,
             request.instance_id,
-            &request.storage.rootfs_path,
+            &rootfs_source,
+            &rootfs_target,
         );
         request.run_dir.inherit_into(&mut command);
         if let Some(context) = restore.as_ref() {
             context.executable.inherit_into(&mut command);
+            if let Some(attachments) = context.restore.provider_attachments.as_ref() {
+                inherit_provider_attachments(attachments, &mut command);
+            }
         }
         // A restore carries its machine configuration inside the snapshot, so
         // only a cold start writes and passes a configuration file.
@@ -510,7 +544,12 @@ impl FirecrackerSpawner {
             self.network.clone(),
             fc_config.serial_log,
         )
-        .with_run_dir(request.run_dir.clone());
+        .with_run_dir(request.run_dir.clone())
+        .with_provider_attachments(
+            restore
+                .as_ref()
+                .and_then(|context| context.restore.provider_attachments.clone()),
+        );
 
         // Load the checkpoint only after the owner exists, so a failed load
         // transfers a runtime whose cleanup is still owned rather than leaking a
@@ -585,11 +624,13 @@ impl BackendSpawner for FirecrackerSpawner {
             backend: BackendKind::Firecracker,
             version: Some(read_pinned_backend_version(executable).await?),
             snapshot_kind: SnapshotKind::Full,
+            consumes_typed_opened_attachments: true,
         }))
     }
 
     async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
         let run_dir = request.run_dir.clone();
+        let provider_attachments = request.provider_attachments.clone();
         let RestoreRequest {
             instance_id,
             binary_path,
@@ -617,6 +658,7 @@ impl BackendSpawner for FirecrackerSpawner {
             // two files are addressed by the names capture wrote.
             vm_state: payload_dir.join(PAYLOAD_VM_STATE_FILE),
             memory: payload_dir.join(PAYLOAD_MEMORY_FILE),
+            provider_attachments,
             expected_version,
             checkpoint_backend,
             snapshot_kind,
@@ -661,6 +703,93 @@ impl BackendSpawner for FirecrackerSpawner {
         .await
     }
 
+    async fn adopt(
+        &self,
+        instance_id: Uuid,
+        runtime: &BackendRuntimeRecord,
+        run_dir: OwnedRunDir,
+        guest_memory_bytes: u64,
+    ) -> Result<Option<DynBackendInstance>> {
+        let process = runtime.process.ok_or_else(|| BlazeError::BackendError {
+            msg: format!("instance {instance_id} has no adoptable backend process identity"),
+        })?;
+        if !verify_live_process(instance_id, process).await? {
+            return Ok(None);
+        }
+
+        let files = configured_runtime_files(
+            runtime_files(
+                run_dir.path().join("api.sock"),
+                run_dir.path().join("vsock.uds"),
+                run_dir.path().join("firecracker.pid"),
+                stopped_marker(run_dir.path()),
+                run_dir.path().join("network.json"),
+            ),
+            runtime.guest_transport,
+        );
+        validate_pid_handoff_identity(&files.pid_file, process)?;
+        let capture = FirecrackerCapture::from_running(
+            files.api_socket.clone(),
+            self.api_timeout,
+            guest_memory_bytes,
+        )
+        .await?;
+        if runtime.version.as_deref() != Some(capture.backend_version.as_str()) {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "instance {instance_id} running backend version does not match durable state"
+                ),
+            });
+        }
+
+        let network = if runtime.network_slot {
+            let (recorded, _) = read_network_metadata(&files.network_file)?;
+            if recorded.owner() != instance_id {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "network record owner {} does not match instance {instance_id}",
+                        recorded.owner()
+                    ),
+                });
+            }
+            let observed = self
+                .network
+                .find_by_owner(instance_id)
+                .await?
+                .ok_or_else(|| BlazeError::BackendError {
+                    msg: format!("instance {instance_id} network namespace is missing"),
+                })?;
+            if observed != recorded {
+                return Err(BlazeError::BackendError {
+                    msg: format!("instance {instance_id} network identity does not match"),
+                });
+            }
+            Some(observed)
+        } else {
+            if files.network_file.exists()
+                || self.network.find_by_owner(instance_id).await?.is_some()
+            {
+                return Err(BlazeError::BackendError {
+                    msg: format!("instance {instance_id} has an unexpected retained network owner"),
+                });
+            }
+            None
+        };
+
+        let owner = FirecrackerInstance::new(
+            instance_id,
+            None,
+            Some(capture),
+            files,
+            network,
+            self.network.clone(),
+            runtime.console_log,
+        )
+        .with_run_dir(run_dir)
+        .with_adopted_process(process);
+        Ok(Some(Arc::new(owner)))
+    }
+
     async fn probe(&self, binary_path: &Path) -> Result<bool> {
         if !binary_path.is_file() || !firecracker_launch_tools_available(executable_in_path) {
             return Ok(false);
@@ -688,6 +817,8 @@ impl BackendSpawner for FirecrackerSpawner {
 struct FirecrackerInstance {
     instance_id: Uuid,
     child: Mutex<Option<Child>>,
+    /// Exact process retained across daemon restart, if this owner was adopted.
+    adopted_process: Option<BackendProcessIdentity>,
     exit_result: Mutex<Option<SpawnResult>>,
     /// API ownership plus the version frozen when this owner started.
     ///
@@ -703,6 +834,13 @@ struct FirecrackerInstance {
     holds_network_slot: bool,
     /// Whether this owner sends guest console output to `serial.log`.
     records_console_log: bool,
+    /// Provider resources stay open for exactly as long as the backend owner.
+    ///
+    /// Firecracker also inherits these descriptors, but retaining the parent's
+    /// copies makes the ownership boundary explicit and prevents an adapter
+    /// from treating a successful `restore` return as permission to recycle the
+    /// underlying lease while this owner is still running.
+    _provider_attachments: Option<ProviderRestoreAttachments>,
     files: FirecrackerRuntimeFiles,
     network: Mutex<Option<NetworkSlot>>,
     network_manager: Arc<NetworkManager>,
@@ -757,11 +895,13 @@ impl FirecrackerInstance {
         Self {
             instance_id,
             child: Mutex::new(child),
+            adopted_process: None,
             exit_result: Mutex::new(None),
             capture,
             run_dir: None,
             holds_network_slot: network.is_some(),
             records_console_log,
+            _provider_attachments: None,
             files,
             network: Mutex::new(network),
             network_manager,
@@ -772,6 +912,19 @@ impl FirecrackerInstance {
 
     fn with_run_dir(mut self, run_dir: OwnedRunDir) -> Self {
         self.run_dir = Some(run_dir);
+        self
+    }
+
+    fn with_provider_attachments(
+        mut self,
+        attachments: Option<ProviderRestoreAttachments>,
+    ) -> Self {
+        self._provider_attachments = attachments;
+        self
+    }
+
+    fn with_adopted_process(mut self, process: BackendProcessIdentity) -> Self {
+        self.adopted_process = Some(process);
         self
     }
 
@@ -860,6 +1013,23 @@ impl BackendInstance for FirecrackerInstance {
 
     fn records_console_log(&self) -> bool {
         self.records_console_log
+    }
+
+    fn runtime_record(&self) -> BackendRuntimeRecord {
+        let process = self.adopted_process.or_else(|| {
+            self.child
+                .try_lock()
+                .ok()
+                .and_then(|child| child.as_ref().and_then(Child::id))
+                .and_then(observe_process_identity)
+        });
+        BackendRuntimeRecord {
+            process,
+            version: self.version().map(str::to_owned),
+            guest_transport: !self.files.guest_socket.as_os_str().is_empty(),
+            network_slot: self.holds_network_slot,
+            console_log: self.records_console_log,
+        }
     }
 
     async fn pause(&self) -> Result<()> {
@@ -968,6 +1138,11 @@ impl BackendInstance for FirecrackerInstance {
         let result = {
             let mut guard = self.child.lock().await;
             let Some(child) = guard.as_mut() else {
+                if let Some(process) = self.adopted_process
+                    && verify_live_process(self.instance_id, process).await?
+                {
+                    return Ok(None);
+                }
                 let result = self.exit_result.lock().await.unwrap_or(SpawnResult {
                     instance_id: self.instance_id,
                     exit_code: None,
@@ -1000,6 +1175,16 @@ impl BackendInstance for FirecrackerInstance {
         }
         if let Some(child) = guard.as_mut() {
             terminate_child(child, "firecracker").await?;
+        } else if let Some(process) = self.adopted_process
+            && verify_live_process(self.instance_id, process).await?
+        {
+            #[cfg(target_os = "linux")]
+            terminate_recorded_process(self.instance_id, &self.files.pid_file, "firecracker")
+                .await?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(BlazeError::BackendError {
+                msg: "live Firecracker adoption is supported only on Linux".to_string(),
+            });
         }
         record_backend_stopped(&self.files.stopped_marker).await?;
         *guard = None;
@@ -1083,10 +1268,38 @@ struct FirecrackerRestoreContext {
 struct FirecrackerRestore {
     vm_state: PathBuf,
     memory: PathBuf,
+    provider_attachments: Option<ProviderRestoreAttachments>,
     expected_version: Option<String>,
     checkpoint_backend: BackendKind,
     snapshot_kind: SnapshotKind,
     expose_guest_socket: bool,
+}
+
+impl FirecrackerRestore {
+    fn memory_backend_path(&self) -> Result<PathBuf> {
+        self.provider_attachments
+            .as_ref()
+            .map(|attachments| {
+                required_provider_attachment(attachments, ProviderAttachmentRole::GuestMemory)
+                    .and_then(|memory| inherited_resource_path(&memory.file))
+            })
+            .unwrap_or_else(|| Ok(self.memory.clone()))
+    }
+
+    fn memory_size_bytes(&self) -> u64 {
+        self.provider_attachments
+            .as_ref()
+            .and_then(|attachments| {
+                attachments
+                    .attachment(ProviderAttachmentRole::GuestMemory)
+                    .map(|memory| memory.logical_size_bytes)
+            })
+            .unwrap_or_else(|| {
+                std::fs::metadata(&self.memory)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+            })
+    }
 }
 
 /// Refuse a checkpoint this executable cannot load.
@@ -1152,7 +1365,7 @@ fn snapshot_load_payload(
         "snapshot_path": path_string(&restore.vm_state, "VM-state snapshot")?,
         "mem_backend": {
             "backend_type": "File",
-            "backend_path": path_string(&restore.memory, "memory snapshot")?
+            "backend_path": path_string(&restore.memory_backend_path()?, "memory snapshot")?
         },
         "track_dirty_pages": false,
         "resume_vm": true
@@ -1460,10 +1673,7 @@ impl FirecrackerApiClient {
             }
             if !status.is_success() {
                 return Err(FirecrackerApiError::Known(BlazeError::BackendError {
-                    msg: format!(
-                        "Firecracker {method} {path} returned {status}: {}",
-                        String::from_utf8_lossy(&collected)
-                    ),
+                    msg: firecracker_api_failure_message(&method, path, status, &collected),
                 }));
             }
             Ok(collected)
@@ -1475,6 +1685,24 @@ impl FirecrackerApiClient {
                     msg: format!("Firecracker {method} {path} timed out after {timeout:?}"),
                 })
             })?
+    }
+}
+
+fn firecracker_api_failure_message(
+    method: &Method,
+    path: &str,
+    status: hyper::StatusCode,
+    body: &[u8],
+) -> String {
+    // Snapshot-load failures may quote host paths from the request. Do not
+    // include that response body in errors that can reach the management API.
+    if path == "/snapshot/load" || body.is_empty() {
+        format!("Firecracker {method} {path} returned {status}")
+    } else {
+        format!(
+            "Firecracker {method} {path} returned {status}: {}",
+            String::from_utf8_lossy(body)
+        )
     }
 }
 
@@ -1682,6 +1910,244 @@ async fn prepare_portable_view_target_at(target: &Path) -> Result<()> {
     }
 }
 
+/// Revalidate the descriptor facts frozen into one attachment contract.
+///
+/// The provider cannot make a path authoritative after the descriptor has been
+/// accepted. Repeating `fstat` and access-mode checks immediately before spawn
+/// catches stale or internally inconsistent attachment messages while still
+/// allowing regular files, character devices, and block devices.
+fn validate_provider_attachment(
+    attachment: &ProviderRestoreAttachment,
+) -> Result<std::fs::Metadata> {
+    let role = attachment.role;
+    let metadata = attachment
+        .file
+        .metadata()
+        .map_err(|error| BlazeError::BackendError {
+            msg: format!(
+                "cannot inspect provider {} attachment: {error}",
+                role.as_str()
+            ),
+        })?;
+    let actual_kind = opened_attachment_kind(&attachment.file, role)?;
+    if actual_kind != attachment.kind {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "provider {} attachment changed kind from {} to {}",
+                role.as_str(),
+                attachment.kind.as_str(),
+                actual_kind.as_str()
+            ),
+        });
+    }
+    let actual_access = opened_attachment_access(&attachment.file, role)?;
+    if actual_access != attachment.access {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "provider {} attachment changed access from {} to {}",
+                role.as_str(),
+                attachment.access.as_str(),
+                actual_access.as_str()
+            ),
+        });
+    }
+    if attachment.sharing == ProviderAttachmentSharing::SharedReadOnly
+        && attachment.access != ProviderAttachmentAccess::ReadOnly
+    {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "provider {} attachment cannot be {} while opened {}",
+                role.as_str(),
+                attachment.sharing.as_str(),
+                attachment.access.as_str()
+            ),
+        });
+    }
+    if metadata.len() != 0 && metadata.len() != attachment.logical_size_bytes {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "provider {} attachment reports {} bytes but the contract declares {} bytes",
+                role.as_str(),
+                metadata.len(),
+                attachment.logical_size_bytes
+            ),
+        });
+    }
+    Ok(metadata)
+}
+
+fn required_provider_attachment(
+    attachments: &ProviderRestoreAttachments,
+    role: ProviderAttachmentRole,
+) -> Result<&ProviderRestoreAttachment> {
+    attachments
+        .attachment(role)
+        .ok_or_else(|| BlazeError::BackendError {
+            msg: format!(
+                "provider attachment collection is missing the {} role",
+                role.as_str()
+            ),
+        })
+}
+
+fn required_consumer_path(attachment: &ProviderRestoreAttachment) -> Result<&Path> {
+    attachment
+        .consumer_path
+        .as_deref()
+        .ok_or_else(|| BlazeError::BackendError {
+            msg: format!(
+                "provider {} attachment is missing its child-visible path",
+                attachment.role.as_str()
+            ),
+        })
+}
+
+fn validate_provider_restore_attachments(
+    attachments: &ProviderRestoreAttachments,
+    instance_id: Uuid,
+) -> Result<()> {
+    attachments.validate_shape()?;
+    if attachments.instance_id != instance_id {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "provider attachment collection for {} cannot restore sandbox {instance_id}",
+                attachments.instance_id
+            ),
+        });
+    }
+    if attachments.len() != 2 {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "Firecracker restore requires exactly 2 provider attachments but received {}",
+                attachments.len()
+            ),
+        });
+    }
+    let rootfs = required_provider_attachment(attachments, ProviderAttachmentRole::RootDrive)?;
+    let memory = required_provider_attachment(attachments, ProviderAttachmentRole::GuestMemory)?;
+    for attachment in [rootfs, memory] {
+        if attachment.access != ProviderAttachmentAccess::ReadWrite
+            || attachment.sharing != ProviderAttachmentSharing::Exclusive
+        {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker {} attachment must be exclusive and read-write, not {} and {}",
+                    attachment.role.as_str(),
+                    attachment.sharing.as_str(),
+                    attachment.access.as_str()
+                ),
+            });
+        }
+    }
+    if memory.consumer_path.is_some() {
+        return Err(BlazeError::BackendError {
+            msg: "provider guest-memory attachment must not declare a child-visible path"
+                .to_string(),
+        });
+    }
+    let rootfs_metadata = validate_provider_attachment(rootfs)?;
+    let memory_metadata = validate_provider_attachment(memory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let same_inode = rootfs_metadata.dev() == memory_metadata.dev()
+            && rootfs_metadata.ino() == memory_metadata.ino();
+        // Separate device nodes can name the same underlying character or
+        // block device, so inode identity alone is insufficient for devices.
+        let same_device =
+            rootfs_metadata.rdev() != 0 && rootfs_metadata.rdev() == memory_metadata.rdev();
+        if same_inode || same_device {
+            return Err(BlazeError::BackendError {
+                msg: "provider rootfs and memory resources resolve to the same object".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to create provider-chosen host paths as a side effect of restore.
+///
+/// A snapshot may have recorded a path different from Blaze's portable default,
+/// but deployment must provision that empty regular-file mount point ahead of
+/// time. Requiring an existing canonical path prevents a compromised provider
+/// response from creating arbitrary directories or following symbolic links on
+/// the host. The bind itself still occurs only inside the child process's
+/// isolated mount namespace.
+fn validate_provider_rootfs_target(target: &Path) -> Result<()> {
+    if !target.is_absolute() || target == Path::new("/") {
+        return Err(BlazeError::BackendError {
+            msg: "provider rootfs target must be an absolute non-root path".to_string(),
+        });
+    }
+    let metadata = std::fs::symlink_metadata(target).map_err(|_| BlazeError::BackendError {
+        msg: "provider rootfs target must be provisioned before restore".to_string(),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(BlazeError::BackendError {
+            msg: "provider rootfs target is not a regular file".to_string(),
+        });
+    }
+    let canonical = std::fs::canonicalize(target).map_err(|_| BlazeError::BackendError {
+        msg: "cannot canonicalize provider rootfs target".to_string(),
+    })?;
+    if canonical != target {
+        return Err(BlazeError::BackendError {
+            msg: "provider rootfs target must not contain symbolic links or path aliases"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn inherited_resource_path(file: &std::fs::File) -> Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+
+    Ok(PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inherited_resource_path(_file: &std::fs::File) -> Result<PathBuf> {
+    Err(BlazeError::BackendError {
+        msg: "provider restore resources require Linux descriptor inheritance".to_string(),
+    })
+}
+
+/// Keep provider attachments open through the launcher's exec chain.
+#[cfg(target_os = "linux")]
+fn inherit_provider_attachments(
+    attachments: &ProviderRestoreAttachments,
+    command: &mut tokio::process::Command,
+) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let descriptors = attachments
+        .attachments
+        .iter()
+        .map(|attachment| attachment.file.as_raw_fd())
+        .collect::<Vec<_>>();
+    // SAFETY: `fcntl` is async-signal-safe. The closure only clears CLOEXEC on
+    // child-side descriptor copies whose owners remain alive through spawn.
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            for &descriptor in &descriptors {
+                if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inherit_provider_attachments(
+    _attachments: &ProviderRestoreAttachments,
+    _command: &mut tokio::process::Command,
+) {
+}
+
 #[cfg(not(target_os = "linux"))]
 async fn prepare_portable_view_target() -> Result<()> {
     Ok(())
@@ -1693,6 +2159,7 @@ fn build_launch_command(
     api_socket: &Path,
     instance_id: Uuid,
     rootfs_source: &Path,
+    rootfs_target: &Path,
 ) -> Command {
     #[cfg(target_os = "linux")]
     let mut command = if let Some(network) = network {
@@ -1718,7 +2185,7 @@ fn build_launch_command(
     };
     #[cfg(not(target_os = "linux"))]
     let mut command = {
-        let _ = (network, rootfs_source);
+        let _ = (network, rootfs_source, rootfs_target);
         Command::new(binary)
     };
     // Bind this sandbox's own rootfs onto one stable path inside the private
@@ -1734,7 +2201,7 @@ fn build_launch_command(
         .arg(MOUNT_AND_EXEC)
         .arg("blaze-firecracker")
         .arg(rootfs_source)
-        .arg(PORTABLE_ROOTFS_PATH)
+        .arg(rootfs_target)
         .arg(binary)
         .arg(api_socket)
         .arg(format!("fc-{instance_id}"));
@@ -1865,6 +2332,101 @@ fn parse_runtime_version(response: &[u8]) -> Result<String> {
         });
     }
     Ok(format!("Firecracker v{version}"))
+}
+
+#[cfg(target_os = "linux")]
+fn observe_process_identity(pid: u32) -> Option<BackendProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_process_start_time(&stat).map(|start_time_ticks| BackendProcessIdentity {
+        pid,
+        start_time_ticks,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observe_process_identity(_pid: u32) -> Option<BackendProcessIdentity> {
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_process_start_time(stat: &str) -> Option<u64> {
+    // The command name is parenthesized and may itself contain spaces. Fields
+    // after its final ')' begin with process state (field 3); start time is
+    // field 22, therefore index 19 in that remaining sequence.
+    let close = stat.rfind(')')?;
+    stat.get(close + 1..)?
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+fn validate_pid_handoff_identity(pid_file: &Path, expected: BackendProcessIdentity) -> Result<()> {
+    let actual: u32 = std::fs::read_to_string(pid_file)?
+        .trim()
+        .parse()
+        .map_err(|error| BlazeError::BackendError {
+            msg: format!(
+                "invalid Firecracker PID handoff {}: {error}",
+                pid_file.display()
+            ),
+        })?;
+    if actual != expected.pid {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "Firecracker PID handoff {} records {actual}, expected {}",
+                pid_file.display(),
+                expected.pid
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn verify_live_process(instance_id: Uuid, expected: BackendProcessIdentity) -> Result<bool> {
+    let process_dir = PathBuf::from(format!("/proc/{}", expected.pid));
+    let stat = match tokio::fs::read_to_string(process_dir.join("stat")).await {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let start_time_ticks =
+        parse_process_start_time(&stat).ok_or_else(|| BlazeError::BackendError {
+            msg: format!("cannot parse process identity for pid {}", expected.pid),
+        })?;
+    if start_time_ticks != expected.start_time_ticks {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "refusing to adopt pid {} because its start time changed",
+                expected.pid
+            ),
+        });
+    }
+    let environ = tokio::fs::read(process_dir.join("environ")).await?;
+    let owner = format!("BLAZE_INSTANCE_ID={instance_id}");
+    if !environ
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == owner.as_bytes())
+    {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "refusing to adopt pid {} because its sandbox identity differs",
+                expected.pid
+            ),
+        });
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn verify_live_process(
+    _instance_id: Uuid,
+    _expected: BackendProcessIdentity,
+) -> Result<bool> {
+    Err(BlazeError::BackendError {
+        msg: "live Firecracker adoption is supported only on Linux".to_string(),
+    })
 }
 
 async fn wait_for_socket(socket: &Path, child: &mut Child, timeout: Duration) -> Result<()> {
@@ -2012,7 +2574,7 @@ fn rotate_serial_log_if_needed(path: &Path) -> Result<()> {
 
 fn path_string<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| BlazeError::BackendError {
-        msg: format!("{label} path is not valid UTF-8: {}", path.display()),
+        msg: format!("{label} path is not valid UTF-8"),
     })
 }
 
@@ -2109,6 +2671,48 @@ async fn cleanup_orphan_run_dir_with(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_path_diagnostic_does_not_echo_the_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(
+            b"/must-not-appear/\xff-resource".to_vec(),
+        ));
+        let error = path_string(&path, "restore resource").expect_err("non-UTF-8 path");
+        let message = error.to_string();
+
+        assert!(message.contains("restore resource path is not valid UTF-8"));
+        assert!(!message.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn snapshot_load_diagnostic_does_not_echo_the_response_body() {
+        let message = firecracker_api_failure_message(
+            &Method::PUT,
+            "/snapshot/load",
+            hyper::StatusCode::BAD_REQUEST,
+            b"failed to open /must-not-appear/resource",
+        );
+
+        assert!(message.contains("400 Bad Request"));
+        assert!(!message.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn process_start_time_parser_handles_spaces_in_command_names() {
+        let mut fields = vec!["S".to_string()];
+        fields.extend((4_u64..=21).map(|value| value.to_string()));
+        fields.push("987654".to_string());
+        fields.push("23".to_string());
+        let stat = format!("42 (backend worker) {}", fields.join(" "));
+
+        assert_eq!(parse_process_start_time(&stat), Some(987654));
+        assert_eq!(parse_process_start_time("42 malformed"), None);
+    }
+
     #[test]
     fn an_owner_without_a_version_keeps_running_but_refuses_capture() {
         // A start whose VM answers on its API socket but not for its version stays
@@ -2223,10 +2827,59 @@ mod tests {
 
     use super::*;
 
+    fn provider_attachment(
+        role: ProviderAttachmentRole,
+        file: Arc<std::fs::File>,
+        logical_size_bytes: u64,
+        consumer_path: Option<PathBuf>,
+    ) -> ProviderRestoreAttachment {
+        let access = opened_attachment_access(&file, role).expect("attachment access");
+        let kind = opened_attachment_kind(&file, role).expect("attachment kind");
+        ProviderRestoreAttachment {
+            role,
+            file,
+            access,
+            sharing: ProviderAttachmentSharing::Exclusive,
+            kind,
+            logical_size_bytes,
+            consumer_path,
+        }
+    }
+
+    fn provider_attachment_collection(
+        instance_id: Uuid,
+        rootfs: Arc<std::fs::File>,
+        memory: Arc<std::fs::File>,
+        rootfs_target: PathBuf,
+        rootfs_size_bytes: u64,
+        memory_size_bytes: u64,
+    ) -> ProviderRestoreAttachments {
+        ProviderRestoreAttachments {
+            instance_id,
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![
+                provider_attachment(
+                    ProviderAttachmentRole::RootDrive,
+                    rootfs,
+                    rootfs_size_bytes,
+                    Some(rootfs_target),
+                ),
+                provider_attachment(
+                    ProviderAttachmentRole::GuestMemory,
+                    memory,
+                    memory_size_bytes,
+                    None,
+                ),
+            ],
+        }
+    }
+
     fn full_restore(expose_guest_socket: bool) -> FirecrackerRestore {
         FirecrackerRestore {
             vm_state: PathBuf::from("/checkpoint/vmstate.snap"),
             memory: PathBuf::from("/checkpoint/memory.snap"),
+            provider_attachments: None,
             expected_version: Some("Firecracker v1.16.0".to_string()),
             checkpoint_backend: BackendKind::Firecracker,
             snapshot_kind: SnapshotKind::Full,
@@ -2269,6 +2922,354 @@ mod tests {
         assert!(payload.get("network_overrides").is_none());
         assert!(payload.get("vsock_override").is_none());
         assert_eq!(payload["resume_vm"], true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_restore_uses_inherited_memory_handle_without_persisting_its_path() {
+        let temp = tempfile::tempdir().expect("temp");
+        let rootfs = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("rootfs"))
+                .expect("rootfs"),
+        );
+        let memory = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("memory"))
+                .expect("memory"),
+        );
+        memory.set_len(4096).expect("memory length");
+        let instance_id = Uuid::new_v4();
+        let restore = FirecrackerRestore {
+            provider_attachments: Some(provider_attachment_collection(
+                instance_id,
+                rootfs,
+                memory.clone(),
+                temp.path().join("target"),
+                4096,
+                4096,
+            )),
+            ..full_restore(false)
+        };
+
+        validate_provider_restore_attachments(
+            restore
+                .provider_attachments
+                .as_ref()
+                .expect("provider attachments"),
+            instance_id,
+        )
+        .expect("valid provider attachments");
+        let payload = snapshot_load_payload(&restore, None, None).expect("load payload");
+        let backend_path = payload["mem_backend"]["backend_path"]
+            .as_str()
+            .expect("memory backend path");
+
+        assert_eq!(
+            backend_path,
+            format!(
+                "/proc/self/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(&*memory)
+            )
+        );
+        assert!(!backend_path.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn provider_restore_rejects_invalid_memory_contracts() {
+        let temp = tempfile::tempdir().expect("temp");
+        let shared = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("shared"))
+                .expect("shared resource"),
+        );
+        shared.set_len(4096).expect("resource length");
+        let instance_id = Uuid::new_v4();
+        let same_resource = provider_attachment_collection(
+            instance_id,
+            shared.clone(),
+            shared,
+            temp.path().join("target"),
+            4096,
+            4096,
+        );
+        let error = validate_provider_restore_attachments(&same_resource, instance_id)
+            .expect_err("one object cannot be both rootfs and memory");
+        assert!(error.to_string().contains("same object"));
+
+        let rootfs = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(temp.path().join("shared"))
+                .expect("rootfs"),
+        );
+        let memory_path = temp.path().join("memory");
+        std::fs::write(&memory_path, [0_u8; 16]).expect("memory");
+        let wrong_length = provider_attachment_collection(
+            instance_id,
+            rootfs,
+            Arc::new(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(memory_path)
+                    .expect("memory"),
+            ),
+            temp.path().join("target"),
+            4096,
+            4096,
+        );
+        let error = validate_provider_restore_attachments(&wrong_length, instance_id)
+            .expect_err("reported and declared memory lengths must match");
+        assert!(error.to_string().contains("reports 16 bytes"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_restore_rejects_a_read_only_attachment() {
+        let temp = tempfile::tempdir().expect("temp");
+        let rootfs_path = temp.path().join("rootfs");
+        std::fs::write(&rootfs_path, [0_u8; 4096]).expect("rootfs");
+        let memory_path = temp.path().join("memory");
+        std::fs::write(&memory_path, [0_u8; 4096]).expect("memory");
+        let instance_id = Uuid::new_v4();
+        let attachments = provider_attachment_collection(
+            instance_id,
+            Arc::new(std::fs::File::open(rootfs_path).expect("read-only rootfs")),
+            Arc::new(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(memory_path)
+                    .expect("memory"),
+            ),
+            temp.path().join("target"),
+            4096,
+            4096,
+        );
+
+        let error = validate_provider_restore_attachments(&attachments, instance_id)
+            .expect_err("read-only attachment must be rejected");
+        assert!(error.to_string().contains("read-write"));
+    }
+
+    #[test]
+    fn provider_attachment_collection_rejects_duplicate_roles_and_stale_binding() {
+        let temp = tempfile::tempdir().expect("temp");
+        let first = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("first"))
+                .expect("first"),
+        );
+        let second = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("second"))
+                .expect("second"),
+        );
+        let instance_id = Uuid::new_v4();
+        let duplicate = ProviderRestoreAttachments {
+            instance_id,
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![
+                provider_attachment(
+                    ProviderAttachmentRole::RootDrive,
+                    first.clone(),
+                    4096,
+                    Some(temp.path().join("target")),
+                ),
+                provider_attachment(
+                    ProviderAttachmentRole::RootDrive,
+                    second.clone(),
+                    4096,
+                    Some(temp.path().join("target")),
+                ),
+            ],
+        };
+        let duplicate = validate_provider_restore_attachments(&duplicate, instance_id)
+            .expect_err("duplicate roles");
+        assert!(duplicate.to_string().contains("duplicate root-drive"));
+
+        let attachments = provider_attachment_collection(
+            instance_id,
+            first,
+            second,
+            temp.path().join("target"),
+            4096,
+            4096,
+        );
+        let stale = validate_provider_restore_attachments(&attachments, Uuid::new_v4())
+            .expect_err("another sandbox cannot reuse this attachment lease");
+        assert!(stale.to_string().contains("cannot restore sandbox"));
+    }
+
+    #[test]
+    fn provider_attachment_collection_rejects_invalid_generation_and_sharing() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("attachment");
+        std::fs::write(&path, [0_u8; 4096]).expect("attachment");
+        let read_write = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("read-write attachment"),
+        );
+        let role = ProviderAttachmentRole::RootDrive;
+        let sharing_error = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![ProviderRestoreAttachment {
+                role,
+                access: opened_attachment_access(&read_write, role).expect("attachment access"),
+                kind: opened_attachment_kind(&read_write, role).expect("attachment kind"),
+                file: read_write,
+                sharing: ProviderAttachmentSharing::SharedReadOnly,
+                logical_size_bytes: 4096,
+                consumer_path: Some(temp.path().join("target")),
+            }],
+        }
+        .validate_shape()
+        .expect_err("writable attachments cannot be shared");
+        assert!(sharing_error.to_string().contains("shared-read-only"));
+
+        let read_only = Arc::new(std::fs::File::open(path).expect("read-only attachment"));
+        let generation_error = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 0,
+            attachments: vec![ProviderRestoreAttachment {
+                role,
+                access: opened_attachment_access(&read_only, role).expect("attachment access"),
+                kind: opened_attachment_kind(&read_only, role).expect("attachment kind"),
+                file: read_only,
+                sharing: ProviderAttachmentSharing::SharedReadOnly,
+                logical_size_bytes: 4096,
+                consumer_path: Some(temp.path().join("target")),
+            }],
+        }
+        .validate_shape()
+        .expect_err("zero generation");
+        assert!(generation_error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn provider_attachment_collection_rejects_descriptor_fact_mismatches() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("attachment");
+        std::fs::write(&path, [0_u8; 4096]).expect("attachment");
+        let read_write = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("read-write attachment"),
+        );
+        let role = ProviderAttachmentRole::RootDrive;
+        let wrong_kind = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![ProviderRestoreAttachment {
+                role,
+                file: read_write,
+                access: ProviderAttachmentAccess::ReadWrite,
+                sharing: ProviderAttachmentSharing::Exclusive,
+                kind: crate::spawner::ProviderAttachmentKind::BlockDevice,
+                logical_size_bytes: 4096,
+                consumer_path: Some(temp.path().join("target")),
+            }],
+        }
+        .validate_shape()
+        .expect_err("declared kind must match fstat");
+        assert!(
+            wrong_kind
+                .to_string()
+                .contains("declares kind block-device")
+        );
+
+        let read_only = Arc::new(std::fs::File::open(path).expect("read-only attachment"));
+        let wrong_access = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![ProviderRestoreAttachment {
+                role,
+                file: read_only,
+                access: ProviderAttachmentAccess::ReadWrite,
+                sharing: ProviderAttachmentSharing::Exclusive,
+                kind: crate::spawner::ProviderAttachmentKind::RegularFile,
+                logical_size_bytes: 4096,
+                consumer_path: Some(temp.path().join("target")),
+            }],
+        }
+        .validate_shape()
+        .expect_err("declared access must match fcntl");
+        assert!(wrong_access.to_string().contains("descriptor is read-only"));
+    }
+
+    #[test]
+    fn provider_attachment_collection_rejects_invalid_lease_and_size() {
+        let temp = tempfile::tempdir().expect("temp");
+        let file = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(temp.path().join("attachment"))
+                .expect("attachment"),
+        );
+        let attachment = provider_attachment(
+            ProviderAttachmentRole::RootDrive,
+            file,
+            4096,
+            Some(temp.path().join("target")),
+        );
+        let invalid_lease = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::nil(),
+            generation: 1,
+            attachments: vec![attachment.clone()],
+        }
+        .validate_shape()
+        .expect_err("nil lease");
+        assert!(invalid_lease.to_string().contains("non-nil lease"));
+
+        let invalid_size = ProviderRestoreAttachments {
+            instance_id: Uuid::new_v4(),
+            lease_id: Uuid::new_v4(),
+            generation: 1,
+            attachments: vec![ProviderRestoreAttachment {
+                logical_size_bytes: 1,
+                ..attachment
+            }],
+        }
+        .validate_shape()
+        .expect_err("unaligned logical size");
+        assert!(invalid_size.to_string().contains("multiple of 4096"));
     }
 
     #[test]
@@ -2454,6 +3455,7 @@ mod tests {
             Path::new("/proc/self/fd/17/api.sock"),
             instance_id,
             Path::new("/var/lib/blaze/instances/owner/rootfs.ext4"),
+            Path::new(PORTABLE_ROOTFS_PATH),
         );
         let arguments = command
             .as_std()
@@ -2481,6 +3483,7 @@ mod tests {
             Path::new("/proc/self/fd/17/api.sock"),
             Uuid::new_v4(),
             owned,
+            Path::new(PORTABLE_ROOTFS_PATH),
         );
         let arguments = command
             .as_std()
@@ -2505,6 +3508,38 @@ mod tests {
                 .iter()
                 .any(|argument| argument == PORTABLE_ROOTFS_PATH),
             "portable rootfs target missing from {arguments:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_command_honours_the_path_recorded_by_a_provider_snapshot() {
+        let target = Path::new("/provider-snapshot/rootfs");
+        let command = build_launch_command(
+            Path::new("/usr/bin/firecracker"),
+            None,
+            Path::new("/proc/self/fd/17/api.sock"),
+            Uuid::new_v4(),
+            Path::new("/proc/self/fd/19"),
+            target,
+        );
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == target.to_string_lossy().as_ref()),
+            "provider snapshot target missing from {arguments:?}"
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == PORTABLE_ROOTFS_PATH),
+            "provider-bound restore must not substitute Blaze's portable path"
         );
     }
 
@@ -3219,14 +4254,14 @@ mod tests {
             SpawnRequest {
                 instance_id,
                 binary_path: root.join("firecracker"),
-                storage: StorageSlot {
+                storage: Some(StorageSlot {
                     id: instance_id.to_string(),
                     rootfs_path: slot_dir.join("rootfs.ext4"),
                     mem_path: slot_dir.join("mem.bin"),
                     mem_diff_path: slot_dir.join("mem.diff"),
                     rootfs_diff_path: slot_dir.join("rootfs.diff"),
                     instance_dir: slot_dir,
-                },
+                }),
                 backend: blaze_core::policy::BackendConfigs::default(),
                 vm: None,
             },
@@ -3623,6 +4658,208 @@ mod tests {
             .await
             .expect_err("symlink target must be rejected");
         assert!(symlink_error.to_string().contains("not a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_rootfs_target_must_be_preprovisioned_and_canonical() {
+        let temp = tempfile::tempdir().expect("temp");
+        let target = temp.path().join("target");
+        std::fs::write(&target, []).expect("target");
+        validate_provider_rootfs_target(&target).expect("canonical regular target");
+
+        let missing = temp.path().join("missing");
+        let error = validate_provider_rootfs_target(&missing)
+            .expect_err("provider restore must not create a missing host path");
+        assert!(error.to_string().contains("must be provisioned"));
+        assert!(!error.to_string().contains(&missing.to_string_lossy()[..]));
+
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&target, &alias).expect("alias");
+        let error = validate_provider_rootfs_target(&alias)
+            .expect_err("symbolic-link target must be rejected");
+        assert!(error.to_string().contains("not a regular file"));
+        assert!(!error.to_string().contains(&alias.to_string_lossy()[..]));
+
+        let subdirectory = temp.path().join("subdirectory");
+        std::fs::create_dir(&subdirectory).expect("subdirectory");
+        let aliased_path = subdirectory.join("..").join("target");
+        let error = validate_provider_rootfs_target(&aliased_path)
+            .expect_err("path aliases must be rejected");
+        assert!(error.to_string().contains("path aliases"));
+        assert!(
+            !error
+                .to_string()
+                .contains(&aliased_path.to_string_lossy()[..])
+        );
+    }
+
+    /// Manual interoperability test for source-level provider authors.
+    ///
+    /// This verifies that caller-prepared resources satisfying the public
+    /// attachment contract can restore a Firecracker snapshot and serve a guest
+    /// request. It deliberately makes no assumption about how those resources
+    /// were created. The test is ignored in normal builds because it needs Linux
+    /// root, hardware virtualization, and a compatible Firecracker snapshot.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires root, KVM, Firecracker, and provider-leased restore resources"]
+    async fn opened_resource_restore_reaches_guest() {
+        use crate::guest::GuestClient;
+
+        fn required_path(name: &str) -> PathBuf {
+            std::env::var_os(name)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("{name} must name a test resource"))
+        }
+
+        let binary = required_path("BLAZE_PROVIDER_RESTORE_FIRECRACKER");
+        let vm_state = required_path("BLAZE_PROVIDER_RESTORE_VMSTATE");
+        let rootfs_path = required_path("BLAZE_PROVIDER_RESTORE_ROOTFS");
+        let memory_path = required_path("BLAZE_PROVIDER_RESTORE_MEMORY");
+        let rootfs_target = required_path("BLAZE_PROVIDER_RESTORE_ROOTFS_TARGET");
+        let rootfs_size_bytes = std::env::var("BLAZE_PROVIDER_RESTORE_ROOTFS_BYTES")
+            .expect("BLAZE_PROVIDER_RESTORE_ROOTFS_BYTES must be set")
+            .parse::<u64>()
+            .expect("BLAZE_PROVIDER_RESTORE_ROOTFS_BYTES must be an integer");
+        let memory_size_bytes = std::env::var("BLAZE_PROVIDER_RESTORE_MEMORY_BYTES")
+            .expect("BLAZE_PROVIDER_RESTORE_MEMORY_BYTES must be set")
+            .parse::<u64>()
+            .expect("BLAZE_PROVIDER_RESTORE_MEMORY_BYTES must be an integer");
+
+        let rootfs = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&rootfs_path)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "cannot open provider rootfs resource {}: {error}",
+                        rootfs_path.display()
+                    )
+                }),
+        );
+        let memory = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&memory_path)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "cannot open provider memory resource {}: {error}",
+                        memory_path.display()
+                    )
+                }),
+        );
+        let instance_id = Uuid::new_v4();
+        let attachments = provider_attachment_collection(
+            instance_id,
+            rootfs,
+            memory,
+            rootfs_target,
+            rootfs_size_bytes,
+            memory_size_bytes,
+        );
+        validate_provider_restore_attachments(&attachments, instance_id)
+            .expect("provider attachment contract");
+        let rootfs_attachment =
+            required_provider_attachment(&attachments, ProviderAttachmentRole::RootDrive)
+                .expect("root-drive attachment");
+        validate_provider_rootfs_target(
+            required_consumer_path(rootfs_attachment).expect("root-drive target"),
+        )
+        .expect("provider rootfs target contract");
+
+        let temp = tempfile::tempdir().expect("test directory");
+        let payload_dir = temp.path().join("payload");
+        std::fs::create_dir(&payload_dir).expect("payload directory");
+        std::fs::copy(&vm_state, payload_dir.join(PAYLOAD_VM_STATE_FILE)).unwrap_or_else(|error| {
+            panic!(
+                "cannot copy VM-state snapshot {}: {error}",
+                vm_state.display()
+            )
+        });
+
+        let slot_dir = temp.path().join("unused-file-storage-slot");
+        let run_dir = OwnedRunDir::for_test(instance_id, temp.path().join("run"));
+        let expected_version = read_backend_version(&binary)
+            .await
+            .expect("read Firecracker version");
+        let executable = Arc::new(PinnedExecutable::open(&binary).expect("pin Firecracker"));
+        let mut request = BackendRestoreRequest::new(
+            RestoreRequest {
+                instance_id,
+                binary_path: binary,
+                storage: Some(StorageSlot {
+                    id: instance_id.to_string(),
+                    rootfs_path: slot_dir.join("rootfs.ext4"),
+                    mem_path: slot_dir.join("mem.bin"),
+                    mem_diff_path: slot_dir.join("mem.diff"),
+                    rootfs_diff_path: slot_dir.join("rootfs.diff"),
+                    instance_dir: slot_dir,
+                }),
+                payload_dir,
+                checkpoint_backend: BackendKind::Firecracker,
+                expected_version: Some(expected_version),
+                snapshot_kind: SnapshotKind::Full,
+                expose_guest_socket: true,
+                preserve_network: true,
+                record_console_log: true,
+                snapshot_from_other_sandbox: true,
+            },
+            run_dir,
+            Some(executable),
+        )
+        .expect("restore request");
+        request.provider_attachments = Some(attachments);
+
+        let spawner = FirecrackerSpawner::new(temp.path().join("unused-images"));
+        spawner
+            .prepare_spawn(&request.run_dir)
+            .await
+            .expect("prepare backend process ownership");
+        let instance = spawner
+            .restore(request)
+            .await
+            .expect("provider-bound Firecracker restore");
+        let client = GuestClient::new(
+            instance.guest_socket_path().to_path_buf(),
+            Duration::from_secs(120),
+            64 * 1024 * 1024,
+        );
+        let verification: std::result::Result<String, String> = async {
+            client
+                .wait_ready(
+                    Duration::from_secs(30),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = client
+                .exec(
+                    "set -eu; uname -r; printf 'provider-restore-ok\\n'".to_string(),
+                    None,
+                    None,
+                    30,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if result.exit_code != 0 {
+                return Err(format!(
+                    "guest workload exited {}: {}",
+                    result.exit_code,
+                    String::from_utf8_lossy(&result.stderr)
+                ));
+            }
+            String::from_utf8(result.stdout).map_err(|error| error.to_string())
+        }
+        .await;
+        let cleanup = instance.kill().await;
+
+        let output = verification.expect("guest reachability verification");
+        cleanup.expect("stop restored Firecracker");
+        println!("opened-resource guest verification:\n{output}");
+        assert!(output.contains("provider-restore-ok"));
     }
 
     #[cfg(target_os = "linux")]

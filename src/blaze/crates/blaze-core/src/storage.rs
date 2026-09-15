@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::data_plane::{DataPlaneLeaseState, DataPlaneRequestContextRecord};
 use crate::error::{BlazeError, Result};
 
 /// A storage slot allocated for one sandbox instance.
@@ -31,6 +32,116 @@ pub struct StorageSlot {
     pub rootfs_diff_path: PathBuf,
     /// Provider-owned directory containing all slot artifacts.
     pub instance_dir: PathBuf,
+}
+
+/// Durable lookup and recovery authorization for one storage slot.
+///
+/// A sandbox identifier alone is not an ownership proof: an unrelated process
+/// may already have created a directory with the same name. Implementations
+/// that support durable ownership must compare every field in this key before
+/// recovery. Allocation and publication additionally compare the complete
+/// immutable [`StorageOwnershipRequest`]. Removal additionally requires the
+/// current durable lease state and generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageOwnershipKey {
+    /// Stable provider instance that created the slot.
+    pub provider_instance_id: uuid::Uuid,
+    /// Complete request context persisted before the provider call.
+    pub context: DataPlaneRequestContextRecord,
+}
+
+/// Immutable facts recorded when a new storage owner is published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageOwnershipRequest {
+    /// Provider and request identity that may recover the slot.
+    pub key: StorageOwnershipKey,
+    /// Logical root-filesystem extent promised by the prepare request.
+    pub root_filesystem_bytes: u64,
+    /// Logical guest-memory extent promised by the prepare request.
+    pub guest_memory_bytes: u64,
+    /// Provider-independent digest of the immutable prepare source.
+    pub source_fingerprint: [u8; 32],
+    /// VM-state length when the source requires a template restore payload.
+    ///
+    /// `None` identifies an ordinary image. `Some` requires a provider-owned
+    /// `backend` directory containing the VM-state and memory payload files.
+    pub template_vmstate_bytes: Option<u64>,
+}
+
+/// Filesystem identity of the concrete directory created for one slot.
+///
+/// This value comes from metadata on the opened directory object. A pathname
+/// or caller-supplied token is not sufficient authorization for recursive
+/// cleanup because an unrelated object can later occupy the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageSlotIdentity {
+    /// Filesystem device containing the opened slot directory.
+    pub device: u64,
+    /// Inode number of the opened slot directory.
+    pub inode: u64,
+}
+
+/// Durable phase of a daemon-managed storage ownership record.
+///
+/// The record lives outside the removable slot tree. This lets recovery prove
+/// ownership before allocation starts and retain that proof until recursive
+/// removal has been synchronized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageOwnershipPhase {
+    /// Ownership was recorded before slot allocation began.
+    Preparing,
+    /// Every required slot artifact has been synchronized.
+    Ready,
+    /// Removal was authorized and may be resumed after interruption.
+    Deleting,
+}
+
+/// Durable ownership claim returned by a storage provider.
+///
+/// `storage_domain` identifies the canonical configured storage root. It keeps
+/// a copied or relocated manifest from authorizing access in a different
+/// provider domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageOwnershipClaim {
+    /// Immutable request facts published with the slot.
+    pub request: StorageOwnershipRequest,
+    /// Provider-defined digest of the canonical storage domain.
+    pub storage_domain: [u8; 32],
+    /// Concrete slot directory, once the provider has created and opened it.
+    ///
+    /// A preparing record may omit this field only while the slot name is
+    /// absent. Ready records always contain it, and cleanup verifies it before
+    /// touching the directory tree.
+    pub slot_identity: Option<StorageSlotIdentity>,
+    /// Current durable allocation or removal phase.
+    pub phase: StorageOwnershipPhase,
+    /// Last provider lease state durably accepted for this slot.
+    pub state: DataPlaneLeaseState,
+    /// Monotonic generation associated with `state`.
+    pub generation: u64,
+}
+
+/// Reconstructed storage accompanied by its verified durable owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedStorageSlot {
+    /// Runtime paths re-derived from the configured storage root.
+    pub storage: StorageSlot,
+    /// Claim read from and verified against durable storage.
+    pub ownership: StorageOwnershipClaim,
+}
+
+/// Result of a ledger-wide ownership lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageOwnershipLookup {
+    /// Neither the requested owner nor another owner with the same stable
+    /// instance or lease identity exists.
+    Absent,
+    /// The complete ownership key matches a verified durable slot record.
+    Owned(Box<OwnedStorageSlot>),
+    /// A durable record reuses the requested instance or lease identity with
+    /// a different context.
+    Conflict,
 }
 
 /// Stable handle for one provider-owned rootfs restore transaction.
@@ -146,6 +257,16 @@ impl From<BlazeError> for StorageAcquireError {
 /// Generic storage backend trait.
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
+    /// Return the stable identity of this storage ownership domain.
+    ///
+    /// Providers without daemon-managed ownership may return `None`. A
+    /// provider that returns an identity must keep it stable across process
+    /// restart and distinct for storage roots that cannot adopt each other's
+    /// resources.
+    fn ownership_domain_id(&self) -> Result<Option<uuid::Uuid>> {
+        Ok(None)
+    }
+
     /// Probe whether this provider is available in the current environment.
     async fn probe(&self) -> Result<bool>;
 
@@ -195,6 +316,92 @@ pub trait StorageProvider: Send + Sync {
     /// Implementations must derive every returned path from their configured
     /// root and must not trust persisted path strings.
     async fn reconstruct(&self, instance_id: &str) -> Result<StorageSlot>;
+
+    /// Write the durable owner before allocation can create a slot directory.
+    ///
+    /// Repeating an identical reservation is allowed. A different immutable
+    /// request for the same sandbox identifier must fail closed.
+    async fn reserve_ownership(
+        &self,
+        request: StorageOwnershipRequest,
+    ) -> Result<StorageOwnershipClaim> {
+        let _ = request;
+        Err(durable_ownership_unsupported())
+    }
+
+    /// Atomically mark a reserved owner ready after synchronizing its slot.
+    ///
+    /// The default fails closed. Providers must implement this method together
+    /// with [`Self::reconstruct_owned`] and [`Self::release_owned`] before a
+    /// caller may rely on request-scoped crash recovery.
+    async fn publish_ownership(
+        &self,
+        slot: &StorageSlot,
+        request: StorageOwnershipRequest,
+    ) -> Result<StorageOwnershipClaim> {
+        let _ = (slot, request);
+        Err(durable_ownership_unsupported())
+    }
+
+    /// Durably advance one ready slot's exact lease state and generation.
+    async fn advance_ownership(
+        &self,
+        key: StorageOwnershipKey,
+        expected_state: DataPlaneLeaseState,
+        expected_generation: u64,
+        next_state: DataPlaneLeaseState,
+        next_generation: u64,
+    ) -> Result<StorageOwnershipClaim> {
+        let _ = (
+            key,
+            expected_state,
+            expected_generation,
+            next_state,
+            next_generation,
+        );
+        Err(durable_ownership_unsupported())
+    }
+
+    /// Reconstruct ownership only when its durable recovery key matches `key`.
+    ///
+    /// Preparing and deleting records may describe an absent or partial slot so
+    /// recovery can finish allocation cleanup. `Ok(None)` is reserved for the
+    /// proven absence of both the ownership record and slot directory. Missing,
+    /// unreadable, corrupt, or mismatched metadata must be errors.
+    async fn reconstruct_owned(
+        &self,
+        key: StorageOwnershipKey,
+    ) -> Result<Option<OwnedStorageSlot>> {
+        let _ = key;
+        Err(durable_ownership_unsupported())
+    }
+
+    /// Search the complete durable ownership index for `key`.
+    ///
+    /// The default preserves compatibility for providers whose keys are
+    /// already globally unique. Filesystem providers should override this to
+    /// detect a lease identifier reused under another instance after restart.
+    async fn lookup_ownership(&self, key: StorageOwnershipKey) -> Result<StorageOwnershipLookup> {
+        Ok(match self.reconstruct_owned(key).await? {
+            Some(owned) => StorageOwnershipLookup::Owned(Box::new(owned)),
+            None => StorageOwnershipLookup::Absent,
+        })
+    }
+
+    /// Remove a slot only after verifying its recovery key and current lease.
+    ///
+    /// Returns `false` only when the provider proves that both the ownership
+    /// record and slot directory are absent. Ambiguous or mismatched state must
+    /// remain an error and retained.
+    async fn release_owned(
+        &self,
+        key: StorageOwnershipKey,
+        expected_state: DataPlaneLeaseState,
+        expected_generation: u64,
+    ) -> Result<bool> {
+        let _ = (key, expected_state, expected_generation);
+        Err(durable_ownership_unsupported())
+    }
 
     /// Synchronize already-written provider artifacts to persistent storage.
     ///
@@ -291,5 +498,11 @@ pub trait StorageProvider: Send + Sync {
 fn checkpoint_restore_unsupported() -> BlazeError {
     BlazeError::StorageError {
         msg: "storage provider does not support checkpoint restore".to_string(),
+    }
+}
+
+fn durable_ownership_unsupported() -> BlazeError {
+    BlazeError::StorageError {
+        msg: "storage provider does not support durable ownership claims".to_string(),
     }
 }

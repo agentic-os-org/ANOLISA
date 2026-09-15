@@ -18,6 +18,7 @@
 pub mod backend;
 pub mod checkpoint;
 pub mod config;
+pub mod data_plane;
 pub mod error;
 pub mod guest_protocol;
 pub mod kernel;

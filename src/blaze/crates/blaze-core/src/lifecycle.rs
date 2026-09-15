@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::backend::BackendKind;
+use crate::checkpoint::ProviderCheckpointRecord;
+use crate::data_plane::{
+    BackendProcessIdentity, BackendRuntimeRecord, DataPlaneLeaseRecord, DataPlaneLeaseState,
+    DataPlaneSuspensionRecord, PendingProviderOperationKind, PendingProviderOperationRecord,
+};
 use crate::error::{BlazeError, Result};
 use crate::policy::WorkloadClass;
 
@@ -134,6 +139,8 @@ pub enum OperationPhase {
     HibernateArtifactsSynced,
     /// The live backend has stopped and no longer owns runtime resources.
     HibernateBackendStopped,
+    /// Provider-owned active resources were released while immutable content remains.
+    HibernateDataPlaneReleased,
     /// The replacement hibernation directory is durably visible.
     HibernatePublished,
     /// Resume intent is durable and no backend has started.
@@ -144,6 +151,8 @@ pub enum OperationPhase {
     ResumeBackendStarted,
     /// The restored backend and optional guest transport are ready.
     ResumeBackendReady,
+    /// Replacement provider resources are committed for public publication.
+    ResumeDataPlaneCommitted,
 }
 
 impl OperationPhase {
@@ -164,11 +173,13 @@ impl OperationPhase {
             OperationPhase::HibernatePaused => "hibernate-paused",
             OperationPhase::HibernateArtifactsSynced => "hibernate-artifacts-synced",
             OperationPhase::HibernateBackendStopped => "hibernate-backend-stopped",
+            OperationPhase::HibernateDataPlaneReleased => "hibernate-data-plane-released",
             OperationPhase::HibernatePublished => "hibernate-published",
             OperationPhase::ResumePreparing => "resume-preparing",
             OperationPhase::ResumeBackendStarting => "resume-backend-starting",
             OperationPhase::ResumeBackendStarted => "resume-backend-started",
             OperationPhase::ResumeBackendReady => "resume-backend-ready",
+            OperationPhase::ResumeDataPlaneCommitted => "resume-data-plane-committed",
         }
     }
 
@@ -189,11 +200,13 @@ impl OperationPhase {
             | OperationPhase::HibernatePaused
             | OperationPhase::HibernateArtifactsSynced
             | OperationPhase::HibernateBackendStopped
+            | OperationPhase::HibernateDataPlaneReleased
             | OperationPhase::HibernatePublished => OperationKind::Hibernate,
             OperationPhase::ResumePreparing
             | OperationPhase::ResumeBackendStarting
             | OperationPhase::ResumeBackendStarted
-            | OperationPhase::ResumeBackendReady => OperationKind::Resume,
+            | OperationPhase::ResumeBackendReady
+            | OperationPhase::ResumeDataPlaneCommitted => OperationKind::Resume,
         }
     }
 
@@ -214,11 +227,13 @@ impl OperationPhase {
             OperationPhase::HibernatePaused => 1,
             OperationPhase::HibernateArtifactsSynced => 2,
             OperationPhase::HibernateBackendStopped => 3,
-            OperationPhase::HibernatePublished => 4,
+            OperationPhase::HibernateDataPlaneReleased => 4,
+            OperationPhase::HibernatePublished => 5,
             OperationPhase::ResumePreparing => 0,
             OperationPhase::ResumeBackendStarting => 1,
             OperationPhase::ResumeBackendStarted => 2,
             OperationPhase::ResumeBackendReady => 3,
+            OperationPhase::ResumeDataPlaneCommitted => 4,
         }
     }
 }
@@ -236,6 +251,69 @@ pub struct OperationJournal {
     /// Last durably committed operation boundary.
     #[serde(default)]
     pub phase: Option<OperationPhase>,
+    /// Provider mutation identity persisted before the provider is called.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_operation: Option<PendingProviderOperationRecord>,
+}
+
+/// Lease ledger selected by one recoverable provider transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderLeaseSlot {
+    /// The lease currently bound to the public sandbox instance.
+    Active,
+    /// A prepared replacement retained while restore or resume is in progress.
+    Replacement,
+}
+
+/// Mutating provider transition protected by the lifecycle write-ahead log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderTransitionKind {
+    /// Make prepared resources available to a backend.
+    Commit,
+    /// Acknowledge that the corresponding public transition is durable.
+    Finalize,
+    /// Release resources that were prepared but never made public.
+    Abort,
+    /// Stop backend access while retaining provider-owned resources.
+    Stop,
+    /// Release resources after backend access has stopped.
+    Release,
+    /// Reattach a surviving backend process during daemon startup.
+    Adopt,
+}
+
+/// Durable public transition supplied to provider finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPublicTransitionRecord {
+    /// Public sandbox whose state transition is being acknowledged.
+    pub instance_id: Uuid,
+    /// Stable operation identifier shared with the provider lease.
+    pub operation_id: Uuid,
+}
+
+/// Complete before-image for one provider state transition.
+///
+/// The record is stored separately from the multi-step operation journal so
+/// startup adoption can use the same crash protocol as create, restore,
+/// hibernate, resume, and destroy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProviderTransitionRecord {
+    /// Provider operation that may have crossed the process boundary.
+    pub kind: ProviderTransitionKind,
+    /// Durable lease field to which this transition applies.
+    pub lease_slot: ProviderLeaseSlot,
+    /// Exact provider binding persisted before the call.
+    pub before: DataPlaneLeaseRecord,
+    /// Only successor state that recovery may accept.
+    pub target_state: DataPlaneLeaseState,
+    /// Public acknowledgement required by finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_transition: Option<ProviderPublicTransitionRecord>,
+    /// Surviving backend identity required by startup adoption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_process: Option<BackendProcessIdentity>,
 }
 
 impl std::fmt::Display for SandboxState {
@@ -292,9 +370,33 @@ pub struct SandboxInstance {
     /// Active multi-step operation, if any.
     #[serde(default)]
     pub operation: Option<OperationJournal>,
+    /// Provider state transition persisted before the provider is called.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_transition: Option<PendingProviderTransitionRecord>,
     /// Last checkpoint whose capture completed and returned the sandbox to running.
     #[serde(default)]
     pub last_checkpoint: Option<String>,
+    /// Provider-independent ownership identity used for restart reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_plane_lease: Option<DataPlaneLeaseRecord>,
+    /// Replacement lease staged while an in-place checkpoint restore keeps
+    /// the current lease available for compensation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_data_plane_lease: Option<DataPlaneLeaseRecord>,
+    /// Provider checkpoint content removed from the public catalog but not yet
+    /// confirmed retired by its owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_provider_retirements: Vec<ProviderCheckpointRecord>,
+    /// Immutable provider content that can recreate this sandbox after hibernation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_suspension: Option<DataPlaneSuspensionRecord>,
+    /// Provider suspension content no longer referenced by the active image but
+    /// not yet confirmed retired by its owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_provider_suspension_retirements: Vec<DataPlaneSuspensionRecord>,
+    /// Live backend identity captured with the provider lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_runtime: Option<BackendRuntimeRecord>,
 }
 
 impl SandboxInstance {
@@ -319,7 +421,14 @@ impl SandboxInstance {
             policy_name,
             backend_ownership: BackendOwnership::NotStarted,
             operation: None,
+            provider_transition: None,
             last_checkpoint: None,
+            data_plane_lease: None,
+            replacement_data_plane_lease: None,
+            pending_provider_retirements: Vec::new(),
+            provider_suspension: None,
+            pending_provider_suspension_retirements: Vec::new(),
+            backend_runtime: None,
         }
     }
 
@@ -330,8 +439,304 @@ impl SandboxInstance {
             started_at: Utc::now(),
             checkpoint_id: None,
             phase: None,
+            provider_operation: None,
         });
         self.updated_at = Utc::now();
+    }
+
+    /// Attach one provider write-ahead identity to the active operation.
+    ///
+    /// Repeating the same record is idempotent. Replacing a different pending
+    /// provider call is rejected so recovery never loses the older identity.
+    pub fn begin_provider_operation(
+        &mut self,
+        pending: PendingProviderOperationRecord,
+    ) -> Result<()> {
+        let previous = self
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.provider_operation);
+        if previous.is_some_and(|previous| previous != pending) {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "a different provider operation is already pending".to_string(),
+            });
+        }
+        let operation =
+            self.operation
+                .as_mut()
+                .ok_or_else(|| BlazeError::InvalidLifecycleRecord {
+                    reason: "provider operation has no enclosing lifecycle operation".to_string(),
+                })?;
+        operation.provider_operation = Some(pending);
+        if let Err(error) = self.validate_provider_operation() {
+            if let Some(operation) = self.operation.as_mut() {
+                operation.provider_operation = previous;
+            }
+            return Err(error);
+        }
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Retain an unsafe preparation outcome without replacing its request identity.
+    ///
+    /// This state survives restart because absence under the requested identity
+    /// does not prove that an unsafe returned lease owns no resources.
+    pub fn retain_unresolved_provider_prepare(&mut self) -> Result<()> {
+        self.validate_provider_operation()?;
+        let pending = self
+            .operation
+            .as_mut()
+            .and_then(|operation| operation.provider_operation.as_mut())
+            .ok_or_else(|| BlazeError::InvalidLifecycleRecord {
+                reason: "unsafe provider preparation has no pending request".to_string(),
+            })?;
+        if !matches!(
+            pending.kind,
+            PendingProviderOperationKind::PrepareLease
+                | PendingProviderOperationKind::UnresolvedPrepareLease
+        ) {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "unsafe provider preparation is not a lease request".to_string(),
+            });
+        }
+        pending.kind = PendingProviderOperationKind::UnresolvedPrepareLease;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Clear the provider write-ahead identity after absence or ownership is durable.
+    pub fn finish_provider_operation(&mut self) {
+        if let Some(operation) = self.operation.as_mut() {
+            operation.provider_operation = None;
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Persist the exact before-image before invoking a provider transition.
+    pub fn begin_provider_transition(
+        &mut self,
+        pending: PendingProviderTransitionRecord,
+    ) -> Result<()> {
+        if self
+            .provider_transition
+            .is_some_and(|current| current != pending)
+        {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "a different provider transition is already pending".to_string(),
+            });
+        }
+        let previous = self.provider_transition;
+        self.provider_transition = Some(pending);
+        if let Err(error) = self.validate_provider_transition() {
+            self.provider_transition = previous;
+            return Err(error);
+        }
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Clear the transition journal only after its accepted result is durable.
+    pub fn finish_provider_transition(&mut self) {
+        self.provider_transition = None;
+        self.updated_at = Utc::now();
+    }
+
+    /// Validate a transition WAL against the exact durable lease ledger.
+    pub fn validate_provider_transition(&self) -> Result<()> {
+        let Some(pending) = self.provider_transition else {
+            return Ok(());
+        };
+        let before = pending.before;
+        if before.provider_instance_id.is_nil()
+            || before.request_id.is_nil()
+            || before.operation_id.is_nil()
+            || before.lease_id.is_nil()
+            || before.initial_generation == 0
+            || before.generation < before.initial_generation
+            || before.root_filesystem_bytes == 0
+            || before.guest_memory_bytes == 0
+        {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "pending provider transition contains an invalid before-image".to_string(),
+            });
+        }
+        let selected = match pending.lease_slot {
+            ProviderLeaseSlot::Active => self.data_plane_lease,
+            ProviderLeaseSlot::Replacement => self.replacement_data_plane_lease,
+        };
+        if selected != Some(before) {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "pending provider transition does not match its durable lease slot"
+                    .to_string(),
+            });
+        }
+        let legal = match pending.kind {
+            ProviderTransitionKind::Commit => {
+                before.state == DataPlaneLeaseState::Prepared
+                    && pending.target_state == DataPlaneLeaseState::Committed
+            }
+            ProviderTransitionKind::Finalize => {
+                before.state == DataPlaneLeaseState::Committed
+                    && pending.target_state == DataPlaneLeaseState::Finalized
+                    && pending.public_transition.is_some_and(|public| {
+                        public.instance_id == self.id && public.operation_id == before.operation_id
+                    })
+                    && pending.backend_process.is_none()
+            }
+            ProviderTransitionKind::Abort => {
+                matches!(
+                    before.state,
+                    DataPlaneLeaseState::Prepared | DataPlaneLeaseState::Committed
+                ) && pending.target_state == DataPlaneLeaseState::Released
+            }
+            ProviderTransitionKind::Stop => {
+                before.state == DataPlaneLeaseState::Finalized
+                    && pending.target_state == DataPlaneLeaseState::Stopped
+            }
+            ProviderTransitionKind::Release => {
+                before.state == DataPlaneLeaseState::Stopped
+                    && pending.target_state == DataPlaneLeaseState::Released
+            }
+            ProviderTransitionKind::Adopt => {
+                matches!(
+                    before.state,
+                    DataPlaneLeaseState::Committed | DataPlaneLeaseState::Finalized
+                ) && pending.target_state == DataPlaneLeaseState::Finalized
+                    && pending.public_transition.is_none()
+                    && pending
+                        .backend_process
+                        .is_some_and(|process| process.pid != 0 && process.start_time_ticks != 0)
+            }
+        };
+        let auxiliary_fields_are_empty = match pending.kind {
+            ProviderTransitionKind::Finalize | ProviderTransitionKind::Adopt => true,
+            _ => pending.public_transition.is_none() && pending.backend_process.is_none(),
+        };
+        if !legal || !auxiliary_fields_are_empty {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "pending provider transition has an invalid state or auxiliary identity"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the relationship between a provider write-ahead identity and
+    /// the enclosing public lifecycle operation.
+    pub fn validate_provider_operation(&self) -> Result<()> {
+        let Some(operation) = &self.operation else {
+            return Ok(());
+        };
+        let Some(pending) = operation.provider_operation else {
+            return Ok(());
+        };
+        let context = pending.context;
+        if pending.provider_instance_id.is_nil()
+            || context.instance_id.is_nil()
+            || context.request_id.is_nil()
+            || context.operation_id.is_nil()
+            || context.lease_id.is_nil()
+            || context.generation == 0
+            || pending.root_filesystem_bytes == 0
+            || pending.guest_memory_bytes == 0
+        {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "pending provider operation contains an empty identity or extent"
+                    .to_string(),
+            });
+        }
+        if context.instance_id != self.id {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "pending provider operation belongs to another sandbox".to_string(),
+            });
+        }
+
+        match (operation.kind, pending.kind) {
+            (
+                OperationKind::Create,
+                PendingProviderOperationKind::PrepareLease
+                | PendingProviderOperationKind::UnresolvedPrepareLease,
+            ) => {
+                if operation.checkpoint_id.is_some()
+                    || operation.phase.is_some()
+                    || self.replacement_data_plane_lease.is_some()
+                {
+                    return Err(BlazeError::InvalidLifecycleRecord {
+                        reason: "create preparation write-ahead identity conflicts with durable ownership"
+                            .to_string(),
+                    });
+                }
+                validate_fresh_prepare_generation(pending)?;
+                validate_pending_prepare_ledger(self.data_plane_lease, pending)?;
+            }
+            (
+                OperationKind::Restore | OperationKind::Resume,
+                PendingProviderOperationKind::PrepareLease
+                | PendingProviderOperationKind::UnresolvedPrepareLease,
+            ) => {
+                validate_fresh_prepare_generation(pending)?;
+                validate_pending_prepare_ledger(self.replacement_data_plane_lease, pending)?;
+            }
+            (OperationKind::Checkpoint, PendingProviderOperationKind::CheckpointCapture) => {
+                if operation.checkpoint_id.is_none() {
+                    return Err(BlazeError::InvalidLifecycleRecord {
+                        reason: "checkpoint provider capture has no public checkpoint identity"
+                            .to_string(),
+                    });
+                }
+                self.validate_pending_capture(pending)?;
+            }
+            (
+                OperationKind::Hibernate,
+                PendingProviderOperationKind::SuspensionCapture { suspension_id },
+            ) => {
+                if suspension_id.is_nil() {
+                    return Err(BlazeError::InvalidLifecycleRecord {
+                        reason: "provider suspension capture has an empty identity".to_string(),
+                    });
+                }
+                self.validate_pending_capture(pending)?;
+            }
+            _ => {
+                return Err(BlazeError::InvalidLifecycleRecord {
+                    reason: format!(
+                        "provider operation {:?} is incompatible with lifecycle operation {}",
+                        pending.kind, operation.kind
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_pending_capture(&self, pending: PendingProviderOperationRecord) -> Result<()> {
+        let Some(active) = self.data_plane_lease else {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "provider capture has no durable source lease".to_string(),
+            });
+        };
+        let context = pending.context;
+        if active.provider_instance_id != pending.provider_instance_id
+            || active.request_id != context.request_id
+            || active.operation_id != context.operation_id
+            || active.lease_id != context.lease_id
+            || active.initial_generation != context.generation
+            || active.state != DataPlaneLeaseState::Finalized
+            || !matches!(
+                active.generation,
+                generation if generation == pending.generation_before_call
+                    || pending.generation_before_call.checked_add(1) == Some(generation)
+            )
+            || active.root_filesystem_bytes != pending.root_filesystem_bytes
+            || active.guest_memory_bytes != pending.guest_memory_bytes
+        {
+            return Err(BlazeError::InvalidLifecycleRecord {
+                reason: "provider capture identity does not match its durable source lease"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Record checkpoint intent before pausing the backend.
@@ -348,6 +753,7 @@ impl SandboxInstance {
             started_at: now,
             checkpoint_id: Some(checkpoint_id),
             phase: Some(OperationPhase::CheckpointPreparing),
+            provider_operation: None,
         });
         self.updated_at = now;
         Ok(())
@@ -372,6 +778,7 @@ impl SandboxInstance {
             started_at: now,
             checkpoint_id: Some(checkpoint_id),
             phase: Some(OperationPhase::RestorePreparing),
+            provider_operation: None,
         });
         self.updated_at = now;
         Ok(())
@@ -396,6 +803,7 @@ impl SandboxInstance {
             started_at: now,
             checkpoint_id: None,
             phase: Some(OperationPhase::HibernatePreparing),
+            provider_operation: None,
         });
         self.updated_at = now;
         Ok(())
@@ -420,6 +828,7 @@ impl SandboxInstance {
             started_at: now,
             checkpoint_id: None,
             phase: Some(OperationPhase::ResumePreparing),
+            provider_operation: None,
         });
         self.updated_at = now;
         Ok(())
@@ -497,6 +906,7 @@ impl SandboxInstance {
             ),
             (SandboxState::Hibernating, SandboxState::Hibernated) => {
                 self.backend_ownership == BackendOwnership::Stopped
+                    && (self.provider_suspension.is_none() || self.data_plane_lease.is_none())
                     && self.operation_phase_reached(
                         OperationKind::Hibernate,
                         OperationPhase::HibernatePublished,
@@ -522,6 +932,12 @@ impl SandboxInstance {
                         OperationKind::Resume,
                         OperationPhase::ResumeBackendReady,
                     )
+                    && (self.provider_suspension.is_none()
+                        || (self.data_plane_lease.is_some()
+                            && self.operation_phase_reached(
+                                OperationKind::Resume,
+                                OperationPhase::ResumeDataPlaneCommitted,
+                            )))
             }
             (SandboxState::Resuming, SandboxState::Hibernated) => {
                 self.backend_ownership == BackendOwnership::Stopped
@@ -576,6 +992,8 @@ impl SandboxInstance {
     /// Persist this instance to `{state_dir}/{id}/state.json`. Atomic
     /// rename via `state.json.tmp` to avoid torn reads on daemon restart.
     pub fn persist(&self, state_dir: &Path) -> Result<()> {
+        self.validate_provider_operation()?;
+        self.validate_provider_transition()?;
         let dir = state_dir.join(self.id.to_string());
         fs::create_dir_all(&dir)?;
         let final_path = dir.join("state.json");
@@ -597,8 +1015,47 @@ impl SandboxInstance {
         let path: PathBuf = state_dir.join(id.to_string()).join("state.json");
         let raw = fs::read(&path)?;
         let instance: SandboxInstance = serde_json::from_slice(&raw)?;
+        instance.validate_provider_operation()?;
+        instance.validate_provider_transition()?;
         Ok(instance)
     }
+}
+
+fn validate_fresh_prepare_generation(pending: PendingProviderOperationRecord) -> Result<()> {
+    if pending.generation_before_call.checked_add(1) != Some(pending.context.generation) {
+        return Err(BlazeError::InvalidLifecycleRecord {
+            reason:
+                "provider preparation generation is not the successor of its write-ahead boundary"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_pending_prepare_ledger(
+    observed: Option<DataPlaneLeaseRecord>,
+    pending: PendingProviderOperationRecord,
+) -> Result<()> {
+    let Some(observed) = observed else {
+        return Ok(());
+    };
+    let context = pending.context;
+    if observed.provider_instance_id != pending.provider_instance_id
+        || observed.request_id != context.request_id
+        || observed.operation_id != context.operation_id
+        || observed.lease_id != context.lease_id
+        || observed.initial_generation != context.generation
+        || observed.generation != context.generation
+        || observed.state != DataPlaneLeaseState::Prepared
+        || observed.root_filesystem_bytes != pending.root_filesystem_bytes
+        || observed.guest_memory_bytes != pending.guest_memory_bytes
+    {
+        return Err(BlazeError::InvalidLifecycleRecord {
+            reason: "observed provider preparation does not match its write-ahead identity"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
@@ -638,6 +1095,11 @@ fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::data_plane::{
+        DataPlaneLeaseState, DataPlaneRequestContextRecord, PendingProviderOperationKind,
+        PendingProviderOperationRecord,
+    };
+
     use super::*;
 
     fn fresh() -> SandboxInstance {
@@ -647,6 +1109,23 @@ mod tests {
             "sha256:deadbeef".into(),
             "agent-rl-default".into(),
         )
+    }
+
+    fn pending_prepare(instance_id: Uuid) -> PendingProviderOperationRecord {
+        PendingProviderOperationRecord {
+            provider_instance_id: Uuid::new_v4(),
+            context: DataPlaneRequestContextRecord {
+                instance_id,
+                request_id: Uuid::new_v4(),
+                operation_id: Uuid::new_v4(),
+                lease_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            generation_before_call: 0,
+            root_filesystem_bytes: 4096,
+            guest_memory_bytes: 8192,
+            kind: PendingProviderOperationKind::PrepareLease,
+        }
     }
 
     #[test]
@@ -757,6 +1236,77 @@ mod tests {
             .expect("backend ready");
         inst.transition(SandboxState::Running)
             .expect("resume commits");
+    }
+
+    #[test]
+    fn provider_hibernation_requires_release_and_resume_requires_commit() {
+        let mut inst = fresh();
+        inst.transition(SandboxState::Creating).expect("creating");
+        inst.transition(SandboxState::Running).expect("running");
+        inst.backend_ownership = BackendOwnership::Running;
+        let provider_instance_id = Uuid::new_v4();
+        let source_lease_id = Uuid::new_v4();
+        let active = DataPlaneLeaseRecord {
+            provider_instance_id,
+            request_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            lease_id: source_lease_id,
+            initial_generation: 1,
+            generation: 3,
+            state: DataPlaneLeaseState::Finalized,
+            root_filesystem_bytes: 4096,
+            guest_memory_bytes: 8192,
+        };
+        inst.data_plane_lease = Some(active);
+        inst.begin_hibernate_operation().expect("begin hibernate");
+        inst.transition(SandboxState::Hibernating)
+            .expect("hibernate starts");
+        inst.advance_hibernate_phase(OperationPhase::HibernateArtifactsSynced)
+            .expect("artifacts durable");
+        inst.backend_ownership = BackendOwnership::Stopped;
+        inst.provider_suspension = Some(DataPlaneSuspensionRecord {
+            provider_instance_id,
+            suspension_id: Uuid::new_v4(),
+            reference_id: Uuid::new_v4(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+            source_lease_id,
+            source_generation: 4,
+            root_filesystem_bytes: 4096,
+            guest_memory_bytes: 8192,
+        });
+        inst.advance_hibernate_phase(OperationPhase::HibernatePublished)
+            .expect("publish image");
+        assert!(
+            inst.transition(SandboxState::Hibernated).is_err(),
+            "an active provider lease must not survive hibernation"
+        );
+        inst.data_plane_lease = None;
+        inst.transition(SandboxState::Hibernated)
+            .expect("released hibernation");
+        inst.finish_operation();
+
+        inst.begin_resume_operation().expect("begin resume");
+        inst.transition(SandboxState::Resuming)
+            .expect("resume starts");
+        inst.backend_ownership = BackendOwnership::Running;
+        inst.advance_resume_phase(OperationPhase::ResumeBackendReady)
+            .expect("backend ready");
+        inst.data_plane_lease = Some(DataPlaneLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            generation: 2,
+            state: DataPlaneLeaseState::Committed,
+            ..active
+        });
+        assert!(
+            inst.transition(SandboxState::Running).is_err(),
+            "provider commit boundary must be journaled"
+        );
+        inst.advance_resume_phase(OperationPhase::ResumeDataPlaneCommitted)
+            .expect("provider commit durable");
+        inst.transition(SandboxState::Running)
+            .expect("provider resume commits");
     }
 
     #[test]
@@ -908,6 +1458,111 @@ mod tests {
         );
         loaded.finish_operation();
         assert!(loaded.operation.is_none());
+    }
+
+    #[test]
+    fn create_provider_write_ahead_identity_round_trips() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Create);
+        let pending = pending_prepare(instance.id);
+        instance
+            .begin_provider_operation(pending)
+            .expect("begin provider prepare");
+        instance.persist(tmp.path()).expect("persist");
+
+        let loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
+
+        assert_eq!(
+            loaded
+                .operation
+                .and_then(|operation| operation.provider_operation),
+            Some(pending)
+        );
+    }
+
+    #[test]
+    fn unresolved_provider_prepare_preserves_its_identity_across_restart() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Create);
+        let pending = pending_prepare(instance.id);
+        instance
+            .begin_provider_operation(pending)
+            .expect("prepare intent");
+
+        instance
+            .retain_unresolved_provider_prepare()
+            .expect("retain unsafe outcome");
+        instance
+            .retain_unresolved_provider_prepare()
+            .expect("idempotent retention");
+        instance
+            .transition(SandboxState::RecoveryRequired)
+            .expect("recovery state");
+        assert!(instance.begin_provider_operation(pending).is_err());
+        instance
+            .persist(temporary.path())
+            .expect("persist unresolved outcome");
+        let loaded = SandboxInstance::load(temporary.path(), instance.id).expect("reload");
+        assert_eq!(loaded.state, SandboxState::RecoveryRequired);
+        assert_eq!(
+            loaded
+                .operation
+                .and_then(|operation| operation.provider_operation),
+            Some(PendingProviderOperationRecord {
+                kind: PendingProviderOperationKind::UnresolvedPrepareLease,
+                ..pending
+            })
+        );
+    }
+
+    #[test]
+    fn unresolved_provider_prepare_requires_an_existing_request() {
+        let mut instance = fresh();
+        assert!(instance.retain_unresolved_provider_prepare().is_err());
+        assert!(instance.operation.is_none());
+    }
+
+    #[test]
+    fn create_provider_write_ahead_identity_accepts_the_matching_observed_prepare() {
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Create);
+        let pending = pending_prepare(instance.id);
+        instance.data_plane_lease = Some(DataPlaneLeaseRecord {
+            provider_instance_id: pending.provider_instance_id,
+            request_id: pending.context.request_id,
+            operation_id: pending.context.operation_id,
+            lease_id: pending.context.lease_id,
+            initial_generation: pending.context.generation,
+            generation: pending.context.generation,
+            state: DataPlaneLeaseState::Prepared,
+            root_filesystem_bytes: pending.root_filesystem_bytes,
+            guest_memory_bytes: pending.guest_memory_bytes,
+        });
+
+        instance
+            .begin_provider_operation(pending)
+            .expect("matching observed preparation remains recoverable");
+
+        assert!(
+            instance
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.provider_operation == Some(pending))
+        );
+    }
+
+    #[test]
+    fn provider_write_ahead_identity_rejects_the_wrong_lifecycle_operation() {
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Destroy);
+
+        let error = instance
+            .begin_provider_operation(pending_prepare(instance.id))
+            .expect_err("destroy cannot own a prepare write-ahead identity");
+
+        assert!(matches!(error, BlazeError::InvalidLifecycleRecord { .. }));
     }
 
     #[test]

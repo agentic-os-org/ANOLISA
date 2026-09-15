@@ -33,6 +33,10 @@ pub enum BlazeError {
     #[error("sandbox operation already in progress: active={active}, requested={requested}")]
     OperationInProgress { active: String, requested: String },
 
+    /// Persisted lifecycle ownership fields contradict one another.
+    #[error("invalid sandbox lifecycle record: {reason}")]
+    InvalidLifecycleRecord { reason: String },
+
     #[error("hook '{hook_name}' error: {msg}")]
     HookError { hook_name: String, msg: String },
 

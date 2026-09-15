@@ -17,6 +17,9 @@ pub(crate) enum BlazeDaemonError {
     Core(#[from] blaze_core::BlazeError),
 
     #[error(transparent)]
+    DataPlane(#[from] blaze_provider_api::ProviderError),
+
+    #[error(transparent)]
     Guest(#[from] crate::guest::GuestError),
 
     #[error("io error: {0}")]
@@ -113,6 +116,10 @@ impl BlazeDaemonError {
             BlazeDaemonError::UnsupportedOperation(_) => 501,
             BlazeDaemonError::Conflict(_) => 409,
             BlazeDaemonError::ServiceUnavailable(_) => 503,
+            BlazeDaemonError::DataPlane(blaze_provider_api::ProviderError::Unsupported) => 501,
+            BlazeDaemonError::DataPlane(blaze_provider_api::ProviderError::NotFound) => 404,
+            BlazeDaemonError::DataPlane(blaze_provider_api::ProviderError::Conflict) => 409,
+            BlazeDaemonError::DataPlane(blaze_provider_api::ProviderError::Unavailable) => 503,
             BlazeDaemonError::PayloadTooLarge { .. } => 413,
             BlazeDaemonError::RecoveryRequired(_) => 500,
             BlazeDaemonError::HttpStatus { status, .. } => *status,

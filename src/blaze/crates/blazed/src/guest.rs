@@ -20,6 +20,9 @@ pub enum GuestError {
     /// JSON encoding or decoding failed.
     #[error("guest JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// The host could not obtain fresh entropy for a restored guest.
+    #[error("host entropy source failed: {0}")]
+    HostEntropy(String),
     /// Firecracker vsock or guest framing was invalid.
     #[error("guest protocol error: {0}")]
     Protocol(String),

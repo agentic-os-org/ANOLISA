@@ -717,13 +717,14 @@ impl CheckpointStore {
                     stage.directory.configured_path().display()
                 )));
             }
-            // The restore path consumes the writable-root capture
-            // unconditionally, so a checkpoint without it would publish as
-            // valid and only fail when someone tries to restore it.
+            // The legacy restore path consumes a writable-root capture. A
+            // provider checkpoint owns that content outside this catalog, so
+            // its public reference replaces the storage artifact requirement.
             let rootfs_rel = format!("{PAYLOAD_STORAGE_DIR}/{STORAGE_ROOTFS_FILE}");
-            if !opened_artifacts
-                .iter()
-                .any(|(rel_path, _)| rel_path == &rootfs_rel)
+            if input.provider_checkpoint.is_none()
+                && !opened_artifacts
+                    .iter()
+                    .any(|(rel_path, _)| rel_path == &rootfs_rel)
             {
                 return Err(invariant(format!(
                     "checkpoint stage {} has no {rootfs_rel} capture",
@@ -771,6 +772,7 @@ impl CheckpointStore {
                 created_at: Utc::now(),
                 snapshot_kind: input.snapshot_kind,
                 artifacts,
+                provider_checkpoint: input.provider_checkpoint,
             };
             validate_checkpoint_manifest(&metadata, stage.sandbox_id, &stage.id)?;
             let metadata_file = write_json_new(&stage.directory, METADATA_FILE, &metadata)?;
@@ -837,8 +839,11 @@ impl CheckpointStore {
     }
 
     /// Read and validate one committed checkpoint and all artifact hashes.
-    #[cfg(test)]
-    pub fn verify(&self, sandbox_id: Uuid, checkpoint_id: &str) -> Result<CheckpointMetadata> {
+    pub(crate) fn verify(
+        &self,
+        sandbox_id: Uuid,
+        checkpoint_id: &str,
+    ) -> Result<CheckpointMetadata> {
         let catalog = self.root()?;
         let sandbox = required_child_directory(
             &catalog,
@@ -923,6 +928,7 @@ impl CheckpointStore {
                 size_bytes,
                 is_head: head.as_deref() == Some(metadata.id.as_str()),
                 on_head_chain: on_head_chain.contains(&metadata.id),
+                provider_managed: metadata.provider_checkpoint.is_some(),
             });
         }
         checkpoints.sort_by(|left, right| {
@@ -931,6 +937,68 @@ impl CheckpointStore {
                 .then_with(|| left.id.cmp(&right.id))
         });
         Ok(checkpoints)
+    }
+
+    /// Return fully verified metadata for every committed checkpoint.
+    pub(crate) fn list_metadata(&self, sandbox_id: Uuid) -> Result<Vec<CheckpointMetadata>> {
+        let catalog_root = self.root()?;
+        let Some(sandbox) = optional_child_directory(&catalog_root, &sandbox_id.to_string())?
+        else {
+            return Ok(Vec::new());
+        };
+        let catalog = self.load_catalog(&sandbox, sandbox_id)?;
+        validate_catalog_lineages(&catalog)?;
+        self.verify_catalog_artifacts(&sandbox, sandbox_id, &catalog)?;
+        let mut metadata: Vec<_> = catalog.into_values().collect();
+        metadata.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(metadata)
+    }
+
+    /// Return fully verified checkpoints that are not reachable from HEAD.
+    ///
+    /// The sandbox operation lock must remain held until the corresponding
+    /// prune completes. The prune path revalidates the same catalog before
+    /// every removal boundary.
+    pub(crate) fn unreachable_metadata(
+        &self,
+        sandbox_id: Uuid,
+        checkpoint_history_expected: bool,
+    ) -> Result<Vec<CheckpointMetadata>> {
+        let catalog_root = self.root()?;
+        let Some(sandbox) = optional_child_directory(&catalog_root, &sandbox_id.to_string())?
+        else {
+            if checkpoint_history_expected {
+                return Err(invariant(format!(
+                    "sandbox {sandbox_id} records completed checkpoints, but its checkpoint namespace is missing"
+                )));
+            }
+            return Ok(Vec::new());
+        };
+        require_prunable_sandbox_namespace(&sandbox)?;
+        let catalog = self.load_catalog(&sandbox, sandbox_id)?;
+        validate_catalog_lineages(&catalog)?;
+        let head = self.read_head_id_from(&sandbox)?;
+        if head.is_none() && !catalog.is_empty() {
+            return Err(invariant(format!(
+                "checkpoint catalog for sandbox {sandbox_id} has committed checkpoints but no HEAD"
+            )));
+        }
+        if head.is_none() && checkpoint_history_expected {
+            return Err(invariant(format!(
+                "sandbox {sandbox_id} records completed checkpoints, but its checkpoint namespace has no HEAD"
+            )));
+        }
+        self.verify_catalog_artifacts(&sandbox, sandbox_id, &catalog)?;
+        let keep = match head.as_deref() {
+            Some(head) => lineage_from(&catalog, head)?,
+            None => HashSet::new(),
+        };
+        let mut candidates: Vec<_> = catalog
+            .into_values()
+            .filter(|metadata| !keep.contains(&metadata.id))
+            .collect();
+        candidates.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(candidates)
     }
 
     /// Atomically move HEAD to an already committed, verified checkpoint.
@@ -1640,7 +1708,9 @@ impl CheckpointStore {
                 )));
             }
             let rootfs_rel = format!("{PAYLOAD_STORAGE_DIR}/{STORAGE_ROOTFS_FILE}");
-            if !manifest_names.contains(&rootfs_rel.as_str()) {
+            if metadata.provider_checkpoint.is_none()
+                && !manifest_names.contains(&rootfs_rel.as_str())
+            {
                 return Err(invariant(format!(
                     "checkpoint {checkpoint_id} has no {rootfs_rel} capture"
                 )));
@@ -2698,6 +2768,7 @@ mod tests {
             backend: BackendKind::Mock,
             backend_version: Some("mock-v1".to_string()),
             snapshot_kind: SnapshotKind::Full,
+            provider_checkpoint: None,
         }
     }
 
@@ -2815,6 +2886,40 @@ mod tests {
         assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
         assert!(error.to_string().contains("storage/rootfs.snap"));
         assert!(store.list(sandbox_id).expect("list").is_empty());
+    }
+
+    #[test]
+    fn provider_checkpoint_replaces_the_storage_artifact_requirement() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        let public_checkpoint_id = validate_checkpoint_id(stage.id()).expect("generated id");
+        let mut artifact =
+            create_new_file(&stage.backend_dir, "vmstate.snap", "create test artifact")
+                .expect("create artifact");
+        artifact
+            .file
+            .write_all(b"vm state")
+            .expect("write artifact");
+        let mut input = commit_input(None);
+        input.provider_checkpoint = Some(blaze_core::checkpoint::ProviderCheckpointRecord {
+            provider_instance_id: Uuid::new_v4(),
+            public_checkpoint_id,
+            reference_id: Uuid::new_v4(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+            parent_reference_id: None,
+            source_lease_id: Uuid::new_v4(),
+            source_generation: 4,
+        });
+
+        let metadata = store
+            .publish(&stage, input)
+            .expect("provider-backed checkpoint publishes without a storage artifact");
+
+        assert!(metadata.provider_checkpoint.is_some());
+        assert_eq!(metadata.artifacts.len(), 1);
+        assert!(store.verify(sandbox_id, &metadata.id).is_ok());
     }
 
     #[test]
@@ -3155,6 +3260,7 @@ mod tests {
             created_at: Utc::now(),
             snapshot_kind: SnapshotKind::Full,
             artifacts,
+            provider_checkpoint: None,
         };
         fs::write(
             directory.join(METADATA_FILE),

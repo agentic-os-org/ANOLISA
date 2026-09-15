@@ -80,8 +80,8 @@ images_dir = "/var/lib/blaze/images"
 # images_dir. Default: "/var/lib/blaze/instances".
 instances_dir = "/var/lib/blaze/instances"
 
-# Storage provider backend. Currently supported: "file".
-# Additional providers may be registered at runtime.
+# Storage selector used by the standard file-backed daemon. This setting does
+# not select a build-time DataPlaneProvider. Supported values: "file", "auto".
 provider = "file"
 
 # Sparse fallback sizes used when base artifacts are unavailable.

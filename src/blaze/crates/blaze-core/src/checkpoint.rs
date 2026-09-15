@@ -15,17 +15,22 @@ use crate::backend::{BackendKind, SnapshotKind};
 
 /// Current on-disk checkpoint metadata format.
 ///
-/// Version 2 hands each payload producer an owned subtree instead of a fixed
+/// Version 3 can pair daemon-owned backend artifacts with an implementation-
+/// neutral reference to provider-owned data-plane content. Version 2 handed
+/// each filesystem payload producer an owned subtree instead of a fixed
 /// pair of named VM files, so directory-shaped payloads (for example a runsc
 /// checkpoint image) commit without changing the format again.
-pub const CHECKPOINT_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 3;
+
+/// Payload-subtree format written before provider-owned checkpoints existed.
+pub const CHECKPOINT_FORMAT_V2: u32 = 2;
 
 /// First on-disk format, kept readable so checkpoints captured before the
 /// payload-subtree split can still be restored. New captures never write it.
 pub const CHECKPOINT_FORMAT_V1: u32 = 1;
 
-/// Payload subtree owned by the backend adapter. Its internal layout is
-/// private to the backend that produced the checkpoint.
+/// Payload subtree whose layout and contents are defined by the backend adapter
+/// that produced the checkpoint.
 pub const PAYLOAD_BACKEND_DIR: &str = "backend";
 
 /// Payload subtree owned by the storage provider (rootfs capture).
@@ -49,6 +54,31 @@ pub struct CheckpointArtifact {
     pub size_bytes: u64,
     /// Lowercase SHA-256 digest.
     pub sha256: String,
+}
+
+/// Implementation-neutral durable identity of provider-owned checkpoint data.
+///
+/// The bounded identity and integrity fields let different provider resource
+/// models share the same durable Blaze checkpoint schema. The presence of this
+/// record denotes provider ownership of the complete writable-root and
+/// guest-memory image; partial provider ownership is not supported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCheckpointRecord {
+    /// Build-time provider instance that owns the content.
+    pub provider_instance_id: Uuid,
+    /// UUID portion of the public checkpoint that owns this reference.
+    pub public_checkpoint_id: Uuid,
+    /// Stable opaque reference resolved by the provider that issued it.
+    pub reference_id: Uuid,
+    /// SHA-256 identity of the provider's canonical checkpoint manifest.
+    pub content_digest: String,
+    /// Provider reference of the public parent checkpoint, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_reference_id: Option<Uuid>,
+    /// Active lease from which the content was frozen.
+    pub source_lease_id: Uuid,
+    /// Lease generation after the provider accepted this capture.
+    pub source_generation: u64,
 }
 
 /// Durable checkpoint identity and integrity manifest.
@@ -78,6 +108,9 @@ pub struct CheckpointMetadata {
     pub snapshot_kind: SnapshotKind,
     /// Integrity records for all required artifacts.
     pub artifacts: Vec<CheckpointArtifact>,
+    /// Provider-owned data-plane content paired with the backend artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_checkpoint: Option<ProviderCheckpointRecord>,
 }
 
 /// Read-only API view of a checkpoint.
@@ -95,6 +128,8 @@ pub struct CheckpointInfo {
     pub is_head: bool,
     /// Whether this checkpoint is reachable from HEAD.
     pub on_head_chain: bool,
+    /// Whether data-plane content is retained by a build-time provider.
+    pub provider_managed: bool,
 }
 
 /// Values supplied by the daemon when publishing a populated stage.
@@ -112,6 +147,8 @@ pub struct CommitCheckpoint {
     pub backend_version: Option<String>,
     /// Backend snapshot semantics.
     pub snapshot_kind: SnapshotKind,
+    /// Provider-owned data-plane content captured at the same quiesce point.
+    pub provider_checkpoint: Option<ProviderCheckpointRecord>,
 }
 
 /// Pure validation failure for a checkpoint identifier or manifest.
@@ -233,7 +270,11 @@ pub fn validate_commit_checkpoint(
         &input.image_digest,
         input.backend,
         input.backend_version.as_deref(),
-    )
+    )?;
+    if let Some(provider) = &input.provider_checkpoint {
+        validate_provider_checkpoint(checkpoint_id, provider)?;
+    }
+    Ok(())
 }
 
 /// Validate a parsed manifest against the catalog location that contained it.
@@ -248,6 +289,7 @@ pub fn validate_checkpoint_manifest(
     validate_checkpoint_id(expected_checkpoint_id)?;
     validate_checkpoint_id(&metadata.id)?;
     if metadata.format_version != CHECKPOINT_FORMAT_VERSION
+        && metadata.format_version != CHECKPOINT_FORMAT_V2
         && metadata.format_version != CHECKPOINT_FORMAT_V1
     {
         return Err(CheckpointValidationError::UnsupportedFormat {
@@ -289,7 +331,84 @@ pub fn validate_checkpoint_manifest(
         metadata.backend,
         metadata.backend_version.as_deref(),
     )?;
+    if metadata.format_version < CHECKPOINT_FORMAT_VERSION && metadata.provider_checkpoint.is_some()
+    {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: metadata.id.clone(),
+            field: "provider_checkpoint",
+            reason: "provider content requires checkpoint format 3".to_string(),
+        });
+    }
+    if let Some(provider) = &metadata.provider_checkpoint {
+        validate_provider_checkpoint(&metadata.id, provider)?;
+    }
     validate_artifact_manifest(&metadata.id, metadata.format_version, &metadata.artifacts)
+}
+
+fn validate_provider_checkpoint(
+    checkpoint_id: &str,
+    provider: &ProviderCheckpointRecord,
+) -> Result<(), CheckpointValidationError> {
+    let public_checkpoint_id = validate_checkpoint_id(checkpoint_id)?;
+    if provider.provider_instance_id.is_nil()
+        || provider.public_checkpoint_id.is_nil()
+        || provider.reference_id.is_nil()
+        || provider.source_lease_id.is_nil()
+        || provider.source_generation == 0
+    {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: checkpoint_id.to_string(),
+            field: "provider_checkpoint",
+            reason: "provider, reference, lease, and generation identities must be non-zero"
+                .to_string(),
+        });
+    }
+    if provider.public_checkpoint_id != public_checkpoint_id {
+        return Err(CheckpointValidationError::IdentityMismatch {
+            reason: format!(
+                "provider checkpoint {} does not match public checkpoint {public_checkpoint_id}",
+                provider.public_checkpoint_id
+            ),
+        });
+    }
+    if provider.parent_reference_id == Some(provider.reference_id) {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: checkpoint_id.to_string(),
+            field: "provider_checkpoint.parent_reference_id",
+            reason: "provider checkpoint cannot be its own parent".to_string(),
+        });
+    }
+    validate_sha256_identity(
+        checkpoint_id,
+        "provider_checkpoint.content_digest",
+        &provider.content_digest,
+    )
+}
+
+fn validate_sha256_identity(
+    checkpoint_id: &str,
+    field: &'static str,
+    digest: &str,
+) -> Result<(), CheckpointValidationError> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: checkpoint_id.to_string(),
+            field,
+            reason: "digest must use the sha256:<lowercase-hex> form".to_string(),
+        });
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: checkpoint_id.to_string(),
+            field,
+            reason: "digest must contain exactly 64 lowercase hexadecimal digits".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_runtime_identity(
@@ -477,6 +596,7 @@ mod tests {
                 artifact("backend/vmstate.snap", 'b'),
                 artifact("storage/rootfs.snap", 'c'),
             ],
+            provider_checkpoint: None,
         }
     }
 
@@ -639,6 +759,7 @@ mod tests {
             backend: BackendKind::Mock,
             backend_version: None,
             snapshot_kind: SnapshotKind::Full,
+            provider_checkpoint: None,
         };
         assert!(validate_commit_checkpoint(&id, &input).is_err());
     }
@@ -665,6 +786,7 @@ mod tests {
             backend: metadata.backend,
             backend_version: metadata.backend_version,
             snapshot_kind: metadata.snapshot_kind,
+            provider_checkpoint: None,
         };
         let error = validate_commit_checkpoint(&metadata.id, &input)
             .expect_err("missing version must fail");
@@ -674,6 +796,56 @@ mod tests {
                 field: "backend_version",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn provider_checkpoint_requires_bounded_complete_owner_identity() {
+        let mut metadata = metadata();
+        let public_checkpoint_id = validate_checkpoint_id(&metadata.id).expect("checkpoint id");
+        metadata.provider_checkpoint = Some(ProviderCheckpointRecord {
+            provider_instance_id: Uuid::new_v4(),
+            public_checkpoint_id,
+            reference_id: Uuid::new_v4(),
+            content_digest: format!("sha256:{}", "b".repeat(64)),
+            parent_reference_id: None,
+            source_lease_id: Uuid::new_v4(),
+            source_generation: 7,
+        });
+        validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id)
+            .expect("generic provider identity is valid");
+        let encoded = serde_json::to_value(
+            metadata
+                .provider_checkpoint
+                .as_ref()
+                .expect("provider checkpoint"),
+        )
+        .expect("serialize provider checkpoint");
+        assert!(encoded.get("root_filesystem").is_none());
+        assert!(encoded.get("guest_memory").is_none());
+
+        metadata
+            .provider_checkpoint
+            .as_mut()
+            .expect("provider checkpoint")
+            .content_digest = "not-a-canonical-sha256-digest".to_string();
+        assert!(
+            validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id).is_err()
+        );
+
+        metadata
+            .provider_checkpoint
+            .as_mut()
+            .expect("provider checkpoint")
+            .content_digest = format!("sha256:{}", "b".repeat(64));
+        metadata
+            .provider_checkpoint
+            .as_mut()
+            .expect("provider checkpoint")
+            .public_checkpoint_id = Uuid::new_v4();
+        assert!(matches!(
+            validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id),
+            Err(CheckpointValidationError::IdentityMismatch { .. })
         ));
     }
 }

@@ -17,9 +17,11 @@ use blaze_core::kernel::HookRegistry;
 use blaze_core::lifecycle::SandboxInstance;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::storage::StorageProvider;
+use blaze_provider_api::DataPlaneProvider;
 #[cfg(test)]
 use uuid::Uuid;
 
+use crate::data_plane::FileDataPlaneProvider;
 use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::sandbox::template::TemplateCatalog;
@@ -61,6 +63,34 @@ impl ServerState {
         template_catalog: TemplateCatalog,
         state_store: StateStore,
     ) -> Result<Self> {
+        let data_plane: Arc<dyn DataPlaneProvider> =
+            Arc::new(FileDataPlaneProvider::new(storage.clone()));
+        Self::build_with_store_and_provider(
+            config,
+            policy,
+            hook,
+            spawners,
+            active_backend,
+            storage,
+            data_plane,
+            template_catalog,
+            state_store,
+        )
+    }
+
+    /// Build server state with the provider selected by the binary composition root.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_store_and_provider(
+        config: DaemonConfig,
+        policy: PolicyEngine,
+        hook: HookRegistry,
+        spawners: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+        data_plane: Arc<dyn DataPlaneProvider>,
+        template_catalog: TemplateCatalog,
+        state_store: StateStore,
+    ) -> Result<Self> {
         Self::assemble(
             config,
             policy,
@@ -68,6 +98,7 @@ impl ServerState {
             spawners,
             active_backend,
             storage,
+            data_plane,
             template_catalog,
             state_store,
         )
@@ -95,6 +126,8 @@ impl ServerState {
         )?;
         let template_catalog = TemplateCatalog::open_validated(&config.template, template_roots)?;
         let state_store = StateStore::new(config.daemon.state_dir.clone());
+        let data_plane: Arc<dyn DataPlaneProvider> =
+            Arc::new(FileDataPlaneProvider::new(storage.clone()));
         Self::assemble(
             config,
             policy,
@@ -102,6 +135,43 @@ impl ServerState {
             spawners,
             active_backend,
             storage,
+            data_plane,
+            template_catalog,
+            state_store,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_provider(
+        config: DaemonConfig,
+        policy: PolicyEngine,
+        hook: HookRegistry,
+        spawners: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+        data_plane: Arc<dyn DataPlaneProvider>,
+    ) -> Result<Self> {
+        let template_roots = validate_template_roots(
+            &config.template,
+            &config.storage.images_dir,
+            &config.storage.instances_dir,
+            &config.policy.dir,
+            &config.backends,
+            &config.daemon.state_dir,
+            &config.daemon.socket,
+            None,
+        )?;
+        let template_catalog = TemplateCatalog::open_validated(&config.template, template_roots)?;
+        let state_store = StateStore::new(config.daemon.state_dir.clone());
+        Self::assemble(
+            config,
+            policy,
+            hook,
+            spawners,
+            active_backend,
+            storage,
+            data_plane,
             template_catalog,
             state_store,
         )
@@ -115,6 +185,7 @@ impl ServerState {
         spawners: SpawnerRegistry,
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
+        data_plane: Arc<dyn DataPlaneProvider>,
         template_catalog: TemplateCatalog,
         state_store: StateStore,
     ) -> Result<Self> {
@@ -124,6 +195,7 @@ impl ServerState {
             spawners,
             active_backend,
             storage: storage.clone(),
+            data_plane,
             state_store: state_store.clone(),
             rootfs_size: config.storage.rootfs_size,
             mem_size: config.storage.mem_size,

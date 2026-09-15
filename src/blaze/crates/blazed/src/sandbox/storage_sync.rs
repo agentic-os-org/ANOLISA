@@ -449,14 +449,17 @@ mod tests {
     use async_trait::async_trait;
     use blaze_core::backend::{BackendKind, SpawnRequest};
     use blaze_core::config::TemplateSection;
+    use blaze_core::data_plane::DataPlaneLeaseState;
     use blaze_core::error::{BlazeError, Result as CoreResult};
     use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxInstance, SandboxState};
     use blaze_core::policy::{BackendConfigs, WorkloadClass};
     use blaze_core::storage::{
-        AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
+        AcquireOpts, OwnedStorageSlot, PoolStatus, StorageAcquireError, StorageOwnershipClaim,
+        StorageOwnershipKey, StorageOwnershipRequest, StorageProvider, StorageSlot,
     };
     use tokio::sync::Notify;
 
+    use crate::data_plane::FileDataPlaneProvider;
     use crate::file_provider::{ArtifactSyncOpenHook, FileStorageProvider};
     use crate::sandbox::manager::{SandboxManagerInit, SandboxManagerResources};
     use crate::sandbox::template::TemplateCatalog;
@@ -613,6 +616,58 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
+        async fn reserve_ownership(
+            &self,
+            request: StorageOwnershipRequest,
+        ) -> CoreResult<StorageOwnershipClaim> {
+            self.inner.reserve_ownership(request).await
+        }
+
+        async fn publish_ownership(
+            &self,
+            slot: &StorageSlot,
+            request: StorageOwnershipRequest,
+        ) -> CoreResult<StorageOwnershipClaim> {
+            self.inner.publish_ownership(slot, request).await
+        }
+
+        async fn reconstruct_owned(
+            &self,
+            key: StorageOwnershipKey,
+        ) -> CoreResult<Option<OwnedStorageSlot>> {
+            self.inner.reconstruct_owned(key).await
+        }
+
+        async fn advance_ownership(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+            next_state: DataPlaneLeaseState,
+            next_generation: u64,
+        ) -> CoreResult<StorageOwnershipClaim> {
+            self.inner
+                .advance_ownership(
+                    key,
+                    expected_state,
+                    expected_generation,
+                    next_state,
+                    next_generation,
+                )
+                .await
+        }
+
+        async fn release_owned(
+            &self,
+            key: StorageOwnershipKey,
+            expected_state: DataPlaneLeaseState,
+            expected_generation: u64,
+        ) -> CoreResult<bool> {
+            self.inner
+                .release_owned(key, expected_state, expected_generation)
+                .await
+        }
+
         async fn sync_artifacts(&self, slot: &StorageSlot) -> CoreResult<()> {
             self.calls.lock().expect("calls").push(slot.id.clone());
             self.call_recorded.notify_waiters();
@@ -656,11 +711,13 @@ mod tests {
         .expect("test runtime template catalog");
         let mut spawners = SpawnerRegistry::new();
         spawners.insert(BackendKind::Mock, Arc::new(MockSpawner));
+        let data_plane = Arc::new(FileDataPlaneProvider::new(storage.clone()));
         let (manager, resources) = SandboxManager::new(SandboxManagerInit {
             instances: HashMap::new(),
             spawners,
             active_backend: BackendKind::Mock,
             storage,
+            data_plane,
             state_store: StateStore::new(state_dir),
             rootfs_size: 64,
             mem_size: 32,
@@ -751,7 +808,7 @@ mod tests {
                     SpawnRequest {
                         instance_id: id,
                         binary_path: PathBuf::new(),
-                        storage: slot,
+                        storage: Some(slot),
                         backend: BackendConfigs::default(),
                         vm: None,
                     },

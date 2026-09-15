@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! JSON-line client layered over Firecracker's vsock Unix socket proxy.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use blaze_core::guest_protocol::{
-    DEFAULT_GUEST_PORT, DEFAULT_MAX_RESPONSE_BYTES, GuestOp, GuestRequest, GuestResponse,
+    DEFAULT_GUEST_PORT, DEFAULT_MAX_RESPONSE_BYTES, GUEST_PROTOCOL_VERSION, GuestOp, GuestRequest,
+    GuestResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -23,6 +24,23 @@ const MAX_EXEC_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_EXEC_CWD_BYTES: usize = 4096;
 const MAX_EXEC_ENV_ENTRIES: usize = 256;
 const MAX_EXEC_ENV_BYTES: usize = 64 * 1024;
+const MAX_ADVERTISED_GUEST_OPERATIONS: usize = 256;
+const MAX_GUEST_OPERATION_NAME_BYTES: usize = 128;
+const RESEED_TIMEOUT_SECS: u32 = 10;
+const POST_RESTORE_TIMEOUT_SECS: u32 = 10;
+const PREPARE_SUSPEND_TIMEOUT_SECS: u32 = 10;
+const GUEST_CLOCK_STEP_THRESHOLD_MS: u64 = 500;
+const MAX_CONFIRMED_CLOCK_SKEW_MS: u64 = 5_000;
+
+/// Fresh host entropy injected into every restored guest.
+pub(crate) const RESTORE_ENTROPY_BYTES: usize = 256;
+
+/// Obtain one restore seed directly from the host operating system.
+pub(crate) fn fresh_restore_entropy() -> Result<[u8; RESTORE_ENTROPY_BYTES]> {
+    let mut seed = [0_u8; RESTORE_ENTROPY_BYTES];
+    getrandom::fill(&mut seed).map_err(|error| GuestError::HostEntropy(error.to_string()))?;
+    Ok(seed)
+}
 
 /// Result of one command executed by the guest agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +51,35 @@ pub struct GuestExecResult {
     pub stdout: Vec<u8>,
     /// Decoded stderr bytes.
     pub stderr: Vec<u8>,
+}
+
+/// Version and operation set advertised by one guest agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GuestCapabilities {
+    operations: BTreeSet<String>,
+}
+
+impl GuestCapabilities {
+    /// Return whether the guest advertised one host-understood operation.
+    pub(crate) fn supports(&self, operation: GuestOp) -> bool {
+        self.operations.contains(operation.as_str())
+    }
+}
+
+/// Evidence returned after synchronizing one restored guest clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClockSyncResult {
+    pub(crate) host_ts_ms: i64,
+    pub(crate) guest_ts_ms: i64,
+    pub(crate) delta_ms: i64,
+    pub(crate) clock_stepped: bool,
+}
+
+/// Evidence returned before the host is allowed to suspend a guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GuestSuspendPreparation {
+    /// Whether the guest also reclaimed caches after synchronizing writes.
+    pub(crate) caches_dropped: Option<bool>,
 }
 
 /// Client for one Firecracker guest agent.
@@ -69,6 +116,181 @@ impl GuestClient {
         let request = GuestRequest::new(Uuid::new_v4().to_string(), GuestOp::Ping);
         self.send_recv(&request).await?;
         Ok(())
+    }
+
+    /// Negotiate the guest protocol and require operations needed by a lifecycle action.
+    ///
+    /// Unknown advertised operations are retained for forward compatibility. A
+    /// protocol mismatch or missing required operation fails before the caller
+    /// begins a host-side lifecycle mutation.
+    pub(crate) async fn negotiate(&self, required: &[GuestOp]) -> Result<GuestCapabilities> {
+        let request = GuestRequest::new(Uuid::new_v4().to_string(), GuestOp::Hello);
+        let response = self.send_recv(&request).await?;
+        let protocol_version = response.proto_version.ok_or_else(|| {
+            GuestError::Protocol("successful hello response is missing proto_version".to_string())
+        })?;
+        if protocol_version != GUEST_PROTOCOL_VERSION {
+            return Err(GuestError::Protocol(format!(
+                "guest protocol version {protocol_version} is incompatible with host version \
+                 {GUEST_PROTOCOL_VERSION}"
+            )));
+        }
+        let advertised = response.ops.ok_or_else(|| {
+            GuestError::Protocol("successful hello response is missing ops".to_string())
+        })?;
+        if advertised.len() > MAX_ADVERTISED_GUEST_OPERATIONS {
+            return Err(GuestError::Protocol(format!(
+                "guest advertised {} operations; limit is {MAX_ADVERTISED_GUEST_OPERATIONS}",
+                advertised.len()
+            )));
+        }
+        let mut operations = BTreeSet::new();
+        for operation in advertised {
+            if operation.is_empty()
+                || operation.len() > MAX_GUEST_OPERATION_NAME_BYTES
+                || operation
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            {
+                return Err(GuestError::Protocol(format!(
+                    "guest advertised invalid operation name {operation:?}"
+                )));
+            }
+            operations.insert(operation);
+        }
+        let capabilities = GuestCapabilities { operations };
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|operation| !capabilities.supports(*operation))
+            .map(GuestOp::as_str)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(GuestError::Protocol(format!(
+                "guest is missing required operations: {}",
+                missing.join(", ")
+            )));
+        }
+        Ok(capabilities)
+    }
+
+    /// Inject fresh host entropy into a guest restored from captured memory.
+    pub(crate) async fn reseed_rng(&self, seed: &[u8]) -> Result<()> {
+        if seed.len() != RESTORE_ENTROPY_BYTES {
+            return Err(GuestError::InvalidArgument(format!(
+                "restore seed must contain exactly {RESTORE_ENTROPY_BYTES} bytes"
+            )));
+        }
+        let mut request = GuestRequest::new(Uuid::new_v4().to_string(), GuestOp::ReseedRng);
+        request.seed_b64 = Some(BASE64.encode(seed));
+        request.timeout = Some(RESEED_TIMEOUT_SECS);
+        let response = self
+            .send_recv_with_timeout(
+                &request,
+                operation_timeout(RESEED_TIMEOUT_SECS).min(self.io_timeout),
+            )
+            .await?;
+        let seed_bytes = response
+            .seed_bytes
+            .ok_or_else(|| {
+                GuestError::Protocol("successful reseed response is missing seed_bytes".to_string())
+            })
+            .map_err(|error| classify_after_request(GuestOp::ReseedRng, error))?;
+        let reseeded = response
+            .reseed
+            .ok_or_else(|| {
+                GuestError::Protocol("successful reseed response is missing reseed".to_string())
+            })
+            .map_err(|error| classify_after_request(GuestOp::ReseedRng, error))?;
+        if seed_bytes != seed.len() {
+            return Err(GuestError::Rejected(format!(
+                "guest consumed {seed_bytes} restore seed bytes, expected {}",
+                seed.len()
+            )));
+        }
+        if !reseeded {
+            return Err(GuestError::Rejected(
+                "guest did not confirm random generator reseed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Synchronize a restored guest's real-time clock with the host.
+    pub(crate) async fn sync_realtime_clock(&self) -> Result<ClockSyncResult> {
+        self.sync_realtime_clock_at(chrono::Utc::now().timestamp_millis())
+            .await
+    }
+
+    async fn sync_realtime_clock_at(&self, host_ts_ms: i64) -> Result<ClockSyncResult> {
+        if host_ts_ms <= 0 {
+            return Err(GuestError::InvalidArgument(
+                "host real-time timestamp must be a positive Unix millisecond value".to_string(),
+            ));
+        }
+        let mut request = GuestRequest::new(Uuid::new_v4().to_string(), GuestOp::PostRestore);
+        request.host_ts_ms = Some(host_ts_ms);
+        request.timeout = Some(POST_RESTORE_TIMEOUT_SECS);
+        let dispatched = Instant::now();
+        let response = self
+            .send_recv_with_timeout(
+                &request,
+                operation_timeout(POST_RESTORE_TIMEOUT_SECS).min(self.io_timeout),
+            )
+            .await?;
+        let guest_ts_ms = required_post_restore_field(response.ts_ms, "ts_ms")?;
+        let delta_ms = required_post_restore_field(response.delta_ms, "delta_ms")?;
+        let clock_stepped = required_post_restore_field(response.clock_stepped, "clock_stepped")?;
+        if delta_ms.unsigned_abs() > GUEST_CLOCK_STEP_THRESHOLD_MS && !clock_stepped {
+            return Err(GuestError::Rejected(format!(
+                "guest clock offset was {delta_ms}ms but the guest did not confirm correction"
+            )));
+        }
+        let elapsed_ms = i64::try_from(dispatched.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let expected_host_ts_ms = host_ts_ms.saturating_add(elapsed_ms);
+        let confirmed_skew = guest_ts_ms.abs_diff(expected_host_ts_ms);
+        if confirmed_skew > MAX_CONFIRMED_CLOCK_SKEW_MS {
+            return Err(GuestError::Rejected(format!(
+                "guest clock remains {confirmed_skew}ms from the dispatched host timestamp"
+            )));
+        }
+        Ok(ClockSyncResult {
+            host_ts_ms,
+            guest_ts_ms,
+            delta_ms,
+            clock_stepped,
+        })
+    }
+
+    /// Require the guest to synchronize writes before host-side suspension.
+    pub(crate) async fn prepare_suspend(
+        &self,
+        deadline: Duration,
+    ) -> Result<GuestSuspendPreparation> {
+        let mut request = GuestRequest::new(Uuid::new_v4().to_string(), GuestOp::PrepareHibernate);
+        request.timeout = Some(PREPARE_SUSPEND_TIMEOUT_SECS);
+        let response = self
+            .send_recv_with_timeout(
+                &request,
+                operation_timeout(PREPARE_SUSPEND_TIMEOUT_SECS)
+                    .min(self.io_timeout)
+                    .min(deadline),
+            )
+            .await?;
+        let synced = response
+            .synced
+            .ok_or_else(|| {
+                GuestError::Protocol("successful suspend preparation is missing synced".to_string())
+            })
+            .map_err(|error| classify_after_request(GuestOp::PrepareHibernate, error))?;
+        if !synced {
+            return Err(GuestError::Rejected(
+                "guest did not complete write synchronization before suspension".to_string(),
+            ));
+        }
+        Ok(GuestSuspendPreparation {
+            caches_dropped: response.drop_caches,
+        })
     }
 
     /// Poll readiness with bounded exponential backoff.
@@ -118,6 +340,35 @@ impl GuestClient {
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| "no attempt completed".to_string())
         )))
+    }
+
+    /// Wait for readiness and negotiate capabilities within one total deadline.
+    pub(crate) async fn wait_ready_and_negotiate(
+        &self,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+        required: &[GuestOp],
+    ) -> Result<GuestCapabilities> {
+        let started = Instant::now();
+        self.wait_ready(deadline, cancellation).await?;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(GuestError::Timeout(format!(
+                "guest at {} became ready without time left for capability negotiation",
+                self.vsock_path.display()
+            )));
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(GuestError::Cancelled),
+            result = tokio::time::timeout(remaining, self.negotiate(required)) => {
+                result.unwrap_or_else(|_| {
+                    Err(GuestError::Timeout(format!(
+                        "guest capability negotiation at {} exceeded the remaining {remaining:?}",
+                        self.vsock_path.display()
+                    )))
+                })
+            }
+        }
     }
 
     /// Execute one shell command in the guest.
@@ -299,16 +550,31 @@ impl GuestClient {
 }
 
 fn classify_after_request(operation: GuestOp, error: GuestError) -> GuestError {
-    if matches!(operation, GuestOp::Exec | GuestOp::Write)
-        && !matches!(
-            error,
-            GuestError::Rejected(_) | GuestError::OutcomeUnknown(_)
-        )
-    {
+    if matches!(
+        operation,
+        GuestOp::Exec
+            | GuestOp::Write
+            | GuestOp::ReseedRng
+            | GuestOp::PostRestore
+            | GuestOp::PrepareHibernate
+    ) && !matches!(
+        error,
+        GuestError::Rejected(_) | GuestError::OutcomeUnknown(_)
+    ) {
         GuestError::OutcomeUnknown(error.to_string())
     } else {
         error
     }
+}
+
+fn required_post_restore_field<T>(value: Option<T>, name: &str) -> Result<T> {
+    value
+        .ok_or_else(|| {
+            GuestError::Protocol(format!(
+                "successful post-restore response is missing {name}"
+            ))
+        })
+        .map_err(|error| classify_after_request(GuestOp::PostRestore, error))
 }
 
 fn operation_timeout(guest_timeout_secs: u32) -> Duration {
@@ -433,6 +699,7 @@ fn validate_guest_path(path: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod lifecycle_contract;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -480,7 +747,13 @@ mod tests {
 
     #[test]
     fn side_effect_errors_become_unknown_only_after_delivery_starts() {
-        for operation in [GuestOp::Exec, GuestOp::Write] {
+        for operation in [
+            GuestOp::Exec,
+            GuestOp::Write,
+            GuestOp::ReseedRng,
+            GuestOp::PostRestore,
+            GuestOp::PrepareHibernate,
+        ] {
             assert!(matches!(
                 classify_after_request(operation, GuestError::Protocol("EOF".into())),
                 GuestError::OutcomeUnknown(_)
@@ -569,6 +842,104 @@ mod tests {
             .await
             .expect("write");
         assert_eq!(requests.load(Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn suspension_and_restore_hooks_negotiate_and_validate_evidence() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("vsock.uds");
+        spawn_server(
+            socket.clone(),
+            Arc::new(|request| match request["op"].as_str().expect("op") {
+                "hello" => json!({
+                    "id": request["id"],
+                    "ok": true,
+                    "proto_version": GUEST_PROTOCOL_VERSION,
+                    "ops": ["hello", "prepare_hibernate", "reseed_rng", "post_restore"]
+                }),
+                "prepare_hibernate" => json!({
+                    "id": request["id"],
+                    "ok": true,
+                    "synced": true,
+                    "drop_caches": false
+                }),
+                "reseed_rng" => {
+                    let seed = BASE64
+                        .decode(request["seed_b64"].as_str().expect("seed"))
+                        .expect("base64 seed");
+                    json!({
+                        "id": request["id"],
+                        "ok": true,
+                        "seed_bytes": seed.len(),
+                        "reseed": true
+                    })
+                }
+                "post_restore" => json!({
+                    "id": request["id"],
+                    "ok": true,
+                    "ts_ms": request["host_ts_ms"],
+                    "delta_ms": 0,
+                    "clock_stepped": false
+                }),
+                operation => panic!("unexpected operation {operation}"),
+            }),
+        )
+        .await;
+        let client = GuestClient::new(socket, Duration::from_secs(30), 1024);
+        let capabilities = client
+            .negotiate(&[
+                GuestOp::Hello,
+                GuestOp::PrepareHibernate,
+                GuestOp::ReseedRng,
+                GuestOp::PostRestore,
+            ])
+            .await
+            .expect("negotiate");
+        assert!(capabilities.supports(GuestOp::ReseedRng));
+        assert_eq!(
+            client
+                .prepare_suspend(Duration::from_secs(30))
+                .await
+                .expect("prepare suspend")
+                .caches_dropped,
+            Some(false)
+        );
+        client
+            .reseed_rng(&[7; RESTORE_ENTROPY_BYTES])
+            .await
+            .expect("reseed");
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let clock = client
+            .sync_realtime_clock_at(timestamp)
+            .await
+            .expect("clock sync");
+        assert_eq!(clock.host_ts_ms, timestamp);
+        assert_eq!(clock.guest_ts_ms, timestamp);
+        assert_eq!(clock.delta_ms, 0);
+        assert!(!clock.clock_stepped);
+    }
+
+    #[tokio::test]
+    async fn negotiation_rejects_missing_lifecycle_hook() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("vsock.uds");
+        spawn_server(
+            socket.clone(),
+            Arc::new(|request| {
+                json!({
+                    "id": request["id"],
+                    "ok": true,
+                    "proto_version": GUEST_PROTOCOL_VERSION,
+                    "ops": ["hello", "prepare_hibernate"]
+                })
+            }),
+        )
+        .await;
+        let error = GuestClient::new(socket, Duration::from_secs(1), 1024)
+            .negotiate(&[GuestOp::PrepareHibernate, GuestOp::ReseedRng])
+            .await
+            .expect_err("missing restore hook");
+        assert!(matches!(error, GuestError::Protocol(message) if message.contains("reseed_rng")));
     }
 
     #[tokio::test]

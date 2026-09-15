@@ -68,6 +68,15 @@ record does not prove cleanup completed. Blaze does not repair or delete the
 invalid owner directory or its `state.json`; it remains available for operator
 repair.
 
+If the compiled provider exposes `DataPlaneInventory`, startup also freezes and
+validates one complete provider inventory before reconciling individual
+sandboxes. Blaze adopts only a clean `Running` record whose exact `Committed`
+or `Finalized` lease and live backend identity agree with durable state. An
+invalid provider inventory prevents the API listeners from opening; a
+per-sandbox mismatch is quarantined and retained as `RecoveryRequired`. The
+standard file provider and providers without this extension never silently
+adopt a live backend.
+
 Blaze state writes are supported only through `StateStore`. A production daemon
 keeps an exclusive advisory lock on the state root, and the startup scan holds
 the in-process ownership-map lock until publication. These locks serialize
@@ -110,6 +119,61 @@ and verify guest connectivity for the host environment.
 
 To disable the capability, set `enable_network = false` or remove the key, then
 destroy existing network-enabled sandboxes through the sandbox API.
+
+## Build-time Data-plane Extensions
+
+The standard `blazed` binary uses the built-in file data plane. Developers can
+implement `DataPlaneProvider` in an extension crate and pass that implementation
+to `BlazeDaemonBuilder` when building a custom daemon. This is a source-level
+interface: build the provider and daemon with compatible source revisions and
+one dependency lockfile. Standard configuration and tenant requests cannot
+select another provider, and provider startup failure does not fall back to
+the file data plane.
+
+From `src/blaze` on Linux, run the repository's file-backed example and inspect
+the custom daemon example's arguments:
+
+```bash
+cargo run --locked -p blaze-provider-conformance --example minimal_provider
+cargo run --locked -p blazed --example custom_provider_daemon -- --help
+cargo doc --locked -p blaze-provider-api -p blazed --no-deps
+```
+
+The first command exercises resource preparation, commit, finalization, stop,
+and release in an isolated temporary directory. Success produces exit status
+zero. The second command only displays help; it does not start a daemon.
+[`custom_provider_daemon.rs`](https://github.com/alibaba/anolisa/blob/main/src/blaze/crates/blazed/examples/custom_provider_daemon.rs)
+shows how to supply a provider and daemon configuration to the builder. Consult
+the generated API documentation for request and response requirements.
+
+`ExampleFileProvider` creates sparse files for contract exercises. It does not
+implement persistent ownership, restart reconciliation, templates, checkpoints,
+hibernation, or reusable capacity and is not a production storage provider.
+Each optional operation requires a provider that implements its corresponding
+extension and a compatible runtime backend.
+
+Provider-backed lifecycle records reside below `daemon.state_dir` in
+`.provider-state-v<contract_version>-<provider_instance_id>`. Keep the provider
+identity stable across restarts. Changing it selects a different state
+namespace; it does not migrate existing sandboxes.
+
+Before switching providers or returning to the standard binary, finish cleanup
+with the original provider. Both startup paths inspect other providers' state
+directories without importing or deleting their records. Startup fails before
+opening the API if any foreign sandbox is non-terminal, if a destroyed record
+still retains ownership, or if the state cannot be read and validated. Empty
+directories and destroyed records that prove completed cleanup do not block
+startup. Do not rename or remove state directories to bypass this check.
+
+If a provider's preparation response does not match the requested lease
+identity or initial state, Blaze retains the operation as `RecoveryRequired`.
+This applies to creation, checkpoint restore, and resume. An absent result
+when looking up the original request is not proof that the returned resources
+were released. Restart and repeated deletion therefore retain the unresolved
+record instead of reporting successful cleanup. Diagnose the provider's
+ownership records before recovery; do not delete Blaze's state directory to
+bypass this safeguard. A matching lease with invalid resource content still
+uses normal compensation when release can be confirmed.
 
 ## Guest Operations
 
@@ -167,7 +231,19 @@ all runtime owners, so an in-flight request may observe a closed connection.
 
 ## Reusable-Instance Management
 
-The four `/v1/pools` management routes also return HTTP 501. Blaze rejects
+`GET /v1/pools` and `PUT /v1/pools/{backend}/{class}/sizing` are reserved and
+always return HTTP 501. A daemon whose build-time provider implements
+`DataPlaneCapacity` additionally serves
+`GET /v1/pools/{backend}/{class}` and
+`POST /v1/pools/{backend}/{class}/drain`; the standard file provider returns
+HTTP 501 for these scoped routes. They report and drain provider-owned
+data-plane capacity only, not reusable sandboxes, backend processes, networks,
+or guest state. Drain stops new allocations, removes idle resources, and
+defers removal of resources held by active leases; it does not evict a sandbox.
+`{class}` is the canonical 64-character lowercase digest of root-filesystem and
+guest-memory requirements.
+
+Blaze rejects
 `storage.pool_size`, `storage.prefork`, and every `[pool]` section except the
 exact historical package defaults. During an upgrade, it temporarily accepts
 and ignores only those defaults from the older daemon configuration and two
@@ -222,13 +298,16 @@ the
 Blaze captures a running sandbox through
 `POST /v1/sandboxes/{id}/checkpoint`.
 
-Capture requires both the selected backend and the storage provider to
-advertise full-checkpoint support. The built-in file provider captures the
-writable root filesystem. Firecracker captures guest memory and device state
-through its own snapshot API, and the built-in mock backend supplies a complete
-development implementation. Bubblewrap and the other process backends do not
-advertise capture support in this release. An unsupported combination returns
-HTTP 501 before the sandbox is paused or its lifecycle record is changed.
+Capture always requires full snapshot support from the selected backend. The
+data-plane path is selected by the provider's declared integration mode, not by
+the mere presence of a provider lease. A provider-owned capture uses
+`DataPlaneCheckpoint` and owns the complete writable-root and guest-memory
+image. A provider that instead declares `daemon_managed_storage` uses the
+configured storage provider for the writable-root capture and does not need the
+checkpoint extension; the standard file provider follows this path.
+Firecracker and the built-in mock backend support full capture, while
+Bubblewrap and the other process backends do not. An unsupported combination
+returns HTTP 501 before the backend is quiesced or its lifecycle record changes.
 
 A Firecracker checkpoint records the exact version of the running virtual machine
 monitor, because a snapshot can only be loaded back by that same version. Keep
@@ -254,7 +333,15 @@ sandbox checkpoint HEAD, and returns the workload to execution. Guest
 operations and other lifecycle changes wait for the same operation lock while
 capture is in progress.
 
-A successful response contains the complete published manifest. The existing
+On the provider-owned extension path, Blaze still stores backend artifacts
+under `backend/`, while `DataPlaneCheckpoint` freezes the complete immutable
+writable-root and guest-memory image at the same quiescent boundary. The durable
+manifest stores an implementation-neutral reference and digest instead of
+requiring `storage/rootfs.snap`; the management response omits that ownership
+record.
+
+A successful response contains the public management view of the published
+manifest. The existing
 `checkpoint_id` and `instance_id` fields identify the same checkpoint and
 sandbox as `id` and `sandbox_id`:
 
@@ -262,7 +349,7 @@ sandbox as `id` and `sandbox_id`:
 {
   "checkpoint_id": "ckpt-11111111-1111-4111-8111-111111111111",
   "instance_id": "22222222-2222-4222-8222-222222222222",
-  "format_version": 2,
+  "format_version": 3,
   "id": "ckpt-11111111-1111-4111-8111-111111111111",
   "parent": null,
   "sandbox_id": "22222222-2222-4222-8222-222222222222",
@@ -296,13 +383,17 @@ The `artifacts` inventory lists every captured file under its slash-separated
 path relative to the checkpoint, sorted lexicographically. Its exact contents
 belong to the backend that produced the checkpoint: the example above shows
 the built-in mock backend, while a container-shaped backend may record a whole
-image directory. Checkpoints written before this format (`format_version: 1`)
-remain restorable, but new captures always publish version 2.
+image directory. Formats 1 and 2 remain readable and restorable when their
+original backend and storage requirements are available. New captures always
+publish format 3. Format 3 can retain an implementation-neutral provider
+ownership record in durable state, but the management response omits that
+record and its opaque identifier.
 
 Use `GET /v1/sandboxes/{id}/checkpoints` to list committed history. Each list
-entry contains `id`, `parent`, `created_at`, total logical `size_bytes`,
-`is_head`, and `on_head_chain`. The list is a summary and does not repeat the
-complete artifact manifest returned by capture.
+entry contains `id`, `parent`, `created_at`, the logical `size_bytes` of
+artifacts in the Blaze checkpoint directory, `is_head`, `on_head_chain`, and
+`provider_managed`. The list is a summary and does not repeat the complete
+artifact manifest returned by capture.
 
 A failure known to occur before publication removes its temporary data,
 resumes the backend, and leaves the sandbox running. If Blaze cannot prove the
@@ -379,11 +470,13 @@ POST /v1/sandboxes/{id}/rollback/{checkpoint_id}
 ```
 
 Restore requires a verified full checkpoint, an exact match for the sandbox's
-policy, image, backend, and backend version, plus explicit restore support from
-both the backend adapter and storage provider. The Firecracker adapter, the
-built-in mock adapter, and the file provider implement this contract. Other
-backend adapters return HTTP 501 before stopping the current runtime until they
-implement restore.
+policy, image, backend, and backend version, and a compatible backend restore
+adapter. A checkpoint whose data plane was captured through
+`daemon_managed_storage` requires storage restore support, even when the active
+lease came from a build-time provider. Only a checkpoint containing a
+provider-owned immutable reference requires `DataPlaneCheckpoint` from the
+matching provider instance. Unsupported combinations return HTTP 501 before
+stopping the current runtime.
 
 Restoring a Firecracker sandbox replaces its virtual machine monitor with a new
 process that loads the captured memory and device state, so the process
@@ -414,13 +507,20 @@ resources that actually exist and marks the sandbox `RecoveryRequired` so
 destruction can finish cleanup. Restore moves checkpoint HEAD but does not
 rewrite `last_checkpoint` or capture history.
 
+For a provider-managed checkpoint, Blaze prepares a fresh exclusive lease from
+the immutable reference while the old backend remains running. It records that
+replacement before the stop boundary, starts the backend from Blaze-owned
+artifacts plus the prepared provider resources, and publishes the replacement
+only after identity and readiness checks. Blaze then commits and finalizes the
+new lease and releases the predecessor; it never reuses the active lease.
+
 ## Hibernation and Resume
 
 Hibernation exists to free the host resources a running sandbox holds — the
 backend process and its memory — during a period when the sandbox is not needed,
 without discarding guest-visible state. Unlike destroy, the sandbox keeps its
-identity and storage; unlike checkpoint capture, the live backend does not keep
-running afterwards.
+identity and restorable state; unlike checkpoint capture, the live backend does
+not keep running afterwards.
 
 ```http
 POST /v1/sandboxes/{id}/hibernate
@@ -436,7 +536,15 @@ to a consistent stop is delegated to the backend's quiesce-for-capture hook,
 whose default pauses the backend; a self-freezing backend overrides that hook
 and does not need separate pause support.
 
-A successful hibernate records intent, quiesces the backend for capture, writes
+The data-plane path is again selected by the provider's declared integration
+mode. A provider-owned hibernation image requires `DataPlaneSuspend`, a
+finalized active lease, and guest protocol version 1 with `prepare_hibernate`,
+`reseed_rng`, and `post_restore`. A provider that declares
+`daemon_managed_storage` instead uses the configured storage provider and does
+not need the suspension extension.
+
+On the standard file path, a successful hibernate records intent, quiesces the
+backend for capture, writes
 the backend payload and guest memory into a private staging directory, flushes
 the retained storage slot, records each artifact's size and SHA-256 digest in a
 manifest, synchronizes the complete image, and only then publishes it and
@@ -444,11 +552,19 @@ commits `Hibernated`. The published image is resolved through the retained
 sandbox directory descriptor, so a replaced or symlinked instance directory
 cannot redirect it.
 
+On the provider-owned extension path, the provider freezes the complete
+immutable writable-root and guest-memory image at the same quiescent boundary
+as the backend snapshot. After the backend stops, Blaze stops and releases the
+active lease; the hibernated sandbox retains the immutable suspension
+reference.
+
 Resume verifies the manifest identity, the exact file set, and every artifact
 digest before it starts a replacement backend. Blaze takes ownership of that
-backend before waiting for optional guest readiness and commits `Running` only
-after a final liveness check. Corrupted or incomplete artifacts are refused
-before any backend starts.
+backend before any readiness check. The standard file path may wait for
+optional guest readiness. The provider path prepares a fresh exclusive lease
+and completes entropy injection and guest clock synchronization before
+publishing `Running`. Corrupted or incomplete artifacts are refused before any
+backend starts.
 
 Failure handling follows the same "before the stop" boundary the restore
 endpoint uses. A failure before Blaze begins stopping the backend resumes the
@@ -462,13 +578,13 @@ be confirmed returns the sandbox to `Hibernated` so the request can be retried;
 when cleanup cannot be confirmed, the replacement owner and the operation
 journal are retained through `RecoveryRequired` for explicit destroy.
 
-Two durability properties are worth planning for. The storage slot stays
-allocated for the whole hibernated period, and a successful resume keeps the
-most recent hibernation image until the next hibernate replaces it or destroy
-removes it — this trades disk space for a repeatable resume. After a daemon
-restart, a completed hibernation is retained so it can still be resumed, but an
-interrupted hibernate or resume is not completed automatically; it is retained
-as `RecoveryRequired` and waits for explicit destroy.
+The daemon-managed path retains its storage slot while hibernated. The
+provider-owned extension path retains no active lease; it preserves an
+immutable suspension reference and prepares a fresh lease for every resume.
+Both paths retain the latest resumable image or reference until the next
+hibernate replaces it or destroy removes it. After a daemon restart, a
+completed hibernation remains resumable, but an interrupted hibernate or resume
+is retained as `RecoveryRequired` and waits for explicit destroy.
 
 ## Storage Artifact Synchronization
 

@@ -4,8 +4,17 @@
 use std::sync::Arc;
 
 use blaze_core::backend::{BackendKind, SnapshotKind, SnapshotRequest};
-use blaze_core::checkpoint::{CheckpointInfo, CheckpointMetadata, CommitCheckpoint};
+use blaze_core::checkpoint::{
+    CheckpointInfo, CheckpointMetadata, CommitCheckpoint, ProviderCheckpointRecord,
+    validate_checkpoint_id,
+};
+use blaze_core::data_plane::{PendingProviderOperationKind, PendingProviderOperationRecord};
 use blaze_core::lifecycle::{OperationKind, OperationPhase, SandboxInstance, SandboxState};
+use blaze_provider_api::{
+    LeaseBinding, LeaseState, ProviderCheckpointRef, ProviderCheckpointRequest, ProviderError,
+    RetireCheckpointRequest,
+};
+use blaze_provider_conformance::{validate_checkpoint_retirement, validate_checkpoint_submission};
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
@@ -16,11 +25,11 @@ use crate::checkpoint_store::{
 use crate::error::{BlazeDaemonError, Result};
 use crate::spawner::DynBackendInstance;
 
-use super::manager::SandboxManager;
+use super::manager::{SandboxManager, checkpoint_retirement_operation_id};
 
 enum PublishBoundaryResult {
     Published {
-        instance: SandboxInstance,
+        instance: Box<SandboxInstance>,
         published: Box<PublishedCheckpoint>,
     },
     KnownUnpublished {
@@ -34,7 +43,7 @@ enum PublishBoundaryResult {
 
 enum HeadBoundaryResult {
     Updated {
-        instance: SandboxInstance,
+        instance: Box<SandboxInstance>,
         metadata: Box<CheckpointMetadata>,
     },
     KnownUnchanged {
@@ -105,9 +114,31 @@ impl SandboxManager {
         let backend = self.backend_owner(id).ok_or_else(|| {
             BlazeDaemonError::Conflict(format!("instance {id} has no backend owner"))
         })?;
-        if !backend.supports_checkpoint_capture() || !self.storage.supports_checkpoint_capture() {
+        let provider_binding = match (self.data_plane.checkpoints(), instance.data_plane_lease) {
+            (Some(provider), Some(record)) => {
+                let binding = LeaseBinding::from_record(id, record);
+                if binding.provider_instance_id != self.data_plane.descriptor().provider_instance_id
+                    || binding.state != LeaseState::Finalized
+                {
+                    return Err(BlazeDaemonError::RecoveryRequired(format!(
+                        "instance {id} has no finalized provider lease for checkpoint capture"
+                    )));
+                }
+                Some((provider, binding))
+            }
+            _ => None,
+        };
+        let storage_capture = provider_binding.is_none();
+        if storage_capture && !self.data_plane.capabilities().daemon_managed_storage {
             return Err(BlazeDaemonError::UnsupportedOperation(format!(
-                "instance {id} backend {} and configured storage do not support checkpoint capture",
+                "instance {id} data plane does not use daemon-managed storage for checkpoint capture"
+            )));
+        }
+        if !backend.supports_checkpoint_capture()
+            || (storage_capture && !self.storage.supports_checkpoint_capture())
+        {
+            return Err(BlazeDaemonError::UnsupportedOperation(format!(
+                "instance {id} backend {} and selected data plane do not support checkpoint capture",
                 backend.backend()
             )));
         }
@@ -129,7 +160,11 @@ impl SandboxManager {
             )));
         }
         self.require_live_backend(id, &backend).await?;
-        let storage = self.storage.reconstruct(&id.to_string()).await?;
+        let storage = if storage_capture {
+            Some(self.storage.reconstruct(&id.to_string()).await?)
+        } else {
+            None
+        };
 
         // Validate the current parent before pausing the backend. The operation
         // guard keeps HEAD stable until publication, while the blocking pool
@@ -149,6 +184,28 @@ impl SandboxManager {
             ))
         })?;
         let parent = read_head?;
+        let parent_provider = if provider_binding.is_some()
+            && let Some(parent_id) = parent.as_deref()
+        {
+            let checkpoints = self.checkpoints.clone();
+            let parent_id = parent_id.to_string();
+            crate::failpoint::spawn_blocking(move || {
+                checkpoints
+                    .verify(id, &parent_id)
+                    .map_err(checkpoint_store_error)
+            })
+            .await
+            .map_err(|error| {
+                BlazeDaemonError::Internal(format!(
+                    "checkpoint parent verification blocking task: {error}"
+                ))
+            })??
+            .provider_checkpoint
+            .as_ref()
+            .map(ProviderCheckpointRef::from_record)
+        } else {
+            None
+        };
 
         let begin_store = self.checkpoints.clone();
         let begin = crate::failpoint::spawn_blocking(move || {
@@ -228,7 +285,7 @@ impl SandboxManager {
         };
         if let Err(error) = paused {
             return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error.into())
+                .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error.into())
                 .await;
         }
 
@@ -237,14 +294,14 @@ impl SandboxManager {
             .and_then(|_| instance.advance_checkpoint_phase(OperationPhase::CheckpointPaused))
         {
             return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error.into())
+                .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error.into())
                 .await;
         }
         if let Err(error) = crate::failpoint::state("checkpoint-paused-state")
             .and_then(|_| self.persist_and_retain(instance.clone()))
         {
             return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error)
+                .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error)
                 .await;
         }
         crate::failpoint::pause("checkpoint-after-pause").await;
@@ -259,35 +316,180 @@ impl SandboxManager {
         };
         if let Err(error) = snapshot_result {
             return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error.into())
+                .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error.into())
                 .await;
         }
 
-        let flushed = match crate::failpoint::storage("checkpoint-storage-flush") {
-            Ok(()) => self.storage.sync_artifacts(&storage).await,
-            Err(error) => Err(error),
-        };
-        if let Err(error) = flushed {
-            return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error.into())
-                .await;
-        }
-
-        let captured = match crate::failpoint::storage("checkpoint-rootfs-capture") {
-            Ok(()) => {
-                self.storage
-                    .capture_checkpoint(&storage, &rootfs_path)
-                    .await
+        let provider_checkpoint = if let Some((provider, binding)) = provider_binding {
+            let checkpoint_uuid = validate_checkpoint_id(&checkpoint_id).map_err(|error| {
+                BlazeDaemonError::Internal(format!(
+                    "generated checkpoint identity is invalid: {error}"
+                ))
+            })?;
+            let active_record = instance.data_plane_lease.ok_or_else(|| {
+                BlazeDaemonError::RecoveryRequired(format!(
+                    "instance {id} lost its provider lease before checkpoint capture"
+                ))
+            })?;
+            instance.begin_provider_operation(PendingProviderOperationRecord {
+                provider_instance_id: binding.provider_instance_id,
+                context: binding.context.into(),
+                generation_before_call: binding.generation,
+                root_filesystem_bytes: active_record.root_filesystem_bytes,
+                guest_memory_bytes: active_record.guest_memory_bytes,
+                kind: PendingProviderOperationKind::CheckpointCapture,
+            })?;
+            if let Err(error) = crate::failpoint::state("checkpoint-provider-capture-intent-state")
+                .and_then(|_| self.persist_and_retain(instance.clone()))
+            {
+                return self
+                    .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error)
+                    .await;
             }
-            Err(error) => Err(error),
+            let request = ProviderCheckpointRequest {
+                binding,
+                checkpoint_id: checkpoint_uuid,
+                parent: parent_provider.clone(),
+            };
+            let submission = match provider.checkpoint(request).await {
+                Ok(submission) => submission,
+                Err(error) => {
+                    if let Err(recovery_error) =
+                        self.settle_pending_provider_capture(&mut instance).await
+                    {
+                        let stage_cleanup = self.abort_checkpoint_stage(stage).await.err();
+                        let resume = self.resume_backend(&backend).await.err();
+                        let recovery = self.mark_instance_recovery(instance).err();
+                        return Err(BlazeDaemonError::RecoveryRequired(format!(
+                            "provider checkpoint failed with {error}; recovery did not converge: {recovery_error}{}{}{}",
+                            stage_cleanup
+                                .map(|error| format!("; stage cleanup failed: {error}"))
+                                .unwrap_or_default(),
+                            resume
+                                .map(|error| format!("; backend resume failed: {error}"))
+                                .unwrap_or_default(),
+                            recovery
+                                .map(|error| format!(
+                                    "; recovery state persistence failed: {error}"
+                                ))
+                                .unwrap_or_default()
+                        )));
+                    }
+                    return self
+                        .finish_failed_unpublished_checkpoint(
+                            id,
+                            &backend,
+                            stage,
+                            None,
+                            error.into(),
+                        )
+                        .await;
+                }
+            };
+            if validate_checkpoint_submission(
+                binding,
+                checkpoint_uuid,
+                parent_provider.as_ref(),
+                &submission,
+            )
+            .is_err()
+            {
+                if let Err(recovery_error) =
+                    self.settle_pending_provider_capture(&mut instance).await
+                {
+                    let stage_cleanup = self.abort_checkpoint_stage(stage).await.err();
+                    let resume = self.resume_backend(&backend).await.err();
+                    let recovery = self.mark_instance_recovery(instance).err();
+                    return Err(BlazeDaemonError::RecoveryRequired(format!(
+                        "provider returned an invalid checkpoint capture; recovery did not converge: {recovery_error}{}{}{}",
+                        stage_cleanup
+                            .map(|error| format!("; stage cleanup failed: {error}"))
+                            .unwrap_or_default(),
+                        resume
+                            .map(|error| format!("; backend resume failed: {error}"))
+                            .unwrap_or_default(),
+                        recovery
+                            .map(|error| format!("; recovery state persistence failed: {error}"))
+                            .unwrap_or_default()
+                    )));
+                }
+                return self
+                    .finish_failed_unpublished_checkpoint(
+                        id,
+                        &backend,
+                        stage,
+                        None,
+                        BlazeDaemonError::DataPlane(ProviderError::InvalidResponse),
+                    )
+                    .await;
+            }
+            let checkpoint = submission.checkpoint;
+            let mut accepted = instance.clone();
+            accepted.data_plane_lease = Some(submission.binding.to_record(
+                active_record.root_filesystem_bytes,
+                active_record.guest_memory_bytes,
+            ));
+            accepted
+                .pending_provider_retirements
+                .push(checkpoint.to_record());
+            accepted.finish_provider_operation();
+            if let Err(error) = self.persist_and_retain(accepted.clone()) {
+                let stage_cleanup = self.abort_checkpoint_stage(stage).await.err();
+                let resume = self.resume_backend(&backend).await.err();
+                let recovery = self.mark_instance_recovery(instance).err();
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "provider checkpoint ownership handoff could not be persisted: {error}{}{}{}",
+                    stage_cleanup
+                        .map(|error| format!("; stage cleanup failed: {error}"))
+                        .unwrap_or_default(),
+                    resume
+                        .map(|error| format!("; backend resume failed: {error}"))
+                        .unwrap_or_default(),
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+            if let Err(error) = self.retain_data_plane_lease(id, submission.binding) {
+                let recovery = self.mark_instance_recovery(accepted).err();
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "provider checkpoint ownership cache could not be updated: {error}{}",
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+            instance = accepted;
+            Some(checkpoint)
+        } else {
+            let storage = storage
+                .as_ref()
+                .expect("daemon-managed storage was selected");
+            let flushed = match crate::failpoint::storage("checkpoint-storage-flush") {
+                Ok(()) => self.storage.sync_artifacts(storage).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = flushed {
+                return self
+                    .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error.into())
+                    .await;
+            }
+
+            let captured = match crate::failpoint::storage("checkpoint-rootfs-capture") {
+                Ok(()) => self.storage.capture_checkpoint(storage, &rootfs_path).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = captured {
+                return self
+                    .finish_failed_unpublished_checkpoint(id, &backend, stage, None, error.into())
+                    .await;
+            }
+            None
         };
-        if let Err(error) = captured {
-            return self
-                .finish_failed_unpublished_checkpoint(id, &backend, stage, error.into())
-                .await;
-        }
 
         let publish_manager = Arc::clone(&self);
+        let publish_provider_checkpoint = provider_checkpoint.clone();
+        let compensation_provider_checkpoint = provider_checkpoint.clone();
         let publish = crate::failpoint::spawn_blocking(move || {
             if let Err(error) = crate::failpoint::storage("checkpoint-publish") {
                 return PublishBoundaryResult::KnownUnpublished {
@@ -304,6 +506,9 @@ impl SandboxManager {
                     backend: instance.backend,
                     backend_version,
                     snapshot_kind: SnapshotKind::Full,
+                    provider_checkpoint: publish_provider_checkpoint
+                        .as_ref()
+                        .map(ProviderCheckpointRef::to_record),
                 },
             );
             let published = match published {
@@ -326,6 +531,11 @@ impl SandboxManager {
             };
 
             crate::failpoint::pause_blocking("checkpoint-after-store-publish-before-state");
+            if let Some(checkpoint) = &publish_provider_checkpoint {
+                instance
+                    .pending_provider_retirements
+                    .retain(|record| record != &checkpoint.to_record());
+            }
             if let Err(error) =
                 instance.advance_checkpoint_phase(OperationPhase::CheckpointPublished)
             {
@@ -349,7 +559,7 @@ impl SandboxManager {
                 return PublishBoundaryResult::RecoveryRequired { error };
             }
             PublishBoundaryResult::Published {
-                instance,
+                instance: Box::new(instance),
                 published: Box::new(published),
             }
         })
@@ -358,10 +568,16 @@ impl SandboxManager {
             Ok(PublishBoundaryResult::Published {
                 instance,
                 published,
-            }) => (instance, published),
+            }) => (*instance, published),
             Ok(PublishBoundaryResult::KnownUnpublished { stage, error }) => {
                 return self
-                    .finish_failed_unpublished_checkpoint(id, &backend, stage, error)
+                    .finish_failed_unpublished_checkpoint(
+                        id,
+                        &backend,
+                        stage,
+                        compensation_provider_checkpoint,
+                        error,
+                    )
                     .await;
             }
             Ok(PublishBoundaryResult::RecoveryRequired { error }) => {
@@ -428,13 +644,13 @@ impl SandboxManager {
                 return HeadBoundaryResult::RecoveryRequired { error };
             }
             HeadBoundaryResult::Updated {
-                instance,
+                instance: Box::new(instance),
                 metadata: Box::new(metadata),
             }
         })
         .await;
         let (mut instance, metadata) = match head {
-            Ok(HeadBoundaryResult::Updated { instance, metadata }) => (instance, *metadata),
+            Ok(HeadBoundaryResult::Updated { instance, metadata }) => (*instance, *metadata),
             Ok(HeadBoundaryResult::KnownUnchanged { error }) => {
                 return self
                     .finish_failed_published_checkpoint(id, &backend, error)
@@ -572,7 +788,57 @@ impl SandboxManager {
 
         let checkpoint_history_expected = instance.last_checkpoint.is_some();
         instance.begin_operation(OperationKind::Prune);
-        self.persist_and_retain(instance)?;
+        self.persist_and_retain(instance.clone())?;
+
+        let planning_store = self.checkpoints.clone();
+        let planning_result = crate::failpoint::spawn_blocking(move || {
+            planning_store.unreachable_metadata(id, checkpoint_history_expected)
+        })
+        .await;
+        let planned = match planning_result {
+            Ok(Ok(planned)) => planned,
+            Ok(Err(error)) => {
+                let original = checkpoint_store_error(error);
+                self.finish_prune_operation(id, Some(&original))?;
+                return Err(original);
+            }
+            Err(error) => {
+                let original = BlazeDaemonError::Internal(format!(
+                    "checkpoint prune planning task stopped unexpectedly: {error}"
+                ));
+                self.finish_prune_operation(id, Some(&original))?;
+                return Err(original);
+            }
+        };
+        let planned_provider: Vec<ProviderCheckpointRecord> = planned
+            .into_iter()
+            .filter_map(|metadata| metadata.provider_checkpoint)
+            .collect();
+        if !planned_provider.is_empty() && self.data_plane.checkpoints().is_none() {
+            instance.finish_operation();
+            self.persist_and_retain(instance)?;
+            return Err(BlazeDaemonError::UnsupportedOperation(
+                "checkpoint history requires provider retirement support".to_string(),
+            ));
+        }
+        for record in &planned_provider {
+            if record.provider_instance_id != self.data_plane.descriptor().provider_instance_id {
+                self.mark_instance_recovery(instance)?;
+                return Err(BlazeDaemonError::RecoveryRequired(
+                    "checkpoint prune encountered content owned by another provider".to_string(),
+                ));
+            }
+            if !instance
+                .pending_provider_retirements
+                .iter()
+                .any(|pending| pending == record)
+            {
+                instance.pending_provider_retirements.push(record.clone());
+            }
+        }
+        if !planned_provider.is_empty() {
+            self.persist_and_retain(instance.clone())?;
+        }
 
         let checkpoints = self.checkpoints.clone();
         let store_result = crate::failpoint::spawn_blocking(move || {
@@ -595,11 +861,20 @@ impl SandboxManager {
 
         match outcome {
             Ok(PruneOutcome::Complete { removed }) => {
+                self.retire_pruned_provider_checkpoints(id, &planned_provider, &removed)
+                    .await?;
                 self.finish_prune_operation(id, None)?;
                 Ok(removed)
             }
             Err(error) => {
                 let original = checkpoint_store_error(error);
+                if !planned_provider.is_empty() {
+                    let mut retained = self.get(id)?;
+                    retained.pending_provider_retirements.retain(|pending| {
+                        !planned_provider.iter().any(|planned| planned == pending)
+                    });
+                    self.persist_and_retain(retained)?;
+                }
                 self.finish_prune_operation(id, Some(&original))?;
                 Err(original)
             }
@@ -622,6 +897,49 @@ impl SandboxManager {
                 )))
             }
         }
+    }
+
+    async fn retire_pruned_provider_checkpoints(
+        &self,
+        id: Uuid,
+        planned: &[ProviderCheckpointRecord],
+        removed: &[String],
+    ) -> Result<()> {
+        let removed_ids: std::collections::HashSet<Uuid> = removed
+            .iter()
+            .map(|checkpoint_id| {
+                validate_checkpoint_id(checkpoint_id).map_err(|error| {
+                    BlazeDaemonError::RecoveryRequired(format!(
+                        "prune returned an invalid checkpoint identity: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let planned_ids: std::collections::HashSet<Uuid> = planned
+            .iter()
+            .map(|record| record.public_checkpoint_id)
+            .collect();
+        if !planned_ids.is_subset(&removed_ids) {
+            self.mark_recovery(id)?;
+            return Err(BlazeDaemonError::RecoveryRequired(
+                "checkpoint prune did not remove every planned provider reference".to_string(),
+            ));
+        }
+        for record in planned {
+            let checkpoint = ProviderCheckpointRef::from_record(record);
+            if let Err(error) = self.retire_provider_checkpoint(&checkpoint).await {
+                self.mark_recovery(id)?;
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "checkpoint left provider content pending retirement: {error}"
+                )));
+            }
+            let mut instance = self.get(id)?;
+            instance
+                .pending_provider_retirements
+                .retain(|pending| pending != record);
+            self.persist_and_retain(instance)?;
+        }
+        Ok(())
     }
 
     fn finish_prune_operation(&self, id: Uuid, original: Option<&BlazeDaemonError>) -> Result<()> {
@@ -657,8 +975,33 @@ impl SandboxManager {
         id: Uuid,
         backend: &DynBackendInstance,
         stage: CheckpointStage,
+        provider_checkpoint: Option<ProviderCheckpointRef>,
         original: BlazeDaemonError,
     ) -> Result<T> {
+        if let Some(checkpoint) = provider_checkpoint {
+            if let Err(retirement) = self.retire_provider_checkpoint(&checkpoint).await {
+                let stage_cleanup = self.abort_checkpoint_stage(stage).await.err();
+                let resume = self.resume_backend(backend).await.err();
+                let recovery = self.mark_recovery(id).err();
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "{original}; provider checkpoint retirement failed: {retirement}{}{}{}",
+                    stage_cleanup
+                        .map(|error| format!("; stage cleanup failed: {error}"))
+                        .unwrap_or_default(),
+                    resume
+                        .map(|error| format!("; backend resume failed: {error}"))
+                        .unwrap_or_default(),
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+            let mut instance = self.get(id)?;
+            instance
+                .pending_provider_retirements
+                .retain(|record| record != &checkpoint.to_record());
+            self.persist_and_retain(instance)?;
+        }
         let compensation = self
             .resume_and_clear_checkpoint(id, backend, Some(stage))
             .await;
@@ -668,6 +1011,73 @@ impl SandboxManager {
                 "{original}; checkpoint compensation failed: {compensation}"
             ))),
         }
+    }
+
+    pub(super) async fn retire_provider_checkpoint(
+        &self,
+        checkpoint: &ProviderCheckpointRef,
+    ) -> Result<()> {
+        if checkpoint.provider_instance_id != self.data_plane.descriptor().provider_instance_id {
+            return Err(BlazeDaemonError::RecoveryRequired(
+                "provider checkpoint belongs to another provider instance".to_string(),
+            ));
+        }
+        let result = self
+            .retire_provider_checkpoint_identity(
+                checkpoint.provider_instance_id,
+                checkpoint.public_checkpoint_id,
+                Some(checkpoint.reference_id),
+            )
+            .await?;
+        validate_checkpoint_retirement(checkpoint, result).map_err(|_| {
+            BlazeDaemonError::RecoveryRequired(
+                "provider checkpoint retirement returned an invalid identity".to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    pub(super) async fn retire_provider_checkpoint_identity(
+        &self,
+        provider_instance_id: Uuid,
+        public_checkpoint_id: Uuid,
+        reference_id: Option<Uuid>,
+    ) -> Result<blaze_provider_api::RetireCheckpointResult> {
+        let provider = self.data_plane.checkpoints().ok_or_else(|| {
+            BlazeDaemonError::RecoveryRequired(
+                "provider checkpoint retirement extension is unavailable".to_string(),
+            )
+        })?;
+        if provider_instance_id != self.data_plane.descriptor().provider_instance_id
+            || public_checkpoint_id.is_nil()
+            || reference_id.is_some_and(|reference_id| reference_id.is_nil())
+        {
+            return Err(BlazeDaemonError::RecoveryRequired(
+                "provider checkpoint retirement identity is invalid".to_string(),
+            ));
+        }
+        let request = RetireCheckpointRequest {
+            provider_instance_id,
+            public_checkpoint_id,
+            reference_id,
+            operation_id: checkpoint_retirement_operation_id(
+                provider_instance_id,
+                public_checkpoint_id,
+                reference_id,
+            ),
+        };
+        let result = match provider.retire_checkpoint(request.clone()).await {
+            Err(ProviderError::OutcomeUnknown) => provider.retire_checkpoint(request).await,
+            result => result,
+        }?;
+        if result.public_checkpoint_id != public_checkpoint_id
+            || result.reference_id != reference_id
+        {
+            return Err(BlazeDaemonError::RecoveryRequired(
+                "provider checkpoint retirement returned another identity".to_string(),
+            ));
+        }
+        Ok(result)
     }
 
     async fn finish_failed_published_checkpoint<T>(

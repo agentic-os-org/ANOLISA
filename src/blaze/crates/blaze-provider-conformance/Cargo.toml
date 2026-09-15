@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "blaze-provider-conformance"
+description = "Reusable conformance checks and examples for Blaze data-plane extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+blaze-core = { workspace = true }
+blaze-provider-api = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
