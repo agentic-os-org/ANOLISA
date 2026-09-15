@@ -62,6 +62,43 @@ tokenless stats disable
 
 An environment override still wins after these commands. For example, `TOKENLESS_STATS_ENABLED=0 tokenless stats enable` saves `true` to the file, but recording remains disabled for processes that keep the environment override.
 
+## Optional Git Diff context cropping
+
+Git Diff cropping is disabled by default. Set `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`
+in the environment inherited by Tokenless or its host agent to enable it; unset the
+variable or set it to `0` to disable it. `1`, `true`, and `yes` enable it
+(case-insensitively). This option is independent of the general compression switch
+and is not a `config.json` field. With cropping enabled,
+`TOKENLESS_COMPRESSION_ENABLED=0` measures candidates but returns the original.
+
+Rust callers use `RuntimeConfig.diff_compression_enabled`; Python callers use
+`TokenlessConfig(diff_compression_enabled=True)` or the native `TokenlessRuntime`
+keyword of the same name. SDK options default to false and are explicit; this CLI
+environment variable does not override them.
+
+The compressor handles complete ordinary Git diffs received as successful command
+output. It requires a text replacement slot, an available Stash, and a supported
+recovery method. All additions, deletions, metadata, and up to two available context
+lines around changes are retained. Within each hunk, it may retain extra context
+when splitting would add more header overhead. It only adopts output when both
+characters decrease and the heuristic token estimate saves at least 16 tokens,
+including the notice and recovery instruction. This estimate uses no runtime
+tokenizer and does not guarantee a reduction for every model tokenizer.
+
+The emitted operation is `diff_reduction` and recoverability is `retrievable`, not
+`lossless`: unmodified context is omitted from the visible output. Follow the
+emitted shell or tool instruction to retrieve the received original while it is in
+Stash. Recovery requires an additional tool call. File reads and results already
+marked as RTK-optimized bypass this compressor; enabling it does not change RTK
+command rewriting. Unsupported or incomplete diffs pass through. Special file
+sections such as renames and binary summaries retain their received bytes; encoded
+binary patches pass through in full. Tokenless does not open host-persisted output
+files to complete truncated diffs or change the host's truncation limit.
+
+Local compression and original recovery have been verified on finite samples.
+Stable whole-Agent token savings have not been established, so this feature remains
+opt-in.
+
 ## Environment variables
 
 ### Common user variables

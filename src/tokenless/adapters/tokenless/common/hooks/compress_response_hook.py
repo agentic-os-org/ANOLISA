@@ -79,7 +79,8 @@ from hook_utils import (
 # Shell tool envelopes carry the log in one dominant text field. Unwrapping
 # is worth a rebuilt envelope only when that field is large enough for the
 # build/log engine to bite (its own gates start at 30 lines / 200 chars;
-# 2000 chars keeps the rewrap machinery out of trivial outputs).
+# 2000 chars keeps the rewrap machinery out of trivial outputs). Bash Git
+# diffs also need the text slot below this gate; Core decides their benefit.
 _SHELL_TEXT_FIELDS = ("stdout", "stderr")
 _SHELL_UNWRAP_MIN_CHARS = 2_000
 
@@ -147,7 +148,10 @@ def _shell_text_field(tool_name: str, envelope) -> tuple | None:
         value = envelope.get(name)
         if (
             isinstance(value, str)
-            and len(value) >= _SHELL_UNWRAP_MIN_CHARS
+            and (
+                len(value) >= _SHELL_UNWRAP_MIN_CHARS
+                or (tool_name == "Bash" and name == "stdout" and value.startswith("diff --git "))
+            )
             and (best is None or len(value) > len(best[1]))
         ):
             best = (name, value)

@@ -501,6 +501,8 @@ pub enum AppliedOperation {
     TabularRowReduction,
     /// Consecutive search records share a full path without removing source text.
     SearchPathSharing,
+    /// Unmodified Git diff context was reduced with the original available in Stash.
+    DiffReduction,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -522,6 +524,7 @@ impl AppliedOperation {
             Self::TabularCompaction => "tabular_compaction",
             Self::TabularRowReduction => "tabular_row_reduction",
             Self::SearchPathSharing => "search_path_sharing",
+            Self::DiffReduction => "diff_reduction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

@@ -1908,6 +1908,182 @@ fn build_log_request(content: &str, status: &str, session_id: &str) -> String {
 }
 
 #[test]
+fn diff_opt_in_round_trips_git_patch_and_original() {
+    for (ending, quote_path) in [
+        ("\n", "true"),
+        ("\n", "false"),
+        ("\r\n", "true"),
+        ("\r\n", "false"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "core.autocrlf", "false"]);
+        git(&["config", "core.quotePath", quote_path]);
+        let mut paths: Vec<std::path::PathBuf> = [
+            "f",
+            "user settings.py",
+            "trailing ",
+            "dir b/name",
+            "中文.py",
+            "quote\".py",
+            "slash\\.py",
+            "tab\t.py",
+            "newline\n.py",
+            "controls\x07\x08\x0b\x0c\r.py",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        // With quotePath=false these bytes are emitted raw, outside the
+        // text input accepted by the compression API.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            if quote_path == "true" {
+                paths.push(std::ffi::OsString::from_vec(b"non-utf8-\xff.py".to_vec()).into());
+            }
+        }
+        let original: String = (0..24)
+            .map(|i| format!("line {i:02}: {}{ending}", "unchanged context ".repeat(4)))
+            .collect();
+        let modified = original.replace("line 12:", "changed:");
+        for path in &paths {
+            let path = temp.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &original).unwrap();
+        }
+        git(&["add", "."]);
+        let base = git(&["write-tree"]);
+        for path in &paths {
+            std::fs::write(temp.path().join(path), &modified).unwrap();
+        }
+        let diff = git(&[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-U10",
+        ]);
+        git(&["add", "."]);
+        let target = git(&["write-tree"]);
+        git(&["read-tree", base.trim()]);
+        for path in &paths {
+            std::fs::write(temp.path().join(path), &original).unwrap();
+        }
+        git(&["update-index", "--refresh"]);
+
+        let state = temp.path().join("data");
+        for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+            let mut command = tokenless_bin();
+            command
+                .env("TOKENLESS_DATA_DIR", &state)
+                .env_remove("TOKENLESS_STATS_DB")
+                .env_remove("TOKENLESS_STASH_DB")
+                .env_remove("TOKENLESS_DIFF_COMPRESSION_ENABLED")
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0");
+            if let Some(value) = enabled {
+                command.env("TOKENLESS_DIFF_COMPRESSION_ENABLED", value);
+            }
+            let output = spawn_with_stdin(
+                &mut command,
+                &["compress"],
+                &build_log_request(&diff, "success", "diff-integration"),
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let result = &response["result"];
+            if enabled.is_none() || enabled == Some("0") {
+                assert_eq!(result["disposition"], "passthrough");
+                assert_eq!(result["output"], diff);
+                assert_eq!(result["stash_keys"], serde_json::json!([]));
+                continue;
+            }
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["diff_reduction"])
+            );
+            assert_eq!(result["recoverability"], "retrievable");
+            let compressed = result["output"].as_str().unwrap();
+            assert!(compressed.len() < diff.len());
+            let hash = result["stash_keys"][0].as_str().unwrap();
+            let retrieved = tokenless_bin()
+                .env("TOKENLESS_DATA_DIR", &state)
+                .env_remove("TOKENLESS_STASH_DB")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["retrieve", hash])
+                .output()
+                .unwrap();
+            assert!(retrieved.status.success());
+            assert_eq!(retrieved.stdout, diff.as_bytes());
+
+            let patch = &compressed[compressed.find("diff --git ").unwrap()..];
+            let patch = patch.strip_suffix("\n[End diff]").unwrap();
+            let original_sections: Vec<_> = diff.split("diff --git ").skip(1).collect();
+            let compressed_sections: Vec<_> = patch.split("diff --git ").skip(1).collect();
+            assert_eq!(original_sections.len(), paths.len());
+            assert_eq!(compressed_sections.len(), paths.len());
+            for (original, compressed) in original_sections.iter().zip(&compressed_sections) {
+                assert!(compressed.len() < original.len(), "{compressed}");
+                assert_eq!(original.split("@@ ").next(), compressed.split("@@ ").next());
+                let changes = |section: &str| {
+                    section
+                        .split_once("@@ ")
+                        .unwrap()
+                        .1
+                        .split_inclusive('\n')
+                        .skip(1)
+                        .filter(|line| line.starts_with(['+', '-']))
+                        .collect::<String>()
+                };
+                assert_eq!(changes(original), changes(compressed));
+            }
+            let patch_path = temp.path().join("candidate.patch");
+            std::fs::write(&patch_path, patch).unwrap();
+            git(&[
+                "apply",
+                "--index",
+                "--whitespace=nowarn",
+                patch_path.to_str().unwrap(),
+            ]);
+            assert_eq!(git(&["write-tree"]), target);
+            for path in &paths {
+                assert_eq!(
+                    std::fs::read(temp.path().join(path)).unwrap(),
+                    modified.as_bytes()
+                );
+            }
+            git(&["read-tree", base.trim()]);
+            for path in &paths {
+                std::fs::write(temp.path().join(path), &original).unwrap();
+            }
+            git(&["update-index", "--refresh"]);
+        }
+    }
+}
+
+#[test]
 fn compress_post_tool_reduces_and_restores_build_logs() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

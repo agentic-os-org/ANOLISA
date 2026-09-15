@@ -135,7 +135,13 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             TokenlessConfig(data_dir="relative")
         self.assertEqual(
             {field.name for field in fields(TokenlessConfig)},
-            {"data_dir", "retrieve_tool_name", "rtk_enabled", "search_path_sharing_enabled"},
+            {
+                "data_dir",
+                "retrieve_tool_name",
+                "rtk_enabled",
+                "search_path_sharing_enabled",
+                "diff_compression_enabled",
+            },
         )
 
     def test_config_identifies_invalid_retrieve_tool_names(self) -> None:
@@ -354,6 +360,52 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, original)
         self.assertEqual(result.applied_operations, ())
         self.assertEqual(result.stash_keys, ())
+
+    async def test_diff_opt_in_recovers_original_and_respects_rtk_ownership(self) -> None:
+        original = (
+            "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n"
+            "@@ -1,12 +1,12 @@\n"
+            + (" " + "context" * 20 + "\n") * 10
+            + "-old\n+new\n tail\n"
+        )
+        default_sdk = self.sdk(rtk_enabled=False)
+        self.assertFalse(default_sdk.config.diff_compression_enabled)
+        enabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=True)
+        for sdk, optimization, applied in (
+            (default_sdk, OutputOptimization.NONE, False),
+            (enabled_sdk, OutputOptimization.NONE, True),
+            (enabled_sdk, OutputOptimization.RTK, False),
+        ):
+            with self.subTest(enabled=sdk.config.diff_compression_enabled, optimization=optimization):
+                attribution = Attribution("sdk-agent", "sdk-session", "diff-1")
+                result = await sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name="Bash",
+                        content=original,
+                        status=ToolResultStatus.SUCCESS,
+                        content_origin=ContentOrigin.COMMAND_OUTPUT,
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            True, RecoveryMethod.tool("tokenless_retrieve"), True
+                        ),
+                        attribution=attribution,
+                    )
+                )
+                if applied:
+                    self.assertEqual(result.applied_operations, (AppliedOperation.DIFF_REDUCTION,))
+                    self.assertEqual(result.recoverability.value, "retrievable")
+                    self.assertLess(len(result.output), len(original))
+                    self.assertIn("-old\n+new\n tail\n", result.output)
+                    self.assertEqual(len(result.stash_keys), 1)
+                    recovered = await sdk.retrieve(
+                        RetrieveRequest(result.stash_keys[0], frozenset(result.stash_keys), attribution)
+                    )
+                    self.assertEqual(recovered.payload, original)
+                else:
+                    self.assertEqual(result.output, original)
+                    self.assertEqual(result.applied_operations, ())
+                    self.assertEqual(result.stash_keys, ())
 
     def test_stats_client_is_lazy_and_uses_runtime_data_dir(self) -> None:
         sdk = self.sdk(rtk_enabled=False)

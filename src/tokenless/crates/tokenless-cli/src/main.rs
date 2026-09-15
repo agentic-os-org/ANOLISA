@@ -570,6 +570,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                             || value.eq_ignore_ascii_case("true")
                             || value.eq_ignore_ascii_case("yes")
                     }),
+                    diff_compression_enabled: std::env::var("TOKENLESS_DIFF_COMPRESSION_ENABLED")
+                        .is_ok_and(|value| {
+                            value == "1"
+                                || value.eq_ignore_ascii_case("true")
+                                || value.eq_ignore_ascii_case("yes")
+                        }),
                     stash_enabled: true,
                     rtk_path,
                     rtk_data_dir,

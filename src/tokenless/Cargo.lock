@@ -922,6 +922,7 @@ dependencies = [
 name = "tokenless-runtime"
 version = "0.8.1"
 dependencies = [
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

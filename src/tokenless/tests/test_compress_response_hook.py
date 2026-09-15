@@ -749,6 +749,58 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertEqual(len(_spawn_log_lines(self.mock_bin)), 1,
                          "Unwrapping must not add a second subprocess")
 
+    def test_small_bash_diff_uses_text_slot_and_preserves_other_fields(self) -> None:
+        diff = "diff --git a/example.py b/example.py\n" + " context\n" * 35
+        self.assertLess(len(diff), 2000)
+        envelope = self._bash_envelope(diff, "warning: retained verbatim")
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": envelope},
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            request = json.load(captured)
+        self.assertEqual(request["content"], diff)
+        self.assertTrue(request["capabilities"]["replace_with_text"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["updatedToolOutput"],
+            dict(envelope, stdout=diff[:40]),
+        )
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    def test_small_bash_diff_without_savings_keeps_host_output(self) -> None:
+        diff = "diff --git a/f b/f\n" + " context\n" * 35
+        binary = _create_mock_tokenless(self.tmpdir, "no-savings")
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": self._bash_envelope(diff, "warning")},
+            agent_id="claude-code",
+            mock_tokenless_path=binary,
+            isolated_home=self.isolated_home,
+        )
+        self.assertEqual(result, {})
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertEqual(json.load(captured)["content"], diff)
+
+    def test_small_non_diff_and_stderr_keep_json_route(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "passthrough")
+        for stdout, stderr in [
+            ("ordinary output\n" * 30, ""),
+            ("prefix\ndiff --git a/f b/f\n" * 15, ""),
+            ("", "diff --git a/f b/f\n" * 20),
+        ]:
+            with self.subTest(stdout=stdout[:30], stderr=stderr[:30]):
+                envelope = self._bash_envelope(stdout, stderr)
+                result = _run_hook(
+                    {"tool_name": "Bash", "tool_response": envelope},
+                    agent_id="claude-code",
+                    mock_tokenless_path=binary,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertEqual(result, {})
+                with open(os.path.join(self.tmpdir, "request.json")) as captured:
+                    self.assertEqual(json.loads(json.load(captured)["content"]), envelope)
+
     def test_largest_field_wins_and_the_other_stays_verbatim(self):
         stdout = "info: routine progress line\n" * 100
         stderr = "warn: something odd\n" * 110
