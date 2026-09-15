@@ -257,7 +257,13 @@ test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh
 
-test-integration:
+# Protocol v2 golden parity belongs to the integration contract, and this is the
+# only tokenless test target a CI job calls (`make test-hook-parity` has no
+# workflow caller). The prerequisite also builds target/debug/tokenless first:
+# without that binary tests/test_hook_parity.py skips itself (skipUnless), so the
+# goldens would go unenforced while the job still reported green. make runs the
+# prerequisite once even though the aggregate `test` target lists both names.
+test-integration: test-hook-parity
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_codex_response_diagnostics.py
