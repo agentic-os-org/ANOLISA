@@ -95,6 +95,34 @@ This setting does not disable RTK command rewriting, adapter execution, or retri
 anolisa adapter disable tokenless <framework>
 ```
 
+### Compression trigger conditions and thresholds
+
+Adapters do not compress every tool result. For response compression, compressed content is produced only when all of the following hold:
+
+1. Compression is not switched off. With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0` the run becomes a dry-run: statistics are still calculated, but the original text is returned (see the previous section).
+2. The tool is not a content-retrieval tool. Read/Glob/Grep/LSP/NotebookRead and their aliases skip response compression so their content stays intact.
+3. The response reaches the minimum length. The shared response hook, OpenClaw, and Hermes skip responses shorter than 200 characters; Codex skips responses shorter than 500 characters. Length is counted in characters, not bytes.
+4. The content is valid JSON. Response compression only handles JSON; plain text passes through unchanged. The shared paths additionally skip skill-like text with YAML frontmatter.
+5. The compressed result is strictly smaller. When neither response compression nor TOON encoding makes the content smaller, the original text is kept.
+
+After these checks, truncation strength depends on the tool category. Categories and thresholds are defined in `tool_categories.json` inside the adapter directory (the single source of truth shared by all adapters); built-in safe fallbacks are used when the file is missing or invalid:
+
+| Category | Representative tools | String truncation threshold | Array item cap | Maximum nesting depth |
+|----------|----------------------|------------------------------|----------------|-----------------------|
+| Content retrieval | Read, Glob, Grep, LSP, NotebookRead and aliases | Compression skipped | — | — |
+| Shell/exec | Bash, Shell, exec, terminal, etc. | 65,536 characters | 128 items | 8 |
+| Other structured tools | Any tool not in the two categories above | 1,048,576 characters | 65,536 items | 32 |
+
+Threshold semantics: a string longer than the threshold is cut at the threshold (retrievable through Stash when Stash is enabled); an array over the cap keeps only its leading items while the tail is truncated (also retrievable through Stash when enabled); subtrees nested deeper than the depth cap collapse into a truncation marker.
+
+Per-path differences worth noting:
+
+- Running `tokenless compress-response` standalone uses the CLI's own defaults (4,096 characters / 32 items / depth 8), overridable with `--truncate-strings-at`, `--truncate-arrays-at`, and `--max-depth`; see the [CLI reference](cli-reference.md).
+- Codex adds task-management tools (TodoWrite, Task, TaskStatus) to the shared skip list, and includes compressed content in context only for responses of at least 4,000 characters.
+- The OpenClaw plugin can override the tool categories through `skip_tools` and `shell_tools`; the thresholds themselves still come from `tool_categories.json`. See [Configuration and data privacy](configuration-and-privacy.md) for the options.
+- TOON encoding is a separate trigger decision: it is only adopted when the encoded result is smaller than the current content.
+- The AgentScope framework integration does not use the adapter thresholds above; it selects thresholds by `conservative` / `balanced` / `aggressive` mode. See [Framework integration](framework-integration.md).
+
 ### Controlling search path sharing
 
 API search path sharing is enabled by default. Set `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`
@@ -227,6 +255,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
 | Connect an Agent product | [Agent integration](framework-integration.md) |
 | Compress or retrieve manually | [CLI reference](cli-reference.md) |
+| Understand when compression triggers and what the thresholds are | [This page · Compression trigger conditions and thresholds](#compression-trigger-conditions-and-thresholds) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |
 | Fix missing statistics, adapter, or Stash issues | [Troubleshooting](troubleshooting.md) |

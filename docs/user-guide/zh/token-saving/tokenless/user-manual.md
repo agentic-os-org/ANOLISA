@@ -91,6 +91,34 @@ CLI-only 用法不需要 Adapter。
 anolisa adapter disable tokenless <framework>
 ```
 
+### 压缩的触发条件与阈值
+
+Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下条件全部满足，才会实际产出压缩内容：
+
+1. 压缩未被停用。`compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 时进入 dry-run，仍计算统计但返回原文（见上一节）。
+2. 工具不属于内容读取类。Read/Glob/Grep/LSP/NotebookRead 及别名会跳过响应压缩，保留完整内容。
+3. 响应长度达到最小阈值。共享响应 Hook、OpenClaw 和 Hermes 跳过短于 200 字符的响应；Codex 跳过短于 500 字符的响应。长度按字符数而非字节数计算。
+4. 内容是合法 JSON。响应压缩只处理 JSON；纯文本直接透传。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。
+5. 压缩结果严格小于原文。响应压缩和 TOON 编码都没有让内容变小时，保留原文。
+
+通过上述检查后，截断强度由工具类别决定。分类和阈值定义在 Adapter 目录下的 `tool_categories.json`（各 Adapter 共享的单一事实来源）；文件缺失或无效时使用内置的安全回退值：
+
+| 类别 | 代表工具 | 字符串截断阈值 | 数组保留上限 | 最大嵌套深度 |
+|------|----------|----------------|--------------|--------------|
+| 内容读取类 | Read、Glob、Grep、LSP、NotebookRead 及别名 | 跳过压缩 | — | — |
+| Shell/exec | Bash、Shell、exec、terminal 等 | 65,536 字符 | 128 项 | 8 |
+| 其他结构化工具 | 未列入前两类的工具 | 1,048,576 字符 | 65,536 项 | 32 |
+
+阈值含义：字符串超过阈值时从阈值处截断（启用 Stash 时可取回原文）；数组超过上限时只保留前面的项，尾部被截断（启用 Stash 时同样可取回）；嵌套超过深度上限的子树折叠为截断标记。
+
+几点路径差异：
+
+- 独立运行 `tokenless compress-response` 时使用 CLI 自身默认值（4,096 字符 / 32 项 / 深度 8），可用 `--truncate-strings-at`、`--truncate-arrays-at`、`--max-depth` 覆盖，详见 [CLI 参考](cli-reference.md)。
+- Codex 的跳过列表在共享分类之外还包含任务管理类工具（TodoWrite、Task、TaskStatus），且只有响应至少 4,000 字符时才把压缩内容附加到上下文。
+- OpenClaw Plugin 可以用 `skip_tools`、`shell_tools` 覆盖工具分类；阈值本身仍来自 `tool_categories.json`，选项说明见[配置与数据隐私](configuration-and-privacy.md)。
+- TOON 编码是独立的触发判断：只有编码结果比当前内容更小时才会采用。
+- AgentScope 框架集成不使用上面的 Adapter 阈值，而是按 `conservative` / `balanced` / `aggressive` 模式选择阈值，见[框架集成](framework-integration.md)。
+
 ### 控制搜索路径共享
 
 API 搜索路径共享默认开启。在 Agent 进程环境中设置 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`，
@@ -208,6 +236,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | 集成 AgentScope | [AgentScope SDK 集成](sdk/agentscope.md) |
 | 接入 Agent 产品 | [Agent 集成](framework-integration.md) |
 | 手动压缩或取回 | [CLI 参考](cli-reference.md) |
+| 了解压缩何时触发、阈值多大 | [本页 · 压缩的触发条件与阈值](#压缩的触发条件与阈值) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |
 | 修改配置或了解本地数据 | [配置与数据隐私](configuration-and-privacy.md) |
 | 解决无统计、Adapter 或 Stash 问题 | [故障排查](troubleshooting.md) |

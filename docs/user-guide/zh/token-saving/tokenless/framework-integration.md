@@ -73,6 +73,8 @@ Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
+完整触发条件（压缩开关、最小响应长度、JSON 校验、严格变小保护）与阈值含义见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
+
 ### DeepSeek Harness 原生处理路径
 
 DSH Bundle 要求 Node.js 22 或更高版本，并需要兼容的 DSH profile。应在同一条

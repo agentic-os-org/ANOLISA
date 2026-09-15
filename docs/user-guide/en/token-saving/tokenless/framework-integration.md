@@ -79,6 +79,8 @@ compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
+For the full trigger conditions (compression switch, minimum response length, JSON validation, strictly-smaller guard) and threshold semantics, see [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
+
 ### DeepSeek Harness native processing
 
 The DSH bundle requires Node.js 22 or later and a compatible DSH profile. Pass
