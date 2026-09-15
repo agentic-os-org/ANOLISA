@@ -205,6 +205,29 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "command-not-found handler 在启动后被覆盖"
         }
         MessageId::HealthLiveReasonCnfMissing => "command-not-found handler 已被移除",
+        MessageId::DoctorVersionLine => {
+            "版本：cosh-shell {shell_version}，cosh-core {core_version}"
+        }
+        MessageId::DoctorHostLine => "主机：{host}",
+        MessageId::DoctorRuntimeLine => "运行时：{summary}",
+        MessageId::DoctorRuntimeSummaryNone => "无活跃会话",
+        MessageId::DoctorRoutingLine => {
+            "路由：ai={ai}，integration={integration}，command-not-found handler={cnf}，最近路由决策={route}"
+        }
+        MessageId::DoctorRoutingUnavailable => {
+            "路由：live 探针不可用；请在受影响会话内运行 /health"
+        }
+        MessageId::DoctorLogsLine => {
+            "日志：level={level}，最近写入 {last}；24h 错误：{errors}"
+        }
+        MessageId::DoctorLogsNoFiles => "无日志文件",
+        MessageId::DoctorCrashesLine => "崩溃：24h 内 {count} 起{detail}",
+        MessageId::DoctorExportHint => {
+            "下一步：运行 `cosh-shell diagnostics export` 收集脱敏证据包"
+        }
+        MessageId::HelpDiagnosticsHint => {
+            "遇到问题：先在会话内运行 /health，或退出后运行 `cosh-shell doctor`"
+        }
         _ => return None,
     })
 }

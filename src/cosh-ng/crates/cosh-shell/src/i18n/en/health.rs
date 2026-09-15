@@ -227,6 +227,29 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthLiveReasonCnfMissing => {
             "the command-not-found handler was removed"
         }
+        MessageId::DoctorVersionLine => {
+            "version: cosh-shell {shell_version}, cosh-core {core_version}"
+        }
+        MessageId::DoctorHostLine => "host: {host}",
+        MessageId::DoctorRuntimeLine => "runtime: {summary}",
+        MessageId::DoctorRuntimeSummaryNone => "no active sessions",
+        MessageId::DoctorRoutingLine => {
+            "routing: ai={ai}, integration={integration}, command-not-found handler={cnf}, last route={route}"
+        }
+        MessageId::DoctorRoutingUnavailable => {
+            "routing: live probe unavailable; run /health inside the affected session"
+        }
+        MessageId::DoctorLogsLine => {
+            "logs: level={level}, last write {last}; 24h errors: {errors}"
+        }
+        MessageId::DoctorLogsNoFiles => "no log files",
+        MessageId::DoctorCrashesLine => "crashes: {count} in the last 24h{detail}",
+        MessageId::DoctorExportHint => {
+            "next step: run `cosh-shell diagnostics export` to collect a redacted evidence bundle"
+        }
+        MessageId::HelpDiagnosticsHint => {
+            "Troubleshooting: run /health inside the session, or `cosh-shell doctor` after exit"
+        }
         _ => return None,
     })
 }

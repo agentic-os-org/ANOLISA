@@ -73,6 +73,11 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(!output.contains("/details"), "{output}");
     assert!(!output.contains("command_id"), "{output}");
     assert!(!output.contains("output_id"), "{output}");
+    // The diagnostics hint trails the panel as a plain line.
+    assert!(
+        normalized.contains("run /health inside the session, or `cosh-shell doctor` after exit"),
+        "{output}"
+    );
     assert!(!output.contains("insight_id"), "{output}");
     assert!(!output.contains("/audit"), "{output}");
     assert!(!output.contains("/select N"), "{output}");

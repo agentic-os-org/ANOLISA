@@ -130,7 +130,15 @@ fn diagnostics_export_health_checks_match_doctor_cli() {
         .collect();
 
     assert_eq!(bundle_checks, doctor_checks, "doctor stdout={stdout}");
-    for check in ["provider", "config", "hooks", "pty", "permissions"] {
+    for check in [
+        "provider",
+        "config",
+        "hooks",
+        "pty",
+        "permissions",
+        "runtime",
+        "logs",
+    ] {
         assert!(
             bundle_checks.iter().any(|done| done == check),
             "bundle health section missing env check {check}: {bundle_checks:?}"

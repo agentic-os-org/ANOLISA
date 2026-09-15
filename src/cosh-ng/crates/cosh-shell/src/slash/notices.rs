@@ -116,7 +116,9 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
                 ],
             ),
         },
-    )
+    )?;
+    writeln!(output, "{}", i18n.t(MessageId::HelpDiagnosticsHint))?;
+    Ok(())
 }
 
 pub(super) fn render_hint<W: Write>(

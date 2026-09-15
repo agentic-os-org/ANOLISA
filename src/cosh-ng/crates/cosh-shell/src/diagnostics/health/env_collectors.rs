@@ -704,11 +704,12 @@ fn collect_permissions(builder: &mut HealthReportBuilder, elapsed_ms: u128) {
 const CRASH_WINDOW_MS: u128 = 24 * 60 * 60 * 1000;
 
 /// One parsed crash log line (written by `diagnostics::crash` and cosh-core's
-/// `crash` module).
-struct CrashRecord {
-    kind: String,
-    ts_ms: u128,
-    panic: String,
+/// `crash` module). Shared with the doctor render layer for the header
+/// summary line.
+pub(crate) struct CrashRecord {
+    pub(crate) kind: String,
+    pub(crate) ts_ms: u128,
+    pub(crate) panic: String,
 }
 
 fn env_now_ms() -> u128 {
@@ -718,7 +719,7 @@ fn env_now_ms() -> u128 {
         .unwrap_or_default()
 }
 
-fn ts_label(ts_ms: u128) -> String {
+pub(crate) fn ts_label(ts_ms: u128) -> String {
     let millis = ts_ms.min(i64::MAX as u128) as i64;
     chrono::DateTime::from_timestamp_millis(millis)
         .map(|ts| {
@@ -750,7 +751,7 @@ fn crash_file_paths() -> Vec<(String, PathBuf)> {
 /// Parses both crash logs and keeps only the records inside `CRASH_WINDOW_MS`,
 /// oldest first. Unparseable lines are skipped so a truncated tail never
 /// breaks the collector.
-fn recent_crash_records(now_ms: u128) -> Vec<CrashRecord> {
+pub(crate) fn recent_crash_records(now_ms: u128) -> Vec<CrashRecord> {
     let mut records = Vec::new();
     for (kind, path) in crash_file_paths() {
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -930,7 +931,7 @@ fn collect_runtime(builder: &mut HealthReportBuilder, elapsed_ms: u128) {
 
 /// Bounded tail read per log file; keeps the scan under 10ms no matter how
 /// large the daily files grow.
-const LOG_TAIL_MAX_BYTES: u64 = 256 * 1024;
+pub(crate) const LOG_TAIL_MAX_BYTES: u64 = 256 * 1024;
 
 /// WARN lines per file within 24h above this threshold surface as a finding
 /// (retry-loop indicator).
@@ -955,7 +956,7 @@ struct LogScan {
 /// Candidate log paths: today and yesterday for each kind. Counts only
 /// consider lines inside the 24h window, so files older than yesterday can
 /// never contribute.
-fn log_file_paths() -> Vec<(String, PathBuf)> {
+pub(crate) fn log_file_paths() -> Vec<(String, PathBuf)> {
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
     };
@@ -978,7 +979,7 @@ fn log_file_paths() -> Vec<(String, PathBuf)> {
 /// Read at most `max_bytes` from the tail of `path`. When the file is
 /// truncated from the start, the first partial line is dropped so line-based
 /// parsing always sees complete lines.
-fn read_log_tail(path: &Path, max_bytes: u64) -> Option<String> {
+pub(crate) fn read_log_tail(path: &Path, max_bytes: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -1002,7 +1003,7 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Option<String> {
 /// `<RFC3339 ts> <LEVEL> <target>: <message>`. Continuation lines (no
 /// timestamp prefix) are skipped. Returns the level and timestamp for
 /// WARN/ERROR lines inside the 24h window.
-fn parse_log_header(line: &str, now_ms: u128) -> Option<(&str, u128)> {
+pub(crate) fn parse_log_header(line: &str, now_ms: u128) -> Option<(&str, u128)> {
     let mut tokens = line.split_whitespace();
     let ts_token = tokens.next()?;
     let level = tokens.next()?;

@@ -111,9 +111,9 @@ mod tests {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
-        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 780);
-        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 781);
-        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 782);
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 791);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 792);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 793);
         assert_eq!(
             MessageId::AgentQuestionUnavailableTitle as usize,
             MessageId::SlashQuotedArgumentsUnsupported as usize + 1
@@ -126,29 +126,29 @@ mod tests {
         // interface: pin the discriminants with fixed values so a segment
         // inserted ahead of them can never shift the tail unnoticed
         // (new segments must append after mcp_registry_ids).
-        assert_eq!(MessageId::AgentStatusToolArguments as usize, 859);
-        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 860);
-        assert_eq!(MessageId::HelpGroupPrompt as usize, 861);
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 870);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 871);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 872);
         // The #1747 trailing segment must stay appended after every earlier
         // segment so pre-existing discriminants never shift.
-        assert_eq!(MessageId::HelpSummaryMcp as usize, 864);
-        assert_eq!(MessageId::SlashMcpTitle as usize, 865);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 875);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 876);
         // The #1988 segment remains pinned ahead of the appended #2029
         // turn-extension messages.
         assert_eq!(
             MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
-            866
+            877
         );
         // The #2029 turn-extension segment keeps its pinned discriminants.
-        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 867);
+        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 878);
         assert_eq!(
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
-            876
+            887
         );
         // The #1913 capture-notice segment remains pinned ahead of the
         // appended shell-recovery, auth, and hook-notification messages.
-        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 877);
-        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 878);
+        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 888);
+        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 889);
         assert_eq!(
             MessageId::AgentRecoveryTriggerLine as usize,
             MessageId::CaptureInputRejectedBody as usize + 1

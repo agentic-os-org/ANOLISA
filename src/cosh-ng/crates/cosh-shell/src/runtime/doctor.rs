@@ -24,7 +24,7 @@ pub(crate) fn run_doctor() -> i32 {
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for line in format_doctor_report_plain(&report, i18n) {
+    for line in format_doctor_report_plain(&config, &report, i18n) {
         let _ = writeln!(out, "{line}");
     }
     let _ = out.flush();

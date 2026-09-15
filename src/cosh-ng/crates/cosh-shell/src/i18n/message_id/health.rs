@@ -150,6 +150,17 @@ macro_rules! health_ids {
             HealthLiveReasonUserCnf,
             HealthLiveReasonCnfOverridden,
             HealthLiveReasonCnfMissing,
+            DoctorVersionLine,
+            DoctorHostLine,
+            DoctorRuntimeLine,
+            DoctorRuntimeSummaryNone,
+            DoctorRoutingLine,
+            DoctorRoutingUnavailable,
+            DoctorLogsLine,
+            DoctorLogsNoFiles,
+            DoctorCrashesLine,
+            DoctorExportHint,
+            HelpDiagnosticsHint,
         );
     };
 }
