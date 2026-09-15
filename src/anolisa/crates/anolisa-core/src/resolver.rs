@@ -9,6 +9,8 @@
 
 use crate::manifest::{DependencyKind, RuntimeDependency};
 use anolisa_platform::command::{CommandRunner, SystemCommandRunner};
+use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
+use anolisa_platform::rpm_query::RpmPackageQuery;
 
 /// Host facts the preflight needs, decoupled from `anolisa_env::EnvFacts` so
 /// callers (and tests) supply only the relevant slice.
@@ -44,6 +46,79 @@ pub enum DependencyStatus {
         /// Why the host cannot satisfy this dependency.
         reason: String,
     },
+    /// The dependency's presence could not be determined; installation is unsafe.
+    ProbeFailed {
+        /// Typed evidence from the query boundary, not an installation hint.
+        error: DependencyProbeError,
+    },
+}
+
+/// Query failures retained in a cloneable dependency resolution report.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DependencyProbeError {
+    /// The query executable could not be found.
+    #[error("command not found: {command}")]
+    CommandMissing {
+        /// Executable name.
+        command: String,
+    },
+    /// The query executable could not be started due to permissions.
+    #[error("permission denied running {command}")]
+    PermissionDenied {
+        /// Executable name.
+        command: String,
+    },
+    /// The query did not return a valid presence or absence result.
+    #[error("{command} failed (code {code:?}): {stderr}")]
+    QueryFailed {
+        /// Executable name.
+        command: String,
+        /// Exit code, or `None` for signal termination or other spawn failures.
+        code: Option<i32>,
+        /// Original diagnostic supplied by the package query adapter.
+        stderr: String,
+    },
+    /// The query returned malformed or ambiguous metadata.
+    #[error("unexpected {command} output: {detail}")]
+    UnexpectedOutput {
+        /// Executable name.
+        command: String,
+        /// Original explanation from the package query adapter.
+        detail: String,
+    },
+}
+
+impl From<PackageQueryError> for DependencyProbeError {
+    fn from(error: PackageQueryError) -> Self {
+        match error {
+            PackageQueryError::CommandMissing { command } => Self::CommandMissing { command },
+            PackageQueryError::PermissionDenied { command } => Self::PermissionDenied { command },
+            PackageQueryError::QueryFailed {
+                command,
+                code,
+                stderr,
+            } => Self::QueryFailed {
+                command,
+                code,
+                stderr,
+            },
+            PackageQueryError::UnexpectedOutput { command, detail } => {
+                Self::UnexpectedOutput { command, detail }
+            }
+        }
+    }
+}
+
+struct BorrowedRunner<'a, R>(&'a R);
+
+impl<R: CommandRunner> CommandRunner for BorrowedRunner<'_, R> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> std::io::Result<anolisa_platform::command::CommandOutput> {
+        self.0.run(program, args)
+    }
 }
 
 /// Per-dependency preflight result.
@@ -90,6 +165,11 @@ impl ResolutionPlan {
                 DependencyStatus::Unresolvable { reason } => {
                     Some(format!("{} [{}]: {reason}", r.name, r.kind.as_str()))
                 }
+                DependencyStatus::ProbeFailed { error } => Some(format!(
+                    "{} [{}]: dependency probe failed: {error}",
+                    r.name,
+                    r.kind.as_str()
+                )),
             })
             .collect()
     }
@@ -191,7 +271,10 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
     ) -> (DependencyStatus, Option<String>) {
         let present = match &dep.probe {
             Some(probe) => matches!(self.run_probe(probe), ProbeOutcome::Present { .. }),
-            None => self.native_package_present(dep, env),
+            None => match self.native_package_present(dep, env) {
+                Ok(present) => present,
+                Err(error) => return (DependencyStatus::ProbeFailed { error }, None),
+            },
         };
         if present {
             return (DependencyStatus::Resolved, None);
@@ -256,22 +339,26 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
         }
     }
 
-    /// Native presence query when a system package has no explicit probe:
-    /// `rpm -q` / `dpkg -s`. Unknown package manager → treated as absent (the
-    /// remediation then reports the unsupported manager).
-    fn native_package_present(&self, dep: &RuntimeDependency, env: &ResolverEnv) -> bool {
+    /// RPM errors remain distinct from absence; other package families retain
+    /// the legacy presence policy until their query contracts are migrated.
+    fn native_package_present(
+        &self,
+        dep: &RuntimeDependency,
+        env: &ResolverEnv,
+    ) -> Result<bool, DependencyProbeError> {
+        if env.pkg_base.as_deref() == Some("rpm") {
+            return RpmPackageQuery::with_runner(BorrowedRunner(&self.runner))
+                .is_installed(dep.packages.rpm.as_deref().unwrap_or(&dep.name))
+                .map_err(DependencyProbeError::from);
+        }
         let (program, args): (&str, [&str; 2]) = match env.pkg_base.as_deref() {
-            Some("rpm") => (
-                "rpm",
-                ["-q", dep.packages.rpm.as_deref().unwrap_or(&dep.name)],
-            ),
             Some("deb") => (
                 "dpkg",
                 ["-s", dep.packages.deb.as_deref().unwrap_or(&dep.name)],
             ),
-            _ => return false,
+            _ => return Ok(false),
         };
-        matches!(self.runner.run(program, &args), Ok(out) if out.code == Some(0))
+        Ok(matches!(self.runner.run(program, &args), Ok(out) if out.code == Some(0)))
     }
 }
 
@@ -590,6 +677,162 @@ mod tests {
     }
 
     #[test]
+    fn native_rpm_probe_failure_is_not_installable() {
+        let runner = FakeRunner::default().ok("rpm", 2, "package btrfs-progs is not installed");
+        let deps = [dep("btrfs-progs", DependencyKind::SystemPackage)];
+        let plan = DependencyResolver::with_probes(runner, || panic!("no filesystem probe"))
+            .resolve(&deps, &rpm_env())
+            .expect("valid declaration");
+        let provision = crate::ProvisionPlan::from_resolution(&plan, &deps, &rpm_env());
+        assert!(provision.has_blockers());
+        assert!(provision.installable.is_empty());
+        assert!(!matches!(
+            plan.resolutions[0].status,
+            DependencyStatus::Unresolved { .. }
+        ));
+    }
+
+    #[test]
+    fn native_rpm_failures_retain_typed_evidence_and_declaration_order() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        struct Runner(RefCell<VecDeque<io::Result<CommandOutput>>>);
+        impl CommandRunner for Runner {
+            fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+                assert_eq!(program, "rpm");
+                let remaining = self.0.borrow().len();
+                assert_eq!(args, ["-q", if remaining == 2 { "rpm-foo" } else { "bar" }]);
+                self.0
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("one query per dependency")
+            }
+        }
+        let mut first = dep("foo", DependencyKind::SystemPackage);
+        first.packages.rpm = Some("rpm-foo".into());
+        let mut platform = dep("kernel", DependencyKind::PlatformCapability);
+        platform.min_kernel = Some("1.0".into());
+        let deps = [first, dep("bar", DependencyKind::SystemPackage), platform];
+        let mut env = rpm_env();
+        env.kernel = Some("6.1.0".into());
+        let cases = vec![
+            (
+                Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
+                DependencyProbeError::CommandMissing {
+                    command: "rpm".into(),
+                },
+            ),
+            (
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                DependencyProbeError::PermissionDenied {
+                    command: "rpm".into(),
+                },
+            ),
+            (
+                Err(io::Error::other("io detail")),
+                DependencyProbeError::QueryFailed {
+                    command: "rpm".into(),
+                    code: None,
+                    stderr: "io detail".into(),
+                },
+            ),
+            (
+                Ok(CommandOutput {
+                    code: Some(1),
+                    stdout: "package rpm-foo is not installed\n".into(),
+                    stderr: " rpmdb unavailable\n".into(),
+                }),
+                DependencyProbeError::QueryFailed {
+                    command: "rpm".into(),
+                    code: Some(1),
+                    stderr: " rpmdb unavailable\n".into(),
+                },
+            ),
+            (
+                Ok(CommandOutput {
+                    code: None,
+                    stdout: String::new(),
+                    stderr: "terminated".into(),
+                }),
+                DependencyProbeError::QueryFailed {
+                    command: "rpm".into(),
+                    code: None,
+                    stderr: "terminated".into(),
+                },
+            ),
+        ];
+        for (output, expected) in cases {
+            let runner = Runner(RefCell::new(VecDeque::from([
+                output,
+                Ok(CommandOutput {
+                    code: Some(1),
+                    stdout: "package bar is not installed\n".into(),
+                    stderr: String::new(),
+                }),
+            ])));
+            let resolver = DependencyResolver::with_probes(runner, || panic!("no btrfs read"));
+            let plan = resolver.resolve(&deps, &env).expect("valid declarations");
+            assert_eq!(
+                plan.resolutions
+                    .iter()
+                    .map(|r| r.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["foo", "bar", "kernel"]
+            );
+            assert_eq!(
+                plan.resolutions[0].status,
+                DependencyStatus::ProbeFailed {
+                    error: expected.clone()
+                }
+            );
+            assert_eq!(plan.clone().resolutions, plan.resolutions);
+            assert!(matches!(
+                plan.resolutions[1].status,
+                DependencyStatus::Unresolved { .. }
+            ));
+            assert_eq!(plan.resolutions[2].status, DependencyStatus::Resolved);
+            assert!(plan.unsatisfied_lines()[0].contains(&expected.to_string()));
+            let provision = crate::ProvisionPlan::from_resolution(&plan, &deps, &env);
+            assert!(provision.has_blockers());
+            assert_eq!(provision.installable_package_names(), ["bar"]);
+            assert_eq!(provision.unresolvable.len(), 1);
+            assert!(provision.manual.is_empty());
+            assert!(resolver.runner.0.borrow().is_empty());
+        }
+        let unexpected = DependencyProbeError::from(PackageQueryError::UnexpectedOutput {
+            command: "rpm".into(),
+            detail: "bad metadata".into(),
+        });
+        assert_eq!(
+            unexpected,
+            DependencyProbeError::UnexpectedOutput {
+                command: "rpm".into(),
+                detail: "bad metadata".into()
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_probe_and_dpkg_keep_their_presence_policy() {
+        let mut explicit = dep("foo", DependencyKind::SystemPackage);
+        explicit.probe = Some("grep --version".into());
+        let env = rpm_env();
+        let result = resolve_one(FakeRunner::default().ok("grep", 1, ""), explicit, &env);
+        assert!(matches!(result.status, DependencyStatus::Unresolved { .. }));
+        let deb = ResolverEnv {
+            pkg_base: Some("deb".into()),
+            ..Default::default()
+        };
+        let result = resolve_one(
+            FakeRunner::default().missing("dpkg"),
+            dep("foo", DependencyKind::SystemPackage),
+            &deb,
+        );
+        assert!(matches!(result.status, DependencyStatus::Unresolved { .. }));
+    }
+
+    #[test]
     fn system_package_present_is_resolved() {
         let mut d = dep("btrfs-progs", DependencyKind::SystemPackage);
         d.probe = Some("btrfs version".to_string());
@@ -664,7 +907,11 @@ mod tests {
     #[test]
     fn system_package_native_query_absent_when_no_probe() {
         let d = dep("btrfs-progs", DependencyKind::SystemPackage);
-        let r = resolve_one(FakeRunner::default().ok("rpm", 1, ""), d, &rpm_env());
+        let r = resolve_one(
+            FakeRunner::default().ok("rpm", 1, "package btrfs-progs is not installed\n"),
+            d,
+            &rpm_env(),
+        );
         assert!(matches!(r.status, DependencyStatus::Unresolved { .. }));
     }
 

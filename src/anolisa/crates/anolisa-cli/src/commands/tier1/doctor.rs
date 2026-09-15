@@ -1516,17 +1516,42 @@ fn add_dependency_resolution(resolution: &DependencyResolution, out: &mut Doctor
         DependencyStatus::Unresolvable { reason } => {
             (DoctorDependencyStatus::Unresolvable, Some(reason.clone()))
         }
+        DependencyStatus::ProbeFailed { error } => (
+            DoctorDependencyStatus::Unresolvable,
+            Some(format!("dependency probe failed: {error}")),
+        ),
     };
     out.dependencies.push(DoctorDependency {
         name: resolution.name.clone(),
         kind: resolution.kind,
         status,
         note: note.clone(),
-        detail: resolution.detail.clone(),
+        detail: match &resolution.status {
+            DependencyStatus::ProbeFailed { error } => Some(error.to_string()),
+            _ => resolution.detail.clone(),
+        },
     });
 
     match &resolution.status {
         DependencyStatus::Resolved => {}
+        DependencyStatus::ProbeFailed { error } => {
+            out.findings.push(finding(
+                FindingSeverity::Error,
+                "dependency_probe_failed",
+                format!(
+                    "runtime dependency '{}' [{}] could not be probed",
+                    resolution.name,
+                    resolution.kind.as_str()
+                ),
+                "dependency",
+                Some(error.to_string()),
+            ));
+            out.fix_plan.push(suggestion(
+                "inspect_dependency_probe",
+                None,
+                "inspect the dependency query failure before installing packages",
+            ));
+        }
         DependencyStatus::Unresolved { remediation } => {
             out.findings.push(finding(
                 FindingSeverity::Error,
@@ -4736,12 +4761,174 @@ mod tests {
     }
 
     #[test]
+    fn doctor_native_rpm_probe_failure_output() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for mode in [
+            "human",
+            "json",
+            "quiet",
+            "dry-run",
+            "stdout-human",
+            "stdout-json",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    format!("{module}::doctor_native_rpm_output_child"),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ])
+                .env("ANOLISA_TEST_NATIVE_RPM_OUTPUT", mode)
+                .output()
+                .expect("isolated renderer");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let rendered = stdout
+                .split_once("RPM_OUTPUT_BEGIN\n")
+                .unwrap()
+                .1
+                .split_once("RPM_OUTPUT_END\n")
+                .unwrap()
+                .0;
+            assert!(stdout.contains(if mode == "dry-run" {
+                "DOMAIN_EXIT=0"
+            } else {
+                "DOMAIN_EXIT=2"
+            }));
+            assert!(!rendered.contains("sudo dnf install"));
+            assert!(!rendered.contains("fix_manifest"));
+            match mode {
+                "json" | "stdout-json" => {
+                    let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                    assert_eq!(json["command"], "doctor");
+                    assert_eq!(json["ok"], false);
+                    assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
+                    let component = &json["data"]["components"][0];
+                    assert_eq!(component["dependencies"][0]["status"], "unresolvable");
+                    assert_eq!(
+                        component["dependencies"][0]["detail"],
+                        if mode == "stdout-json" {
+                            "unexpected rpm output: rpm -q libfoo failed (code Some(1)); stdout: package libfoo is not installed\nextra\n"
+                        } else {
+                            "rpm failed (code Some(1)): rpmdb broken\n"
+                        }
+                    );
+                    assert_eq!(component["findings"][0]["code"], "dependency_probe_failed");
+                    assert_eq!(
+                        component["fix_plan"][0]["action"],
+                        "inspect_dependency_probe"
+                    );
+                    assert_eq!(component["fix_plan"][0]["automatic"], false);
+                    assert!(component["fix_plan"][0]["command"].is_null());
+                }
+                "human" | "stdout-human" => {
+                    assert!(rendered.contains("[dependency_probe_failed]"));
+                    if mode == "stdout-human" {
+                        assert!(rendered.contains("code Some(1)"));
+                        assert!(rendered.contains("package libfoo is not installed\nextra\n"));
+                    } else {
+                        assert!(rendered.contains("rpmdb broken"));
+                    }
+                    assert!(rendered.contains("inspect_dependency_probe"));
+                }
+                "quiet" => assert!(rendered.is_empty()),
+                "dry-run" => assert!(!rendered.contains("dependency_probe_failed")),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_native_rpm_output_child() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        if std::env::args().skip(1).collect::<Vec<_>>()
+            != [
+                format!("{module}::doctor_native_rpm_output_child"),
+                "--exact".into(),
+                "--nocapture".into(),
+            ]
+        {
+            return;
+        }
+        let Ok(mode) = std::env::var("ANOLISA_TEST_NATIVE_RPM_OUTPUT") else {
+            return;
+        };
+        if !matches!(
+            mode.as_str(),
+            "human" | "json" | "quiet" | "dry-run" | "stdout-human" | "stdout-json"
+        ) {
+            return;
+        }
+        let sandbox = crate::test_support::TestSandbox::new();
+        let ctx = sandbox.context_with(
+            crate::context::InstallMode::System,
+            crate::test_support::TestContextOptions {
+                json: mode.ends_with("json"),
+                quiet: mode == "quiet",
+                dry_run: mode == "dry-run",
+                ..Default::default()
+            },
+        );
+        let runner = RuntimeRunner::new(vec![Ok(anolisa_platform::command::CommandOutput {
+            code: Some(1),
+            stdout: if mode.starts_with("stdout-") {
+                "package libfoo is not installed\nextra\n"
+            } else {
+                "package libfoo is not installed\n"
+            }
+            .into(),
+            stderr: if mode.starts_with("stdout-") {
+                ""
+            } else {
+                "rpmdb broken\n"
+            }
+            .into(),
+        })]);
+        let resolver = DependencyResolver::with_probes(&runner, || panic!("no btrfs probe"));
+        let payload = diagnose_runtime_fixture(
+            ctx.layout(),
+            Some(owned_object("runtime-tool", LifecycleStatus::Installed)),
+            Some("[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\""),
+            ctx.dry_run,
+            &|deps, env| resolver.resolve(deps, env),
+        );
+        assert_eq!(runner.calls.borrow().len(), usize::from(!ctx.dry_run));
+        if !ctx.dry_run {
+            assert!(runner.outputs.borrow().is_empty());
+        }
+        let has_issues = payload_has_issues(&payload);
+        println!("RPM_OUTPUT_BEGIN");
+        render_doctor(&ctx, &payload, !has_issues).expect("render");
+        println!("RPM_OUTPUT_END");
+        let code = if has_issues {
+            CliError::DiagnosticsFound {
+                command: COMMAND.into(),
+            }
+            .exit_code()
+        } else {
+            0
+        };
+        println!("DOMAIN_EXIT={code}");
+    }
+
+    #[test]
     fn doctor_runtime_dependencies_use_real_resolver_exactly_once() {
         for healthy in [true, false] {
             let temp = tempfile::tempdir().expect("tempdir");
             let layout = FsLayout::system(Some(temp.path().to_path_buf()));
             let runner = RuntimeRunner::new(vec![
-                runtime_output(Some(if healthy { 0 } else { 1 }), ""),
+                runtime_output(
+                    Some(if healthy { 0 } else { 1 }),
+                    if healthy {
+                        ""
+                    } else {
+                        "package libfoo is not installed\n"
+                    },
+                ),
                 runtime_output(Some(0), if healthy { "v20.0.0" } else { "v18.0.0" }),
             ]);
             let reads = Cell::new(0);
@@ -4840,7 +5027,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_runtime_probe_errors_keep_existing_diagnostics() {
+    fn doctor_runtime_probe_errors_distinguish_native_rpm_from_legacy_probes() {
         for kind in [
             std::io::ErrorKind::NotFound,
             std::io::ErrorKind::PermissionDenied,
@@ -4864,7 +5051,14 @@ mod tests {
             let component = &payload.components[0];
             assert_eq!(
                 component.dependencies[0].status,
-                DoctorDependencyStatus::Unresolved
+                DoctorDependencyStatus::Unresolvable
+            );
+            assert_eq!(component.findings[0].code, "dependency_probe_failed");
+            assert!(
+                !component
+                    .fix_plan
+                    .iter()
+                    .any(|fix| fix.command.as_deref() == Some("sudo dnf install libfoo"))
             );
             assert_eq!(
                 component.dependencies[1].status,
@@ -5090,7 +5284,14 @@ mod tests {
             },
         );
         let runner = RuntimeRunner::new(vec![
-            runtime_output(Some(if healthy { 0 } else { 1 }), ""),
+            runtime_output(
+                Some(if healthy { 0 } else { 1 }),
+                if healthy {
+                    ""
+                } else {
+                    "package libfoo is not installed\n"
+                },
+            ),
             runtime_output(Some(0), if healthy { "v20.0.0" } else { "v18.0.0" }),
         ]);
         let resolver = DependencyResolver::with_probes(&runner, || {

@@ -61,10 +61,19 @@ fn run_runtime_preflight_with<R: CommandRunner, P: Fn() -> std::io::Result<Strin
             reason: format!("invalid runtime dependency declaration: {err}"),
         })?;
     if !plan.is_satisfied() {
+        let heading = if plan
+            .resolutions
+            .iter()
+            .any(|resolution| matches!(resolution.status, DependencyStatus::ProbeFailed { .. }))
+        {
+            "runtime dependency probes failed"
+        } else {
+            "missing runtime dependencies"
+        };
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "missing runtime dependencies; no files were changed:\n  {}",
+                "{heading}; no files were changed:\n  {}",
                 plan.unsatisfied_lines().join("\n  ")
             ),
         });
@@ -157,12 +166,18 @@ where
             .iter()
             .map(|u| format!("  {} [unresolvable]: {}", u.name, u.reason))
             .collect();
+        let heading = if plan
+            .resolutions
+            .iter()
+            .any(|resolution| matches!(resolution.status, DependencyStatus::ProbeFailed { .. }))
+        {
+            "runtime dependency probes failed"
+        } else {
+            "unsatisfiable platform requirements"
+        };
         return Err(CliError::Runtime {
             command: command.to_string(),
-            reason: format!(
-                "unsatisfiable platform requirements; no files were changed:\n{}",
-                lines.join("\n")
-            ),
+            reason: format!("{heading}; no files were changed:\n{}", lines.join("\n")),
         });
     }
 
@@ -262,7 +277,14 @@ where
                     // Only fail on deps we actually tried to provision.
                     provisioned_dep_names.contains(r.name.as_str())
                 })
-                .map(|r| format!("{} [{}]", r.name, r.kind.as_str()))
+                .map(|r| match &r.status {
+                    DependencyStatus::ProbeFailed { error } => format!(
+                        "{} [{}]: dependency probe failed: {error}",
+                        r.name,
+                        r.kind.as_str()
+                    ),
+                    _ => format!("{} [{}]", r.name, r.kind.as_str()),
+                })
                 .collect();
             if !still_failed.is_empty() {
                 let installed_names: Vec<String> =
@@ -404,10 +426,206 @@ mod tests {
                 .expect("unexpected dependency probe");
             Ok(CommandOutput {
                 code,
-                stdout: String::new(),
+                stdout: if program == "rpm" && args.len() == 2 && code == Some(1) {
+                    format!("package {} is not installed\n", args[1])
+                } else {
+                    String::new()
+                },
                 stderr: String::new(),
             })
         }
+    }
+
+    struct EvidenceRunner {
+        outputs: RefCell<VecDeque<std::io::Result<CommandOutput>>>,
+        calls: RefCell<Vec<CommandCall>>,
+    }
+
+    impl CommandRunner for &EvidenceRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            assert_eq!(program, "rpm");
+            assert_eq!(args[0], "-q");
+            assert_eq!(args.len(), 2);
+            self.calls
+                .borrow_mut()
+                .push((program.into(), args.iter().map(|s| s.to_string()).collect()));
+            self.outputs
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected RPM query")
+        }
+    }
+
+    fn missing_rpm(package: &str) -> std::io::Result<CommandOutput> {
+        Ok(CommandOutput {
+            code: Some(1),
+            stdout: format!("package {package} is not installed\n"),
+            stderr: String::new(),
+        })
+    }
+
+    #[test]
+    fn native_rpm_probe_failure_blocks_mixed_provisioning_before_manager_creation() {
+        for mode in [InstallMode::System, InstallMode::User] {
+            for failure in ["rpmdb", "permission", "missing-command", "signal", "stdout"] {
+                let sandbox = TestSandbox::new();
+                let ctx = sandbox.context(mode);
+                let layout = ctx.layout();
+                let inventory = inventory_for(layout, &[]);
+                let output = match failure {
+                    "stdout" => Ok(CommandOutput {
+                        code: Some(1),
+                        stdout: "package libbar is not installed\nextra\n".into(),
+                        stderr: String::new(),
+                    }),
+                    "permission" => Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "denied",
+                    )),
+                    "missing-command" => {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+                    }
+                    _ => Ok(CommandOutput {
+                        code: if failure == "signal" { None } else { Some(1) },
+                        stdout: "package libbar is not installed\n".into(),
+                        stderr: "rpmdb diagnostic\n".into(),
+                    }),
+                };
+                let runner = EvidenceRunner {
+                    outputs: RefCell::new(VecDeque::from([
+                        missing_rpm("libfoo"),
+                        output,
+                        Ok(CommandOutput {
+                            code: Some(0),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        }),
+                    ])),
+                    calls: RefCell::new(Vec::new()),
+                };
+                let resolver = DependencyResolver::with_probes(&runner, || {
+                    panic!("unexpected filesystem probe")
+                });
+                let manifest = manifest_with_deps(vec![
+                    system_dep("foo", "libfoo"),
+                    system_dep("bar", "libbar"),
+                    system_dep("baz", "libbaz"),
+                ]);
+                let manager = FakePackageManager::default();
+                let detections = Cell::new(0);
+                let error = run_provision_with(
+                    &manifest,
+                    &rpm_host_env(),
+                    &ctx,
+                    "install component-a",
+                    &mut Vec::new(),
+                    &inventory,
+                    layout,
+                    &resolver,
+                    |_| {
+                        detections.set(detections.get() + 1);
+                        Ok(Box::new(manager.clone()))
+                    },
+                )
+                .expect_err("query failure blocks all automatic installs");
+                assert_eq!(error.code(), "EXECUTION_FAILED");
+                assert_eq!(error.exit_code(), 1);
+                assert!(error.reason().contains("runtime dependency probes failed"));
+                assert!(error.reason().contains("bar"));
+                if failure == "stdout" {
+                    assert!(error.reason().contains("code Some(1)"));
+                    assert!(
+                        error
+                            .reason()
+                            .contains("package libbar is not installed\nextra\n")
+                    );
+                }
+                assert!(!error.reason().contains("sudo dnf install libbar"));
+                assert_eq!(detections.get(), 0);
+                assert!(manager.install_calls().is_empty());
+                assert_eq!(
+                    runner
+                        .calls
+                        .borrow()
+                        .iter()
+                        .map(|(_, args)| args[1].as_str())
+                        .collect::<Vec<_>>(),
+                    ["libfoo", "libbar", "libbaz"]
+                );
+                assert!(runner.outputs.borrow().is_empty());
+                let preflight = run_runtime_preflight_with(
+                    &manifest,
+                    &rpm_host_env(),
+                    "install component-a",
+                    &DependencyResolver::with_probes(
+                        ScriptedRunner::with_codes([Some(2), Some(0), Some(0)]),
+                        || panic!("no btrfs"),
+                    ),
+                )
+                .expect_err("read-only preflight also blocks");
+                assert!(preflight.reason().contains("dependency probe failed"));
+            }
+        }
+    }
+
+    #[test]
+    fn native_rpm_recheck_failure_retains_packages_and_diagnostic() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let runner = EvidenceRunner {
+            outputs: RefCell::new(VecDeque::from([
+                missing_rpm("libfoo"),
+                Ok(CommandOutput {
+                    code: Some(1),
+                    stdout: "package libfoo is not installed\n".into(),
+                    stderr: "rpmdb recheck failed\n".into(),
+                }),
+            ])),
+            calls: RefCell::new(Vec::new()),
+        };
+        let resolver = DependencyResolver::with_probes(&runner, || panic!("no btrfs"));
+        let manager = FakePackageManager::default();
+        let detections = Cell::new(0);
+        let error = run_provision_with(
+            &manifest,
+            &rpm_host_env(),
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| {
+                assert_eq!(
+                    runner.calls.borrow().len(),
+                    1,
+                    "detect manager after initial query"
+                );
+                detections.set(detections.get() + 1);
+                Ok(Box::new(manager.clone()))
+            },
+        )
+        .expect_err("post-install observation failed");
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .reason()
+                .contains("dependencies still unsatisfied after install")
+        );
+        assert!(error.reason().contains("rpmdb recheck failed\n"));
+        assert!(
+            error
+                .reason()
+                .contains(&retained_packages_note(&["libfoo".into()]))
+        );
+        assert_eq!(detections.get(), 1);
+        assert_eq!(manager.install_calls(), [vec!["libfoo".to_string()]]);
+        assert_eq!(runner.calls.borrow().len(), 2);
+        assert!(runner.outputs.borrow().is_empty());
     }
 
     /// Records install calls instead of touching the host.

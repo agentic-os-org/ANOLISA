@@ -290,6 +290,35 @@ fn is_expected_miss(out: &CommandOutput, expected: &[&str]) -> bool {
 }
 
 impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
+    /// Presence does not require a single installed version or parsed metadata.
+    fn is_installed(&self, package: &str) -> Result<bool, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", package])
+            .map_err(|error| map_spawn_error(error, RPM))?;
+        if out.code == Some(0) {
+            return Ok(true);
+        }
+        if is_expected_miss(&out, &[&format!("package {package} is not installed")]) {
+            return Ok(false);
+        }
+        // Keep stdout-only evidence without mislabeling it as stderr.
+        if out.stderr.trim().is_empty() && !out.stdout.trim().is_empty() {
+            return Err(PackageQueryError::UnexpectedOutput {
+                command: RPM.to_string(),
+                detail: format!(
+                    "rpm -q {package} failed (code {:?}); stdout: {}",
+                    out.code, out.stdout
+                ),
+            });
+        }
+        Err(PackageQueryError::QueryFailed {
+            command: RPM.to_string(),
+            code: out.code,
+            stderr: out.stderr,
+        })
+    }
+
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
         let out = self
             .runner
@@ -854,8 +883,91 @@ mod tests {
     }
 
     #[test]
+    fn native_presence_requires_clean_missing_evidence() {
+        use std::cell::RefCell;
+
+        struct OnceRunner(RefCell<Option<io::Result<CommandOutput>>>);
+        impl CommandRunner for OnceRunner {
+            fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+                assert_eq!(program, "rpm");
+                assert_eq!(args, ["-q", "foo"]);
+                self.0.borrow_mut().take().expect("exactly one query")
+            }
+        }
+        for (code, stdout, stderr, expected) in [
+            (Some(0), "foo-1-1.x86_64\n", "", Some(true)),
+            (
+                Some(0),
+                "foo-1-1.x86_64\nfoo-2-1.x86_64\n",
+                "warning",
+                Some(true),
+            ),
+            (Some(0), "", "", Some(true)),
+            (Some(1), "package foo is not installed\n", "", Some(false)),
+            (
+                Some(1),
+                " package foo is not installed\n",
+                " \t\n",
+                Some(false),
+            ),
+            (
+                Some(1),
+                "package foo is not installed\n",
+                "error: rpmdb unavailable\n",
+                None,
+            ),
+            (Some(1), "package foo is not installed\n", "warning\n", None),
+            (Some(1), "package bar is not installed\n", "", None),
+            (Some(1), "package foo is not installed\nextra\n", "", None),
+            (Some(1), "is not installed", "", None),
+            (Some(2), "package foo is not installed", "", None),
+            (None, "package foo is not installed", "", None),
+        ] {
+            let query =
+                RpmPackageQuery::with_runner(OnceRunner(RefCell::new(Some(Ok(CommandOutput {
+                    code,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                })))));
+            let result = query.is_installed("foo");
+            match expected {
+                Some(present) => assert_eq!(result.expect("domain result"), present),
+                None if stderr.trim().is_empty() && !stdout.trim().is_empty() => assert!(
+                    matches!(result, Err(PackageQueryError::UnexpectedOutput { command, detail }) if command == "rpm" && detail == format!("rpm -q foo failed (code {code:?}); stdout: {stdout}"))
+                ),
+                None => assert!(
+                    matches!(result, Err(PackageQueryError::QueryFailed { command, code: actual, stderr: diagnostic }) if command == "rpm" && actual == code && diagnostic == stderr)
+                ),
+            }
+            assert!(query.runner.0.borrow().is_none());
+        }
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+        ] {
+            let query = RpmPackageQuery::with_runner(OnceRunner(RefCell::new(Some(Err(
+                io::Error::new(kind, "spawn diagnostic"),
+            )))));
+            let error = query.is_installed("foo").expect_err("spawn failure");
+            match kind {
+                io::ErrorKind::NotFound => assert!(
+                    matches!(error, PackageQueryError::CommandMissing { command } if command == "rpm")
+                ),
+                io::ErrorKind::PermissionDenied => assert!(
+                    matches!(error, PackageQueryError::PermissionDenied { command } if command == "rpm")
+                ),
+                _ => assert!(
+                    matches!(error, PackageQueryError::QueryFailed { command, code: None, stderr } if command == "rpm" && stderr == "spawn diagnostic")
+                ),
+            }
+            assert!(query.runner.0.borrow().is_none());
+        }
+    }
+
+    #[test]
     fn installed_returns_info() {
-        let q = query_with_rpm(
+        let mut q = query_with_rpm(
             "tokenless",
             ok_out(Some(0), "tokenless|(none)|2.0.1|1.al8|x86_64", ""),
         );
@@ -870,16 +982,18 @@ mod tests {
         assert_eq!(info.arch, "x86_64");
         assert_eq!(info.origin, None);
         assert_eq!(info.version.to_string(), "2.0.1-1.al8");
+        q.runner.expected_args = Some(vec!["-q".into(), "tokenless".into()]);
         assert!(q.is_installed("tokenless").unwrap());
     }
 
     #[test]
     fn not_installed_returns_none() {
-        let q = query_with_rpm(
+        let mut q = query_with_rpm(
             "tokenless",
             ok_out(Some(1), "package tokenless is not installed", ""),
         );
         assert_eq!(q.query_installed("tokenless").unwrap(), None);
+        q.runner.expected_args = Some(vec!["-q".into(), "tokenless".into()]);
         assert!(!q.is_installed("tokenless").unwrap());
     }
 

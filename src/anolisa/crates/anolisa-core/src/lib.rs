@@ -121,8 +121,8 @@ pub use registry::{
     RegistryError, UreqFetch,
 };
 pub use resolver::{
-    DependencyResolution, DependencyResolver, DependencyStatus, ResolutionPlan, ResolverEnv,
-    ResolverError,
+    DependencyProbeError, DependencyResolution, DependencyResolver, DependencyStatus,
+    ResolutionPlan, ResolverEnv, ResolverError,
 };
 pub use self_update::{
     ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,

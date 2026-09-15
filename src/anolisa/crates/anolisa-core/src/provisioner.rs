@@ -56,13 +56,13 @@ pub struct ManualDependency {
     pub hint: String,
 }
 
-/// A dependency that cannot be satisfied on this host (kernel version,
-/// platform capability). The install must not proceed.
+/// A dependency that blocks provisioning: a host requirement cannot be met,
+/// or a failed presence query makes automatic installation unsafe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvableDependency {
     /// Logical dependency name.
     pub name: String,
-    /// Why this host cannot satisfy the dependency.
+    /// Host requirement or query failure that blocks installation.
     pub reason: String,
 }
 
@@ -78,8 +78,7 @@ pub struct ProvisionPlan {
     /// Dependencies that require manual intervention
     /// (`kind = LanguageRuntime`, `status = Unresolved`).
     pub manual: Vec<ManualDependency>,
-    /// Dependencies that cannot be satisfied on this host
-    /// (`status = Unresolvable`).
+    /// Dependencies that block installation (`Unresolvable` or `ProbeFailed`).
     pub unresolvable: Vec<UnresolvableDependency>,
     /// Count of dependencies already satisfied.
     pub satisfied_count: usize,
@@ -153,6 +152,12 @@ impl ProvisionPlan {
                     result.unresolvable.push(UnresolvableDependency {
                         name: resolution.name.clone(),
                         reason: reason.clone(),
+                    });
+                }
+                DependencyStatus::ProbeFailed { error } => {
+                    result.unresolvable.push(UnresolvableDependency {
+                        name: resolution.name.clone(),
+                        reason: format!("dependency probe failed: {error}"),
                     });
                 }
             }
