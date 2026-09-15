@@ -1,4 +1,5 @@
 pub(crate) mod bundle;
+pub(crate) mod crash;
 pub(crate) mod doctor;
 pub(crate) mod health;
 #[cfg(test)]

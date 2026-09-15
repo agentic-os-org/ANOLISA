@@ -10,6 +10,7 @@ mod compression;
 mod config;
 mod context;
 mod core;
+mod crash;
 mod extension;
 mod headless;
 mod hook;
@@ -102,6 +103,7 @@ fn needs_auth(config: &CoreConfig) -> bool {
 
 #[cfg(unix)]
 fn main() {
+    crash::install_panic_hook();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -118,6 +120,7 @@ fn main() {
 #[cfg(not(unix))]
 #[tokio::main]
 async fn main() {
+    crash::install_panic_hook();
     run().await;
 }
 

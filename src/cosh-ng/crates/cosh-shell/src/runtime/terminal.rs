@@ -29,6 +29,9 @@ pub(crate) fn install_terminal_recovery() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
+        // Persist the panic before the default hook prints it: stderr is
+        // consumed by the TUI, so this file is the only durable evidence.
+        crate::diagnostics::crash::record_panic(info);
         prev_hook(info);
     }));
 
