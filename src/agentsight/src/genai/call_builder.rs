@@ -63,7 +63,13 @@ impl GenAIBuilder {
         // Build request from parsed message or HTTP record
         let request = self.build_request(&parsed_message, &http);
         // Build response from parsed message or HTTP record
-        let response = self.build_response(&parsed_message, &http, &token_record);
+        let mut response = self.build_response(&parsed_message, &http, &token_record);
+
+        // Recover empty tool_call names from request tools definitions.
+        // DashScope/Qwen gateways sometimes omit function.name entirely from
+        // all SSE delta chunks, leaving the merged name as "". When the
+        // request's tools array is available, back-fill from it.
+        Self::recover_empty_tool_call_names(&request, &mut response);
 
         // Build token usage from TokenRecord
         let token_usage = token_record.as_ref().map(|t| {
@@ -345,6 +351,86 @@ impl GenAIBuilder {
             reason.to_ascii_lowercase().as_str(),
             "tool_calls" | "tool_use" | "function_call" | "pause_turn"
         )
+    }
+
+    /// Back-fill empty tool_call names in the response from the request's
+    /// `tools` definitions.
+    ///
+    /// Some OpenAI-compatible gateways (DashScope/Qwen) omit `function.name`
+    /// from all SSE delta chunks for a tool_call, leaving the merged name as
+    /// `""`. When the request carries a `tools` array we can recover:
+    ///   - single tool defined → use its name unconditionally
+    ///   - multiple tools → match by comparing the tool_call's argument keys
+    ///     against each tool's `parameters.properties` keys
+    fn recover_empty_tool_call_names(request: &LLMRequest, response: &mut LLMResponse) {
+        let tools = match request.tools.as_ref() {
+            Some(t) if !t.is_empty() => t,
+            _ => return,
+        };
+
+        // Extract (name, property_keys) from each tool definition
+        let tool_info: Vec<(String, Vec<String>)> = tools
+            .iter()
+            .filter_map(|t| {
+                let func = t.get("function")?;
+                let name = func.get("name")?.as_str()?.to_string();
+                let prop_keys: Vec<String> = func
+                    .get("parameters")
+                    .and_then(|p| p.get("properties"))
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.keys().cloned().collect())
+                    .unwrap_or_default();
+                Some((name, prop_keys))
+            })
+            .collect();
+
+        if tool_info.is_empty() {
+            return;
+        }
+
+        for msg in &mut response.messages {
+            for part in &mut msg.parts {
+                let MessagePart::ToolCall {
+                    name, arguments, ..
+                } = part
+                else {
+                    continue;
+                };
+                if !name.is_empty() {
+                    continue;
+                }
+
+                if tool_info.len() == 1 {
+                    *name = tool_info[0].0.clone();
+                    continue;
+                }
+
+                // Multiple tools: match by argument keys
+                let call_keys: Vec<String> = arguments
+                    .as_ref()
+                    .and_then(|a| a.as_object())
+                    .map(|obj| obj.keys().cloned().collect())
+                    .unwrap_or_default();
+
+                if call_keys.is_empty() {
+                    continue;
+                }
+
+                // Pick the tool whose property keys are a superset of the call's keys
+                let matched: Vec<&str> = tool_info
+                    .iter()
+                    .filter(|(_, prop_keys)| {
+                        !prop_keys.is_empty() && call_keys.iter().all(|k| prop_keys.contains(k))
+                    })
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+
+                if matched.len() == 1 {
+                    *name = matched[0].to_string();
+                }
+                // 0 or >1 matches: leave empty (abstain, don't guess)
+            }
+        }
     }
 
     /// Build LLMRequest from parsed message or HTTP record
@@ -2138,5 +2224,151 @@ mod tests {
             first, second,
             "a SysOM tool_use response (hardcoded finish_reason stop) must not evict the anchor"
         );
+    }
+
+    // --- recover_empty_tool_call_names tests ---
+
+    fn make_request_with_tools(tools: Vec<serde_json::Value>) -> LLMRequest {
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: Some(tools),
+            raw_body: None,
+        }
+    }
+
+    fn make_response_with_tool_calls(parts: Vec<MessagePart>) -> LLMResponse {
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts,
+                name: None,
+                finish_reason: None,
+            }],
+            streamed: true,
+            raw_body: None,
+        }
+    }
+
+    fn tool_def(name: &str, props: &[&str]) -> serde_json::Value {
+        let properties: serde_json::Map<String, serde_json::Value> = props
+            .iter()
+            .map(|p| (p.to_string(), serde_json::json!({"type": "string"})))
+            .collect();
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": { "type": "object", "properties": properties }
+            }
+        })
+    }
+
+    /// Single tool defined: empty name gets back-filled unconditionally.
+    /// Discriminating: removing the single-tool fast path makes this fail.
+    #[test]
+    fn test_recover_name_single_tool() {
+        let request = make_request_with_tools(vec![tool_def("run_shell_command", &["command"])]);
+        let mut response = make_response_with_tool_calls(vec![MessagePart::ToolCall {
+            id: Some("call_1".to_string()),
+            name: String::new(),
+            arguments: Some(serde_json::json!({"command": "whoami"})),
+        }]);
+
+        GenAIBuilder::recover_empty_tool_call_names(&request, &mut response);
+
+        match &response.messages[0].parts[0] {
+            MessagePart::ToolCall { name, .. } => assert_eq!(name, "run_shell_command"),
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    /// Non-empty name is never overwritten by recovery.
+    #[test]
+    fn test_recover_name_skips_nonempty() {
+        let request = make_request_with_tools(vec![tool_def("run_shell_command", &["command"])]);
+        let mut response = make_response_with_tool_calls(vec![MessagePart::ToolCall {
+            id: Some("call_1".to_string()),
+            name: "original_name".to_string(),
+            arguments: Some(serde_json::json!({"command": "whoami"})),
+        }]);
+
+        GenAIBuilder::recover_empty_tool_call_names(&request, &mut response);
+
+        match &response.messages[0].parts[0] {
+            MessagePart::ToolCall { name, .. } => assert_eq!(name, "original_name"),
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    /// Multiple tools: match by argument keys.
+    #[test]
+    fn test_recover_name_multi_tool_by_arg_keys() {
+        let request = make_request_with_tools(vec![
+            tool_def("run_shell_command", &["command", "is_background"]),
+            tool_def("read_file", &["file_path", "offset", "limit"]),
+        ]);
+        let mut response = make_response_with_tool_calls(vec![
+            MessagePart::ToolCall {
+                id: Some("call_1".to_string()),
+                name: String::new(),
+                arguments: Some(serde_json::json!({"command": "whoami", "is_background": false})),
+            },
+            MessagePart::ToolCall {
+                id: Some("call_2".to_string()),
+                name: String::new(),
+                arguments: Some(serde_json::json!({"file_path": "/etc/hostname"})),
+            },
+        ]);
+
+        GenAIBuilder::recover_empty_tool_call_names(&request, &mut response);
+
+        match &response.messages[0].parts[0] {
+            MessagePart::ToolCall { name, .. } => assert_eq!(name, "run_shell_command"),
+            _ => panic!("expected ToolCall"),
+        }
+        match &response.messages[0].parts[1] {
+            MessagePart::ToolCall { name, .. } => assert_eq!(name, "read_file"),
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    /// No tools in request: nothing to recover from, name stays empty.
+    #[test]
+    fn test_recover_name_no_tools_in_request() {
+        let request = LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        let mut response = make_response_with_tool_calls(vec![MessagePart::ToolCall {
+            id: Some("call_1".to_string()),
+            name: String::new(),
+            arguments: Some(serde_json::json!({"command": "whoami"})),
+        }]);
+
+        GenAIBuilder::recover_empty_tool_call_names(&request, &mut response);
+
+        match &response.messages[0].parts[0] {
+            MessagePart::ToolCall { name, .. } => assert_eq!(name, ""),
+            _ => panic!("expected ToolCall"),
+        }
     }
 }
