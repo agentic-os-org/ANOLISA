@@ -59,6 +59,13 @@ async fn run() -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
+    let (finalizer, event_sinks) = match event_finalizer() {
+        Ok(sinks) => sinks,
+        Err(error) => {
+            eprintln!("agent-sec-daemon: security event storage unavailable: {error}");
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
@@ -80,13 +87,6 @@ async fn run() -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let (finalizer, event_sinks) = match event_finalizer() {
-        Ok(sinks) => sinks,
-        Err(error) => {
-            eprintln!("agent-sec-daemon: security event storage unavailable: {error}");
-            return (ExitCode::FAILURE, None);
-        }
-    };
     let dispatcher = Arc::new(DaemonDispatcher::new_with_finalizer(
         pap,
         policy_for_handler,

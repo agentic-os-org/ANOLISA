@@ -89,6 +89,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
+name = "asc-action-runtime"
+version = "0.12.0"
+dependencies = [
+ "asc-action-types",
+ "asc-security-events",
+ "serde_json",
+]
+
+[[package]]
+name = "asc-action-types"
+version = "0.12.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "asc-agentsight-client"
 version = "0.12.0"
 dependencies = [
@@ -107,6 +123,8 @@ dependencies = [
 name = "asc-capability-code-scan"
 version = "0.12.0"
 dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
  "fancy-regex",
  "serde",
  "serde_json",
@@ -142,11 +160,13 @@ dependencies = [
 name = "asc-daemon"
 version = "0.12.0"
 dependencies = [
+ "asc-action-runtime",
  "asc-agentsight-client",
  "asc-daemon-core",
  "asc-daemon-handler",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-event-sink",
  "asc-foundation-types",
  "asc-pap",
  "asc-pap-repository-memory",
@@ -156,6 +176,7 @@ dependencies = [
  "asc-policy-repository",
  "asc-policy-runtime",
  "asc-policy-types",
+ "asc-security-events",
  "serde_json",
  "thiserror",
  "tokio",
@@ -187,10 +208,13 @@ dependencies = [
 name = "asc-daemon-handler"
 version = "0.12.0"
 dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
  "asc-capability-code-scan",
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-security-events",
  "serde",
  "serde_json",
  "uuid",

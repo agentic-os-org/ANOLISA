@@ -39,12 +39,28 @@ fn unique_directory() -> PathBuf {
 
 async fn wait_for_socket(path: &Path) {
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !path.exists() {
-            tokio::task::yield_now().await;
+        loop {
+            match UnixStream::connect(path).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    panic!("daemon bootstrap failed before accepting connections: {error}")
+                }
+            }
         }
     })
     .await
-    .expect("daemon bootstrap should bind its socket");
+    .expect("daemon bootstrap should accept connections");
 }
 
 async fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
