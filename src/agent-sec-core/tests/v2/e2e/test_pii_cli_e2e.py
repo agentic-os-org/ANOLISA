@@ -10,23 +10,6 @@ import subprocess
 import pytest
 
 
-@pytest.fixture
-def pii_environment(tmp_path, monkeypatch):
-    data = tmp_path / "audit"
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("AGENT_SEC_DAEMON_SOCKET", raising=False)
-    return data, home
-
-
-@pytest.fixture
-def pii_daemon(pii_environment, start_daemon):
-    # No policy-administrator grant is needed for PII scanning.
-    return start_daemon(admin_uids=[])
-
-
 def _events(environment):
     path = environment[0] / "security-events.jsonl"
     if not path.exists():

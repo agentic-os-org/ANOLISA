@@ -346,7 +346,8 @@ Full daemon endpoint, CLI, and host-hook status:
 Detects personal data and credentials, and can emit redacted text.
 
 The bundled [pii-checker Skill](skills/pii-checker/SKILL.md) lets an Agent scan
-specified text or files and generate redacted text with the V1 CLI.
+specified text or files and generate redacted text. V2 uses the Rust daemon:
+set `AGENT_SEC_DAEMON_SOCKET` or pass top-level `--socket`; the CLI never starts it automatically.
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
@@ -355,7 +356,11 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 ```
 
-Custom business types can be added in `~/.config/agent-sec/pii-checker/rules.yaml`.
+V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
+`agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage and rule identity;
+a `pass` result with partial coverage does not establish complete detection. This phase preserves
+Hook contracts without switching live hosts or adding PDP enforcement.
 
 Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
 

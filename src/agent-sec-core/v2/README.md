@@ -106,7 +106,28 @@ in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_
 The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
 maps Prompt Scan and Code Scan migration work onto the repository architecture, including module
 locations, dependency order, interface boundaries, and acceptance requirements.
-It describes planned work; this workspace does not yet expose scan methods.
+The workspace now exposes `action.code_scan` and `action.pii_scan` through the common
+Action Runtime. PII migration and its future policy boundary are described in the
+[two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
+
+## PII scanning
+
+`asc-capability-pii-scan` provides a transport-free Rust detector, immutable centralized
+rule sets, a typed report, executor and safe audit projector. The daemon loads built-ins
+and the optional `/etc/agent-sec/pii-checker/rules.yaml` once; `--pii-rules` accepts an
+administrator-selected absolute path. Restart applies rule changes. There is no HOME
+lookup or caller-selected file access.
+
+`agent-sec-cli --socket /run/agent-sec-core/daemon.sock scan-pii --stdin --redact-output`
+reads input locally and invokes `action.pii_scan` using LocalUser authorization.
+The response preserves V1 fields with coverage, input digests and rule identity under
+`summary`; `deny` classifies findings and is not a PDP decision. Authorized parameter
+failures use the same Finalizer as normal scans. V1-compatible opaque trace metadata
+is accepted through top-level `--trace-context`; it is not an OpenTelemetry ID.
+
+See the [PII user guide](../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md)
+for limits, rule migration, compatibility differences and rollback. Hook/RPM tests
+exercise real Rust subprocesses without switching Agent hosts.
 
 ## Daemon service boundary
 
