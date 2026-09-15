@@ -192,10 +192,14 @@ async fn preflight_model_endpoint(
         }
         return preflight_model_fallback(client, provider, fallback).await;
     }
+    // The token-plan gateway answers GET /models/{model} with HTTP 400
+    // "Model not exist." even for models its own model list contains and
+    // chat serves, so a 400 must defer to the fallback chain (model list,
+    // then minimal chat) instead of ending validation here.
     if fallback != ModelFallback::None
         && matches!(
             status,
-            StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+            StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED | StatusCode::BAD_REQUEST
         )
     {
         return preflight_model_fallback(client, provider, fallback).await;
@@ -1004,7 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_compat_falls_back_for_ambiguous_model_endpoint_failures() {
-        for status in [404, 405, 501] {
+        for status in [400, 404, 405, 501] {
             let server = MockServer::spawn(vec![
                 Reply::json(status, r#"{"error":{"code":"route_not_found"}}"#),
                 Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
@@ -1132,6 +1136,36 @@ mod tests {
             .expect("chat fallback succeeds");
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
+    }
+
+    /// The real token-plan gateway answers GET /models/{model} with HTTP 400
+    /// "Model not exist." even for models its own model list contains and
+    /// chat serves, so the retrieve-route 400 must defer to the list+chat
+    /// chain instead of ending validation.
+    #[tokio::test]
+    async fn token_plan_retrieve_bad_request_defers_to_list_and_chat() {
+        let server = MockServer::spawn(vec![
+            Reply::json(
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist.","request_id":"tp"}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"object":"list","data":[{"id":"qwen3.8-max","object":"model"}]}"#,
+            ),
+            Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
+        ]);
+        let mut token_plan = provider(&server.base_url, "token_plan");
+        token_plan.model = "qwen3.8-max".to_string();
+
+        preflight_auth(&token_plan)
+            .await
+            .expect("list and chat are the authority");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /v1/models/qwen3.8-max HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/models HTTP/1.1"));
         assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
     }
 
