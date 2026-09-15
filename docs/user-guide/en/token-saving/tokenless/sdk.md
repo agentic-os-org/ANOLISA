@@ -34,14 +34,14 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple silicon | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.1 on Linux x86_64
+The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.2 on Linux x86_64
 into a virtual environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.1/anolisa_tokenless-0.8.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not

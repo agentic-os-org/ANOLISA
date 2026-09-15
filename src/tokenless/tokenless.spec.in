@@ -502,6 +502,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Tue Sep 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.2-1
+- Add lossless search path sharing with CLI and SDK controls
+- Upgrade RTK to 0.49.0 with native grep flags and recall recovery
+- Fix shell failure attribution and preserve pytest diagnostics
+
 * Wed Sep 09 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.1-1
 - Add recoverable CSV/TSV compression and host trace correlation in SLS records
 - Fix Claude Code detection and Hermes shared hook API compatibility

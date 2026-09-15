@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "chrono",
  "clap",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "csv",
  "serde_json",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-python"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "pyo3",
  "serde",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-runtime"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "regex",
  "serde_json",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-stats"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "chrono",
  "dirs",

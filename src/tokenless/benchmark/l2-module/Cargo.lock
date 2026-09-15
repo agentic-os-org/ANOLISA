@@ -1212,7 +1212,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "blake3",
  "thiserror",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "csv",
  "serde_json",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "serde",
  "serde_json",
