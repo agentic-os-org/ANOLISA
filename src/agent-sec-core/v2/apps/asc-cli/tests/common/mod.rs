@@ -1,5 +1,7 @@
 #![allow(dead_code)] // Shared by independent contract and process test targets.
 
+use std::os::unix::fs::PermissionsExt as _;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -33,6 +35,7 @@ impl Directory {
         };
         let path = base.join(format!("asc-cli-{}", Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self(path)
     }
 }

@@ -154,9 +154,16 @@ root-managed Principal policy, and an explicitly transitional process-local
 Repository. Policy CRUD therefore works during one daemon lifetime, but all
 state disappears on restart; this is integration evidence, not durable
 persistence or distribution readiness. The process prints that limitation at
-startup. It also requires an explicit absolute socket path because
-packaging-owned system paths, singleton/stale-socket policy, runtime directory
-hardening, and readiness remain later process-integration work.
+startup. The daemon and CLI default socket is `/run/agent-sec-core/daemon.sock`;
+a nonempty `AGENT_SEC_DAEMON_SOCKET` overrides it, and explicit `--socket` takes
+precedence over both. Both entrypoints require absolute paths. HOME and
+XDG_RUNTIME_DIR do not select a daemon namespace. The V2 RPM stages a system
+unit running as `root:root`, with a 0755 runtime directory and 0666
+socket. Ordinary users can connect; server-side peer-UID authorization still
+protects policy administration. Runtime directory validation, a retained flock and conservative stale
+socket recovery protect this namespace. Readiness and persistence remain separate
+work. See [systemd acceptance](../tests/v2/systemd/README.md) for deployment,
+validation and upgrade boundaries.
 
 UID 0 is always a Policy administrator. A deployment operator can add other UIDs
 at startup with repeatable `--policy-admin-uid <UID>` options. Omitted means root
@@ -165,7 +172,8 @@ still requires root. The allowlist is process-local and must be supplied on each
 startup. Configuration-file loading, persistence and management RPCs remain later
 work. Authorization does not change OS socket permissions or deployment topology.
 
-Run the daemon in the foreground:
+Run the daemon in the foreground (the existing directory must belong to the
+process UID, have mode 0700, 0750 or 0755, and have protected, non-symlink ancestors):
 
 ```bash
 cargo run -p asc-daemon -- serve --socket /absolute/existing-directory/daemon.sock

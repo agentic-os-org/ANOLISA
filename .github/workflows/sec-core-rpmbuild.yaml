@@ -314,7 +314,12 @@ jobs:
           echo "=== Verify codex plugin ==="
           ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
           echo "=== Verify daemon systemd unit ==="
-          ls /usr/lib/systemd/user/agent-sec-core.service
+          test -f /usr/lib/systemd/system/agent-sec-core.service
+          test ! -e /usr/lib/systemd/user/agent-sec-core.service
+          test ! -e /usr/lib/sysusers.d/agent-sec-core.conf
+          grep -qx 'User=root' /usr/lib/systemd/system/agent-sec-core.service
+          grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
+          systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
           echo "=== Verify component manifest ==="
           test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
           echo "=== Assert no V1 Python site-packages ==="
@@ -366,11 +371,11 @@ jobs:
 
       - name: Start V2 daemon for CLI compatibility E2E
         run: |
-          runtime_dir="$RUNNER_TEMP/agent-sec-core-runtime"
+          # Avoid runner-mounted ancestors with unrelated owners or writable modes.
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
           daemon_log="$RUNNER_TEMP/agent-sec-daemon.log"
           daemon_pid="$RUNNER_TEMP/agent-sec-daemon.pid"
-          socket="$runtime_dir/agent-sec-core/daemon.sock"
-          mkdir -p "$runtime_dir/agent-sec-core"
+          socket="$runtime_dir/daemon.sock"
           chmod 0700 "$runtime_dir"
           agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
           echo $! >"$daemon_pid"

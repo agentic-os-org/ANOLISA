@@ -1,4 +1,4 @@
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -159,6 +159,7 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
 async fn run_binary_scenario(configure_admin: bool) {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
     let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));

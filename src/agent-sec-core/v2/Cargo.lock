@@ -177,6 +177,7 @@ dependencies = [
  "asc-policy-runtime",
  "asc-policy-types",
  "asc-security-events",
+ "rustix",
  "serde_json",
  "thiserror",
  "tokio",

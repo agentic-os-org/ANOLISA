@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -85,6 +86,7 @@ impl RunningPapDaemon {
     ) -> Self {
         let directory = unique_directory();
         std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = directory.join("daemon.sock");
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,

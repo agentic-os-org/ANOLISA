@@ -108,8 +108,8 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@# The shared code-scanner E2E imports rule metadata before it can decide
 	@# whether source-only inventory assertions apply to this installed V2 RPM.
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
-	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 python3 -m pytest tests/e2e/ tests/v2/e2e/ \
-		--import-mode=importlib \
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 python3 -m pytest tests/e2e/ tests/v2/ \
+		--import-mode=importlib -ra \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
@@ -229,7 +229,7 @@ endef
 # target is prepended by each aggregate.
 RPM_INSTALL_COMMON_TARGETS := install-cosh-hook install-codex-plugin install-qoder-plugin \
 	install-openclaw-plugin install-hermes-plugin install-qwen-code-extension \
-	install-skills install-component-manifest install-systemd-user
+	install-skills install-component-manifest
 
 # V2 Rust binaries are collected here by build-cli-v2 and consumed by
 # install-cli-v2, mirroring the build/install split used for linux-sandbox.
@@ -458,6 +458,8 @@ SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
 SYSTEMD_USER_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core.service.in
 SYSTEMD_SERVICE_BINDIR ?= /usr/bin
 SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
+SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
+SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -597,17 +599,23 @@ install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) install-systemd-user ## Install all (RPM build)
 
-# V2 differs from install-all-for-rpmbuild only in the CLI/daemon implementation;
-# both versions install the same systemd unit contract.
+# V2 installs a system-scope unit; the V1 raw/RPM user unit remains separate.
 .PHONY: install-all-for-rpmbuild-v2
 install-all-for-rpmbuild-v2: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild-v2: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) ## Install all (V2 RPM build)
+install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
+
+.PHONY: install-systemd-system
+install-systemd-system: ## Stage V2 system unit
+	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)
+	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
+		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 
 # =============================================================================
 # UNINSTALL

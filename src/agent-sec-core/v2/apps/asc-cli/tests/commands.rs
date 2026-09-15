@@ -144,7 +144,6 @@ fn invalid_and_ambiguous_options_are_usage_errors() {
         let error = Cli::parse_from(args.clone()).unwrap_err();
         assert!(error.use_stderr(), "{args:?} unexpectedly produced help");
     }
-    assert!(Cli::parse_from(["agent-sec-cli", "policy", "list"]).is_err());
     assert!(
         Cli::parse_from([
             "agent-sec-cli",

@@ -43,7 +43,7 @@ pub enum Plan<'a> {
     about = "Manage Policy, Scope and Binding through asc-daemon"
 )]
 struct Arguments {
-    /// Absolute endpoint of an already-running daemon.
+    /// Absolute endpoint; otherwise `AGENT_SEC_DAEMON_SOCKET` or the system default.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
@@ -151,7 +151,12 @@ fn resolve_socket(
 ) -> Result<PathBuf, clap::Error> {
     let socket = match option {
         Some(socket) => socket,
-        None => daemon_socket_path_from_env(socket_env).map_err(|error| {
+        None => daemon_socket_path_from_env(
+            socket_env
+                .filter(|path| !path.is_empty())
+                .or(Some(OsStr::new("/run/agent-sec-core/daemon.sock"))),
+        )
+        .map_err(|error| {
             clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
         })?,
     };
@@ -193,13 +198,10 @@ mod tests {
     fn environment_socket_is_used_when_the_option_is_omitted() {
         let cli = Cli::parse_from_with_socket_env(
             ["agent-sec-cli", "scan-code", "--code", "echo hello"],
-            Some(OsStr::new("/run/agent-sec-core/daemon.sock")),
+            Some(OsStr::new("/run/custom/daemon.sock")),
         )
         .expect("deployment endpoint parses");
-        assert_eq!(
-            cli.socket(),
-            Some(Path::new("/run/agent-sec-core/daemon.sock"))
-        );
+        assert_eq!(cli.socket(), Some(Path::new("/run/custom/daemon.sock")));
         assert!(matches!(cli.plan(), Plan::Daemon { .. }));
     }
 
@@ -221,14 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_relative_environment_socket_is_a_usage_error() {
-        for socket_env in [None, Some(OsStr::new("relative"))] {
-            let error = Cli::parse_from_with_socket_env(
+    fn relative_environment_socket_is_a_usage_error() {
+        let error = Cli::parse_from_with_socket_env(
+            ["agent-sec-cli", "scan-code", "--code", "echo hello"],
+            Some(OsStr::new("relative")),
+        )
+        .expect_err("invalid deployment endpoint must fail before connecting");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn absent_or_empty_environment_socket_uses_system_default() {
+        for socket_env in [None, Some(OsStr::new(""))] {
+            let cli = Cli::parse_from_with_socket_env(
                 ["agent-sec-cli", "scan-code", "--code", "echo hello"],
                 socket_env,
             )
-            .expect_err("invalid deployment endpoint must fail before connecting");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            .expect("system endpoint parses");
+            assert_eq!(
+                cli.socket(),
+                Some(Path::new("/run/agent-sec-core/daemon.sock"))
+            );
         }
     }
 

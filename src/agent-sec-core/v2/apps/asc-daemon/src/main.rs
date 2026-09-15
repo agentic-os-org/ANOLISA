@@ -1,3 +1,7 @@
+mod runtime_path;
+
+use runtime_path::RuntimeLease;
+
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +25,31 @@ use crate::sinks::EventSinkAdapter;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
-    match run_with_shutdown_timeout(run(), RUNTIME_SHUTDOWN_TIMEOUT) {
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+    let outcome = match Cli::parse_from(std::env::args_os()) {
+        Ok(outcome) => outcome,
+        Err(problem) => {
+            eprintln!("agent-sec-daemon: {problem}");
+            return ExitCode::from(2);
+        }
+    };
+    let ParseOutcome::Serve(cli) = outcome else {
+        let ParseOutcome::Help(help) = outcome else {
+            unreachable!("all parse outcomes are covered")
+        };
+        print!("{help}");
+        return ExitCode::SUCCESS;
+    };
+
+    let lease = match RuntimeLease::acquire(&cli.bootstrap.socket_path) {
+        Ok(lease) => lease,
+        Err(problem) => {
+            report_error(&problem);
+            return ExitCode::FAILURE;
+        }
+    };
+    // Retain the singleton through the outer Tokio blocking-task shutdown window.
+    match run_with_shutdown_timeout(run(cli, &lease), RUNTIME_SHUTDOWN_TIMEOUT) {
         Ok((exit_code, event_sinks)) => {
             if let Some(sinks) = event_sinks {
                 sinks.close();
@@ -35,22 +63,14 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run() -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
-    let outcome = match Cli::parse_from(std::env::args_os()) {
-        Ok(outcome) => outcome,
-        Err(problem) => {
-            eprintln!("agent-sec-daemon: {problem}");
-            return (ExitCode::from(2), None);
-        }
-    };
-    let ParseOutcome::Serve(cli) = outcome else {
-        let ParseOutcome::Help(help) = outcome else {
-            unreachable!("all parse outcomes are covered")
-        };
-        print!("{help}");
-        return (ExitCode::SUCCESS, None);
-    };
-
+async fn run(
+    cli: Cli,
+    lease: &RuntimeLease,
+) -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
+    if let Err(problem) = lease.prepare_socket().await {
+        report_error(&problem);
+        return (ExitCode::FAILURE, None);
+    }
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {

@@ -101,7 +101,7 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 可观察区别必须保留到 V2 readiness 设计：
 
 - process active 与 application READY 分开；
-- readiness 必须通过受支持 health RPC/probe 验证；
+- 将来交付 readiness 时，必须通过受支持 health RPC/probe 验证；本阶段不交付该接口；
 - prompt compatibility stub 不代表 capability readiness；
 - 单个 Job error 不自动等于顶层 daemon 不可用；
 - 引入 sd_notify、socket activation 或 container probe 时必须冻结 timeout、failure 和
@@ -113,10 +113,11 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 
 - 安装 system-scope systemd unit，不安装或启用 user-scope unit；
 - 默认一个 Host 一个 asc-daemon；第二实例必须因 Host 级 singleton 失败；
-- unit 使用专用 service account 和最小 capability，system-level 不等于 UID 0；
+- 当前 Linux unit 使用 root:root，不创建专用账户；保留现有 capability 和沙箱限制，
+  root 身份不等于开放全部特权；
 - systemd 负责 start/stop/restart、资源限制、目录准备和故障拉起；
 - daemon 不自行 daemonize，不在启动路径隐式执行不可逆 migration；
-- packaging 通过 sysusers/tmpfiles 或等价机制创建 system-owned runtime/state/log path；
+- runtime 目录由 systemd RuntimeDirectory 创建；state/log 路径按各自存储契约管理；
 - 两个不同 UID/Agent 通过同一 system socket 访问并保持 owner-scope 隔离。
 
 ### 4.2 Kubernetes
@@ -155,8 +156,8 @@ V1 未对已有 lock path 完整执行 no-follow、regular-file、owner 和 mode
 
 - lock、socket、runtime 和 state 是 Host 级 system-owned 资源；
 - 最终 path component 不跟随 symlink；
-- 在同一已打开 fd 上验证 regular file、owner、mode、lock、truncate 和 PID，避免 reopen
-  TOCTOU；
+- 在同一已打开 fd 上验证 regular file、owner、mode 并获取 flock，避免 reopen
+  TOCTOU；V2 不要求锁文件保存 PID；
 - 无持锁者时可复用安全遗留 lock；持锁实例阻止第二实例；
 - cleanup 只删除本实例绑定的同一 socket inode；
 - held lock、unsafe path、permission 和普通 I/O failure 使用稳定分类；
@@ -219,8 +220,7 @@ operator-visible semantics 必须进入 compatibility/change record。journald �
 
 `v2/apps/asc-daemon` 当前提供对外名为 `agent-sec-daemon` 的前台 Rust binary 和
 composition bootstrap。它接受无子命令或显式 `serve` 两种形式；`--socket` 可提供显式绝对
-路径，省略时沿用 V1 service 契约，从 `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` 解析
-兼容路径。进程安装 SIGTERM/SIGINT cooperative shutdown，并消费 SIGHUP 而不 reload。
+路径，省略时读取非空 `AGENT_SEC_DAEMON_SOCKET`，再回退到 `/run/agent-sec-core/daemon.sock`；不读取 HOME 或 XDG_RUNTIME_DIR。进程安装 SIGTERM/SIGINT cooperative shutdown，并消费 SIGHUP 而不 reload。
 bootstrap 使用 `asc-daemon-service` 完成真实 UDS bind、bounded admission、单请求 frame
 读取、drain 和同 inode socket cleanup。
 
@@ -260,17 +260,78 @@ Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
-当前仅实现了兼容 V1 user service 的 `$XDG_RUNTIME_DIR` socket 默认值，尚未实现目标态的
-packaging-owned system socket 默认值、runtime directory hardening、Host singleton/stale-socket
-判定、日志/OTel 和 health readiness。因此这一 slice 提供
-DPROC-002/DPROC-003 的 focused process evidence，以及 DPROC-013 中 binary + UDS protocol
-注册、server-side permission 和 signal cleanup 的部分证据；它不能宣称 DPROC-012、完整
-DPROC-013、DPROC-014 或 production process gate 已完成。
+本阶段交付 V2 RPM 的 system-scope unit（`packaging/systemd/agent-sec-core-v2.service.in`）。
+它以 `root:root` 运行，不创建专用 UID，systemd 创建 `/run/agent-sec-core`（0755），socket
+为 0666。普通用户无需加入服务组即可连接；方法授权仍检查内核 peer UID，
+连接权限不授予 PAP 管理权限。
+**TODO（独立入口流量控制任务）**：当前全局 64 个连接名额可被单个普通 UID 占满，
+管理员请求也会被拒绝；方法授权不能解决该可用性问题。后续实现按身份隔离/管理员
+保留容量，并用跨 UID 饱和测试验收。本次仅记录缺口，不宣称已实现隔离。
+`BootstrapConfig::new()` 保持私有 socket 默认值 0600，daemon CLI 装配显式改为 0666；
+使用固定授权策略的库测试将运行目录限制为 0700。
+目录不可由 group/other 写入，锁保持 0600。
+`BoundUnixSocket` 允许 other 读写位，继续拒绝执行位、特殊位和缺少 owner 读写的 mode。
+跨 UID fixture 检查普通 UID 可连接且 PAP 管理仍被拒绝；该 fixture 需要 root，
+缺少权限时跳过，不计为验收通过。本次不交付扫描接口。
+进程设置 umask 0077，最终 socket mode 显式设置为 0666。unit 不授予 capabilities，
+启用 NoNewPrivileges、只读系统路径等 hardening，stdout/stderr 进入 journal。
+**DPROC-V2-HARDENING-1（2026-09-10，获准实施，跟踪 issue #2861）**：V2 默认启用
+`SystemCallFilter=@system-service`、`SystemCallArchitectures=native` 和
+`MemoryDenyWriteExecute=true`，并保留空 `CapabilityBoundingSet`/`AmbientCapabilities`。
+打包 fixture 锁定这些生效指令；实际 syscall/W^X 兼容性需在目标发行版的 systemd
+服务下验收当前业务路径，不能用 unit 语法检查或普通进程测试替代。
+V2 spec 暂保留原有 Python、GPG/PGPy、loongshield 依赖声明及 strip/自动依赖
+排除设置；发布前按能力迁移结果单独审计，不在本次 system-service 变更中清理。
+不再打包 sysusers 文件或执行账户创建脚本。V1/V2 源包分别收录各自的 unit
+模板；构建和安装继续复制共享的 `.anolisa/component.toml`。该 manifest 仍声明
+V1 user scope，尚未适配 V2 的 system-service 编排，不能作为 V2 服务管理的验收证据。
+V2 安装态 CI 检查 system unit 的 root 身份配置，并拒绝遗留 user unit。
+
+启动先逐级以 nofollow 打开并验证 runtime 目录：祖先属于 root 或服务 UID，不允许
+非 sticky 的 group/world 可写祖先；最终目录必须服务 UID 所有，普通权限位
+（`mode & 0777`）为 0700/0750/0755。目录特殊位不单独构成拒绝条件；锁文件和
+socket 的完整模式检查不变。CI 私有实例在 `/tmp` 下创建独立 0700 目录，避免依赖
+runner 工作目录的 owner、权限和 umask。
+同一目录的 `daemon.lock` 以 nofollow 打开，在同一 fd 上验证 regular/owner/0600/nlink=1、
+获取非阻塞 flock；V2 不读写 PID 文件内容，持锁状态是单实例判定依据。
+锁贯穿 Tokio shutdown，不 unlink；
+`RuntimeDirectoryPreserve=yes` 保留同一锁 inode，/run 在主机重启后仍为临时存储。
+已有 socket 只有 owner/mode/link 合法且 connect 明确返回 ECONNREFUSED 时才按 inode
+复核并删除；live listener、符号链接、普通文件和模糊错误均拒绝启动。
+服务 UID 与 root 是可信边界；客户端不得拥有目录写权限。显式 `--socket` 允许在另一
+安全目录建立隔离开发实例，不代表防止特权操作者故意创建第二个 namespace。
+
+当前正常退出包含 UDS drain 2s、reconciliation join 30s 和 Tokio shutdown 1s 的上限；
+unit 另设 `TimeoutStopSec=45`，超时由 systemd 对 control group 发 SIGKILL。
+SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
+`Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
+Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。
+
+版本化变更记录 **DPROC-V2-SYSTEM-1（2026-09-10）**：本次搭建独立 V2 system-service
+基础，不执行 V1 到 V2 的迁移。V1 raw/RPM 保留 user unit 和原有测试入口；V2 RPM
+使用 root 身份的 system unit 和独立安装检查。V2 不再沿用此前的 XDG socket 默认值。服务环境由 systemd 配置，终端变量不会自动
+传给服务；自定义路径时，部署者须同时配置服务和客户端。
+回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
+持久化、业务重启恢复、readiness/持续健康检查和 OTel 不在本次交付范围。
+
+RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
+V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
+
+本阶段 fixture 和执行命令见 [V2 systemd 验收说明](../../tests/v2/systemd/README.md)。
+V2 测试统一由 pytest 收集；system manager 环境不足时明确 skip，
+专用主机通过 `--require-systemd` 禁止跳过。收集成功或 skip 不计为 DPROC-013 验收通过。
+DPROC-012/014 由进程与 staging fixture 覆盖当前 namespace 边界；DPROC-013 的
+system-manager 生命周期 pytest 必须在具有 root 权限的 systemd 主机上运行。
+只有完成真实 system-manager gate 才能验收该部署生命周期；普通进程测试与 unit
+语法验证不能替代它。完整 DPROC-013（含 readiness）和整个 production gate 仍为 PARTIAL。
 
 ### 8.2 **[TARGET V2][PARTIAL]** Rust Policy CLI
 
 `v2/apps/asc-cli` 构建产物为 `agent-sec-cli`（crate 名仍为 `asc-cli`），提供 `policy`、`scope`、`binding` 三组各五条 CRUD 命令，通过
-`asc-daemon-client` 调用现有 15 个 PAP method。它要求显式绝对 `--socket`，不启动或
+`asc-daemon-client` 调用现有 15 个 PAP method。**DPROC-V2-CLIENT-ENDPOINT-1（2026-09-10）**：CLI 省略 `--socket` 时读取非空 `AGENT_SEC_DAEMON_SOCKET`，再回退到
+`/run/agent-sec-core/daemon.sock`；两端均要求解析后的路径为绝对路径。
+显式参数优先于环境变量，空环境变量忽略，与 V1 的覆盖顺序一致；不再将缺少该参数视为用法错误。
+`asc-daemon-client` 库继续接收调用方传入的路径，不自行解析部署环境。CLI 不启动或
 重启 daemon，不解析 HOME socket，不读取 Repository，也不执行本地业务 fallback。
 `--help` 和 `--version` 不连接 daemon。
 
@@ -289,11 +350,11 @@ revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary �
 DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
-共同运行的双进程 E2E 暂缓接入。
+共同运行的双进程 E2E 位于 `tests/v2/e2e/`。
 `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root`
 验证真实 daemon binary 的只读授权和信号退出，不依赖 Client 默认凭据是否可用。测试不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
 完整 PAP CRUD 保留在 `asc-daemon/tests/pap_protocol.rs` 的进程内 UDS fixture 中；后台下发
-装配由 DPROC-021 验证，完整 CLI/daemon 进程链路仍归独立 E2E PR。完整范围与命令见
+装配由 DPROC-021 验证，CLI/daemon 进程链路由上述 pytest E2E 验证。完整范围与命令见
 [`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
 
 ## 9. 验收矩阵

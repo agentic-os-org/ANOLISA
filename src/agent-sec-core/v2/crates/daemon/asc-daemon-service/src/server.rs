@@ -40,7 +40,7 @@ impl BoundUnixSocket {
         if !path.is_absolute() {
             return Err(BindError::RelativePath);
         }
-        if mode & !0o777 != 0 || mode & 0o600 != 0o600 || mode & 0o111 != 0 || mode & 0o007 != 0 {
+        if mode & !0o777 != 0 || mode & 0o600 != 0o600 || mode & 0o111 != 0 {
             return Err(BindError::UnsafeMode);
         }
         match fs::symlink_metadata(path) {
@@ -110,8 +110,8 @@ pub enum BindError {
     /// System-owned daemon socket paths must be absolute.
     #[error("daemon socket path must be absolute")]
     RelativePath,
-    /// Socket mode must grant owner read/write without execute or other-user access.
-    #[error("daemon socket mode must grant owner read/write without execute or other-user access")]
+    /// Socket mode must grant owner read/write without execute or special bits.
+    #[error("daemon socket mode must grant owner read/write without execute or special bits")]
     UnsafeMode,
     /// Stale/live path classification belongs to the process bootstrap.
     #[error("daemon socket path already exists")]
@@ -275,6 +275,10 @@ fn admit_connection(
         return;
     }
 
+    // TODO: isolate host-wide admission across peer UIDs and reserve administrator
+    // capacity. Public UDS access currently lets one UID exhaust the global budget;
+    // method authorization does not prevent this availability failure. Add a
+    // cross-UID saturation regression with the separate ingress-control work.
     match Arc::clone(&runtime.normal_admission).try_acquire_owned() {
         Ok(permit) => {
             let config = runtime.config.clone();
@@ -645,8 +649,18 @@ mod tests {
             Err(BindError::PathExists)
         ));
         drop(socket);
+        let public_socket = BoundUnixSocket::bind(&path, 0o666).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666
+        );
+        drop(public_socket);
         assert!(matches!(
-            BoundUnixSocket::bind(&path, 0o666),
+            BoundUnixSocket::bind(&path, 0o1666),
+            Err(BindError::UnsafeMode)
+        ));
+        assert!(matches!(
+            BoundUnixSocket::bind(&path, 0o466),
             Err(BindError::UnsafeMode)
         ));
         assert!(matches!(
