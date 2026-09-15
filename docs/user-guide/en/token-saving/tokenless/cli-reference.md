@@ -440,6 +440,8 @@ tokenless stats summary --compare <baseline-session> <active-session>
 
 A missing session ID fails with a non-zero exit instead of a 0% comparison, matching `stats diff --session`. `stats summary --limit` must be a positive integer; `--limit 0` is rejected at parse time, matching `stats diff --limit`.
 
+The percentage fields in `stats summary --json` (`chars_saved_percent`, `tokens_saved_percent`) and in `--compare --json` (`saved_percent`) are all computed as saved amount divided by the original, uncompressed amount. See [Measuring savings → Saving-rate field definitions](measuring-savings.md#saving-rate-field-definitions).
+
 Inspect one record or the verified stages of one tool call:
 
 ```bash

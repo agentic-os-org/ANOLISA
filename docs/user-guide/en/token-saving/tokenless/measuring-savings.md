@@ -71,6 +71,23 @@ tokenless stats summary --limit 1000
 
 `--limit` must be a positive integer. `--limit 0` is rejected at parse time with a non-zero exit, matching `stats diff --limit`.
 
+## Saving-rate field definitions
+
+Tokenless always expresses a saving rate as “saved tokens as a share of the original, uncompressed tokens”; only the aggregation scope differs. Every percentage field emitted by `tokenless stats` is defined as follows:
+
+| Field | Where | Formula | Meaning |
+|-------|-------|---------|---------|
+| `chars_saved_percent` | `stats summary --json` | (before_chars − after_chars) ÷ before_chars × 100% | Character-level compression rate for payloads handled by Tokenless |
+| `tokens_saved_percent` | `stats summary --json` | (before_tokens − after_tokens) ÷ before_tokens × 100% | Token-level compression rate for payloads handled by Tokenless |
+| `saved_percent` | `stats summary --compare --json` | (baseline_tokens − tokenless_tokens) ÷ baseline_tokens × 100% | Saving rate of the compression-on run in a dry-run comparison |
+| `saved_percent` | `stats diff --json` (every chain and stage) | (before_tokens − after_tokens) ÷ before_tokens × 100% | Saving rate of one chain or stage in a diff report; computed from that object's own `before_tokens` and `after_tokens`, not the run totals used by `--compare` |
+
+`saved_percent` appears in two schemas with the same formula but different scopes: the `--compare` value is computed from the two runs' totals (`baseline_tokens` and `tokenless_tokens`), while `stats diff --json` reports one `saved_percent` for every chain and every stage, each computed from that object's own `before_tokens` and `after_tokens`.
+
+`Saved: N tokens (X%)` in the text output corresponds to `tokens_saved_percent`: the denominator is the sum of `before_tokens` over the same records — the original, uncompressed size — not the session's total consumption and not any provider-side cache metric. In other words, Tokenless saving rates follow exactly the “saved tokens ÷ original uncompressed tokens” definition: the numerator is `before − after` (the tokens actually saved) and the denominator is `before` (the original uncompressed tokens).
+
+> `tokenless-stats` does not emit `savings_rate`, `cached_tokens`, or `total_cached_tokens` fields, and it does not collect model-provider prompt-cache hit data. If another tool's report shows a `savings_rate` computed as `cached_tokens ÷ total_tokens`, that number describes the provider-side prompt-cache hit share; it does not represent Tokenless compression savings and is not produced by `tokenless-stats`.
+
 ## Inspect individual records
 
 List recent records:
@@ -205,7 +222,7 @@ Notes:
 
 ## Interpret the saving rate correctly
 
-The compression rate in `stats summary` covers only payloads handled by Tokenless. Estimate the whole-session effect with:
+See [Saving-rate field definitions](#saving-rate-field-definitions) for the definition of each percentage field. The compression rate in `stats summary` covers only payloads handled by Tokenless. Estimate the whole-session effect with:
 
 ```text
 Estimated overall saving rate
