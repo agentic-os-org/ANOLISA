@@ -30,6 +30,9 @@ mod composer;
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]
 mod cosh_core;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/daily_terminal.rs"]
+mod daily_terminal;
 #[path = "raw_cli/diagnostics.rs"]
 mod diagnostics;
 #[path = "raw_cli/doctor.rs"]

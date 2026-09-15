@@ -18,6 +18,9 @@ const QUIET: Duration = Duration::from_millis(50);
 pub(crate) struct TerminalSession {
     child: Child,
     master: File,
+    terminal: File,
+    original_termios: libc::termios,
+    original_flags: i32,
     parser: vt100::Parser,
     raw: Vec<u8>,
     action_start: usize,
@@ -33,6 +36,15 @@ impl TerminalSession {
     }
 
     pub(crate) fn spawn_for_shell(shell: &str, integration: &str, cols: u16) -> Self {
+        Self::spawn_with_startup(shell, integration, cols, &[])
+    }
+
+    pub(crate) fn spawn_with_startup(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        files: &[(&str, &str)],
+    ) -> Self {
         let gate = raw_cli_shared_run_guard();
         let root = tempfile::Builder::new()
             .prefix("cosh-screen-")
@@ -55,6 +67,9 @@ impl TerminalSession {
             "[shell]\nadapter_default = 'fake'\n",
         )
         .unwrap();
+        for (name, contents) in files {
+            fs::write(root.path().join(name), contents).expect("write startup fixture");
+        }
         let size = libc::winsize {
             ws_row: ROWS,
             ws_col: cols,
@@ -64,6 +79,9 @@ impl TerminalSession {
         let pty = nix::pty::openpty(Some(&size), None).expect("screen PTY");
         let master = File::from(pty.master);
         let slave = File::from(pty.slave);
+        let original_termios = read_termios(&slave);
+        let original_flags = unsafe { libc::fcntl(slave.as_raw_fd(), libc::F_GETFL) };
+        assert!(original_flags >= 0, "read parent terminal flags");
         let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);
         assert_eq!(
@@ -91,7 +109,7 @@ impl TerminalSession {
             .current_dir(root.path())
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave));
+            .stderr(Stdio::from(slave.try_clone().unwrap()));
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() < 0
@@ -106,6 +124,9 @@ impl TerminalSession {
         let mut session = Self {
             child,
             master,
+            terminal: slave,
+            original_termios,
+            original_flags,
             parser: vt100::Parser::new(ROWS, cols, 0),
             raw: Vec::new(),
             action_start: 0,
@@ -231,14 +252,33 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn finish(mut self) {
-        self.send(b"exit\n");
+    pub(crate) fn finish(self) {
+        self.finish_with_input(b"exit\n", 0);
+    }
+
+    pub(crate) fn finish_with_input(mut self, input: &[u8], expected_code: i32) {
+        self.send(input);
         let status = self
             .child
             .wait_timeout(DEADLINE)
             .expect("wait screen shell")
             .expect("screen shell exit timeout");
-        assert!(status.success(), "screen shell exit: {status:?}");
+        assert_eq!(status.code(), Some(expected_code), "screen shell exit");
+        let restored = read_termios(&self.terminal);
+        let original = &self.original_termios;
+        assert_eq!(restored.c_iflag, original.c_iflag, "input flags");
+        assert_eq!(restored.c_oflag, original.c_oflag, "output flags");
+        assert_eq!(restored.c_cflag, original.c_cflag, "control flags");
+        assert_eq!(restored.c_lflag, original.c_lflag, "local flags");
+        assert_eq!(restored.c_line, original.c_line, "line discipline");
+        assert_eq!(restored.c_cc, original.c_cc, "control characters");
+        assert_eq!(restored.c_ispeed, original.c_ispeed, "input speed");
+        assert_eq!(restored.c_ospeed, original.c_ospeed, "output speed");
+        assert_eq!(
+            unsafe { libc::fcntl(self.terminal.as_raw_fd(), libc::F_GETFL) },
+            self.original_flags,
+            "parent terminal file flags"
+        );
     }
 }
 
@@ -262,4 +302,13 @@ impl Drop for TerminalSession {
             }
         }
     }
+}
+
+fn read_termios(terminal: &File) -> libc::termios {
+    let mut value = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.as_raw_fd(), &mut value) },
+        0
+    );
+    value
 }
