@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# cosh-wsl — community preview launcher: start cosh-shell inside WSL2 from
+# Git Bash on Windows. This is a preview entry point, not a native Windows
+# port of cosh-ng.
+set -euo pipefail
+
+if ! command -v wsl.exe >/dev/null 2>&1; then
+    {
+        echo "Error: wsl.exe was not found on PATH."
+        echo "cosh-ng on Windows requires WSL2. From an elevated PowerShell run:"
+        echo "  wsl --install"
+        echo "then install a Linux distribution and install cosh-ng inside it."
+        echo "See https://learn.microsoft.com/windows/wsl/install"
+    } >&2
+    exit 127
+fi
+
+distro="${COSH_WSL_DISTRO:-Ubuntu}"
+# `pwd -W` is a Git Bash/MSYS2 extension that prints the Windows form of the
+# current directory. It has no Linux equivalent, so a failure here means the
+# launcher is not running where it is designed to run; fail explicitly rather
+# than silently forwarding a Linux path that WSL cannot interpret.
+if ! windows_cwd="$(pwd -W 2>/dev/null)" || [ -z "$windows_cwd" ]; then
+    {
+        echo "Error: could not determine the Windows working directory (pwd -W failed)."
+        echo "Run cosh-wsl from Git Bash (MSYS2), where pwd -W prints the Windows path."
+    } >&2
+    exit 1
+fi
+
+{
+    echo "cosh-ng WSL2 preview"
+    echo "- cosh-ng runs on Linux inside WSL2; this is not a native Windows build."
+    echo "- Git Bash is only the Windows-side entry point."
+    echo "- Directories under /mnt/c and other mounts may have performance and permission differences."
+    echo "- Configuration and credentials stay in the WSL user environment."
+    echo "- pkg, svc, checkpoint, and Gateway are not part of this preview."
+} >&2
+
+# MSYS2_ARG_CONV_EXCL applies only to this wsl.exe invocation so Git Bash does
+# not rewrite the forwarded arguments. The Windows path travels as a
+# positional parameter ($1 in the inner script) so spaces, quotes, and
+# backslashes cannot break the command line or be reinterpreted.
+MSYS2_ARG_CONV_EXCL='*' exec wsl.exe -d "$distro" -- bash -lc '
+set -e
+windows_cwd="$1"
+if ! linux_cwd="$(wslpath "$windows_cwd" 2>/dev/null)"; then
+    echo "Error: wslpath could not convert: $windows_cwd" >&2
+    echo "Start cosh-wsl from a directory that maps into WSL." >&2
+    exit 1
+fi
+if ! cd "$linux_cwd" 2>/dev/null; then
+    echo "Error: directory is not accessible inside WSL: $linux_cwd (converted from $windows_cwd)" >&2
+    exit 1
+fi
+if ! command -v cosh-shell >/dev/null 2>&1; then
+    echo "Error: cosh-shell was not found on PATH inside the WSL distribution." >&2
+    echo "Install cosh-ng inside the distribution first; see the cosh-ng install documentation." >&2
+    exit 127
+fi
+exec cosh-shell
+' bash "$windows_cwd"

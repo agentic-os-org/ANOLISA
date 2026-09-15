@@ -68,6 +68,11 @@ Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
 
+在 Windows 上，社区预览 launcher 可以从 Git Bash 启动 WSL2 内的
+cosh-ng：先在 WSL2 发行版中安装 cosh-ng，然后在 Git Bash 中运行
+`scripts/cosh-wsl`。这是一条预览路径，不是 Windows 原生 target；详见
+[在 Windows 上通过 WSL2 运行 cosh-ng（预览）](../../docs/user-guide/zh/user-entrypoint/cosh-ng/wsl-preview.md)。
+
 ## 30 秒开始使用
 
 ```bash

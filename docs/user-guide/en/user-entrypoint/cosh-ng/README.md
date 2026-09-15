@@ -12,6 +12,7 @@ use the task-based links below for the feature or command you need.
 - [Model providers](core/providers.md) — configure authentication and select a provider.
 - [Configuration](configuration.md) — review files, settings, and precedence.
 - [Supported platforms](supported-distros.md) — check package and service backends.
+- [Windows WSL2 preview](wsl-preview.md) — start cosh-ng from Git Bash on Windows (community preview).
 
 ## Work in the terminal
 
