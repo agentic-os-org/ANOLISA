@@ -35,7 +35,7 @@ import {
   cpSync,
   rmSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -175,6 +175,51 @@ function main() {
 }
 
 /**
+ * Enable the Claude Code adapter by running its install helper against the
+ * user-level adapter tree. The helper is idempotent and exits cleanly when
+ * the `claude` CLI is not present, so this is safe to run on every install.
+ *
+ * Fail-open: if enabling fails (e.g. the claude CLI is present but plugin
+ * validation fails), warn the user and leave the adapter files in place so
+ * they can retry manually.
+ */
+function enableClaudeAdapter(adapterDir) {
+  const installScript = join(adapterDir, 'claude-code', 'scripts', 'install.sh');
+  if (!existsSync(installScript)) {
+    return;
+  }
+
+  const claudeBin = process.env.CLAUDE_BIN || 'claude';
+  try {
+    const out = execFileSync('bash', [installScript], {
+      env: { ...process.env, CLAUDE_BIN: claudeBin },
+      stdio: 'pipe',
+    }).toString();
+    // install.sh exits 0 but prints a "skipping" line when claude CLI is absent.
+    if (out.includes('skipping plugin installation')) {
+      console.log(
+        `anolisa-tokenless: claude-code adapter skipped (${claudeBin} not found)`,
+      );
+      console.log(
+        `anolisa-tokenless: Install Claude Code, then run: bash ${installScript}`,
+      );
+    } else {
+      console.log(`anolisa-tokenless: Enabled claude-code adapter (CLAUDE_BIN=${claudeBin})`);
+    }
+  } catch (err) {
+    console.warn(
+      `anolisa-tokenless: Could not enable claude-code adapter: ${err.message}`,
+    );
+    console.warn(
+      `anolisa-tokenless: Prerequisite: the claude CLI must be installed and reachable` +
+      ` (CLAUDE_BIN=${claudeBin}).`,
+    );
+    console.warn('anolisa-tokenless: Once the prerequisite is met, re-enable with:');
+    console.warn(`  bash ${installScript}`);
+  }
+}
+
+/**
  * Install the bundled Agent adapters (hook scripts and install helpers —
  * plain bash/python, OS independent) into the user-level data directory that
  * the hook dispatcher (common/hooks/run-hook.sh) already searches:
@@ -195,10 +240,7 @@ function installAdapters() {
     mkdirSync(destParent, { recursive: true });
     cpSync(adaptersSrc, dest, { recursive: true });
     console.log(`anolisa-tokenless: Installed Agent adapters to ${dest}`);
-    console.log(
-      'anolisa-tokenless: To register an adapter with an Agent product, run its install script, e.g.:',
-    );
-    console.log(`  bash ${join(dest, 'claude-code', 'scripts', 'install.sh')}`);
+    enableClaudeAdapter(dest);
   } catch (err) {
     console.warn(`anolisa-tokenless: Could not install adapters to ${dest}: ${err.message}`);
     console.warn(`anolisa-tokenless: Adapter files remain available at ${adaptersSrc}`);
