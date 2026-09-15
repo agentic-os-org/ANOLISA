@@ -258,7 +258,7 @@ impl FrameworkDriver for CodexDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let layout = MarketplaceLayout::from_claim(claim)?;
 
@@ -412,6 +412,7 @@ impl FrameworkDriver for CodexDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;

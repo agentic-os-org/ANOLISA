@@ -298,7 +298,7 @@ impl FrameworkDriver for HermesDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         require_home(ctx)?;
 
@@ -417,6 +417,7 @@ impl FrameworkDriver for HermesDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;

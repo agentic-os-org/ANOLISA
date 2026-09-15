@@ -41,8 +41,8 @@ use super::claim::{
 };
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport,
-    AdapterSummary, CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan,
-    EnableProgress, FrameworkCommand, FrameworkRpcSession, HostEnv,
+    AdapterSummary, ClaimProgress, CliOutput, ConditionStatus, DisableReport, DriverCtx,
+    DriverPlan, FrameworkCommand, FrameworkRpcSession, HostEnv,
 };
 use super::managed_files::{
     ManagedInventory, ManagedMatch, cleanup_replaced_materialized_files,
@@ -1302,7 +1302,22 @@ impl AdapterManager {
             // A failed cleanup leaves the validated prior receipt untouched,
             // so disable or a later re-enable can retry safely.
             let pristine_prior = prior.clone();
-            let report = match driver.cleanup_replaced_claim(prior, &claim, &ctx) {
+            // The channel is the one `apply_enable` writes through: a cleanup
+            // that runs a full disable here recovers facts from host state it is
+            // about to destroy, and every save this function performs on `prior`
+            // happens after it returned. See `FrameworkDriver::cleanup_replaced_claim`.
+            let cleanup_result = {
+                let mut progress = ManagerClaimProgress {
+                    state: &mut state,
+                    state_path: &self.state_path,
+                    layout: &self.layout,
+                    allowed_external_roots: &claim_allowed_roots,
+                    extra_owned_roots: &trust.target_roots,
+                    exact_symlink_targets: trust.exact_targets(),
+                };
+                driver.cleanup_replaced_claim(prior, &claim, &ctx, &mut progress)
+            };
+            let report = match cleanup_result {
                 Ok(report) => report,
                 Err(err) => {
                     // An error is not the same as "the driver got nowhere": it
@@ -1375,7 +1390,7 @@ impl AdapterManager {
         trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots);
         state.save(&self.state_path)?;
         let apply_result = {
-            let mut progress = ManagerEnableProgress {
+            let mut progress = ManagerClaimProgress {
                 state: &mut state,
                 state_path: &self.state_path,
                 layout: &self.layout,
@@ -1641,7 +1656,23 @@ impl AdapterManager {
         // only and the receipt on disk still naming them. The retry then re-enables
         // a plugin it already gave back, over whatever the operator did since.
         let pristine = claim.clone();
-        let report = match driver.disable(&mut claim, &ctx) {
+        // Both saves below run once the driver has returned, which is too late
+        // for a fact it recovered from host state its own cleanup destroys: the
+        // destructive step is in between. The channel lets it write that down
+        // first, so a process killed mid-cleanup leaves a receipt describing the
+        // host as the driver last saw it. See `FrameworkDriver::disable`.
+        let disable_result = {
+            let mut progress = ManagerClaimProgress {
+                state: &mut state,
+                state_path: &self.state_path,
+                layout: &self.layout,
+                allowed_external_roots: &claim_allowed_roots,
+                extra_owned_roots: &trust.target_roots,
+                exact_symlink_targets: trust.exact_targets(),
+            };
+            driver.disable(&mut claim, &ctx, &mut progress)
+        };
+        let report = match disable_result {
             Ok(report) => report,
             Err(err) => {
                 // Only when the driver actually changed something: an error
@@ -2850,10 +2881,10 @@ struct ManagerOps {
     record_invocations: bool,
 }
 
-/// Persists incremental receipt facts while the Manager holds the enable
-/// lock. Drivers never receive the state path or write installed state
-/// directly.
-struct ManagerEnableProgress<'a> {
+/// Persists incremental receipt facts while the Manager holds the install
+/// lock, on the enable and on the disable path alike. Drivers never receive
+/// the state path or write installed state directly.
+struct ManagerClaimProgress<'a> {
     state: &'a mut StateStore,
     state_path: &'a Path,
     layout: &'a FsLayout,
@@ -2864,7 +2895,7 @@ struct ManagerEnableProgress<'a> {
     exact_symlink_targets: &'a [PathBuf],
 }
 
-impl EnableProgress for ManagerEnableProgress<'_> {
+impl ClaimProgress for ManagerClaimProgress<'_> {
     fn persist_claim(&mut self, claim: &AdapterClaim) -> Result<(), AdapterError> {
         claim.validate_with_trust(
             self.layout,

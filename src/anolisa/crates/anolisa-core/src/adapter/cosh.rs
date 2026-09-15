@@ -235,7 +235,7 @@ impl FrameworkDriver for CoshDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let dst = claim_extension_dir(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
@@ -340,6 +340,7 @@ impl FrameworkDriver for CoshDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
@@ -713,7 +714,7 @@ mod tests {
                     && c.status == ConditionStatus::True)
         );
 
-        let disabled = driver.disable(&mut claim, &ctx).expect("disable");
+        let disabled = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(disabled.cleanup_complete);
         assert!(!ext_dir.exists(), "extension dir removed");
         assert!(

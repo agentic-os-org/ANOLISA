@@ -193,13 +193,16 @@ pub enum PreparedEnable {
     },
 }
 
-/// Manager-owned persistence channel for resources applied incrementally.
+/// Manager-owned persistence channel for receipt facts recorded incrementally.
 ///
-/// Drivers use it for write-ahead intent and confirmed-success transitions.
-/// The Manager validates and saves the updated receipt while the enable lock
-/// is still held, keeping cleanup state accurate across partial failure.
-pub trait EnableProgress {
-    /// Validate and persist the current enable receipt.
+/// Drivers use it for write-ahead intent and confirmed-success transitions on
+/// the enable path, and for a recovery the disable path has to make durable
+/// *before* it destroys the host state that evidenced it. The Manager validates
+/// and saves the updated receipt while it still holds the install lock, which is
+/// what keeps cleanup state accurate across a partial failure — and across a
+/// process that never returns from the driver at all.
+pub trait ClaimProgress {
+    /// Validate and persist the current receipt.
     ///
     /// # Errors
     ///
@@ -208,7 +211,7 @@ pub trait EnableProgress {
 }
 
 #[cfg(test)]
-impl EnableProgress for () {
+impl ClaimProgress for () {
     fn persist_claim(&mut self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
         Ok(())
     }
@@ -737,6 +740,11 @@ pub trait FrameworkDriver: Send + Sync {
     /// whether that failure is an incomplete report or an error returned
     /// partway through the cleanup.
     ///
+    /// `progress` is [`Self::disable`]'s channel, for the same reason and with
+    /// the same duty: an implementation that runs a full cleanup here destroys
+    /// host state a recovery of its own was read from, and the Manager's saves
+    /// around this hook all land afterwards.
+    ///
     /// # Errors
     ///
     /// Returns a driver-specific cleanup error.
@@ -745,6 +753,7 @@ pub trait FrameworkDriver: Send + Sync {
         _prior: &mut AdapterClaim,
         _next: &AdapterClaim,
         _ctx: &DriverCtx,
+        _progress: &mut dyn ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         Ok(DisableReport {
             cleanup_complete: true,
@@ -868,7 +877,7 @@ pub trait FrameworkDriver: Send + Sync {
         claim: &mut AdapterClaim,
         prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        progress: &mut dyn EnableProgress,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<(), AdapterError>;
 
     /// Read-only status check against a receipt. Must not mutate state.
@@ -903,6 +912,15 @@ pub trait FrameworkDriver: Send + Sync {
     /// never got to report on it — but only the mutations actually made: an
     /// error raised before the first one leaves the receipt untouched.
     ///
+    /// Both of those saves happen *after* the cleanup ran, so neither reaches a
+    /// fact the driver recovers from host state its own cleanup destroys.
+    /// `progress` does: it is the same Manager-owned channel
+    /// [`Self::apply_enable`] writes through, and a driver holding such a fact
+    /// must persist it before the step that invalidates the reading it came
+    /// from. A process killed in between then leaves a receipt describing the
+    /// host as this driver last saw it rather than one describing a host that no
+    /// longer exists. A driver that recovers nothing from the host ignores it.
+    ///
     /// # Errors
     ///
     /// [`AdapterError::FrameworkCli`] when de-registration fails in a way
@@ -911,6 +929,7 @@ pub trait FrameworkDriver: Send + Sync {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<DisableReport, AdapterError>;
 }
 

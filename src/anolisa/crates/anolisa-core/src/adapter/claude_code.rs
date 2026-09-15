@@ -264,7 +264,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let plugin = claim_plugin(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
@@ -429,6 +429,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         // Deregistration is only possible through the CLI. ANOLISA must not
         // hand-edit ~/.claude/settings.json, so without the CLI we report

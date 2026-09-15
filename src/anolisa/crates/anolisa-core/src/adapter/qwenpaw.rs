@@ -231,7 +231,7 @@ impl FrameworkDriver for QwenPawDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let home = require_home(ctx)?;
         let plugin_id = claim
@@ -371,6 +371,7 @@ impl FrameworkDriver for QwenPawDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let Some(plugin_id) = claim.plugin_id.clone() else {
             return Ok(DisableReport {

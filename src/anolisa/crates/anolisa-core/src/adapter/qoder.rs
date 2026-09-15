@@ -501,7 +501,7 @@ impl FrameworkDriver for QoderDriver {
         claim: &mut AdapterClaim,
         prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        progress: &mut dyn super::driver::EnableProgress,
+        progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         if native_claim(claim)? {
             let PreparedEnable::QoderNative { program } = prepared else {
@@ -743,6 +743,7 @@ impl FrameworkDriver for QoderDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         if native_claim(claim)? {
             return disable_native(claim, ctx);

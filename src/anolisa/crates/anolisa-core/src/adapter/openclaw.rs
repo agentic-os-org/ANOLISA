@@ -137,8 +137,8 @@ use super::claim::{
 };
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
-    ClaimResourceRef, CliOutput, ConditionStatus, DetectResult, DisableReport, DriverCtx,
-    DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
+    ClaimProgress, ClaimResourceRef, CliOutput, ConditionStatus, DetectResult, DisableReport,
+    DriverCtx, DriverPlan, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
     find_binary_in_path,
 };
 use super::managed_files::{MaterializedMapping, copy_materialized_resource};
@@ -798,6 +798,7 @@ impl FrameworkDriver for OpenClawDriver {
         prior: &mut AdapterClaim,
         next: &AdapterClaim,
         ctx: &DriverCtx,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let prior_home = claim_state_dir(prior)?;
         if prior_home != claim_state_dir(next)? {
@@ -809,7 +810,7 @@ impl FrameworkDriver for OpenClawDriver {
             // too and needs no extra step. Reachable only for the migrations the
             // Manager's trust boundary admits; see
             // `preserve_openclaw_displaced_facts`.
-            return self.disable(prior, ctx);
+            return self.disable(prior, ctx, progress);
         }
 
         // Same home, so the prior installation continues — but a displacement
@@ -850,7 +851,7 @@ impl FrameworkDriver for OpenClawDriver {
         claim: &mut AdapterClaim,
         prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        progress: &mut dyn EnableProgress,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<(), AdapterError> {
         let home = require_home(ctx)?;
         let user_home = ctx.user_home.as_deref();
@@ -1179,6 +1180,7 @@ impl FrameworkDriver for OpenClawDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         // Disable must clean the state directory recorded at enable time. In
         // particular, pre-fix receipts can point at the legacy resolver's
@@ -1202,8 +1204,12 @@ impl FrameworkDriver for OpenClawDriver {
         // Write down whatever that capture recovered, here and not three steps
         // later: the uninstall below destroys the evidence the recovery rests on,
         // and a restore that fails keeps the receipt for a retry which has no
-        // capture of its own — see the method.
-        self.record_recovered_slot_selection_handoffs(claim, &claimed, &slots, &home, ctx)?;
+        // capture of its own. It saves what it writes for the same reason, since
+        // every save the Manager performs lands after that uninstall — see the
+        // method.
+        self.record_recovered_slot_selection_handoffs(
+            claim, &claimed, &slots, &home, ctx, progress,
+        )?;
         // Resolve again, so the restore reasons from the `applied` flags just
         // written rather than from a view of the receipt that predates them. Both
         // would reach the same verdict on an unchanged host, but the enablement
@@ -2057,7 +2063,7 @@ impl OpenClawDriver {
         claim: &mut AdapterClaim,
         home: &Path,
         ctx: &DriverCtx,
-        progress: &mut dyn EnableProgress,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<(), AdapterError> {
         let claimed = claim_displaced_plugins(claim)?;
         if claimed.is_empty() {
@@ -2130,7 +2136,7 @@ impl OpenClawDriver {
         home: &Path,
         user_home: Option<&Path>,
         ctx: &DriverCtx,
-        progress: &mut dyn EnableProgress,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<(), AdapterError> {
         let claimed = claim_displaced_plugins(claim)?;
         if claimed.is_empty() {
@@ -2740,17 +2746,31 @@ impl OpenClawDriver {
     /// the steps that follow succeeding. A crash anywhere in this disable then leaves
     /// a receipt describing an ownership the host really established.
     ///
+    /// Durable means written by this call, which is why it takes `progress` and
+    /// saves each mark as it makes it — the same pairing
+    /// [`Self::record_slot_selection_handoffs`] uses on the enable side. The
+    /// Manager does re-persist the receipt on every path that keeps it, the error
+    /// one included, but each of those saves runs only once `disable` has returned,
+    /// and the uninstall sitting in between is precisely the step that erases the
+    /// reading the attribution was recovered from. A process killed inside that
+    /// window — SIGKILL, OOM, power loss — would leave a slot naming the plugin
+    /// the uninstall put back over a receipt still reading `applied = false`, and
+    /// the retry then has nothing left to recover from: it reports this adapter
+    /// never disabled the plugin, drops the receipt, and strands the host. So the
+    /// recovery is what has to reach the disk before the host mutation, not
+    /// merely before the end of the call.
+    ///
     /// Positive evidence only, exactly as on the enable side: an entry this cannot
     /// attribute stays unapplied, and a capture the host could not answer stays
-    /// unattributed rather than becoming a guess. No persistence hook is needed —
-    /// the Manager re-persists the receipt on every path that keeps it, the error one
-    /// included.
+    /// unattributed rather than becoming a guess.
     ///
     /// # Errors
     ///
     /// Propagates a receipt-consistency error from [`claim_own_plugin`] or
     /// [`mark_displacement_applied`], both meaning the caller's view of the receipt
-    /// has diverged from the receipt itself.
+    /// has diverged from the receipt itself, and a persistence failure from
+    /// `progress` — which aborts the disable with the host untouched rather than
+    /// proceeding to destroy evidence the receipt never recorded.
     fn record_recovered_slot_selection_handoffs(
         &self,
         claim: &mut AdapterClaim,
@@ -2758,6 +2778,7 @@ impl OpenClawDriver {
         slots: &CapturedSlots,
         home: &Path,
         ctx: &DriverCtx,
+        progress: &mut dyn ClaimProgress,
     ) -> Result<(), AdapterError> {
         let own_plugin_id = claim_own_plugin(claim)?;
         for entry in displaced {
@@ -2776,6 +2797,7 @@ impl OpenClawDriver {
                 continue;
             }
             mark_displacement_applied(claim, &entry.resource)?;
+            progress.persist_claim(claim)?;
         }
         Ok(())
     }

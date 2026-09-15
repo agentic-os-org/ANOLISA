@@ -72,6 +72,12 @@ impl World {
         load_state_at(&self.layout.state_dir.join("installed.toml"))
     }
 
+    /// The staged prefix, so a world can be handed to a child process that
+    /// reopens it from disk instead of inheriting it in memory.
+    fn root(&self) -> &Path {
+        self._root.path()
+    }
+
     /// Path the fake CLI appends each invocation's argv to (test-only).
     fn argv_log(&self) -> PathBuf {
         self.openclaw_home
@@ -267,6 +273,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_CONFIG_GET_FAIL_ON_NTH",
     "FAKE_OC_ENABLE_FAIL_ID",
     "FAKE_OC_UNLINK_BIN_AFTER_ENABLE_ID",
+    "FAKE_OC_KILL_PID_AFTER_UNINSTALL",
     "FAKE_OC_CONFIG_GET_FAIL_KEY",
     "FAKE_OC_CONFIG_FAIL_KEY",
     "FAKE_OC_CONFIG_FAIL_AFTER_KEY",
@@ -463,6 +470,13 @@ fn stage() -> World {
 ///   out in the middle of a cleanup": a non-zero exit is a report, and it takes the
 ///   `cleanup_complete` path instead. It models an install broken or a package
 ///   removed while a disable is running.
+///   `FAKE_OC_KILL_PID_AFTER_UNINSTALL=<pid>` SIGKILLs that process from inside a
+///   successful `plugins uninstall`, immediately after the config rewrite. Where
+///   the knob above reaches the driver as an error the Manager can report and
+///   persist around, this one runs no handler at all in the process it kills, so it
+///   is the only way to express "the process died between a destructive host
+///   mutation and the save that follows it". It needs a process to aim at: see
+///   `disable_child_killed_between_the_uninstall_and_the_save`.
 /// - `FAKE_OPENCLAW_FAIL=install|install_after_register|uninstall` forces that
 ///   verb to exit non-zero; `FAKE_OC_CONFIG_FAIL_KEY` fails `config set`
 ///   before mutation, while `FAKE_OC_CONFIG_FAIL_AFTER_KEY` fails after
@@ -730,6 +744,14 @@ case "$action" in
     mkdir -p "$OPENCLAW_STATE_DIR/disabled"
     : > "$OPENCLAW_STATE_DIR/disabled/$arg3"
     fake_uninstall_config_rewrite "$arg3"
+    # Test-only, and deliberately placed after the rewrite above: the caller is
+    # killed at the exact moment the host stops holding the state a hand-off
+    # attribution was read from, with every save the Manager would have performed
+    # still ahead of it.
+    if [ -n "${FAKE_OC_KILL_PID_AFTER_UNINSTALL:-}" ]; then
+      kill -9 "$FAKE_OC_KILL_PID_AFTER_UNINSTALL" 2>/dev/null
+      exit 0
+    fi
     echo "uninstalled $arg3"
     ;;
   list)
@@ -9850,6 +9872,11 @@ fn failed_verify_with_an_unreadable_slot_still_hands_the_plugin_back() {
 /// stops holding the evidence the moment this driver uninstalls its own plugin, so
 /// the readings are local to one call by construction. What has to survive is the
 /// ownership they establish, and the only place it can is the receipt.
+///
+/// What this test cannot show is *when* the receipt gets it: the failed restore
+/// returns control to the Manager, whose save would write the mark even if the
+/// driver never did. `disable_persists_a_recovered_handoff_before_the_uninstall_destroys_it`
+/// closes that gap by killing the process in between.
 #[test]
 fn failed_restore_keeps_the_recovered_handoff_retryable() {
     let guard = OpenClawEnvGuard::acquire();
@@ -9960,6 +9987,204 @@ fn failed_restore_keeps_the_recovered_handoff_retryable() {
         "a hand-off attribution recovered from a pre-uninstall capture must be \
          durable rather than local to the call that recovered it: {leftover:?}"
     );
+}
+
+/// Name of the child half of the crash test below. The parent invokes it by
+/// string through the test binary, so the two cannot drift silently — the parent
+/// asserts the child died by SIGKILL, which only the real child can.
+const DISABLE_CHILD_TEST: &str = "disable_child_killed_between_the_uninstall_and_the_save";
+
+/// Staged-world prefix the parent hands that child, which reopens the world from
+/// disk rather than inheriting it in memory.
+const DISABLE_CHILD_ROOT_ENV: &str = "ANOLISA_TEST_OPENCLAW_WORLD_ROOT";
+
+/// A hand-off attribution a `disable` recovers must be on disk before the
+/// `plugins uninstall` that destroys the evidence for it — not merely before
+/// `disable` returns.
+///
+/// `failed_restore_keeps_the_recovered_handoff_retryable` proves the recovery
+/// outlives a failed restore, but it proves it the comfortable way: the restore
+/// fails, control returns to the Manager, and the Manager's own save writes the
+/// mark. The window that save cannot reach is the one between the destructive host
+/// mutation and itself, and it is the window a crash actually lands in. This
+/// reproduces it with a real kill instead of a modelled one: the disable runs in a
+/// child process, and the fake CLI SIGKILLs that child from inside its own
+/// `plugins uninstall` handler, immediately after the config rewrite that resets
+/// `plugins.slots.memory` to `memory-core`. Nothing the child had not already
+/// persisted survives, so what is on disk afterwards is exactly what a crash there
+/// leaves behind.
+///
+/// Without a write-ahead save the receipt still reads `applied = false` while the
+/// host says the slot belongs to the bundled plugin again: of the two facts the
+/// attribution was recovered from, one is destroyed and the other was never
+/// recorded. The retry then has nothing to recover from, reports that this adapter
+/// never disabled `memory-core`, removes the receipt over a bundled backend still
+/// switched off, and the stranded host the capture exists to prevent arrives one
+/// attempt later with nothing done in between.
+#[test]
+fn disable_persists_a_recovered_handoff_before_the_uninstall_destroys_it() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(
+        &world.layout,
+        &plugin_adapter_block_with_displacement("memory-core", Some("memory")),
+    );
+    // Both sides declare `kind = "memory"`, which is what makes the host write the
+    // slot the attribution is read from at all.
+    declare_bundle_plugin_kind(&world, "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-core", "memory");
+    world.apply_env(&guard, None);
+    guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+
+    // An enable that cannot read the slot, and then fails verification: the host
+    // performed the hand-off and the receipt could not record it.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_KEY", "plugins.slots.memory");
+    guard.set("FAKE_OC_RUNTIME_STATUS", "error");
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("a non-loaded runtime status must fail the enable");
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_KEY");
+    guard.unset("FAKE_OC_RUNTIME_STATUS");
+    assert!(
+        !persisted_displacement(&world).applied,
+        "fixture must leave the mark unwritten, so the disable below has to recover it"
+    );
+
+    // The crash. A child process runs the disable and is SIGKILLed from inside the
+    // fake CLI's uninstall handler, so no handler of ours — the driver's or the
+    // Manager's — runs again in it, and the flock it held dies with it.
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([DISABLE_CHILD_TEST, "--exact", "--ignored", "--nocapture"])
+        .env(DISABLE_CHILD_ROOT_ENV, world.root())
+        .env("OPENCLAW_BIN", &world.fake_bin)
+        .env("OPENCLAW_HOME", &world.openclaw_home)
+        .env("FAKE_OC_ARGV_LOG", world.argv_log())
+        .status()
+        .expect("run the child disable");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(9),
+        "the child must have been killed by the fake CLI mid-cleanup, not merely \
+         failed in a way the Manager could have reported around: {status}"
+    );
+
+    // The host mutation the kill landed after. This is what makes the window real
+    // rather than hypothetical: the reading the attribution came from is gone, and
+    // this adapter's own plugin — the only thing that could have been asked about
+    // it — is gone with it.
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some("memory-core"),
+        "fixture: the uninstall really ran and really reset the slot"
+    );
+    assert!(
+        !world.registry_marker_exists(),
+        "fixture: and it really removed this adapter's own plugin"
+    );
+
+    // The substance of the fix: the recovered ownership outlived the process that
+    // recovered it, because the driver wrote it down before the uninstall rather
+    // than leaving it to a save that the kill never reached.
+    let leftover = persisted_displacement(&world);
+    assert!(
+        leftover.applied,
+        "a hand-off attribution recovered from a pre-uninstall capture must be \
+         durable before that uninstall, or a crash in between loses the only record \
+         that this adapter turned the bundled plugin off: {leftover:?}"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "and the receipt the crash left behind is still there to retry from"
+    );
+
+    // The retry that receipt now honestly advises, over a host that holds no
+    // evidence of the hand-off at all.
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let retry = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the retry completes the restore the killed attempt owed");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the retry must hand the bundled backend back rather than give up on an \
+         attribution the previous attempt recorded: {appended:?}"
+    );
+    assert!(
+        !retry
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("never disabled it")),
+        "and must not disown a hand-off the killed attempt had already recovered: {:?}",
+        retry.report.messages
+    );
+    assert!(
+        retry.claim_removed,
+        "the cleanup converges, so the receipt goes: {:?}",
+        retry.report.messages
+    );
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the bundled backend must really be back on"
+    );
+}
+
+/// The child half of
+/// [`disable_persists_a_recovered_handoff_before_the_uninstall_destroys_it`]: it
+/// reopens the world the parent staged and runs the disable that the fake CLI
+/// SIGKILLs it in the middle of.
+///
+/// `#[ignore]`d because it is only meaningful as that child. Reaching either
+/// `panic!` below means the kill never fired, which the parent reports as a
+/// missing SIGKILL rather than as a failure here.
+#[test]
+#[ignore = "child process of disable_persists_a_recovered_handoff_before_the_uninstall_destroys_it"]
+fn disable_child_killed_between_the_uninstall_and_the_save() {
+    let root = std::env::var_os(DISABLE_CHILD_ROOT_ENV).map_or_else(
+        || panic!("must be run by the parent test, which passes {DISABLE_CHILD_ROOT_ENV}"),
+        PathBuf::from,
+    );
+    // Reopen the staged world from the prefix alone: everything the parent built
+    // under it is on disk, and the env contract is re-applied here because env is
+    // per process and the fake CLI reads it in this one.
+    let layout = FsLayout::system(Some(root.clone()));
+    let user_home = root.join("home");
+    let openclaw_home = root.join("openclaw-home");
+    let fake_bin = write_fake_openclaw(&root);
+    let resource_root = layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join(FRAMEWORK);
+    record_owned_adapter_files(&layout, &resource_root);
+    // SAFETY: invoked with `--exact --ignored`, so this process runs this one test
+    // and no other thread reads the OpenClaw env contract.
+    unsafe {
+        std::env::set_var("OPENCLAW_BIN", &fake_bin);
+        std::env::set_var("OPENCLAW_HOME", &openclaw_home);
+        std::env::set_var("FAKE_OC_ARGV_LOG", root.join("argv.log"));
+        // Aim the fake CLI's kill at this process, from inside its own
+        // `plugins uninstall` handler.
+        std::env::set_var(
+            "FAKE_OC_KILL_PID_AFTER_UNINSTALL",
+            std::process::id().to_string(),
+        );
+    }
+    let manager = AdapterManager::new(layout, Some(user_home), "tester".to_string());
+    match manager.disable(COMPONENT, Some(FRAMEWORK), false) {
+        Ok(_) => panic!(
+            "the disable returned; the fake CLI was supposed to SIGKILL this process \
+             from inside `plugins uninstall`"
+        ),
+        Err(err) => panic!(
+            "the disable failed before reaching `plugins uninstall`, so nothing about \
+             the crash window was exercised: {err}"
+        ),
+    }
 }
 
 /// The same window, but on a host where nothing changes: the claim stands and the

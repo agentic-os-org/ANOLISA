@@ -272,6 +272,7 @@ impl FrameworkDriver for DshDriver {
         prior: &mut AdapterClaim,
         next: &AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let prior_payload = dsh_claim(prior)?;
         let next_payload = dsh_claim(next)?;
@@ -336,7 +337,7 @@ impl FrameworkDriver for DshDriver {
         claim: &mut AdapterClaim,
         prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         if !matches!(prepared, PreparedEnable::None) {
             return Err(AdapterError::FrameworkCli {
@@ -460,6 +461,7 @@ impl FrameworkDriver for DshDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let payload = dsh_claim(claim)?;
         validate_dsh_claim(claim, payload)?;
@@ -1421,7 +1423,7 @@ mod tests {
         let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
 
         let report = driver
-            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx, &mut ())
             .unwrap();
 
         assert!(report.cleanup_complete);
@@ -1487,7 +1489,7 @@ mod tests {
 
         let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
         let report = driver
-            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx, &mut ())
             .unwrap();
 
         assert!(report.cleanup_complete);
@@ -1540,7 +1542,7 @@ mod tests {
         let (next, _) = driver.prepare_enable(&bundle, None, &next_ctx).unwrap();
 
         let report = driver
-            .cleanup_replaced_claim(&mut prior, &next, &next_ctx)
+            .cleanup_replaced_claim(&mut prior, &next, &next_ctx, &mut ())
             .unwrap();
 
         assert!(!report.cleanup_complete);

@@ -242,7 +242,7 @@ impl FrameworkDriver for QwenCodeDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let layout = QwenLayout::from_claim(claim)?;
         ensure_current_home(&layout, ctx)?;
@@ -414,6 +414,7 @@ impl FrameworkDriver for QwenCodeDriver {
         &self,
         claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let layout = QwenLayout::from_claim(claim)?;
         if let Err(error) = ensure_current_home(&layout, ctx) {
@@ -1672,7 +1673,7 @@ mod tests {
         let driver = QwenCodeDriver::new();
         let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&mut claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(report.cleanup_complete, "{:?}", report.messages);
         assert!(!home.join("extensions").join("tokenless").exists());
         assert_eq!(
@@ -1708,7 +1709,7 @@ mod tests {
         )
         .expect("replace manifest");
 
-        let report = driver.disable(&mut claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(
             report
@@ -1748,7 +1749,7 @@ mod tests {
         let driver = QwenCodeDriver::new();
         let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&mut claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(
             report
@@ -1777,7 +1778,7 @@ mod tests {
         let driver = QwenCodeDriver::new();
         let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&mut claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(ops.commands().is_empty());
     }
@@ -1800,7 +1801,7 @@ mod tests {
         let driver = QwenCodeDriver::new();
         let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        let report = driver.disable(&mut claim, &ctx).expect("disable");
+        let report = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(!report.cleanup_complete);
         assert!(ops.commands().is_empty());
         assert!(home.join("extensions").join("tokenless").exists());
