@@ -136,6 +136,8 @@ Core 决定。即使压缩关闭，DSH 原始失败和结构化命令失败仍�
 后续 Waterfall Listener 替换 Canonical `value` 后，Tokenless 只检查该替换值，且不会对其
 应用内容压缩。
 
+完整触发条件（压缩开关、最小响应长度、JSON 校验、严格变小保护）与阈值含义见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
+
 ## 通过 anolisa 管理（推荐）
 
 这些命令需要 ANOLISA 组件记录。如果 Tokenless 是通过 YUM 直接安装的，

@@ -152,6 +152,8 @@ when compression is disabled. When a later waterfall listener replaces the
 canonical `value`, Tokenless examines only that replacement and never applies
 content compression to it.
 
+For the full trigger conditions (compression switch, minimum response length, JSON validation, strictly-smaller guard) and threshold semantics, see [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
+
 ## Manage adapters with anolisa (recommended)
 
 These commands require an ANOLISA component record. If Tokenless was installed

@@ -95,6 +95,38 @@ This setting does not disable RTK command rewriting, adapter execution, or retri
 anolisa adapter disable tokenless <framework>
 ```
 
+### Compression trigger conditions and thresholds
+
+Adapters do not compress every tool result. For response compression, compressed content is produced only when all of the following hold:
+
+1. Compression is not switched off. With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0` the run becomes a dry-run: statistics are still calculated, but the original text is returned (see the previous section).
+2. The tool is not a content-retrieval tool. Read/Glob/Grep/LSP/NotebookRead and their aliases skip response compression so their content stays intact. Search path sharing adds one narrow exception: a native Claude Code `Grep` result in no-context content mode is routed to that lossless compressor instead, and still keeps every received match (see [Controlling search path sharing](#controlling-search-path-sharing)).
+3. The response reaches the minimum length. The shared response hook, OpenClaw, and Hermes skip responses shorter than 200 characters. Length is counted in characters, not bytes.
+4. The content is valid JSON. Threshold-based response compression works on JSON objects and arrays.
+   - **4a. Shared response hook path:** output that arrives as plain text (not JSON) is routed to the content-aware text compressors (build/test log terminal cleanup and progress reduction, CSV/TSV table compaction, API search path sharing) described in [Adapter processing rules](framework-integration.md#adapter-processing-rules); the table rules are detailed in [CSV/TSV views can be incomplete](#csvtsv-views-can-be-incomplete) and the search rules in [Controlling search path sharing](#controlling-search-path-sharing).
+   - **4b. OpenClaw and Hermes:** both unwrap a shell result's dominant text field (for example the `output` of a `{"stdout": ...}` envelope) and allow text replacement, so Core can also route that plain text to the build-log and CSV/TSV compressors; OpenClaw's structured slots accept JSON only.
+
+   The shared response hook additionally skips skill-like text with YAML frontmatter before spawning a compression subprocess (Core passes such text through anyway).
+5. The compressed result is strictly smaller. When neither response compression nor TOON encoding makes the content smaller, the original text is kept.
+
+After these checks, truncation strength depends on the tool category. Categories and thresholds are defined in `tool_categories.json` inside the adapter directory (the single source of truth shared by all adapters); built-in safe fallbacks are used when the file is missing or invalid:
+
+| Category | Representative tools | String truncation threshold | Array item cap | Maximum nesting depth |
+|----------|----------------------|------------------------------|----------------|-----------------------|
+| Content retrieval | Read, Glob, Grep, LSP, NotebookRead and aliases | Compression skipped | — | — |
+| Shell/exec | Bash, Shell, exec, terminal, etc. | 65,536 characters | 128 items | 8 |
+| Other structured tools | Any tool not in the two categories above | 1,048,576 characters | 65,536 items | 32 |
+
+Threshold semantics: a string longer than the threshold is cut at the threshold (retrievable through Stash when Stash is enabled); an array over the cap keeps only its leading items while the tail is truncated (also retrievable through Stash when enabled); subtrees nested deeper than the depth cap collapse into a truncation marker.
+
+Per-path differences worth noting:
+
+- Running `tokenless compress-response` standalone uses the CLI's own defaults (4,096 characters / 32 items / depth 8), overridable with `--truncate-strings-at`, `--truncate-arrays-at`, and `--max-depth`; see the [CLI reference](cli-reference.md).
+- Codex and Qwen Code do not run response compression under their current host contracts: Codex relies on RTK source reduction plus environment-failure diagnostics, and Qwen Code has no post-tool replacement slot. See the adapter table below for what each integration provides.
+- The OpenClaw plugin reads the same `tool_categories.json` lists to map each tool to a content origin (file content, command output, or API response), falling back to its built-in lists when that file is missing or invalid; Core then applies the matching thresholds. Its former `skip_tools` and `shell_tools` overrides have been removed and no longer control the adapter. See [Configuration and data privacy](configuration-and-privacy.md) for the current options.
+- TOON encoding is a separate trigger decision: it runs only on payloads of at least 500 characters and only when the host slot accepts text, and it is adopted only when the encoded result is smaller than the current content.
+- The AgentScope framework integration does not use the adapter thresholds above; it selects thresholds by `conservative` / `balanced` / `aggressive` mode. See [Framework integration](framework-integration.md).
+
 ### Controlling search path sharing
 
 API search path sharing is enabled by default. Set `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`
@@ -227,6 +259,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
 | Connect an Agent product | [Agent integration](framework-integration.md) |
 | Compress or retrieve manually | [CLI reference](cli-reference.md) |
+| Understand when compression triggers and what the thresholds are | [This page · Compression trigger conditions and thresholds](#compression-trigger-conditions-and-thresholds) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |
 | Fix missing statistics, adapter, or Stash issues | [Troubleshooting](troubleshooting.md) |
