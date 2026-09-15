@@ -89,6 +89,7 @@ impl RunningPapDaemon {
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,
             Arc::new(FixedRolePolicy(role)),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
         ));
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
@@ -348,6 +349,7 @@ fn all_frozen_methods_route_once_and_return_domain_values_directly() {
     let handler = DaemonDispatcher::new(
         application,
         Arc::new(FixedRolePolicy(PrincipalRole::PolicyAdministrator)),
+        Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
     );
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
         "../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-methods.json"
@@ -401,6 +403,7 @@ fn server_assigned_non_admin_role_is_not_overridden_by_request_data() {
     let handler = DaemonDispatcher::new(
         application,
         Arc::new(FixedRolePolicy(PrincipalRole::LocalUser)),
+        Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
     );
     let response = handler.handle(
         RequestId::new("request-denied").unwrap(),
@@ -424,6 +427,7 @@ fn unknown_methods_and_invalid_method_params_use_distinct_errors() {
     let handler = DaemonDispatcher::new(
         RecordingAdministration::new(),
         Arc::new(FixedRolePolicy(PrincipalRole::PolicyAdministrator)),
+        Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
     );
     for (method, params, expected_code, expected_message) in [
         (

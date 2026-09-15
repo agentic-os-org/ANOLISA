@@ -57,6 +57,7 @@ impl RunningDaemon {
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,
             Arc::new(FixedRolePolicy(role)),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
         ));
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
@@ -100,6 +101,24 @@ async fn wait_for_socket(path: &Path) {
     })
     .await
     .expect("daemon should accept connections on its socket");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pii_scan_is_available_to_a_non_administrator_local_peer() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "action.pii_scan", "params": {"text": "alice@company.cn"}}),
+    )
+    .await;
+    assert_eq!(response["result"]["verdict"], "warn", "{response}");
+    let denied = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "policy.templates.list", "params": {}}),
+    )
+    .await;
+    assert_eq!(denied["error"]["code"], "permission_denied", "{denied}");
+    daemon.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

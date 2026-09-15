@@ -2,6 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use asc_action_runtime::{Finalizer, SecurityEventSink};
+use asc_capability_pii_scan::PiiRuleSet;
 use asc_daemon_core::{
     PeerCredentials, PolicyAdministration, Principal, PrincipalPolicy, PrincipalRole,
 };
@@ -11,11 +12,13 @@ use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, Resp
 
 use crate::action::CodeScanHandler;
 use crate::pap::PapHandler;
+use crate::pii::PiiScanHandler;
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
     pap: PapHandler,
     code_scan: CodeScanHandler,
+    pii_scan: PiiScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -27,8 +30,14 @@ impl DaemonDispatcher {
     pub fn new(
         application: impl PolicyAdministration + 'static,
         principal_policy: Arc<dyn PrincipalPolicy>,
+        pii_rules: Arc<PiiRuleSet>,
     ) -> Self {
-        Self::new_with_finalizer(application, principal_policy, default_finalizer())
+        Self::new_with_finalizer(
+            application,
+            principal_policy,
+            default_finalizer(),
+            pii_rules,
+        )
     }
 
     /// Composes dispatch with an explicitly configured action finalizer.
@@ -36,10 +45,12 @@ impl DaemonDispatcher {
         application: impl PolicyAdministration + 'static,
         principal_policy: Arc<dyn PrincipalPolicy>,
         finalizer: Finalizer,
+        pii_rules: Arc<PiiRuleSet>,
     ) -> Self {
         Self {
             pap: PapHandler::new(application),
-            code_scan: CodeScanHandler::new(finalizer),
+            code_scan: CodeScanHandler::new(finalizer.clone()),
+            pii_scan: PiiScanHandler::new(pii_rules, finalizer),
             principal_policy,
         }
     }
@@ -92,6 +103,10 @@ impl DaemonDispatcher {
             MethodId::Action(method) => match method {
                 method::ActionMethod::CodeScan => {
                     self.code_scan
+                        .handle(request_id, peer, control, request.params)
+                }
+                method::ActionMethod::PiiScan => {
+                    self.pii_scan
                         .handle(request_id, peer, control, request.params)
                 }
             },

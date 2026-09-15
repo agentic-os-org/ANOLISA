@@ -70,12 +70,15 @@ class DaemonHandle:
         self.process = process
         self.socket_path = socket_path
 
-    def cli(self, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    def cli(
+        self, *args: str, timeout: float = 30.0, input_text: str | None = None
+    ) -> subprocess.CompletedProcess:
         """Invokes ``agent-sec-cli --socket <this daemon> <args>``."""
         return subprocess.run(
             [_require(CLI_BIN), "--socket", str(self.socket_path), *args],
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=timeout,
             check=False,
         )
@@ -90,11 +93,15 @@ class DaemonHandle:
         return json.loads(result.stdout)
 
 
-def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
+def _start_daemon(
+    socket_path: Path, admin_uids: list[int], pii_rules: Path | None = None
+) -> subprocess.Popen:
     """Starts a foreground daemon and waits for its socket to appear."""
     argv = [_require(DAEMON_BIN), "--socket", str(socket_path)]
     for uid in admin_uids:
         argv += ["--policy-admin-uid", str(uid)]
+    if pii_rules is not None:
+        argv += ["--pii-rules", str(pii_rules)]
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
@@ -149,11 +156,13 @@ def start_daemon(tmp_path: Path):
     started: list[subprocess.Popen] = []
 
     def _factory(
-        admin_uids: list[int] | None = None, name: str = "daemon.sock"
+        admin_uids: list[int] | None = None,
+        name: str = "daemon.sock",
+        pii_rules: Path | None = None,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids)
+        process = _start_daemon(socket_path, uids, pii_rules)
         started.append(process)
         return DaemonHandle(process, socket_path)
 

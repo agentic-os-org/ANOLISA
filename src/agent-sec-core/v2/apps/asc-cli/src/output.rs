@@ -5,6 +5,9 @@ use std::io::{self, Write};
 use asc_daemon_protocol::DaemonResponse;
 use serde::{Deserialize, Serialize};
 
+mod pii;
+pub use pii::render_pii_scan;
+
 /// V1-compatible code-scan result ordered for CLI JSON output.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

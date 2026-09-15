@@ -13,6 +13,7 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+asc-action-types = { workspace = true }
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
@@ -24,6 +25,7 @@ thiserror = { workspace = true }
 unicode-properties = { workspace = true }
 
 [dev-dependencies]
+asc-capability-pii-scan = { workspace = true }
 tokio = { workspace = true }
 asc-daemon = { workspace = true }
 asc-daemon-core = { workspace = true }

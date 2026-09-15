@@ -13,6 +13,7 @@ name = "agent-sec-daemon"
 path = "src/main.rs"
 
 [dependencies]
+asc-capability-pii-scan = { workspace = true }
 asc-policy-runtime.workspace = true
 asc-pcp.workspace = true
 asc-agentsight-client.workspace = true
