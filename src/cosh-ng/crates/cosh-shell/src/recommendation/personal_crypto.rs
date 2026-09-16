@@ -63,7 +63,7 @@ pub(crate) fn sha256(input: &[u8]) -> [u8; SHA256_OUTPUT_BYTES] {
         0x1f83d9ab,
         0x5be0cd19,
     ];
-    for chunk in padded.chunks_exact(SHA256_BLOCK_BYTES) {
+    for chunk in padded.as_chunks::<SHA256_BLOCK_BYTES>().0 {
         compress(&mut state, chunk);
     }
 
@@ -169,8 +169,8 @@ fn compress(state: &mut [u32; 8], block: &[u8]) {
         0xc67178f2,
     ];
     let mut words = [0u32; 64];
-    for (index, bytes) in block.chunks_exact(4).enumerate() {
-        words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (index, bytes) in block.as_chunks::<4>().0.iter().enumerate() {
+        words[index] = u32::from_be_bytes(*bytes);
     }
     for index in 16..64 {
         let s0 = words[index - 15].rotate_right(7)
