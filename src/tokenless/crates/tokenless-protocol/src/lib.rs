@@ -503,6 +503,9 @@ pub enum AppliedOperation {
     SearchPathSharing,
     /// Unmodified Git diff context was reduced with the original available in Stash.
     DiffReduction,
+    /// An HTML page was rendered as Markdown with enumerated non-content elements
+    /// removed and the original available in Stash.
+    HtmlExtraction,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -525,6 +528,7 @@ impl AppliedOperation {
             Self::TabularRowReduction => "tabular_row_reduction",
             Self::SearchPathSharing => "search_path_sharing",
             Self::DiffReduction => "diff_reduction",
+            Self::HtmlExtraction => "html_extraction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

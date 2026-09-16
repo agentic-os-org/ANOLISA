@@ -99,6 +99,48 @@ Local compression and original recovery have been verified on finite samples.
 Stable whole-Agent token savings have not been established, so this feature remains
 opt-in.
 
+## Optional HTML page rendering
+
+HTML page rendering is disabled by default. Set `TOKENLESS_HTML_EXTRACTION_ENABLED=1`
+in the environment inherited by Tokenless or its host agent to enable it; unset the
+variable or set it to `0` to disable it. `1`, `true`, and `yes` enable it
+(case-insensitively). This option is independent of the general compression switch
+and is not a `config.json` field. With rendering enabled,
+`TOKENLESS_COMPRESSION_ENABLED=0` measures candidates but returns the original.
+
+Rust callers use `RuntimeConfig.html_extraction_enabled`; Python callers use
+`TokenlessConfig(html_extraction_enabled=True)` or the native `TokenlessRuntime`
+keyword of the same name. SDK options default to false and are explicit; this CLI
+environment variable does not override them.
+
+The compressor handles complete HTML documents (starting with `<!doctype html` or
+`<html>`) received as successful command output or API responses, for example a page
+fetched with `curl` or returned by an MCP tool. It requires a text replacement slot,
+an available Stash, and a supported recovery method. The page is rendered as a
+Markdown subset: headings, paragraphs, lists, tables, fenced code with its language,
+links with targets, image alt text, quotes, and admonitions. The content root is
+`<main>`, an element with `role=main`, or the only `<article>`; otherwise the whole
+body. Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
+page-level `header`/`footer`, and elements with navigation, banner, contentinfo, or
+complementary roles are removed. The first line of the view names the root, the
+number of nodes omitted outside it, and every removal count by category. Pages whose
+rendered body is shorter than 64 characters, such as application shells, pass through,
+and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
+quadratically with nesting depth, so such pages are not parsed at all.
+It only adopts output when both characters decrease and the heuristic token estimate
+saves at least 16 tokens, including the notice and recovery instruction.
+
+The emitted operation is `html_extraction` and recoverability is `retrievable`, not
+`lossless`: markup and the removed elements are not in the visible output. Follow the
+emitted shell or tool instruction to retrieve the received original while it is in
+Stash. Content that a page loads through scripts is not visible in the view. Content
+origin is classified per tool by the adapters: file reads pass through, but a page
+printed by a shell `cat` or returned by an MCP file tool is rendered like a fetched
+page and must be retrieved to see its source.
+
+Local rendering and original recovery have been verified on finite samples. Stable
+whole-Agent token savings have not been established, so this feature remains opt-in.
+
 ## Environment variables
 
 ### Common user variables
@@ -112,6 +154,8 @@ opt-in.
 | `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
+| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | Enable HTML page rendering | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 
 ### Adapter and diagnostic variables
 

@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
-    BuildLogCompressor, BuildLogOperation, JsonCompressionConfig, JsonCompressionContext,
-    JsonCompressor, JsonOperation, SearchResultsCompressor, TabularCompressor, TabularOperation,
+    BuildLogCompressor, BuildLogOperation, HtmlExtractor, JsonCompressionConfig,
+    JsonCompressionContext, JsonCompressor, JsonOperation, SearchResultsCompressor,
+    TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
     AppliedOperation, BYTE_ESTIMATOR_ID, ContentOrigin, ContentType, Disposition, PostToolRequest,
@@ -28,6 +29,7 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) compression_enabled: bool,
     pub(crate) search_path_sharing_enabled: bool,
     pub(crate) diff_compression_enabled: bool,
+    pub(crate) html_extraction_enabled: bool,
     pub(crate) stash_enabled: bool,
     pub(crate) require_reversibility: bool,
     pub(crate) force_json: bool,
@@ -94,6 +96,11 @@ impl PostToolPipeline {
             && content_type == ContentType::Diff
             && request.content_origin == ContentOrigin::CommandOutput
             && request.capabilities.replace_with_text;
+        // Complete HTML documents from commands or APIs; file reads were excluded above.
+        let html_candidate = config.html_extraction_enabled
+            && !search_only
+            && content_type == ContentType::Html
+            && request.capabilities.replace_with_text;
         let json_candidate = !search_only
             && (config.force_json
                 || content_type == ContentType::Json
@@ -109,6 +116,7 @@ impl PostToolPipeline {
             && content_type == ContentType::SearchResults
             && request.capabilities.replace_with_text;
         if !diff_candidate
+            && !html_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
@@ -144,6 +152,33 @@ impl PostToolPipeline {
                 DomainCandidate {
                     output: format!("{hint}\n{view}"),
                     operations: vec![AppliedOperation::DiffReduction],
+                    recoverability: tokenless_compressors::Recoverability::Retrievable,
+                    stash_writes: vec![write],
+                    stash_errors: 0,
+                    unrecoverable_truncations: None,
+                }
+            } else {
+                DomainCandidate {
+                    output: request.content.clone(),
+                    operations: Vec::new(),
+                    recoverability: tokenless_compressors::Recoverability::Lossless,
+                    stash_writes: Vec::new(),
+                    stash_errors: 0,
+                    unrecoverable_truncations: None,
+                }
+            }
+        } else if html_candidate {
+            if let Some(store) = attached_store
+                && let Some(view) = HtmlExtractor.render(&request.content)
+            {
+                let write = store
+                    .stash(&request.content)
+                    .map_err(|error| PostToolPipelineError(error.to_string()))?;
+                let hint =
+                    tokenless_ccr::recovery_instruction(&write.key, &request.capabilities.recovery);
+                DomainCandidate {
+                    output: format!("{hint}\n{}", view.output),
+                    operations: vec![AppliedOperation::HtmlExtraction],
                     recoverability: tokenless_compressors::Recoverability::Retrievable,
                     stash_writes: vec![write],
                     stash_errors: 0,
@@ -241,8 +276,12 @@ impl PostToolPipeline {
             original: &request.content,
             candidate: &candidate.output,
             has_operations: !candidate.operations.is_empty(),
-            // Reject marginal Diff estimates after including wrapper and recovery text.
-            min_token_savings: if diff_candidate { 16 } else { 1 },
+            // Reject marginal Diff and HTML estimates after including wrapper and recovery text.
+            min_token_savings: if diff_candidate || html_candidate {
+                16
+            } else {
+                1
+            },
             recoverability: candidate.recoverability,
             require_reversibility: config.require_reversibility && config.compression_enabled,
             dry_run: !config.compression_enabled,
@@ -400,6 +439,7 @@ mod tests {
 
     use super::*;
     include!("tests/tabular_pipeline_tests.rs");
+    include!("tests/html_pipeline_tests.rs");
     fn search_input() -> String {
         (1..30)
             .map(|line| format!("crates/long_directory/src/search_file.rs:{line}:  value  \r\n"))
@@ -605,6 +645,7 @@ mod tests {
             compression_enabled: true,
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
+            html_extraction_enabled: false,
             stash_enabled: true,
             require_reversibility: false,
             force_json: true,

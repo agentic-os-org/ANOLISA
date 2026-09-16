@@ -130,6 +130,7 @@ class AppliedOperation(StrEnum):
     TABULAR_ROW_REDUCTION = "tabular_row_reduction"
     SEARCH_PATH_SHARING = "search_path_sharing"
     DIFF_REDUCTION = "diff_reduction"
+    HTML_EXTRACTION = "html_extraction"
     JSON_CLEANUP = "json_cleanup"
     JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"
@@ -168,6 +169,7 @@ class TokenlessConfig:
     rtk_enabled: bool = True
     search_path_sharing_enabled: bool = True
     diff_compression_enabled: bool = False
+    html_extraction_enabled: bool = False
 
     def __post_init__(self) -> None:
         try:
@@ -324,6 +326,7 @@ class TokenlessSdk:
             self.config.data_dir,
             search_path_sharing_enabled=self.config.search_path_sharing_enabled,
             diff_compression_enabled=self.config.diff_compression_enabled,
+            html_extraction_enabled=self.config.html_extraction_enabled,
         )
         self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
         self._stats: TokenlessStats | None = None

@@ -2430,3 +2430,85 @@ fn compress_toon_min_chars_zero_encodes_short_payload() {
     assert_ne!(emitted, input, "min-chars 0 must encode a saving payload");
     assert_eq!(emitted, "a: short", "expected TOON object encoding");
 }
+
+#[test]
+fn html_extraction_is_env_gated_and_recovers_the_original_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let html = format!(
+        "<!DOCTYPE html>\n<html><head><title>Guide</title>\
+         <link rel=\"canonical\" href=\"https://example.com/guide\"><style>{}</style></head>\
+         <body><nav><a href=\"/\">Home</a></nav><main><h1>Guide</h1>{}\
+         <table><tr><th>Flag</th><th>Meaning</th></tr><tr><td>-v</td><td>verbose</td></tr></table>\
+         <pre><code class=\"language-sh\">tokenless retrieve HASH</code></pre></main>\
+         <footer>footer</footer><script>{}</script></body></html>",
+        "p{margin:0}".repeat(40),
+        (0..8)
+            .map(|i| format!("<p>Section {i}: {}</p>", "explanatory prose ".repeat(10)))
+            .collect::<String>(),
+        "window.x = 1;".repeat(40)
+    );
+    let state = temp.path().join("data");
+    for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env_remove("TOKENLESS_HTML_EXTRACTION_ENABLED")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0");
+        if let Some(value) = enabled {
+            command.env("TOKENLESS_HTML_EXTRACTION_ENABLED", value);
+        }
+        let output = spawn_with_stdin(
+            &mut command,
+            &["compress"],
+            &build_log_request(&html, "success", "html-integration"),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "html");
+        if enabled.is_none() || enabled == Some("0") {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], html);
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["html_extraction"])
+        );
+        assert_eq!(result["recoverability"], "retrievable");
+        let rendered = result["output"].as_str().unwrap();
+        assert!(rendered.len() < html.len());
+        assert!(rendered.contains(
+            "[HTML page rendered as Markdown; <main> only, 3 nodes outside it omitted; \
+             removed 1 style. Retrieve original for the full page.]\nTitle: Guide\nURL: https://example.com/guide\n\
+             # Guide\n\nSection 0: explanatory prose"
+        ));
+        assert!(rendered.contains("| Flag | Meaning |\n| --- | --- |\n| -v | verbose |"));
+        assert!(rendered.contains("```sh\ntokenless retrieve HASH\n```"));
+        assert!(!rendered.contains("Home") && !rendered.contains("window.x"));
+        let hash = result["stash_keys"][0].as_str().unwrap();
+        assert!(rendered.starts_with(&format!(
+            "If needed, run in shell: tokenless retrieve {hash}\n"
+        )));
+        let retrieved = tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STASH_DB")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args(["retrieve", hash])
+            .output()
+            .unwrap();
+        assert!(retrieved.status.success());
+        assert_eq!(retrieved.stdout, html.as_bytes());
+    }
+}

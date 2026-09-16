@@ -148,6 +148,7 @@ fn content_operations_have_stable_wire_names() {
         (AppliedOperation::TabularCompaction, "tabular_compaction"),
         (AppliedOperation::SearchPathSharing, "search_path_sharing"),
         (AppliedOperation::DiffReduction, "diff_reduction"),
+        (AppliedOperation::HtmlExtraction, "html_extraction"),
         (
             AppliedOperation::TabularRowReduction,
             "tabular_row_reduction",
