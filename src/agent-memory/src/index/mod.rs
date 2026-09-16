@@ -26,6 +26,12 @@ pub use worker::IndexWorker;
 pub struct SearchHit {
     pub path: String,
     pub snippet: String,
+    /// Ranking score. **Higher is better** on every path (BM25, the LIKE
+    /// fallback, vector, and hybrid RRF), and a genuine match scores above
+    /// zero. The magnitude is path-specific — BM25 relevance grows with the
+    /// corpus, and a term that occurs in most documents has a negative IDF
+    /// that can push a weak match below zero — so compare hits inside one
+    /// result set rather than across queries or across paths.
     pub score: f64,
     /// Whether the snippet contains prompt-injection patterns.  Callers
     /// in the adapter layer can use this flag to decide whether to
