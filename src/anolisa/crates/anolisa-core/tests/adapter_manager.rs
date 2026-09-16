@@ -10174,6 +10174,276 @@ fn reenable_recovers_a_handoff_the_failed_enable_never_marked() {
     );
 }
 
+/// Stage a world whose first enable performed the hand-off but could not mark it,
+/// with both faults cleared again — the state a real retry is read from.
+///
+/// The fixture half of
+/// [`reenable_recovers_a_handoff_the_failed_enable_never_marked`], which walks it
+/// step by step because the staging *is* its subject. The two tests below start from
+/// the same world and need it as a precondition, so they share this rather than each
+/// carrying a third copy of it. Returns once the receipt names `memory-core` with
+/// `applied = false` over a host whose memory slot names this adapter's own plugin —
+/// positive evidence for the recovery, and the only record that the hand-off
+/// happened at all.
+fn stage_with_unmarked_handoff(guard: &OpenClawEnvGuard) -> (World, AdapterManager) {
+    let world = stage();
+    write_openclaw_manifest(
+        &world.layout,
+        &plugin_adapter_block_with_displacement("memory-core", Some("memory")),
+    );
+    // Both plugins declare `kind = "memory"`, which is what makes the host write the
+    // slot the attribution reads at all.
+    declare_bundle_plugin_kind(&world, "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-core", "memory");
+    world.apply_env(guard, None);
+    guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+
+    // An enable that cannot read the slot, and then fails verification: the host
+    // performed the hand-off and the receipt could not record it.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_KEY", "plugins.slots.memory");
+    guard.set("FAKE_OC_RUNTIME_STATUS", "error");
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("a non-loaded runtime status must fail the enable");
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_KEY");
+    guard.unset("FAKE_OC_RUNTIME_STATUS");
+
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "fixture must reproduce the slot-selection side effect"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "and the slot this adapter's own plugin owns, which is the corroborating \
+         half of the attribution"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "fixture must leave a receipt naming the displacement"
+    );
+    assert!(
+        !persisted_displacement(&world).applied,
+        "and must leave the hand-off unmarked, which is what a retry has to recover"
+    );
+    (world, manager)
+}
+
+/// One transient failure to read the slot must not cost the operator the recovery —
+/// and it must not be answered by guessing, either.
+///
+/// [`reenable_recovers_a_handoff_the_failed_enable_never_marked`] proves the recovery
+/// works when the host answers. This is the retry where it does not: the same failed
+/// enable leaves the same unapplied entry over a plugin this adapter really turned
+/// off, both faults are cleared, and then a *single* `config get plugins.slots.memory`
+/// fails during the re-enable's own attribution read.
+///
+/// The attribution used to collapse "could not read" into "not this adapter", which
+/// declined the recovery and then lost it exactly as before: the replacement receipt
+/// named no displacement, the same-home cleanup handed `memory-core` back, this
+/// enable's own install and enable switched it off again through the very selection
+/// the read had failed to attribute, and the disable that followed reported a receipt
+/// with nothing to restore and removed it — the bundled backend off, no operator
+/// anywhere in the sequence, and nothing left recording why. Inheriting *every*
+/// unapplied entry instead is the mirror-image mistake, and the one the evidence gate
+/// exists to prevent: it would claim an operator's own disable and a later `disable`
+/// would re-open a plugin they closed themselves.
+///
+/// So the re-enable fails while the host cannot answer, before its first mutation and
+/// with the prior receipt untouched, and the retry — the one an operator runs after
+/// whatever broke the read is over — recovers the ownership and hands the plugin back.
+#[test]
+fn review_reenable_preserves_unrecorded_handoff_on_one_failed_slot_probe() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+
+    // 1. One transient failure of the attribution read, and nothing else.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ONCE", "plugins.slots.memory");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("an unreadable attribution must fail the re-enable, not guess at it");
+    let appended = argv_appended(&world, logged_before);
+    // The failure must land before the first mutation, which is the whole reason it
+    // is an error rather than a verdict: everything after this point acts on the
+    // receipt the read failure just declined to carry forward.
+    assert_dry_run_only_probed(&appended);
+    assert!(
+        err.to_string().contains("memory-core"),
+        "the error must name the plugin whose ownership it could not settle: {err}"
+    );
+
+    // 2. The prior receipt is the thing being protected, so it has to survive
+    //    byte-for-byte: still naming the displacement, still unmarked, and still the
+    //    only record that this adapter is what turned the plugin off.
+    assert!(
+        world.has_claim(),
+        "the failed re-enable must keep the receipt"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "and must not have dropped the displacement it is the only record of"
+    );
+    assert!(
+        !persisted_displacement(&world).applied,
+        "still unmarked, so the retry is asked the same question and can still \
+         answer it"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "and the host must be exactly as the failed enable left it"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "including the slot reading the retry recovers the attribution from"
+    );
+
+    // 3. The retry, with the host answering: the ownership is recovered rather than
+    //    lost, so the same-home cleanup has nothing dropped to restore.
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the retry succeeds once the host answers the attribution");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        persisted_displacement(&world).applied,
+        "the recovered hand-off must be carried as already performed, which is what \
+         a later disable acts on"
+    );
+    assert!(
+        !argv_contains(&appended, "plugins enable memory-core"),
+        "handing the plugin back here only has this enable's own install switch it \
+         off again, which is the sequence that lost the ownership: {appended:?}"
+    );
+
+    // 4. The payoff the transient failure was protecting.
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "a transient read failure on a re-enable must not cost the operator the \
+         bundled backend: {appended:?}"
+    );
+    assert!(
+        !outcome
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("never disabled it")),
+        "and must not disown a hand-off the recovered receipt records as its own: {:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the bundled backend must really be back on"
+    );
+}
+
+/// The re-enable preview must describe the ownership the real re-enable recovers.
+///
+/// `prepare_enable` recovers an unmarked hand-off from host evidence, and the preview
+/// knew nothing about it: `plan_enable`'s `FlagDisabled` arm read the positive `false`
+/// and promised "already disabled before this adapter, so it is not claimed and
+/// disable will not re-enable it" — over a real enable whose replacement receipt
+/// carried the entry as applied and whose disable then really did re-enable the
+/// plugin. The two commands disagreed about the one fact an operator runs a dry-run
+/// to learn, and the disagreement left no trace: the disable succeeded and removed
+/// the receipt, so nothing afterwards showed that the plan had described a different
+/// run. Whoever assessed the cost of a later uninstall from that preview got the
+/// opposite of the answer.
+///
+/// Both halves are read from the same world in the order an operator runs them, with
+/// no host change in between, so the pairing cannot drift.
+#[test]
+fn review_reenable_preview_matches_recovered_ownership() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+
+    // 1. The preview.
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let plan = match manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("re-enable plan")
+    {
+        EnableOutcome::Planned { plan, .. } => plan,
+        EnableOutcome::Enabled(_) => panic!("dry-run must return a plan"),
+    };
+    assert!(
+        plan.actions.iter().any(|action| action
+            .contains("keep openclaw plugin 'memory-core' disabled")
+            && action.contains("disable will hand it back")
+            && action.contains("plugins.slots.memory")),
+        "the preview must report the ownership the real re-enable recovers, from the \
+         same evidence: {:?}",
+        plan.actions
+    );
+    assert!(
+        !plan
+            .actions
+            .iter()
+            .any(|action| action.contains("leave openclaw plugin 'memory-core' alone")),
+        "and must not promise the opposite of what the disable that follows does: {:?}",
+        plan.actions
+    );
+    // The recovery is a read: it may cost the plan two more `config get` calls, and
+    // nothing else.
+    let all = argv_lines(&world.argv_log());
+    assert_dry_run_only_probed(&all[logged_before.min(all.len())..]);
+
+    // 2. The real re-enable, with nothing changed in between.
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the real re-enable succeeds");
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "the receipt carries the displacement the preview said it would carry"
+    );
+    assert!(
+        persisted_displacement(&world).applied,
+        "as already performed, which is what the preview's `disable will hand it \
+         back` rests on"
+    );
+
+    // 3. And the disable the preview spoke for.
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the preview promised the bundled backend would be handed back: {appended:?}"
+    );
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("re-enabled openclaw plugin 'memory-core'")),
+        "and said so in the words the report really uses: {:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "so the plan and the operation agree on the host state as well"
+    );
+}
+
 /// Name of the child half of the crash test below. The parent invokes it by
 /// string through the test binary, so the two cannot drift silently — the parent
 /// asserts the child died by SIGKILL, which only the real child can.
