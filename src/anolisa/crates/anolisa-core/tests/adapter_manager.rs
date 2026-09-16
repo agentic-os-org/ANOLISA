@@ -10444,6 +10444,196 @@ fn review_reenable_preview_matches_recovered_ownership() {
     );
 }
 
+/// One transient failure of either half of a `disable`'s attribution read must stop
+/// the disable before its first mutation — and the retry must then recover exactly
+/// what the stopped one kept.
+///
+/// Shared by the two tests below because they are the same question asked of the two
+/// halves the attribution is built from: the slot the pre-uninstall capture reads, and
+/// the enablement flag the attribution reads live. A driver that guards one and folds
+/// the other into "not this adapter" has guarded neither, and only running both says
+/// so.
+///
+/// What makes `Unknown` an error here rather than a verdict is what the rest of the
+/// disable does. It uninstalls this adapter's own plugin, which resets
+/// `plugins.slots.memory` to the host default and so destroys the reading the
+/// attribution was recovered from; the restore then skips an entry nothing marked; the
+/// cleanup reports itself complete; and the Manager removes the one receipt that ever
+/// named the hand-off. Folding "could not read" into "not ours" therefore used to end
+/// with the bundled backend off, no record of who turned it off, nothing left for a
+/// retry to recover from, and a report reading "this adapter never disabled it and
+/// there is nothing to hand back" — no crash and no operator anywhere in the sequence.
+/// The capture exists to keep the evidence alive across the disable; failing while it
+/// cannot be read is what keeps it alive across the disable *attempt*.
+fn assert_disable_stops_on_unreadable_attribution(
+    world: &World,
+    manager: &AdapterManager,
+    guard: &OpenClawEnvGuard,
+    fail_key: &str,
+) {
+    // 1. One transient failure of that one key, and nothing else wrong with the host.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ONCE", fail_key);
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let err = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("an unreadable attribution must stop the disable, not be spent as 'not ours'");
+    let appended = argv_appended(world, logged_before);
+    assert!(
+        err.to_string().contains("memory-core"),
+        "the error must name the plugin whose ownership it could not settle: {err}"
+    );
+    // Nothing but reads ran, which is the whole reason this is an error rather than a
+    // verdict: every step after this point is one the retry could not undo.
+    assert_dry_run_only_probed(&appended);
+
+    // 2. Both halves of the evidence survive, because nothing did.
+    assert!(
+        world.has_claim(),
+        "the stopped disable must keep the receipt it could not act on"
+    );
+    assert_eq!(
+        persisted_displacement_ids(world),
+        vec!["memory-core".to_string()],
+        "still naming the displacement it is the only record of"
+    );
+    assert!(
+        !persisted_displacement(world).applied,
+        "and still unmarked, so the retry is asked the same question and can still \
+         answer it"
+    );
+    assert!(
+        world.registry_marker_exists(),
+        "this adapter's own plugin must still be installed — the uninstall is what \
+         resets the slot the attribution reads: {err}"
+    );
+    assert_eq!(
+        config_answer(world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "the slot must still name this adapter's plugin, so the retry has something to \
+         recover the attribution from"
+    );
+    assert_eq!(
+        config_answer(world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "and the bundled backend must be exactly as the failed enable left it"
+    );
+
+    // 3. The retry, with the host answering: the recovered ownership is written down
+    //    before the uninstall and handed back after it.
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_ONCE");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the retry succeeds once the host answers the attribution");
+    let appended = argv_appended(world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "a transient read failure on a disable must not cost the operator the bundled \
+         backend: {appended:?}"
+    );
+    assert!(
+        !outcome
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("never disabled it")),
+        "and must not disown a hand-off the recovered attribution records as its own: \
+         {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "the retry must converge: {:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert!(!displaced_marker_exists(world, "memory-core"));
+    assert_eq!(
+        config_answer(world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the bundled backend must really be back on"
+    );
+}
+
+/// The slot half: the pre-uninstall capture's own `config get plugins.slots.memory`
+/// fails once, so the attribution has no reading to reason from.
+///
+/// This is the reviewer's repro. The fixture is the failed enable
+/// `stage_with_unmarked_handoff` stages — the host really did turn the bundled plugin
+/// off and really did write the slot naming this adapter's own plugin, and the receipt
+/// could not record either — and the only fault injected afterwards is the one read.
+#[test]
+fn review_disable_keeps_unmarked_handoff_on_unreadable_capture() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    assert_disable_stops_on_unreadable_attribution(
+        &world,
+        &manager,
+        &guard,
+        "plugins.slots.memory",
+    );
+}
+
+/// The enablement half: the capture reads the slot perfectly well, and the live
+/// `config get plugins.entries.memory-core.enabled` that corroborates it fails once.
+///
+/// Neither half carries the attribution on its own — a slot naming this adapter's
+/// plugin says its selection ran, not that *this* plugin was one of the ones it
+/// switched off — so an unreadable flag is as unreadable a verdict as an unreadable
+/// slot, and must stop the disable the same way.
+#[test]
+fn review_disable_keeps_unmarked_handoff_on_unreadable_enablement_flag() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    assert_disable_stops_on_unreadable_attribution(
+        &world,
+        &manager,
+        &guard,
+        "plugins.entries.memory-core.enabled",
+    );
+}
+
+/// The preview has to fail where the operation it describes fails.
+///
+/// A real disable now stops on an attribution the host cannot answer, so a plan that
+/// kept predicting a restore decision through the same unreadable evidence would
+/// describe a disable that does not exist: "would leave openclaw plugin 'memory-core'
+/// alone ... this adapter never disabled it" over a command that refuses to run at
+/// all. That is the contradiction `restore_decision` was made the single source of
+/// truth to prevent, arriving through a failure rather than a veto — and it is the
+/// disable side of the agreement
+/// `review_reenable_preview_matches_recovered_ownership` pins for the re-enable.
+///
+/// The second half is what keeps the gate honest in the other direction: once the host
+/// answers, the plan promises the hand-back and the disable performs it, so the
+/// preview fails *only* while the operation would.
+#[test]
+fn review_disable_preview_fails_like_the_real_disable_on_unreadable_capture() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ONCE", "plugins.slots.memory");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let plan_err = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect_err("a plan must fail where the operation it describes fails");
+    let appended = argv_appended(&world, logged_before);
+    assert_dry_run_only_probed(&appended);
+    assert!(
+        plan_err.to_string().contains("memory-core"),
+        "and must name the plugin it could not settle, the way the operation does: \
+         {plan_err}"
+    );
+    assert!(
+        world.has_claim() && !persisted_displacement(&world).applied,
+        "a preview that could not be completed leaves the receipt exactly as it found it"
+    );
+
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_ONCE");
+    assert_disable_preview_matches_real(&world, &manager, "unreadable-then-answered", true);
+}
+
 /// Name of the child half of the crash test below. The parent invokes it by
 /// string through the test binary, so the two cannot drift silently — the parent
 /// asserts the child died by SIGKILL, which only the real child can.

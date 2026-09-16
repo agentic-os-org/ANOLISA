@@ -821,6 +821,25 @@ impl FrameworkDriver for OpenClawDriver {
         // A real disable uninstalls this adapter's own plugin before it restores
         // anything, and that uninstall is what rewrites `plugins.allow`.
         let own_plugin_id = claim_own_plugin(claim)?;
+        // Ask the operation's own attribution question before describing what it
+        // would restore, because a real disable now fails on an answer the host
+        // cannot give: a preview promising "left alone, this adapter never disabled
+        // it" over a command that refuses to run describes a disable that does not
+        // exist. Live, like every other reading a preview takes — it has no capture
+        // of its own. See [`Self::recovered_disable_attribution`].
+        let home = claim_state_dir(claim)?;
+        for entry in &displaced {
+            if entry.applied {
+                continue;
+            }
+            self.recovered_disable_attribution(
+                entry,
+                own_plugin_id.as_deref(),
+                SlotReadings::Live,
+                &home,
+                ctx,
+            )?;
+        }
         self.restore_preview_lines(
             claim,
             &displaced,
@@ -2850,7 +2869,7 @@ impl OpenClawDriver {
     /// [`SlotReadings::Captured`].
     ///
     /// Only unapplied entries, because only they have a question to ask about the
-    /// past: [`Self::handoff_performed_by_slot_selection`] is the one decision that
+    /// past: [`Self::handoff_attribution`] is the one decision that
     /// reads the slot as evidence of who turned the plugin off, and everything else
     /// reads it as a statement about right now. An applied entry's slot veto keeps
     /// its live read on purpose — see the branch in [`Self::restore_decision`].
@@ -2927,17 +2946,38 @@ impl OpenClawDriver {
     /// recovery is what has to reach the disk before the host mutation, not
     /// merely before the end of the call.
     ///
-    /// Positive evidence only, exactly as on the enable side: an entry this cannot
-    /// attribute stays unapplied, and a capture the host could not answer stays
+    /// Positive evidence only, exactly as on the enable side: an entry the host
+    /// rules out stays unapplied, and a capture the host could not answer stays
     /// unattributed rather than becoming a guess.
+    ///
+    /// "Could not answer" is an error here and a verdict everywhere else, and the
+    /// difference is what this disable does next. Every other reader of the
+    /// attribution has *inaction* for its negative direction, so folding `Unknown`
+    /// into "not ours" costs nothing a later attempt cannot undo. This one is
+    /// followed by the rest of the disable, and the rest of the disable is what
+    /// destroys the question: `plugins uninstall` resets the slot the attribution
+    /// reads to the host default, the restore then skips an entry nothing marked,
+    /// the cleanup reports itself complete, and the Manager removes the one receipt
+    /// that ever named the hand-off. A single failed `config get` inside the very
+    /// capture this method exists to take therefore used to end with the bundled
+    /// plugin off, no record of who turned it off, and nothing left to recover from
+    /// — the stranded host both the capture and the write-ahead mark were added to
+    /// prevent, reached with no crash involved and a report claiming this adapter
+    /// never disabled the plugin. Failing first costs one retry and keeps both
+    /// halves of the evidence: the host still holds the slot reading the capture
+    /// missed, and the receipt still names the displacement.
     ///
     /// # Errors
     ///
-    /// Propagates a receipt-consistency error from [`claim_own_plugin`] or
-    /// [`mark_displacement_applied`], both meaning the caller's view of the receipt
-    /// has diverged from the receipt itself, and a persistence failure from
-    /// `progress` — which aborts the disable with the host untouched rather than
-    /// proceeding to destroy evidence the receipt never recorded.
+    /// [`AdapterError::FrameworkCli`] when the host cannot answer the attribution of
+    /// an unapplied entry, i.e. on [`HandoffAttribution::Unknown`] — raised before
+    /// this disable's first mutation, so the host and the receipt both survive for
+    /// the retry. Also propagates a receipt-consistency error from
+    /// [`claim_own_plugin`] or [`mark_displacement_applied`], both meaning the
+    /// caller's view of the receipt has diverged from the receipt itself, and a
+    /// persistence failure from `progress` — which aborts the disable with the host
+    /// untouched rather than proceeding to destroy evidence the receipt never
+    /// recorded.
     fn record_recovered_slot_selection_handoffs(
         &self,
         claim: &mut AdapterClaim,
@@ -2954,19 +2994,61 @@ impl OpenClawDriver {
             if entry.applied {
                 continue;
             }
-            if !self.handoff_performed_by_slot_selection(
+            if !self.recovered_disable_attribution(
                 entry,
                 own_plugin_id.as_deref(),
                 SlotReadings::Captured(slots),
                 home,
                 ctx,
-            ) {
+            )? {
                 continue;
             }
             mark_displacement_applied(claim, &entry.resource)?;
             progress.persist_claim(claim)?;
         }
         Ok(())
+    }
+
+    /// Whether a `disable` recovers one unapplied entry's hand-off from the evidence
+    /// it holds — and the failure that stops the whole disable when the host will
+    /// not answer.
+    ///
+    /// [`Self::handoff_attribution`] with its `Unknown` turned into an error, kept in
+    /// one place because two callers have to agree on it and they are the two halves
+    /// of one promise: [`Self::record_recovered_slot_selection_handoffs`] decides what
+    /// the write-ahead mark carries, and [`Self::plan_disable_restores`] decides what
+    /// the preview says about the disable that mark feeds. A preview reading "left
+    /// alone, this adapter never disabled it" over a disable that refuses to run at
+    /// all is the contradiction [`Self::recovered_prior_handoff`] exists to rule out
+    /// on the enable side, arriving in the other direction — and it is invisible
+    /// afterwards, because the operator who reads the plan and then runs the command
+    /// gets an error instead of either outcome.
+    ///
+    /// `slots` differs per caller for the reason [`SlotReadings`] gives: the real
+    /// disable reasons from the capture its own uninstall is about to invalidate,
+    /// while a preview has no capture of its own and reads the host as it stands.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] on [`HandoffAttribution::Unknown`]. Neither
+    /// caller has mutated anything by the time it asks, so the failure leaves the
+    /// host and the receipt exactly as they were and the retry gets to ask again.
+    fn recovered_disable_attribution(
+        &self,
+        entry: &DisplacedPlugin,
+        own_plugin_id: Option<&str>,
+        slots: SlotReadings<'_>,
+        home: &Path,
+        ctx: &DriverCtx,
+    ) -> Result<bool, AdapterError> {
+        match self.handoff_attribution(entry, own_plugin_id, slots, home, ctx) {
+            HandoffAttribution::Performed => Ok(true),
+            HandoffAttribution::NotPerformed => Ok(false),
+            HandoffAttribution::Unknown => Err(unreadable_handoff_evidence_on_disable(
+                ctx,
+                &entry.plugin_id,
+            )),
+        }
     }
 
     /// The `plugins.slots.<slot>` token to reason from, from a capture when the
@@ -3123,14 +3205,18 @@ impl OpenClawDriver {
     /// [`Self::handoff_attribution`] collapsed to its positive answer.
     ///
     /// Right for every caller whose negative direction is *inaction* — leaving an
-    /// entry unapplied, filing it in a reporting bucket, skipping a restore. There,
-    /// "the host rules this adapter out" and "the host could not say" lead to the
-    /// same place, and a read failure must keep leading there: marking a hand-off on
-    /// evidence nobody could read would claim a transition this adapter never made.
+    /// entry unapplied or skipping a restore, where the next attempt asks the same
+    /// question of an unchanged host. There, "the host rules this adapter out" and
+    /// "the host could not say" lead to the same place, and a read failure must keep
+    /// leading there: marking a hand-off on evidence nobody could read would claim a
+    /// transition this adapter never made.
     ///
-    /// The re-enable is the one caller whose negative direction is destructive — it
-    /// drops an ownership the prior receipt is the only record of — so it asks the
-    /// tri-state directly instead. See [`Self::recovered_prior_handoff`].
+    /// Two callers are not like that, and both ask the tri-state directly instead.
+    /// A re-enable's negative direction drops an ownership the prior receipt is the
+    /// only record of — see [`Self::recovered_prior_handoff`]. A `disable`'s is worse
+    /// still, because what follows it destroys the evidence the question was asked of
+    /// and then removes the receipt — see
+    /// [`Self::recovered_disable_attribution`].
     fn handoff_performed_by_slot_selection(
         &self,
         entry: &DisplacedPlugin,
@@ -6532,12 +6618,15 @@ fn prior_for_this_instance<'a>(
 /// mark needs a readable `plugins.slots.<slot>`, so a probe the host cannot answer —
 /// or a process killed before the save that follows it — leaves a receipt reading
 /// `applied = false` over a plugin this adapter really did turn off. Three places
-/// already recover it from positive host evidence through
-/// [`OpenClawDriver::handoff_performed_by_slot_selection`]: the enable-side mark,
-/// the one a `disable` writes from its pre-uninstall capture, and the restore
-/// branch that refuses to strand the plugin. This is the set a *fourth* place has
-/// to ask about, because a re-enable is the one path where the receipt the evidence
-/// would be recovered into is itself about to be replaced: `prepare_enable` asks,
+/// already recover it from positive host evidence: the enable-side mark and the
+/// restore branch that refuses to strand the plugin, both through
+/// [`OpenClawDriver::handoff_performed_by_slot_selection`], and the one a `disable`
+/// writes from its pre-uninstall capture, which asks the tri-state instead because
+/// what follows it destroys the evidence — see
+/// [`OpenClawDriver::recovered_disable_attribution`]. This is the set a *fourth*
+/// place has to ask about, because a re-enable is the one path where the receipt the
+/// evidence would be recovered into is itself about to be replaced: `prepare_enable`
+/// asks,
 /// and it is the caller that has to, being the only scope holding both the prior
 /// receipt and this round's probe — the same reason [`inherited_displacement_ids`]
 /// gives for itself.
@@ -6795,6 +6884,37 @@ fn unreadable_handoff_evidence(ctx: &DriverCtx, plugin_id: &str) -> AdapterError
              answered. Nothing was changed and that receipt is kept as it stands; retry \
              once the host answers, because guessing here would either claim a disable you \
              made yourself or drop the only record of one this adapter made",
+            ctx.component, ctx.framework
+        ),
+    }
+}
+
+/// The error [`OpenClawDriver::recovered_disable_attribution`] raises when the host
+/// will not answer an attribution the `disable` it stopped is about to destroy.
+///
+/// [`unreadable_handoff_evidence`]'s counterpart on the other side of the same
+/// question, and the two differ in what they say a guess would have cost because the
+/// operations do different things next. A re-enable would leave the entry out of the
+/// receipt it is writing; a disable goes on to uninstall this adapter's own plugin —
+/// which resets the very slot the attribution reads — and then removes the receipt
+/// over a cleanup it reports as complete. So this one has to say that the evidence is
+/// still there *because nothing ran*: an operator reading it needs to know the retry
+/// is a recovery rather than a cleanup, and that it has to happen before the disable
+/// does anything at all.
+fn unreadable_handoff_evidence_on_disable(ctx: &DriverCtx, plugin_id: &str) -> AdapterError {
+    AdapterError::FrameworkCli {
+        program: openclaw_bin(),
+        reason: format!(
+            "cannot read the evidence that would say who disabled displaced plugin \
+             '{plugin_id}' while disabling {}/{}: an earlier receipt of this adapter \
+             names it without having marked the hand-off, and neither `config get \
+             plugins.slots.<slot>` nor `config get plugins.entries.{plugin_id}.enabled` \
+             answered. Nothing was uninstalled, no slot was reset and that receipt is \
+             kept exactly as it stands, so the evidence this needs is all still there; \
+             retry once the host answers, because guessing would either claim a disable \
+             you made yourself or uninstall this adapter's plugin over one it made — \
+             which resets the slot and, once the cleanup reports complete, removes the \
+             only receipt that recorded it",
             ctx.component, ctx.framework
         ),
     }
