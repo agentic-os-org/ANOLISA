@@ -1,7 +1,7 @@
 //! Unit tests for `anolisa upgrade`. The apply path is driven entirely through
 //! an injected fake that implements both [`PackageQuery`] and
 //! [`PackageTransaction`], so no live rpmdb/dnf is required. The fake records
-//! transaction call order and refuses to be called on the dry-run path.
+//! transaction call order and supports read-only install preflight on dry-run.
 
 use super::application::UpgradeChange;
 use super::*;
@@ -42,7 +42,7 @@ struct FakeHost {
     installed: HashMap<String, PackageInfo>,
     /// packages whose `update` transaction fails.
     fail_update: HashSet<String>,
-    /// packages whose `install` transaction fails.
+    /// packages whose install preflight or transaction fails.
     fail_install: HashSet<String>,
     /// packages whose `query_installed` returns `Ok(None)` (rpmdb miss).
     missing_after: HashSet<String>,
@@ -61,6 +61,7 @@ struct FakeHost {
     calls: RefCell<Vec<String>>,
     /// package names inspected through `query_installed`.
     query_calls: RefCell<Vec<String>>,
+    preflight_calls: RefCell<Vec<Vec<String>>>,
 }
 
 impl FakeHost {
@@ -134,8 +135,25 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
-    fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
-        panic!("this path must not preflight an install")
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.preflight_calls.borrow_mut().push(
+            packages
+                .iter()
+                .map(|package| (*package).to_string())
+                .collect(),
+        );
+        if packages
+            .iter()
+            .any(|package| self.fail_install.contains(*package))
+        {
+            return Err(PackageTransactionError::TransactionFailed {
+                command: "dnf".to_string(),
+                operation: "install preflight".to_string(),
+                code: Some(1),
+                stderr: "cosh-ng conflicts with copilot-shell".to_string(),
+            });
+        }
+        Ok(())
     }
 
     // Calls record the full package set per invocation
@@ -849,6 +867,8 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
     )
     .expect("dry-run is allowed without root");
     assert!(result.dry_run);
+    assert!(host.preflight_calls.borrow().is_empty());
+    assert!(result.warnings.is_empty());
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.updated.len(), 1);
     assert!(
@@ -859,6 +879,162 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
         !layout.state_dir.join("installed.toml").exists(),
         "dry-run must not write state"
     );
+}
+
+#[test]
+fn upgrade_dry_run_preflights_missing_defaults_as_one_transaction() {
+    for (packages, conflict) in [
+        (vec![], false),
+        (vec!["copilot-shell"], false),
+        (vec!["copilot-shell"], true),
+        (vec!["copilot-shell", "os-skills"], false),
+        (vec!["copilot-shell", "os-skills"], true),
+    ] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = system_ctx(tmp.path().to_path_buf());
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut host = FakeHost::default()
+            .with_installed("cosh-ng", info("cosh-ng", "0.24.1", Some("1.alnx4")));
+        if conflict {
+            host.fail_install.insert("copilot-shell".to_string());
+        }
+        let components: Vec<_> = packages
+            .iter()
+            .map(|package| {
+                component_check(
+                    if *package == "copilot-shell" {
+                        "cosh"
+                    } else {
+                        package
+                    },
+                    Some(package),
+                    None,
+                    None,
+                    None,
+                    ACTION_INSTALL,
+                    None,
+                )
+            })
+            .collect();
+        let plan = build_plan(None, &cli_noop(), &components);
+        let result = run_upgrade_with_deps(
+            &ctx,
+            &layout,
+            &plan,
+            &host,
+            &host,
+            true,
+            true,
+            COMMAND,
+            &NoopReporter,
+        )
+        .expect("preview renders solver failures");
+
+        assert!(result.dry_run);
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result.status,
+            if conflict { STATUS_FAILED } else { STATUS_OK }
+        );
+        if conflict {
+            assert!(result.installed.is_empty());
+            assert_eq!(result.errors.len(), packages.len());
+            assert_eq!(result.errors[0].name, "cosh");
+            assert!(result.errors.iter().all(|error| {
+                error
+                    .reason
+                    .contains("cosh-ng conflicts with copilot-shell")
+            }));
+        } else {
+            assert_eq!(result.installed.len(), packages.len());
+            assert!(result.errors.is_empty());
+        }
+        let expected_calls = if packages.is_empty() {
+            vec![]
+        } else {
+            vec![packages]
+        };
+        assert_eq!(*host.preflight_calls.borrow(), expected_calls);
+        assert!(host.txn_calls().is_empty());
+        assert!(!layout.lock_file.exists());
+        assert!(!layout.state_dir.exists());
+        assert!(!rpm_install::journal_dir(&layout).exists());
+    }
+}
+
+#[test]
+fn upgrade_non_root_preview_warns_without_running_dnf() {
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
+    use anolisa_platform::rpm_repo::DnfRepoSource;
+    use anolisa_platform::rpm_transaction::RpmTransaction;
+    use std::cell::Cell;
+
+    struct PrivilegeDeniedRunner<'a>(&'a Cell<usize>);
+
+    impl CommandRunner for PrivilegeDeniedRunner<'_> {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            assert_eq!(program, "dnf");
+            assert!(args.contains(&"--assumeno"));
+            assert!(
+                args.windows(3).any(|args| {
+                    args == ["repository-packages", "anolisa-configured", "install"]
+                })
+            );
+            self.0.set(self.0.get() + 1);
+            Ok(CommandOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "This command has to be run with superuser privileges".to_string(),
+            })
+        }
+    }
+
+    let calls = Cell::new(0);
+    let txn = RpmTransaction::with_runner_and_repo(
+        PrivilegeDeniedRunner(&calls),
+        DnfRepoSource::new(
+            "anolisa-configured",
+            "file:///unused-repository",
+            Some(true),
+        ),
+    );
+    assert!(txn.check_install(&["copilot-shell"]).is_err());
+    calls.set(0);
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = UpgradePlan {
+        installs: vec![PlannedInstall {
+            name: "cosh".to_string(),
+            package: "copilot-shell".to_string(),
+        }],
+        ..UpgradePlan::default()
+    };
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &txn,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("non-root preview remains available");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].package, "copilot-shell");
+    assert!(result.errors.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("conflicts have not been checked"));
+    assert!(result.warnings[0].contains("sudo anolisa --install-mode system upgrade --dry-run"));
+    assert_eq!(calls.get(), 0);
+    assert!(!layout.lock_file.exists());
+    assert!(!layout.state_dir.exists());
+    assert!(!rpm_install::journal_dir(&layout).exists());
 }
 
 #[test]

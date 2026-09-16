@@ -796,6 +796,7 @@ fn execute_upgrade_plan(
             layout,
             &preview_store,
             query,
+            is_root.then_some(txn),
             command,
             ctx.packaged_data_probe(),
         ));
@@ -1699,6 +1700,7 @@ fn render_plan_preview(
     layout: &FsLayout,
     store: &StateStore,
     query: &dyn PackageQuery,
+    install_preflight: Option<&dyn PackageTransaction>,
     command: &str,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> UpgradeEngineOutcome {
@@ -1708,7 +1710,7 @@ fn render_plan_preview(
     }
     updated.extend(plan.updates.iter().map(planned_to_updated));
 
-    let installed: Vec<InstalledItem> = plan
+    let mut installed: Vec<InstalledItem> = plan
         .installs
         .iter()
         .map(|install| InstalledItem {
@@ -1744,6 +1746,28 @@ fn render_plan_preview(
         };
     }
 
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    if !installed.is_empty() {
+        if let Some(txn) = install_preflight {
+            // Match the merged install transaction so conflicts between defaults
+            // are checked by the same native solver as conflicts with installed RPMs.
+            let packages: Vec<&str> = installed.iter().map(|item| item.package.as_str()).collect();
+            if let Err(err) = txn.check_install(&packages) {
+                let reason = txn_error_reason(err);
+                errors.extend(installed.drain(..).map(|item| ErrorResult {
+                    name: item.name,
+                    reason: reason.clone(),
+                }));
+            }
+        } else {
+            // DNF requires root even with --assumeno; keep unprivileged previews usable.
+            warnings.push(
+                "RPM install conflicts have not been checked: DNF preflight requires root; rerun with sudo (preserving any --target option), e.g. `sudo anolisa --install-mode system upgrade --dry-run`".to_string(),
+            );
+        }
+    }
+
     // Planned component work will refresh these rows during finalize, so a
     // preview must not report the same component as both updated and reconciled.
     let excluded: HashSet<String> = plan
@@ -1753,7 +1777,6 @@ fn render_plan_preview(
         .chain(plan.installs.iter().map(|item| item.name.clone()))
         .chain(plan.observed_defaults.iter().map(|item| item.name.clone()))
         .collect();
-    let mut warnings = Vec::new();
     let inspection = inspect_rpm_reconciliations(
         layout,
         store,
@@ -1769,7 +1792,6 @@ fn render_plan_preview(
         .iter()
         .map(reconciliation_result)
         .collect::<Vec<_>>();
-    let mut errors = plan_errors(plan);
     errors.extend(inspection.errors);
 
     let status = match apply_status(
