@@ -7,7 +7,7 @@
 
 use crate::runtime::prelude::AuthFieldInfo;
 
-use super::runtime::RuntimeAuthState;
+use super::runtime::{AuthBackend, RuntimeAuthState};
 
 /// Hint rendered under the Provider ID prompt; states the character rule up front.
 pub(super) const PROVIDER_ID_HINT: &str =
@@ -19,6 +19,9 @@ const PROVIDER_ID_EMPTY_ERROR: &str = "Provider ID cannot be empty.";
 
 const PROVIDER_ID_CHARSET_ERROR: &str =
     "Provider ID allows letters, digits, '-' and '_' only (no '.').";
+
+pub(super) const PROVIDER_ID_OCCUPIED_ERROR: &str =
+    "Provider ID is already in use. Choose a different name.";
 
 /// Outcome of submitting the value of the field currently being filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +73,14 @@ pub(super) fn record_field_submission(
         auth.field_error = None;
         return FieldSubmission::Accepted;
     };
-    if let Some(error) = field_error(&field.name, &value) {
+    let error = field_error(&field.name, &value).or_else(|| {
+        (field.name == PROVIDER_ID_FIELD
+            && auth.backend == AuthBackend::CoreRegistry
+            && auth.editing_provider_name.is_none()
+            && auth.provider_name_is_taken(&value))
+        .then_some(PROVIDER_ID_OCCUPIED_ERROR)
+    });
+    if let Some(error) = error {
         auth.field_input = value;
         auth.field_error = Some(error.to_string());
         auth.field_capture_revision = auth.field_capture_revision.wrapping_add(1);

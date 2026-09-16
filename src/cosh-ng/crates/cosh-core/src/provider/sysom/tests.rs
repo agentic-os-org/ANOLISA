@@ -1,3 +1,4 @@
+use super::ecs_metadata::{classify_credentials, CredentialStatus, ProbeError};
 use super::*;
 
 use futures::FutureExt;
@@ -221,7 +222,7 @@ fn build_request_preserves_user_provided_secrets() {
         }),
         is_sts: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        instance_id: None,
+        instance_id: OnceCell::new(),
     };
     let secret = "short-provider-secret";
     let messages = vec![Message::user(&format!("api_key={secret}"))];
@@ -243,7 +244,7 @@ fn test_provider() -> SysomProvider {
         }),
         is_sts: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        instance_id: None,
+        instance_id: OnceCell::new(),
     }
 }
 
@@ -291,4 +292,450 @@ fn extra_params_may_still_lower_the_wire_output_cap() {
     let inner = wire_inner(&provider.build_request_body(&[], &[], &config));
 
     assert_eq!(inner["max_tokens"], 512);
+}
+
+fn ecs_metadata_now() -> chrono::DateTime<Utc> {
+    "2026-09-15T12:00:00Z"
+        .parse()
+        .expect("fixed UTC test timestamp")
+}
+
+fn ecs_metadata_credentials() -> serde_json::Value {
+    serde_json::json!({
+        "Code": "Success",
+        "AccessKeyId": "synthetic-ak",
+        "AccessKeySecret": "synthetic-sk",
+        "SecurityToken": "synthetic-token",
+        "Expiration": "2026-09-15T13:00:00Z",
+    })
+}
+
+#[test]
+fn ecs_metadata_ready_for_complete_unexpired_credentials() {
+    for expiration in ["2026-09-15T12:00:01Z", "2026-09-15T13:00:00Z"] {
+        let mut body = ecs_metadata_credentials();
+        body["Expiration"] = serde_json::json!(expiration);
+        assert!(matches!(
+            classify_credentials(200, body.to_string().as_bytes(), ecs_metadata_now()),
+            Ok(CredentialStatus::Ready)
+        ));
+    }
+}
+
+#[test]
+fn ecs_metadata_not_ready_for_missing_role() {
+    for body in [
+        ecs_metadata_credentials().to_string(),
+        "not JSON".to_string(),
+    ] {
+        assert!(matches!(
+            classify_credentials(404, body.as_bytes(), ecs_metadata_now()),
+            Ok(CredentialStatus::NotReady(NotReadyReason::RoleMissing))
+        ));
+    }
+}
+
+#[test]
+fn ecs_metadata_not_ready_at_or_after_expiration() {
+    for expiration in ["2026-09-15T12:00:00Z", "2026-09-15T11:59:59Z"] {
+        let mut body = ecs_metadata_credentials();
+        body["Expiration"] = serde_json::json!(expiration);
+        assert!(matches!(
+            classify_credentials(200, body.to_string().as_bytes(), ecs_metadata_now()),
+            Ok(CredentialStatus::NotReady(
+                NotReadyReason::CredentialsExpired
+            ))
+        ));
+    }
+}
+
+#[test]
+fn ecs_metadata_classifies_http_errors_before_parsing_body() {
+    for status in [401, 403, 500] {
+        for body in [
+            ecs_metadata_credentials().to_string(),
+            "not JSON".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    (
+                        status,
+                        classify_credentials(status, body.as_bytes(), ecs_metadata_now())
+                    ),
+                    (401 | 403, Err(ProbeError::AccessDenied)) | (500, Err(ProbeError::Http))
+                ),
+                "HTTP {status} must retain its error classification"
+            );
+        }
+    }
+}
+
+#[test]
+fn ecs_metadata_rejects_invalid_fields() {
+    for field in [
+        "Code",
+        "AccessKeyId",
+        "AccessKeySecret",
+        "SecurityToken",
+        "Expiration",
+    ] {
+        for (case, replacement) in [
+            ("missing", None),
+            ("null", Some(serde_json::json!(null))),
+            ("empty", Some(serde_json::json!(""))),
+            ("number", Some(serde_json::json!(42))),
+            ("boolean", Some(serde_json::json!(true))),
+            ("array", Some(serde_json::json!([]))),
+            ("object", Some(serde_json::json!({}))),
+        ] {
+            let mut body = ecs_metadata_credentials();
+            match replacement {
+                Some(value) => body[field] = value,
+                None => {
+                    body.as_object_mut()
+                        .expect("fixture is an object")
+                        .remove(field);
+                }
+            }
+            assert!(
+                matches!(
+                    classify_credentials(200, body.to_string().as_bytes(), ecs_metadata_now()),
+                    Err(ProbeError::InvalidResponse)
+                ),
+                "{field}/{case} must be rejected"
+            );
+        }
+    }
+    for (field, value) in [
+        ("Code", "SyntheticFailure"),
+        ("Code", "success"),
+        ("Expiration", "not-a-timestamp"),
+    ] {
+        let mut body = ecs_metadata_credentials();
+        body[field] = serde_json::json!(value);
+        assert!(
+            matches!(
+                classify_credentials(200, body.to_string().as_bytes(), ecs_metadata_now()),
+                Err(ProbeError::InvalidResponse)
+            ),
+            "invalid {field} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn ecs_metadata_rejects_invalid_json_or_keyword_decoys() {
+    for (case, body) in [
+        ("empty body", ""),
+        ("malformed JSON", "{\"Code\":\"Success\","),
+        ("null document", "null"),
+        ("array document", "[]"),
+        ("empty object", "{}"),
+        (
+            "keyword text",
+            "metadata error: AccessKeyId AccessKeySecret SecurityToken",
+        ),
+        (
+            "keyword JSON string",
+            r#""metadata error: AccessKeyId AccessKeySecret SecurityToken""#,
+        ),
+        (
+            "keyword error object",
+            r#"{"Code":"Success","Message":"AccessKeyId AccessKeySecret SecurityToken"}"#,
+        ),
+    ] {
+        assert!(
+            matches!(
+                classify_credentials(200, body.as_bytes(), ecs_metadata_now()),
+                Err(ProbeError::InvalidResponse)
+            ),
+            "{case} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn ecs_metadata_errors_do_not_display_response_body_or_credentials() {
+    let mut body = ecs_metadata_credentials();
+    body["Code"] = serde_json::json!("SyntheticFailure");
+    let body = body.to_string();
+    let malformed_body = format!("{body} invalid-json");
+
+    for body in [&body, &malformed_body] {
+        for status in [200, 401, 403, 500] {
+            let error = match classify_credentials(status, body.as_bytes(), ecs_metadata_now()) {
+                Err(error) => error,
+                Ok(_) => panic!("error fixture must not produce a credential status"),
+            };
+            let message = error.to_string();
+            // Do not print the message on failure: it may contain the leaked fixture.
+            for forbidden in [
+                body.as_str(),
+                "synthetic-ak",
+                "synthetic-sk",
+                "synthetic-token",
+            ] {
+                assert!(
+                    !message.contains(forbidden),
+                    "HTTP {status} error Display must not expose response data"
+                );
+            }
+        }
+    }
+    for error in [ProbeError::Unreachable, ProbeError::Timeout] {
+        let message = error.to_string();
+        for forbidden in [
+            body.as_str(),
+            "synthetic-ak",
+            "synthetic-sk",
+            "synthetic-token",
+        ] {
+            assert!(
+                !message.contains(forbidden),
+                "transport error Display must not expose response data"
+            );
+        }
+    }
+}
+
+#[test]
+fn ecs_metadata_error_codes_and_messages_are_fixed() {
+    for (error, code, message) in [
+        (
+            ProbeError::AccessDenied,
+            "metadata_access_denied",
+            "Unable to access ECS instance metadata.",
+        ),
+        (
+            ProbeError::InvalidResponse,
+            "invalid_metadata_response",
+            "ECS instance metadata returned an invalid response.",
+        ),
+        (
+            ProbeError::Unreachable,
+            "metadata_unreachable",
+            "Unable to reach ECS instance metadata.",
+        ),
+        (
+            ProbeError::Timeout,
+            "metadata_timeout",
+            "ECS instance metadata request timed out.",
+        ),
+        (
+            ProbeError::Http,
+            "metadata_http_error",
+            "ECS instance metadata returned an HTTP error.",
+        ),
+    ] {
+        assert_eq!(error.code(), code);
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+async fn ecs_metadata_read_request(socket: &mut AsyncTcpStream) -> std::io::Result<String> {
+    let mut request = Vec::new();
+    let mut buffer = [0; 1024];
+    while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        let count = socket.read(&mut buffer).await?;
+        if count == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        request.extend_from_slice(&buffer[..count]);
+    }
+    Ok(String::from_utf8(request).expect("ASCII HTTP request"))
+}
+
+#[tokio::test]
+async fn ecs_metadata_token_required_service_accepts_probe() {
+    let mut body = ecs_metadata_credentials();
+    body["Expiration"] = serde_json::json!("2100-01-01T00:00:00Z");
+    assert_eq!(
+        ecs_metadata_fixture(
+            ecs_metadata_http_response(200, &body.to_string()),
+            MetadataBodyMode::Complete,
+        )
+        .await,
+        Ok(CredentialStatus::Ready),
+    );
+}
+
+#[derive(Clone, Copy)]
+enum MetadataBodyMode {
+    Complete,
+    Stall,
+    Trickle,
+}
+
+async fn ecs_metadata_fixture(
+    response: String,
+    mode: MetadataBodyMode,
+) -> Result<CredentialStatus, ProbeError> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind metadata fixture");
+    let url = format!(
+        "http://{}/latest/meta-data/ram/security-credentials/{ECS_RAM_ROLE_NAME}",
+        listener.local_addr().expect("fixture address")
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let request = ecs_metadata_read_request(&mut socket).await?;
+        // The fixture deliberately rejects IMDSv1 instead of accepting a tokenless GET.
+        if !request.starts_with("PUT /latest/api/token HTTP/1.1\r\n") {
+            socket
+                .write_all(ecs_metadata_http_response(401, "token required").as_bytes())
+                .await?;
+            return Ok(());
+        }
+        assert!(request.contains("x-aliyun-ecs-metadata-token-ttl-seconds: 60\r\n"));
+        assert!(!request.contains("x-aliyun-ecs-metadata-token:"));
+        socket
+            .write_all(ecs_metadata_http_response(200, "synthetic-imds-token").as_bytes())
+            .await?;
+        socket.shutdown().await?;
+        let (mut socket, _) = listener.accept().await?;
+        let request = ecs_metadata_read_request(&mut socket).await?;
+        assert!(request.starts_with(&format!(
+            "GET /latest/meta-data/ram/security-credentials/{ECS_RAM_ROLE_NAME} HTTP/1.1\r\n"
+        )));
+        assert!(request.contains("x-aliyun-ecs-metadata-token: synthetic-imds-token\r\n"));
+        socket.write_all(response.as_bytes()).await?;
+        match mode {
+            MetadataBodyMode::Complete => socket.shutdown().await?,
+            MetadataBodyMode::Stall => std::future::pending::<()>().await,
+            MetadataBodyMode::Trickle => loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                socket.write_all(b"1\r\n \r\n").await?;
+            },
+        }
+        Ok::<_, std::io::Error>(())
+    });
+    let outcome = tokio::time::timeout(TEST_WATCHDOG, super::ecs_metadata::probe_url(&url)).await;
+    server.abort();
+    match server.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        )),
+        Err(error) => assert!(error.is_cancelled(), "metadata fixture failed"),
+    }
+    outcome.expect("metadata probe must finish within watchdog")
+}
+
+fn ecs_metadata_http_response(status: u16, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn ecs_metadata_http_probe_preserves_classification() {
+    let mut body = ecs_metadata_credentials();
+    body["Expiration"] = serde_json::json!("2100-01-01T00:00:00Z");
+    let body = body.to_string();
+    for (status, expected) in [
+        (200, Ok(CredentialStatus::Ready)),
+        (201, Ok(CredentialStatus::Ready)),
+        (
+            404,
+            Ok(CredentialStatus::NotReady(NotReadyReason::RoleMissing)),
+        ),
+        (401, Err(ProbeError::AccessDenied)),
+        (403, Err(ProbeError::AccessDenied)),
+        (500, Err(ProbeError::Http)),
+        (429, Err(ProbeError::Http)),
+    ] {
+        assert_eq!(
+            ecs_metadata_fixture(
+                ecs_metadata_http_response(status, &body),
+                MetadataBodyMode::Complete
+            )
+            .await,
+            expected,
+            "HTTP {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ecs_metadata_http_body_limit_includes_chunked_responses() {
+    let mut body = ecs_metadata_credentials();
+    body["Expiration"] = serde_json::json!("2100-01-01T00:00:00Z");
+    let mut body = body.to_string();
+    body.push_str(&" ".repeat(64 * 1024 - body.len()));
+    for extra in [0, 1] {
+        let body = format!("{body}{}", " ".repeat(extra));
+        let expected = if extra == 0 {
+            Ok(CredentialStatus::Ready)
+        } else {
+            Err(ProbeError::InvalidResponse)
+        };
+        for response in [
+            ecs_metadata_http_response(200, &body),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            ),
+        ] {
+            assert_eq!(
+                ecs_metadata_fixture(response, MetadataBodyMode::Complete).await,
+                expected
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ecs_metadata_http_redirect_is_not_followed() {
+    let target = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("redirect target");
+    let response = format!(
+        "HTTP/1.1 302 Found\r\nLocation: http://{}/steal\r\nContent-Length: 0\r\n\r\n",
+        target.local_addr().expect("redirect address")
+    );
+    let result = ecs_metadata_fixture(response, MetadataBodyMode::Complete).await;
+    assert_eq!(result, Err(ProbeError::Http));
+    assert!(
+        target.accept().now_or_never().is_none(),
+        "redirect target must not receive a connection"
+    );
+}
+
+#[tokio::test]
+async fn ecs_metadata_http_deadline_covers_headers_body_and_trickle() {
+    for (response, mode) in [
+        (String::new(), MetadataBodyMode::Stall),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".to_string(),
+            MetadataBodyMode::Stall,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_string(),
+            MetadataBodyMode::Trickle,
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let result = ecs_metadata_fixture(response, mode).await;
+        assert_eq!(result, Err(ProbeError::Timeout));
+        assert!(
+            started.elapsed() < TEST_COMPLETION_BOUND,
+            "metadata deadline must cover the whole response"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ecs_metadata_http_connection_failure_is_unreachable() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("unused local port");
+    let url = format!("http://{}", listener.local_addr().expect("local address"));
+    drop(listener);
+    assert_eq!(
+        super::ecs_metadata::probe_url(&url).await,
+        Err(ProbeError::Unreachable)
+    );
 }

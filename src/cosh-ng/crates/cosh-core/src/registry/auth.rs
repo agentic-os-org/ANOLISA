@@ -1,6 +1,54 @@
 //! Authentication registry commands and credential update rules.
 
 use super::*;
+use crate::provider::sysom::{CredentialStatus, ProbeError};
+
+fn ecs_probe_response(
+    request_id: &str,
+    result: Result<CredentialStatus, ProbeError>,
+) -> OutputMessage {
+    let (success, data, error) = match result {
+        Ok(CredentialStatus::Ready) => (true, serde_json::json!({ "status": "ready" }), None),
+        Ok(CredentialStatus::NotReady(reason)) => (
+            true,
+            serde_json::json!({ "status": "not_ready", "reason": reason.as_str() }),
+            None,
+        ),
+        Err(error) => (
+            false,
+            serde_json::json!({ "error_code": error.code() }),
+            Some(error.to_string()),
+        ),
+    };
+    OutputMessage::RegistryResponse {
+        request_id: request_id.to_string(),
+        success,
+        data: Some(data),
+        error,
+    }
+}
+
+fn ecs_prepare_response(
+    request_id: &str,
+    result: Result<Option<crate::provider::sysom::EcsAuthChallenge>, ProbeError>,
+) -> OutputMessage {
+    let data = match result {
+        Ok(Some(challenge)) => serde_json::json!({
+            "mode": "ecs_ram_role",
+            "instance_id": challenge.instance_id,
+            "console_url": challenge.console_url,
+            "values": { "auth_source": "ecs_ram_role" }
+        }),
+        Ok(None) => serde_json::json!({ "mode": "manual" }),
+        Err(error) => return ecs_probe_response(request_id, Err(error)),
+    };
+    OutputMessage::RegistryResponse {
+        request_id: request_id.to_string(),
+        success: true,
+        data: Some(data),
+        error: None,
+    }
+}
 
 pub(super) async fn handle_auth(
     request_id: &str,
@@ -135,31 +183,12 @@ pub(super) async fn handle_auth(
             if provider_type.is_empty() {
                 return registry_error(request_id, "missing provider_type");
             }
-            let data = if provider_type == "aliyun" {
-                match crate::provider::sysom::detect_ecs_auth_challenge() {
-                    Some(challenge) => serde_json::json!({
-                        "mode": "ecs_ram_role",
-                        "instance_id": challenge.instance_id,
-                        "console_url": challenge.console_url,
-                        "values": {
-                            "auth_source": "ecs_ram_role"
-                        }
-                    }),
-                    None => serde_json::json!({
-                        "mode": "manual"
-                    }),
-                }
+            let result = if provider_type == "aliyun" {
+                crate::provider::sysom::detect_ecs_auth_challenge().await
             } else {
-                serde_json::json!({
-                    "mode": "manual"
-                })
+                Ok(None)
             };
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(data),
-                error: None,
-            }
+            ecs_prepare_response(request_id, result)
         }
         "verify" => {
             let provider_type = params
@@ -171,15 +200,10 @@ pub(super) async fn handle_auth(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if provider_type == "aliyun" && auth_source == "ecs_ram_role" {
-                let authorized = crate::provider::sysom::ecs_ram_role_credentials_available();
-                OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: true,
-                    data: Some(serde_json::json!({
-                        "authorized": authorized
-                    })),
-                    error: None,
-                }
+                ecs_probe_response(
+                    request_id,
+                    crate::provider::sysom::probe_ecs_ram_role().await,
+                )
             } else {
                 OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -289,6 +313,126 @@ fn preserve_masked_secret(
     if !value.is_empty() && value.chars().all(|ch| ch == '•') {
         if let Some(existing) = existing {
             values.insert(key.to_string(), existing.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod ecs_tests {
+    use super::*;
+    use crate::provider::sysom::{EcsAuthChallenge, NotReadyReason};
+
+    #[test]
+    fn ecs_metadata_registry_prepare_encodes_ecs_and_manual() {
+        for (challenge, expected) in [
+            (None, serde_json::json!({"mode": "manual"})),
+            (
+                Some(EcsAuthChallenge {
+                    instance_id: "i-test".to_string(),
+                    console_url:
+                        "https://alinux.console.aliyun.com/cn-shanghai/guide/cosh?instance=i-test"
+                            .to_string(),
+                }),
+                serde_json::json!({"mode": "ecs_ram_role", "instance_id": "i-test", "console_url": "https://alinux.console.aliyun.com/cn-shanghai/guide/cosh?instance=i-test", "values": {"auth_source": "ecs_ram_role"}}),
+            ),
+        ] {
+            let OutputMessage::RegistryResponse {
+                success,
+                data,
+                error,
+                ..
+            } = ecs_prepare_response("prepare-id", Ok(challenge))
+            else {
+                panic!("registry response")
+            };
+            assert!(success);
+            assert_eq!(data, Some(expected));
+            assert_eq!(error, None);
+        }
+    }
+
+    #[test]
+    fn ecs_metadata_registry_prepare_never_masks_safe_errors_as_manual() {
+        for probe_error in [
+            ProbeError::AccessDenied,
+            ProbeError::InvalidResponse,
+            ProbeError::Http,
+        ] {
+            let OutputMessage::RegistryResponse {
+                success,
+                data,
+                error,
+                ..
+            } = ecs_prepare_response("prepare-id", Err(probe_error))
+            else {
+                panic!("registry response")
+            };
+            assert!(!success);
+            assert_eq!(
+                data,
+                Some(serde_json::json!({"error_code": probe_error.code()}))
+            );
+            assert_eq!(error, Some(probe_error.to_string()));
+        }
+    }
+
+    #[test]
+    fn ecs_metadata_registry_encodes_ready_and_not_ready() {
+        for (status, expected) in [
+            (
+                CredentialStatus::Ready,
+                serde_json::json!({"status": "ready"}),
+            ),
+            (
+                CredentialStatus::NotReady(NotReadyReason::RoleMissing),
+                serde_json::json!({"status": "not_ready", "reason": "role_missing"}),
+            ),
+            (
+                CredentialStatus::NotReady(NotReadyReason::CredentialsExpired),
+                serde_json::json!({"status": "not_ready", "reason": "credentials_expired"}),
+            ),
+        ] {
+            let OutputMessage::RegistryResponse {
+                request_id,
+                success,
+                data,
+                error,
+            } = ecs_probe_response("probe-id", Ok(status))
+            else {
+                panic!("expected registry response")
+            };
+            assert_eq!(request_id, "probe-id");
+            assert!(success);
+            assert_eq!(data, Some(expected));
+            assert_eq!(error, None);
+        }
+    }
+
+    #[test]
+    fn ecs_metadata_registry_preserves_safe_errors() {
+        for probe_error in [
+            ProbeError::AccessDenied,
+            ProbeError::InvalidResponse,
+            ProbeError::Unreachable,
+            ProbeError::Timeout,
+            ProbeError::Http,
+        ] {
+            let OutputMessage::RegistryResponse {
+                request_id,
+                success,
+                data,
+                error,
+            } = ecs_probe_response("probe-error-id", Err(probe_error))
+            else {
+                panic!("expected registry response")
+            };
+            assert_eq!(request_id, "probe-error-id");
+            assert!(!success);
+            assert_eq!(
+                data,
+                Some(serde_json::json!({"error_code": probe_error.code()}))
+            );
+            assert_eq!(error, Some(probe_error.to_string()));
         }
     }
 }

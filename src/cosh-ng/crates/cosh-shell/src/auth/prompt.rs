@@ -145,19 +145,25 @@ pub(super) fn render_current_auth_panel<W: Write>(
             state.questions.active_panel_height = height;
             state.questions.active_panel_id = Some(panel_id.clone());
         }
-        AuthPhase::AliyunEcsChallenge {
-            ref instance_id,
-            ref console_url,
-        } => {
-            let mut question = format!(
-                "\u{1f511} Aliyun Authentication \u{2014} Authorize ECS RAM Role\n  \
-                 ECS Instance ID: {instance_id}\n  URL: {console_url}"
-            );
-            if let Some(qr) = generate_qr_text(console_url) {
-                question.push_str("\n\n");
-                question.push_str(&qr);
+        AuthPhase::PreparingMenu
+        | AuthPhase::AliyunEcsPreparing
+        | AuthPhase::AliyunEcsChallenge { .. } => {
+            let (mut question, options, show_link) = super::ecs_poll::question(state);
+            if show_link {
+                if let AuthPhase::AliyunEcsChallenge {
+                    instance_id,
+                    console_url,
+                } = &auth.phase
+                {
+                    question.push_str(&format!(
+                        "\nECS Instance ID: {instance_id}\nURL: {console_url}"
+                    ));
+                    if let Some(qr) = generate_qr_text(console_url) {
+                        question.push_str("\n\n");
+                        question.push_str(&qr);
+                    }
+                }
             }
-            let options = vec!["I have authorized this ECS instance".to_string()];
             let model = QuestionPanelModel {
                 id: &panel_id,
                 question: &question,
@@ -174,6 +180,7 @@ pub(super) fn render_current_auth_panel<W: Write>(
             state.questions.active_panel_id = Some(panel_id);
         }
     }
+    state.questions.active_panel_width = Some(renderer.panel_standard_width());
     output.flush()
 }
 

@@ -113,4 +113,5 @@ collect_message_ids!([
     enhanced_routing_mode_ids,
     managed_task_ids,
     composer_control_submit_ids,
+    auth_ecs_ids,
 ],);

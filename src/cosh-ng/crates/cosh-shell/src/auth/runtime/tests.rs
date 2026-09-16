@@ -1,5 +1,8 @@
 //! Unit tests for the `/auth` slash-command state machine.
 
+#[path = "default_name_tests.rs"]
+mod default_name_tests;
+
 use super::{
     apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
     clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
@@ -84,6 +87,8 @@ fn slash_auth_state(templates: &[&str], sysom: SysomMenu) -> RuntimeAuthState {
         field_capture_revision: 0,
         existing_providers: Vec::new(),
         editing_provider_name: None,
+        default_provider_id: false,
+        from_sysom_shortcut: false,
         error_message: None,
         backend: AuthBackend::CoreRegistry,
         sysom,
@@ -114,19 +119,22 @@ fn manual_prepare_mode_is_not_an_ecs_challenge() {
     );
 
     let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_manual());
-    assert!(
-        !apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
-            .expect("cached manual prepare needs no registry")
-    );
+    assert!(!apply_aliyun_prepare(&mut auth));
     assert_eq!(auth.phase, AuthPhase::ManagingProviders);
 }
 
 #[test]
-fn sysom_shortcut_starts_the_aliyun_template_at_provider_id() {
+fn sysom_shortcut_requires_name_for_an_existing_aliyun_type() {
     let mut auth = slash_auth_state(
         &["dashscope", "openai_compat", "aliyun"],
         SysomMenu::on_ecs(ecs_prepare()),
     );
+    auth.providers[2].fields = vec![field("provider_id", "Provider ID", false)];
+    auth.existing_providers = vec![ExistingProvider {
+        name: "prod".to_string(),
+        provider_type: "aliyun".to_string(),
+        ..saved_dashscope()
+    }];
 
     assert!(begin_sysom_shortcut(&mut auth));
 
@@ -148,6 +156,97 @@ fn sysom_shortcut_without_an_aliyun_template_reports_failure() {
 }
 
 #[test]
+fn first_sysom_provider_skips_the_name_field() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    auth.providers[0].fields = vec![
+        field("provider_id", "Provider ID", false),
+        field("access_key_id", "Access Key ID", true),
+    ];
+
+    assert!(begin_sysom_shortcut(&mut auth));
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("aliyun")
+    );
+    assert_eq!(auth.current_field, 1);
+}
+
+#[test]
+fn every_first_provider_uses_its_own_default_name() {
+    for id in [
+        "aliyun",
+        "dashscope",
+        "coding_plan",
+        "token_plan",
+        "openai_compat",
+    ] {
+        let mut auth = slash_auth_state(&[id], SysomMenu::on_manual());
+        auth.phase = AuthPhase::SelectingProvider;
+        auth.providers[0].fields = vec![
+            field("provider_id", "Provider ID", false),
+            field("api_key", "API Key", true),
+        ];
+        let mut state = InlineState::default();
+        state.auth.state = Some(auth);
+
+        answer_selected_row(&mut state);
+
+        let auth = state.auth.state.as_ref().unwrap();
+        assert_eq!(
+            auth.collected_values.get("provider_id").map(String::as_str),
+            Some(id)
+        );
+        assert_eq!(
+            auth.current_field_info().map(|field| field.name.as_str()),
+            Some("api_key")
+        );
+    }
+}
+
+#[test]
+fn same_type_custom_name_and_cross_type_collision_require_naming() {
+    for (name, provider_type) in [("prod", "aliyun"), ("aliyun", "dashscope")] {
+        let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_manual());
+        auth.phase = AuthPhase::SelectingProvider;
+        auth.providers[0].fields = vec![field("provider_id", "Provider ID", false)];
+        auth.existing_providers = vec![ExistingProvider {
+            name: name.to_string(),
+            provider_type: provider_type.to_string(),
+            ..saved_dashscope()
+        }];
+        let mut state = InlineState::default();
+        state.auth.state = Some(auth);
+
+        answer_selected_row(&mut state);
+
+        let auth = state.auth.state.as_ref().unwrap();
+        assert_eq!(auth.current_field, 0);
+        assert!(!auth.collected_values.contains_key("provider_id"));
+    }
+}
+
+#[test]
+fn active_run_selection_preserves_the_first_credential_field() {
+    for name in ["api_key", "base_url", "access_key_id"] {
+        let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+        auth.backend = AuthBackend::ActiveRun;
+        auth.phase = AuthPhase::SelectingProvider;
+        auth.providers[0].fields = vec![field(name, name, true)];
+        let mut state = InlineState::default();
+        state.auth.state = Some(auth);
+
+        answer_selected_row(&mut state);
+
+        let auth = state.auth.state.as_ref().unwrap();
+        assert_eq!(
+            auth.current_field_info().map(|field| field.name.as_str()),
+            Some(name)
+        );
+        assert!(!auth.collected_values.contains_key("provider_id"));
+    }
+}
+
+#[test]
 fn prefetched_challenge_is_applied_without_probing_ecs_again() {
     let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
     auth.collected_values
@@ -155,8 +254,7 @@ fn prefetched_challenge_is_applied_without_probing_ecs_again() {
     auth.collected_values
         .insert("access_key_id".to_string(), "stale-ak".to_string());
 
-    let applied = apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
-        .expect("cached prepare needs no registry");
+    let applied = apply_aliyun_prepare(&mut auth);
 
     assert!(applied);
     assert_eq!(
@@ -175,6 +273,26 @@ fn prefetched_challenge_is_applied_without_probing_ecs_again() {
         auth.collected_values.get("provider_id").map(String::as_str),
         Some("sysom-trial")
     );
+}
+
+#[test]
+fn waiting_ecs_authorization_does_not_offer_a_confirmation_action() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    assert!(apply_aliyun_prepare(&mut auth));
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    assert!(matches!(
+        crate::auth::capture::pending_auth_capture(&state),
+        Some(crate::runtime::prelude::RawInputCapture::Question {
+            option_count: 0,
+            ..
+        })
+    ));
+    let mut output = Vec::new();
+    crate::auth::prompt::render_current_auth_panel(&mut state, &mut output).unwrap();
+    assert!(!String::from_utf8(output)
+        .unwrap()
+        .contains("I have authorized"));
 }
 
 #[test]
@@ -272,9 +390,12 @@ fn the_first_menu_row_starts_the_sysom_shortcut() {
     answer_selected_row(&mut state);
 
     let auth = state.auth.state.as_ref().expect("auth state");
-    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert!(matches!(auth.phase, AuthPhase::AliyunEcsChallenge { .. }));
     assert_eq!(auth.current_provider().id, "aliyun");
-    assert_eq!(auth.current_field, 0);
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("aliyun")
+    );
 }
 
 #[test]
@@ -319,14 +440,26 @@ fn deleting_the_promoted_provider_restores_the_shortcut_row() {
 }
 
 #[test]
-fn without_a_prefetched_challenge_prepare_still_asks_the_registry() {
+fn without_a_prefetched_challenge_prepare_is_queued_without_registry_io() {
     let mut auth = slash_auth_state(&["aliyun"], SysomMenu::default());
+    assert!(apply_aliyun_prepare(&mut auth));
+    assert_eq!(auth.phase, AuthPhase::AliyunEcsPreparing);
+}
 
-    let error = apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
-        .expect_err("registry is consulted when nothing was prefetched");
-
-    assert!(error.contains("cosh-core"), "{error}");
-    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+#[test]
+fn first_ecs_check_does_not_display_the_authorization_link() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    assert!(apply_aliyun_prepare(&mut auth));
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    let mut output = Vec::new();
+    crate::auth::prompt::render_current_auth_panel(&mut state, &mut output).unwrap();
+    let rendered = String::from_utf8(output).unwrap();
+    assert!(
+        !rendered.contains("https://example.invalid/guide"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Checking ECS RAM Role"), "{rendered}");
 }
 
 #[test]

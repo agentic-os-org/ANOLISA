@@ -289,6 +289,7 @@ pub(crate) fn run_raw(
         }
     };
 
+    crate::auth::ecs_poll::shutdown(&mut inline_state);
     config.clear_shell_environment_observer();
     config.clear_shell_history_file_observer();
     inline_state.personalization.poll_ready();

@@ -20,6 +20,8 @@ mod approval;
 mod audit;
 #[path = "raw_cli/auth.rs"]
 mod auth;
+#[path = "raw_cli/auth_ecs.rs"]
+mod auth_ecs;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
 #[path = "raw_cli/compaction.rs"]

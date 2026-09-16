@@ -14,6 +14,16 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::ResolvedProvider;
+use crate::provider::sysom::{CredentialStatus, ProbeError};
+
+fn ecs_preflight_result(
+    result: Result<CredentialStatus, ProbeError>,
+) -> Result<(), AuthPreflightError> {
+    match result.map_err(AuthPreflightError::MetadataProbe)? {
+        CredentialStatus::Ready => Ok(()),
+        CredentialStatus::NotReady(_) => Err(AuthPreflightError::CredentialSourceUnavailable),
+    }
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -46,6 +56,7 @@ pub(crate) enum AuthPreflightError {
     ProviderUnavailable,
     ServiceNotReady,
     CredentialSourceUnavailable,
+    MetadataProbe(ProbeError),
     UnsupportedResponse,
 }
 
@@ -61,6 +72,7 @@ impl AuthPreflightError {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::ServiceNotReady => "service_not_ready",
             Self::CredentialSourceUnavailable => "credential_source_unavailable",
+            Self::MetadataProbe(error) => error.code(),
             Self::UnsupportedResponse => "unsupported_response",
         }
     }
@@ -95,8 +107,9 @@ impl fmt::Display for AuthPreflightError {
                 "Aliyun SysOM is not authorized for this account. Complete service authorization and try again.",
             ),
             Self::CredentialSourceUnavailable => formatter.write_str(
-                "ECS RAM Role credentials are not available yet. Authorize the instance role and try again.",
+                "ECS RAM Role credentials are not available yet. Check the instance role or wait for credential refresh.",
             ),
+            Self::MetadataProbe(error) => error.fmt(formatter),
             Self::UnsupportedResponse => formatter.write_str(
                 "The endpoint returned an unsupported validation response. Check the endpoint configuration and provider compatibility.",
             ),
@@ -372,13 +385,7 @@ async fn response_explicitly_reports_missing_model(response: Response) -> bool {
 
 async fn preflight_aliyun(provider: &ResolvedProvider) -> Result<(), AuthPreflightError> {
     if provider.auth_source.as_deref() == Some("ecs_ram_role") {
-        return tokio::task::spawn_blocking(
-            crate::provider::sysom::ecs_ram_role_credentials_available,
-        )
-        .await
-        .map_err(|_| AuthPreflightError::EndpointUnreachable)?
-        .then_some(())
-        .ok_or(AuthPreflightError::CredentialSourceUnavailable);
+        return ecs_preflight_result(crate::provider::sysom::probe_ecs_ram_role().await);
     }
 
     let resolved = crate::provider::sysom::endpoint::resolve(&provider.sysom_endpoint).await;
@@ -739,6 +746,39 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn ecs_metadata_preflight_distinguishes_ready_from_not_ready() {
+        use crate::provider::sysom::NotReadyReason;
+        assert_eq!(ecs_preflight_result(Ok(CredentialStatus::Ready)), Ok(()));
+        for reason in [
+            NotReadyReason::RoleMissing,
+            NotReadyReason::CredentialsExpired,
+        ] {
+            assert_eq!(
+                ecs_preflight_result(Ok(CredentialStatus::NotReady(reason))),
+                Err(AuthPreflightError::CredentialSourceUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn ecs_metadata_preflight_preserves_probe_errors_through_configure() {
+        for probe_error in [
+            ProbeError::AccessDenied,
+            ProbeError::InvalidResponse,
+            ProbeError::Unreachable,
+            ProbeError::Timeout,
+            ProbeError::Http,
+        ] {
+            let error = ecs_preflight_result(Err(probe_error)).expect_err("probe failure");
+            assert_eq!(error.code(), probe_error.code());
+            assert_eq!(error.to_string(), probe_error.to_string());
+            let configure_error = crate::auth::AuthConfigureError::from(error);
+            assert_eq!(configure_error.code(), probe_error.code());
+            assert_eq!(configure_error.to_string(), probe_error.to_string());
+        }
+    }
 
     #[derive(Clone)]
     struct Reply {

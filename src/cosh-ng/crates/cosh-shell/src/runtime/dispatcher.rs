@@ -85,6 +85,7 @@ impl RuntimeDispatcher {
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let batch = snapshot.batch_since(state.control.event_cursor());
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
+        crate::auth::ecs_poll::poll(adapter, state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])
     }
 

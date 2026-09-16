@@ -602,3 +602,27 @@ fn provider_change_drops_stale_startup_auth_verdict() {
     assert!(!state.startup_auth.ai_unconfigured());
     drop(sender);
 }
+
+#[test]
+fn edit_identity_error_never_opens_the_immutable_name_field() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+
+    restore_after_failed_submission_at(auth, Some("provider_id"));
+
+    assert_eq!(auth.current_field_info().unwrap().name, "base_url");
+    assert_eq!(auth.collected_values["provider_id"], "qwen-prod");
+}
+
+#[test]
+fn edit_retry_without_a_name_field_restores_the_first_credential() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.providers[0].fields.remove(0);
+
+    restore_after_failed_submission(auth);
+
+    assert_eq!(auth.current_field, 0);
+    assert_eq!(auth.current_field_info().unwrap().name, "base_url");
+    assert_eq!(auth.collected_values["provider_id"], "qwen-prod");
+}
