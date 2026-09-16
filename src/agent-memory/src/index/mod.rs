@@ -26,12 +26,14 @@ pub use worker::IndexWorker;
 pub struct SearchHit {
     pub path: String,
     pub snippet: String,
-    /// Ranking score. **Higher is better** on every path (BM25, the LIKE
-    /// fallback, vector, and hybrid RRF), and a genuine match scores above
-    /// zero. The magnitude is path-specific — BM25 relevance grows with the
-    /// corpus, and a term that occurs in most documents has a negative IDF
-    /// that can push a weak match below zero — so compare hits inside one
-    /// result set rather than across queries or across paths.
+    /// Ranking score: **higher is a better match** on every path (BM25, the
+    /// LIKE fallback, vector, hybrid RRF). Only that ordering is portable.
+    /// The magnitude is path-specific — BM25 relevance and LIKE term
+    /// frequency are unbounded and non-negative (FTS5 clamps a negative IDF
+    /// to ~0), while `search_vec` scales a cosine in `[-1, 1]` and can
+    /// legitimately return zero or less — so compare hits within one result
+    /// set, never across queries or paths, and never against an absolute
+    /// threshold.
     pub score: f64,
     /// Whether the snippet contains prompt-injection patterns.  Callers
     /// in the adapter layer can use this flag to decide whether to

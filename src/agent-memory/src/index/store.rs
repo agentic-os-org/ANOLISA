@@ -468,21 +468,16 @@ impl BM25Store {
             .map(|(path, snippet, bm25_score, _body, mtime_ms)| {
                 let decay = time_decay(mtime_ms, self.time_decay_lambda);
                 // FTS5's `bm25()` is negative and *more negative is a better
-                // match* — that is exactly why the SQL above orders by `rank`
+                // match* — which is why the SQL above orders by `rank`
                 // ascending to keep the best `top_k` rows. Negate it so
                 // `SearchHit::score` means "higher is better" like the two
-                // sibling scorers (`search_like`: term frequency + decay;
-                // `search_vec`: cosine + decay) and so the additive recency
-                // boost lifts a good match instead of being subtracted from
-                // it. Feeding the raw value to the descending sort below
-                // ranked the *weakest* matched row first, which is also the
-                // position `search_hybrid_inner` turns into the largest RRF
-                // weight.
-                //
-                // The result is a relative ranking score, not a bounded
-                // 0..1 similarity: a term that occurs in most of the corpus
-                // has a negative IDF, so a weak-but-real match can still
-                // score below zero.
+                // sibling scorers (`search_like`, `search_vec`) and so the
+                // additive recency boost lifts a good match instead of being
+                // subtracted from it: sorted descending, the raw value ranked
+                // the weakest matched row first and handed
+                // `search_hybrid_inner`'s RRF the BM25 ranks in reverse. FTS5
+                // clamps a negative IDF to ~0, so relevance is never below
+                // zero on this path.
                 let relevance = -bm25_score;
                 let adjusted_score = relevance + self.time_decay_alpha * decay;
                 let suspicious =
@@ -1648,14 +1643,12 @@ mod tests {
 
     #[test]
     fn search_ranks_the_stronger_bm25_match_first() {
-        // Regression: FTS5's `bm25()` is negative and *more negative is a
-        // better match* — that is why the SQL orders by `rank` ascending to
-        // keep the best `top_k` rows. The scorer used to add the recency
-        // boost to that raw value and then sort descending, so the weakest
-        // matched row was reported first: `memory_search`, `memory_about`
-        // and the OpenClaw auto-recall hook all present results in the order
-        // they arrive, and `search_hybrid_inner` derives its RRF weight from
-        // that position — the worst BM25 match got the largest one.
+        // Regression: the scorer used to add the recency boost to the raw
+        // (negative-is-better) `bm25()` value and sort descending, so the
+        // weakest matched row was reported first. `memory_search`,
+        // `memory_about` and the OpenClaw auto-recall hook all present
+        // results in the order they arrive, and `search_hybrid_inner`
+        // derives its RRF weight from that position.
         let s = relevance_corpus();
 
         let hits = s.search("walrus", 5, true).unwrap();
@@ -1672,17 +1665,19 @@ mod tests {
     #[test]
     fn search_reports_one_score_convention_on_every_path() {
         // `search_like` (any term < 3 chars) and `search_vec` both report
-        // "higher is better" with a real match above zero. The BM25 path
-        // must not hand the same `SearchHit::score` field the opposite
-        // convention, or a client cannot compare hits across queries — the
-        // auto-recall hook fuses results from several of them.
+        // "higher is better". The BM25 path must not hand the same
+        // `SearchHit::score` field the opposite convention, or a client
+        // cannot order hits at all — the auto-recall hook fuses results from
+        // several queries by rank. The two keyword paths are also
+        // non-negative, which `search_vec`'s cosine is not.
         let s = relevance_corpus();
 
         let bm25_hits = s.search("walrus", 5, true).unwrap();
         assert_eq!(bm25_hits.len(), 2);
         assert!(
             bm25_hits[0].score > 0.0,
-            "a matched document must score above zero on the BM25 path, got {}",
+            "a discriminative term has a positive IDF, so its BM25 relevance \
+             must land above zero; got {}",
             bm25_hits[0].score
         );
         assert!(
