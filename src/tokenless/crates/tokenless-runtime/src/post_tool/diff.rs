@@ -185,7 +185,11 @@ fn render_impl(input: &str, optimize: bool) -> Option<String> {
             cursor += 1;
             while cursor < end && !lines[cursor].starts_with("@@ ") {
                 match lines[cursor].as_bytes().first() {
-                    Some(b' ' | b'+' | b'-') => units.push((cursor, cursor + 1)),
+                    // Git terminates patch content lines even when the source
+                    // has no final newline; its EOF marker is a separate line.
+                    Some(b' ' | b'+' | b'-') if lines[cursor].ends_with('\n') => {
+                        units.push((cursor, cursor + 1));
+                    }
                     Some(b'\\')
                         if lines[cursor].trim_end_matches(['\r', '\n'])
                             == "\\ No newline at end of file" =>
@@ -340,6 +344,34 @@ mod tests {
                 .unwrap()
                 .contains("@@ -2,3 +2,3 @@\r\n b\r\n")
         );
+        for input in [&input, &crlf] {
+            assert!(
+                render(input)
+                    .unwrap()
+                    .contains("\\ No newline at end of file")
+            );
+        }
+    }
+    #[test]
+    fn rejects_unterminated_content_lines_even_when_counts_match() {
+        let context = format!(" {}\n", "unchanged context ".repeat(10)).repeat(10);
+        for (counts, body) in [
+            ("-1,10 +1,11", "+new complete value\n"),
+            ("-1,11 +1,10", "-old complete value\n"),
+            (
+                "-1,12 +1,12",
+                "-old complete value\n+new complete value\n unchanged complete value\n",
+            ),
+        ] {
+            let input = format!("{HEAD}@@ {counts} @@\n{context}{body}");
+            for input in [input.clone(), input.replace('\n', "\r\n")] {
+                assert!(render(&input).is_some());
+                for removed_bytes in [1, 10] {
+                    let truncated = &input[..input.len() - removed_bytes];
+                    assert!(render(truncated).is_none(), "{truncated}");
+                }
+            }
+        }
     }
     #[test]
     fn rejects_incomplete_input_and_detached_markers() {
