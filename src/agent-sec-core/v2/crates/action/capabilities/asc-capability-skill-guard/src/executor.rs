@@ -84,7 +84,10 @@ impl SkillGuardExecutor {
                 deadline,
             ),
             GuardCommand::Analyze { .. } => {
-                let result = crate::scanner::analyze(&root()?.io_dir, deadline)?;
+                let root = root()?;
+                root.verify_mapping()?;
+                let result = crate::scanner::analyze(&root.io_dir, deadline)?;
+                root.verify_mapping()?;
                 Ok((result.data, i64::from(result.exit_code)))
             }
             GuardCommand::Check { all, .. } => self.check(roots, *all, deadline),

@@ -128,6 +128,27 @@ pub enum ResponseDisposition {
 #[error("request dispatcher failed")]
 pub struct DispatchError;
 
+/// Bounded response frames from one step of a connection-local authentication exchange.
+pub struct SessionStep {
+    /// At most two payloads, each without an LF delimiter.
+    pub responses: Vec<Vec<u8>>,
+    /// Close after writing these responses; a session accepts at most four incoming frames.
+    pub complete: bool,
+}
+
+/// Session state and the first response, owned by one admitted connection.
+pub type StartedSession = (Box<dyn ConnectionSession>, SessionStep);
+
+/// Short authentication exchange preceding one application notification.
+/// Implementations may only parse, authenticate and enqueue bounded data; never perform I/O.
+pub trait ConnectionSession: Send {
+    /// Processes the next frame without retaining transport resources.
+    ///
+    /// # Errors
+    /// Rejects authentication or protocol errors by closing without a plaintext fallback.
+    fn advance(&mut self, payload: &[u8]) -> Result<SessionStep, DispatchError>;
+}
+
 /// Protocol adapter injected into the UDS service framework.
 ///
 /// Implementations decode request bytes, generate protocol request identities,
@@ -136,6 +157,19 @@ pub struct DispatchError;
 /// owns and bounds that writer. Transport rejection encoding is a separate
 /// [`RejectionEncoder`] dependency.
 pub trait RequestDispatcher: Send + Sync + 'static {
+    /// Optionally begins an authenticated connection-local exchange.
+    /// Performs bounded parsing/cryptography only. Ordinary requests return `None`.
+    ///
+    /// # Errors
+    /// Closes a recognized but invalid authentication exchange without a plaintext response.
+    fn start_session(
+        &self,
+        _peer: PeerCredentials,
+        _payload: &[u8],
+    ) -> Result<Option<StartedSession>, DispatchError> {
+        Ok(None)
+    }
+
     /// Selects a method-specific execution budget after a complete bounded frame arrives.
     /// The transport caps overrides at 120 seconds. Default adapters keep configured limits.
     /// Implementations must perform bounded parsing only, never I/O or capability work.

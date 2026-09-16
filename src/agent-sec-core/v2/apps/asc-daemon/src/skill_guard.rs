@@ -13,6 +13,7 @@ use asc_capability_skill_guard::scanner::{ScannerConfig, ScannerRegistry};
 use asc_capability_skill_guard::{
     GuardConfig, GuardError, SkillGuardService, SkillIdentity, SkillRoot,
 };
+use asc_daemon_handler::skillfs::{SkillFsBridge, SkillFsConfig};
 use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -34,13 +35,17 @@ struct Settings {
     scanners: Vec<ScannerConfig>,
     #[serde(default)]
     parsers: BTreeMap<String, String>,
+    #[serde(default)]
+    skillfs: Option<SkillFsConfig>,
 }
 
 fn default_state() -> PathBuf {
     PathBuf::from("/var/lib/agent-sec/skillguard")
 }
 
-pub(super) fn start(config: Option<&Path>) -> Result<Arc<SkillGuardService>, StartupError> {
+pub(super) fn start(
+    config: Option<&Path>,
+) -> Result<(Arc<SkillGuardService>, Option<SkillFsConfig>), StartupError> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(StartupError::RootRequired);
     }
@@ -55,10 +60,18 @@ pub(super) fn start(config: Option<&Path>) -> Result<Arc<SkillGuardService>, Sta
                 managed_skill_dirs: Vec::new(),
                 scanners: Vec::new(),
                 parsers: BTreeMap::new(),
+                skillfs: None,
             },
             Err(error) => return Err(error),
         }
     };
+    if settings
+        .skillfs
+        .as_ref()
+        .is_some_and(|s| s.auth_key_file == settings.state_dir.join("signing-key.pk8"))
+    {
+        return Err(StartupError::UnsafePath);
+    }
     private_state(&settings.state_dir)?;
     let service = Arc::new(SkillGuardService::new(
         GuardConfig {
@@ -67,7 +80,7 @@ pub(super) fn start(config: Option<&Path>) -> Result<Arc<SkillGuardService>, Sta
         },
         ScannerRegistry::new(settings.scanners, settings.parsers)?,
     )?);
-    Ok(service)
+    Ok((service, settings.skillfs))
 }
 
 fn read_settings(path: &Path) -> Result<Settings, StartupError> {
@@ -155,6 +168,7 @@ pub(super) enum StartupError {
 pub(super) fn recover(
     service: &Arc<SkillGuardService>,
     finalizer: Finalizer,
+    bridge: Option<&SkillFsBridge>,
 ) -> Result<(), StartupError> {
     let deadline = Instant::now() + Duration::from_secs(120);
     let runtime = ActionRuntime::new(
@@ -190,8 +204,15 @@ pub(super) fn recover(
         let roots = service
             .rotation_skills(deadline)?
             .into_iter()
-            .map(|identity| SkillRoot::direct(identity.path()))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|identity| {
+                bridge
+                    .map_or_else(
+                        || SkillRoot::direct(identity.path()),
+                        |bridge| bridge.resolve(&identity, deadline),
+                    )
+                    .unwrap_or_else(|error| SkillRoot::unavailable(identity, error.to_string()))
+            })
+            .collect();
         let outcome = run(GuardCommand::RotateKeys {}, roots);
         if !outcome.success {
             return Err(StartupError::Recovery(outcome.error_type));
@@ -199,7 +220,19 @@ pub(super) fn recover(
     }
     if service.key_status(deadline)?["initialized"] == true {
         for identity in service.managed_skills()? {
-            let root = SkillRoot::direct(identity.path())?;
+            let root = match bridge.map_or_else(
+                || SkillRoot::direct(identity.path()),
+                |bridge| bridge.resolve(&identity, deadline),
+            ) {
+                Ok(root) => root,
+                Err(error) => {
+                    eprintln!(
+                        "agent-sec-daemon: SkillGuard startup mapping unavailable for {}: {error}",
+                        identity.path().display()
+                    );
+                    continue;
+                }
+            };
             let outcome = run(
                 GuardCommand::Reconcile {
                     skill_dir: identity.clone(),
@@ -214,6 +247,11 @@ pub(super) fn recover(
                 );
             }
         }
+    }
+    if let Some(bridge) = bridge {
+        bridge
+            .schedule_reconcile(service.managed_skills()?)
+            .map_err(|e| StartupError::Recovery(e.to_string()))?;
     }
     Ok(())
 }

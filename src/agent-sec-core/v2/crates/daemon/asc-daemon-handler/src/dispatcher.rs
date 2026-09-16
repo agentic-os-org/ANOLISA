@@ -59,6 +59,15 @@ impl DaemonDispatcher {
         self
     }
 
+    /// Adds authenticated `SkillFS` compatibility on the same socket as ordinary V2 requests.
+    #[must_use]
+    pub fn with_skillfs(mut self, bridge: Arc<crate::skillfs::SkillFsBridge>) -> Self {
+        if let Some(handler) = &mut self.skill_guard {
+            handler.skillfs = Some(bridge);
+        }
+        self
+    }
+
     /// Handles one decoded request using transport-authenticated peer identity.
     pub fn handle(
         &self,
@@ -133,6 +142,17 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 }
 
 impl RequestDispatcher for DaemonDispatcher {
+    fn start_session(
+        &self,
+        peer: asc_daemon_service::PeerCredentials,
+        payload: &[u8],
+    ) -> Result<Option<asc_daemon_service::StartedSession>, DispatchError> {
+        match self.skill_guard.as_ref().and_then(|h| h.skillfs.as_ref()) {
+            Some(bridge) => bridge.start_session(peer, payload),
+            None => Ok(None),
+        }
+    }
+
     fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
         if request.method != method::ACTION_SKILL_GUARD || self.skill_guard.is_none() {

@@ -249,9 +249,15 @@ dependencies = [
  "asc-pap-repository-memory",
  "asc-policy-engine",
  "asc-security-events",
+ "base64",
+ "ring",
+ "rustix",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
+ "thiserror",
+ "tokio",
  "uuid",
 ]
 

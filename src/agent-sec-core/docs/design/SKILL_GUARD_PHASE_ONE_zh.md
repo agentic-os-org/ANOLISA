@@ -20,7 +20,7 @@ daemon、CLI、SkillFS 和 Linux 部署。Agent Hook 实现、能力视图、Hoo
 | 3 | Ledger 与 Service | 已实现，Linux 验收通过 | 版本、补扫与强制扫描、快照、导出、串行化、扫描期间内容变化 |
 | 4 | Activation | 已实现，Linux 验收通过 | 决策、active/pending/hidden、回滚、发布失败与启动 reconcile |
 | 5 | daemon、CLI 与审计 | Linux 验收通过 | 真实 CLI 请求、输出和退出码、peer 身份、审计、超时、管理员换钥、消费者样例 |
-| 6 | SkillFS | 计划 | 单 socket、HMAC notify/resolver、拒绝降级、真实 FUSE 效果、普通 IPC 回归 |
+| 6 | SkillFS | Linux 验收通过 | 单 socket、HMAC notify/resolver、拒绝降级、真实 FUSE 效果、普通 IPC 回归 |
 | 7 | 部署 | 计划 | 源码与 RPM 安装、root systemd、普通本地用户调用、核心完整流程 |
 
 每批形成一个独立编译的逻辑 commit，同时包含测试和文档。本批引入的问题修回本批 commit。
@@ -143,7 +143,7 @@ Unicode、元数据、符号链接、目录排除及覆盖不完整。仅归一�
 `SkillGuardService` 按 canonical Skill 身份加锁，直接路径和已验证的映射路径共用同一把锁，
 闲置锁条目会释放。操作持有密钥代际读锁，第五批换钥时使用写锁。受管目录精确登记在 daemon
 私有状态中，不会把用户指定目录的同级 Skill 自动纳入管理。
-业务根目录不得位于 `.skill-meta` 内；内部快照校验不经过该业务根入口。
+业务根目录不得位于 `.skill-meta` 内，包括已认证映射的物理路径；内部快照校验不经过该业务根入口。
 
 扫描先捕获最多 2,000 个普通文件、50 MiB、10,000 个目录、32 层深度，排除 `.git` 和 `.skill-meta`。
 扫描使用私有暂存目录，另行保留原始符号链接分类供 static scanner 报告；临时快照写入并校验后、正式发布前重新检查 live
@@ -256,3 +256,72 @@ rustdoc 均通过，共覆盖 806 个不同测试。跨 UID CLI 用例在正常 
 
 root daemon 回滚后，恢复的普通文件与目录归属于源 Skill 目录的所有者，普通用户可以继续
 编辑。快照仍去除特权权限位。跨 UID CLI 用例验证回滚后由真实普通用户写入原文件。
+
+## 第六批 SkillFS 边界
+
+`asc-daemon-handler::skillfs` 负责兼容适配。通用 socket service 只增加可选的连接内会话接口，
+并在帧之间保留缓冲区剩余字节。普通 V2 envelope 继续拒绝未知字段。认证会话只接受
+`skill_ledger.skillfs_notify_change`，不能调用 PAP 或其他 V1 方法。
+
+保留现有四帧 HMAC 握手、字符串 `authVersion="1"`、客户端与服务端独立 domain、原始 payload
+加 `auth.frame` 标签，以及 notify schema version 2。daemon 将会话限制为四个入站帧、
+每帧 64 KiB，首帧之后总计五秒。证明无效时直接关闭连接，不回退到明文。认证后的业务响应
+均签名，包括拒绝响应。`accepted`、`queued`、`coalesced` 只表示内存工作状态；仅修改
+`.skill-meta` 的通知以 `ignored=true` 确认。
+合并事件仍返回 `queued=true`。保留 V1 的 `skill` 摘要、metadata-only `reason`、
+daemon 生成的 `request_id`、`stdout/stderr/exit_code` 及结构化错误字段。
+worker 意外退出会关闭通知准入并报告不健康状态，需重启 daemon 恢复。
+
+SkillFS 认证客户端接受原有私有端点，或 root 所有的 `0755` 父目录加 `0666` socket。
+握手前检查祖先目录归属、符号链接、可写权限、端点类型与归属，以及已连接进程的内核 UID。
+HMAC 密钥仍为仅所有者可访问的 `0600` 普通文件。公共 socket 不授予管理员换钥权限，也不
+改变 PAP 授权；第一阶段仍允许所有本地用户操作所有受管 Skill。
+
+root 所有的 `--skillguard-config` 文件接受以下可选绑定。路径必须为规范化绝对路径，
+同一挂载的 canonical/live 根可完全相等（普通非原地挂载），否则必须互不包含；不同挂载的
+前缀不能重叠。daemon 和各 SkillFS 进程分别持有同一原始 HMAC 密钥的私有副本。
+该密钥独立于 `stateDir/signing-key.pk8`；系统签名换钥和用户 HOME 都不决定 HMAC 密钥。
+
+```json
+{
+  "stateDir": "/var/lib/agent-sec/skillguard",
+  "managedSkillDirs": ["/home/alice/.openclaw/skills/demo"],
+  "skillfs": {
+    "authKeyFile": "/etc/agent-sec/skillfs-hmac.key",
+    "mounts": [{
+      "controlSocket": "/run/user/1000/skillfs/control.sock",
+      "canonicalRoot": "/home/alice/.openclaw/skills",
+      "liveRoot": "/home/alice/.openclaw/live-skills",
+      "peerUid": 1000
+    }]
+  }
+}
+```
+
+control 端点保持私有：配置中的 peer UID、仅所有者访问的父目录和 socket、内核 peer 检查，
+以及现有 control HMAC domain。只读 `skill.resolveLiveSource` 的响应必须匹配配置中的两个
+前缀、精确相对 Skill ID 和 `shared_path`。source/live 别名映射到同一个 canonical 锁身份。
+打开 backing 目录时检查返回的 device/inode，进入 service 后再次检查。配置内解析失败不
+回退读取 FUSE 可见视图。批量命令保留逐 Skill 的解析错误，`status` 仍返回密钥就绪状态。
+换钥的私有恢复记录持久化目录身份；映射未解析成功时不会开始替换密钥。
+
+一个 worker 按 canonical Skill 合并通知，默认 debounce 为 500 ms，持续编辑时最多延迟
+两秒。它通过公共 Action Runtime 执行 scan，然后执行 activation；扫描失败或 noop 也不
+跳过激活。只有能够证明尚未获准执行的 `Busy` 在期限内重试，提交后状态不明的失败不自动
+重放。每个操作限时 30 秒。失败保留在审计、stderr 和 `status` 的 `skillfs` 计数中。
+关闭时停止队列接收，等待当前一组有界操作结束。
+
+daemon 同步恢复 rollback/latest/activation 后，重新安排全部显式注册的挂载 Skill 执行
+扫描与激活，不要求 SkillFS 同时重启。启动列表来自有界私有 registry；实时通知最多保留
+256 个不同 Skill，满队列返回签名拒绝。这是 Rust 相比 Python 无界 pending map 增加的
+明确资源限制，不表示持久化接受。挂载启动通知补充新发现的 Skill；没有持久事件队列，也不
+重放原通知顺序。
+
+第六批测试覆盖冻结的 SkillFS HMAC 向量、同次读取中的多帧、错误密钥与 payload MAC、
+明文拒绝、source/live 身份、错误 resolver 映射、backing inode 被替换、daemon 启动补扫、
+扫描失败后的激活尝试和普通 V2 请求。合成 resolver 测试证明 IPC 合同；Linux 验收另外通过了
+V2 工作区门禁、SkillFS 工作区测试及按既有用例环境前提执行的定向复验，以及仓库真实 FUSE smoke。
+root 原地挂载和 UID 1001 普通挂载各完成 25 项真实 daemon/SkillFS 操作，覆盖认证通知与
+resolver、发布、错误身份/密钥/明文拒绝，以及仅重启 daemon 后的恢复。
+SkillFS Clippy 使用仓库固定的 Rust 1.86，V2 使用 Rust 1.93.1。这些是核心与 FUSE 结果，
+不代表 Agent Hook 或安装后的 systemd 验收。

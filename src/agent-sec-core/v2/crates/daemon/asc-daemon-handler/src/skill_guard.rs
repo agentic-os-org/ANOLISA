@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(super) struct SkillGuardHandler {
+    pub(super) skillfs: Option<Arc<crate::skillfs::SkillFsBridge>>,
     service: Arc<SkillGuardService>,
     runtime: ActionRuntime<SkillGuardExecutor, SkillGuardAuditProjector>,
 }
@@ -21,6 +22,7 @@ pub(super) struct SkillGuardHandler {
 impl SkillGuardHandler {
     pub(super) fn new(service: Arc<SkillGuardService>, finalizer: Finalizer) -> Self {
         Self {
+            skillfs: None,
             service: service.clone(),
             runtime: ActionRuntime::new(
                 ActionId::SkillGuard,
@@ -80,14 +82,24 @@ impl SkillGuardHandler {
         .and_then(|identities| {
             identities
                 .iter()
-                .map(|identity| SkillRoot::direct(identity.path()))
+                .map(|identity| {
+                    self.skillfs.as_ref().map_or_else(
+                        || SkillRoot::direct(identity.path()),
+                        |bridge| {
+                            Ok(bridge.resolve(identity, control.deadline()).unwrap_or_else(
+                                |error| SkillRoot::unavailable(identity.clone(), error.to_string()),
+                            ))
+                        },
+                    )
+                })
                 .collect::<Result<Vec<_>, GuardError>>()
         });
         let (roots, preparation_error) = match prepared {
             Ok(roots) => (roots, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        let outcome = self.runtime.invoke(
+        let is_status = matches!(&command, GuardCommand::Status { .. });
+        let mut outcome = self.runtime.invoke(
             &ExecutionControl {
                 deadline: control.deadline(),
                 cancelled: control.is_cancelled(),
@@ -107,6 +119,9 @@ impl SkillGuardHandler {
                 preparation_error,
             },
         );
+        if is_status && let Some(bridge) = &self.skillfs {
+            outcome.data["output"]["skillfs"] = bridge.status();
+        }
         let result = json!({"success":outcome.success,"exitCode":outcome.exit_code,"error":outcome.error,"errorType":outcome.error_type,"data":outcome.data.get("output")});
         // A committed mutation is not rolled back because its detailed response is too large.
         // Preserve a parseable diagnosis and require show/export instead of silently truncating.

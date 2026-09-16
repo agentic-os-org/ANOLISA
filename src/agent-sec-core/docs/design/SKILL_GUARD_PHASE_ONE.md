@@ -22,7 +22,7 @@ Phase-two policy integration is outside this PR.
 | 3 | Ledger and Service | Implemented; Linux gates passed | Versions, fill-in/force, snapshots, export, serialization, changes during scan |
 | 4 | Activation | Implemented; Linux gates passed | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
 | 5 | daemon, CLI and audit | Linux acceptance passed | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
-| 6 | SkillFS | Planned | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
+| 6 | SkillFS | Linux acceptance passed | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
 | 7 | Deployment | Planned | Source/RPM installation, root systemd service, local non-root callers, complete core workflow |
 
 Each batch is one independently compiling logical commit with its tests and documentation.
@@ -168,8 +168,8 @@ writes. Fixture generation is a developer tool; the deployed Rust binary never i
 paths. Unused lock entries are discarded. A generation read lock protects operations against
 system key replacement; rotation will take the write side in batch five. Registration stores
 exact roots in private daemon state and never discovers siblings from a user-selected parent.
-Business roots cannot be inside `.skill-meta`; internal snapshot verification does not use this
-business-root entry point.
+Business roots cannot be inside `.skill-meta`, including authenticated physical mappings; internal
+snapshot verification does not use this business-root entry point.
 
 Scan captures at most 2,000 regular files / 50 MiB / 10,000 directories / depth 32, excluding `.git` and `.skill-meta`.
 It scans a private staging tree, retains original symlink classifications for static findings,
@@ -313,3 +313,85 @@ Code Scan and safe public audit.
 A rollback performed by the root daemon restores regular files and directories to the source
 Skill directory owner, so its ordinary user can continue editing. Snapshot privilege bits remain
 stripped. The cross-UID CLI workflow verifies rollback followed by a real user write.
+
+## Batch six: SkillFS boundary
+
+`asc-daemon-handler::skillfs` owns the compatibility adapter. The generic socket service only adds
+an optional connection-local session port and retains buffered bytes between frames. The normal
+V2 envelope remains closed to unknown fields. Authenticated sessions accept only
+`skill_ledger.skillfs_notify_change`; they cannot dispatch PAP or arbitrary V1 methods.
+
+The existing four-frame HMAC handshake, string `authVersion="1"`, separate client/server domains,
+raw payload plus `auth.frame` tag, and notify schema version 2 are retained. The daemon bounds a
+session to four incoming frames, 64 KiB per frame and five seconds after the initial frame. Invalid
+proofs close the connection without plaintext fallback. A verified business response is signed,
+including rejected notifications. `accepted`, `queued` and `coalesced` describe in-memory work;
+metadata-only `.skill-meta` notifications are acknowledged with `ignored=true`.
+Coalesced work retains `queued=true`. The V1 `skill` summary, metadata-only `reason`,
+daemon-generated `request_id`, `stdout/stderr/exit_code` and structured error fields are retained.
+An unexpected worker exit closes admission and reports unhealthy status until daemon restart.
+
+The authenticated SkillFS client accepts its existing private endpoint or a root-owned parent
+mode `0755` plus socket mode `0666`. It verifies ancestor ownership, symlinks, writable parents,
+endpoint type/owner and the connected kernel UID before the HMAC handshake. The HMAC key remains
+an owner-only `0600` regular file. Public socket access does not grant administrative key rotation
+or change PAP authorization. All local users may operate managed Skills under the phase-one
+access contract.
+
+The root-owned `--skillguard-config` file accepts the optional binding below. Paths must be
+absolute and normalized. One mount's canonical/live roots may be identical for an ordinary
+non-in-place mount; otherwise they must be disjoint. Prefixes belonging to different mounts cannot
+overlap. The daemon and each SkillFS
+process receive private copies of the same raw HMAC secret. This secret is separate from
+`stateDir/signing-key.pk8`; neither signing-key rotation nor user HOME selects the HMAC key.
+
+```json
+{
+  "stateDir": "/var/lib/agent-sec/skillguard",
+  "managedSkillDirs": ["/home/alice/.openclaw/skills/demo"],
+  "skillfs": {
+    "authKeyFile": "/etc/agent-sec/skillfs-hmac.key",
+    "mounts": [{
+      "controlSocket": "/run/user/1000/skillfs/control.sock",
+      "canonicalRoot": "/home/alice/.openclaw/skills",
+      "liveRoot": "/home/alice/.openclaw/live-skills",
+      "peerUid": 1000
+    }]
+  }
+}
+```
+
+The control endpoint stays private: configured peer UID, owner-only parent/socket, kernel peer
+verification and the existing control HMAC domains. Each read-only `skill.resolveLiveSource`
+response must match both configured prefixes, the exact relative Skill ID and `shared_path`.
+Source/live aliases map to one canonical lock identity. The returned device/inode is checked when
+opening the backing directory and again inside the service boundary. Failed resolution inside a
+configured mount never falls back to reading the FUSE view. Aggregate commands retain per-Skill
+mapping failures; `status` still returns key readiness. Rotation persists physical identity pins
+in its private recovery intent and refuses unresolved mappings before starting replacement.
+
+One worker coalesces notifications per canonical Skill with a 500 ms debounce and a two-second
+maximum delay under continuous edits. It invokes public Action Runtime scan, then activation even
+if scan fails or is a no-op. Only `Busy`, which proves execution was not admitted, is retried
+within the execution deadline; unknown post-commit failures are not replayed. Each operation has a
+30-second budget. Failures remain visible in the audit, stderr and `status`'s `skillfs` counters.
+Shutdown stops queue admission and waits for the current pair of bounded operations.
+
+After synchronous rollback/latest/activation recovery, daemon startup schedules all explicitly
+registered mount Skills for a fresh scan and activation. This does not require SkillFS to restart.
+The startup list comes from the bounded private registry; live notifications allow up to 256
+pending distinct Skills, and queue overflow returns a signed rejection. This is an explicit Rust
+resource bound beyond the unbounded Python pending map; it is not durable acceptance. Mount
+startup notifications cover newly discovered Skills. There is no persistent event queue or replay
+of original notification order.
+
+Batch-six tests cover frozen SkillFS HMAC vectors, coalesced wire frames, wrong keys and payload
+MACs, plaintext rejection, source/live identity, false resolver mappings, replaced backing
+inodes, daemon startup rescan, activation after scan errors and normal V2 calls. The synthetic
+resolver tests establish the IPC contract. Linux acceptance additionally passed V2 workspace gates,
+SkillFS workspace tests with targeted retries under the existing tests' environment assumptions,
+and the repository's real FUSE smoke. The root in-place mount and UID-1001 ordinary mount each
+completed 25 real daemon/SkillFS operations, including authenticated notify/resolver, publication,
+invalid identity/key/plaintext rejection and daemon-only restart recovery. SkillFS Clippy used the
+repository's pinned Rust 1.86; V2 used Rust 1.93.1. These are core/FUSE results, not Agent Hook or
+installed-systemd acceptance.

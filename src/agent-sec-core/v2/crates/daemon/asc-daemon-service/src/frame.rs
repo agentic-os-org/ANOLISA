@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 const READ_CHUNK_BYTES: usize = 4096;
 
@@ -16,43 +16,27 @@ pub(crate) async fn read_request_frame<R>(
     maximum_wire_bytes: usize,
 ) -> Result<Vec<u8>, FrameReadError>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
 {
     let mut payload = Vec::with_capacity(maximum_wire_bytes.min(READ_CHUNK_BYTES));
-    let mut chunk = [0_u8; READ_CHUNK_BYTES];
-
     loop {
-        let remaining_probe = maximum_wire_bytes
-            .saturating_sub(payload.len())
-            .saturating_add(1)
-            .min(READ_CHUNK_BYTES);
-        let read = reader
-            .read(&mut chunk[..remaining_probe])
-            .await
-            .map_err(FrameReadError::Io)?;
-        if read == 0 {
+        let available = reader.fill_buf().await.map_err(FrameReadError::Io)?;
+        if available.is_empty() {
             return if payload.is_empty() {
                 Err(FrameReadError::Empty)
             } else {
                 Ok(payload)
             };
         }
-
-        if let Some(delimiter) = chunk[..read].iter().position(|byte| *byte == b'\n') {
-            let wire_size = payload
-                .len()
-                .checked_add(delimiter + 1)
-                .ok_or(FrameReadError::TooLarge)?;
-            if wire_size > maximum_wire_bytes {
-                return Err(FrameReadError::TooLarge);
-            }
-            payload.extend_from_slice(&chunk[..delimiter]);
-            return Ok(payload);
-        }
-
-        payload.extend_from_slice(&chunk[..read]);
-        if payload.len() > maximum_wire_bytes {
+        let delimiter = available.iter().position(|byte| *byte == b'\n');
+        let count = delimiter.map_or(available.len(), |index| index + 1);
+        if payload.len().saturating_add(count) > maximum_wire_bytes {
             return Err(FrameReadError::TooLarge);
+        }
+        payload.extend_from_slice(&available[..delimiter.unwrap_or(count)]);
+        reader.consume(count);
+        if delimiter.is_some() {
+            return Ok(payload);
         }
     }
 }
@@ -148,21 +132,27 @@ mod tests {
 
     #[tokio::test]
     async fn frame_limit_includes_the_lf_delimiter() {
-        let (mut writer, mut reader) = tokio::io::duplex(32);
+        let (mut writer, reader) = tokio::io::duplex(32);
         writer.write_all(b"1234567\ntrailing").await.unwrap();
         drop(writer);
+        let mut reader = tokio::io::BufReader::new(reader);
 
         assert_eq!(
             read_request_frame(&mut reader, 8).await.unwrap(),
             b"1234567"
         );
+        assert_eq!(
+            read_request_frame(&mut reader, 16).await.unwrap(),
+            b"trailing"
+        );
     }
 
     #[tokio::test]
     async fn eof_terminated_frame_can_fill_the_exact_limit() {
-        let (mut writer, mut reader) = tokio::io::duplex(32);
+        let (mut writer, reader) = tokio::io::duplex(32);
         writer.write_all(b"12345678").await.unwrap();
         drop(writer);
+        let mut reader = tokio::io::BufReader::new(reader);
 
         assert_eq!(
             read_request_frame(&mut reader, 8).await.unwrap(),
@@ -172,9 +162,10 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_frame_is_rejected_before_unbounded_growth() {
-        let (mut writer, mut reader) = tokio::io::duplex(32);
+        let (mut writer, reader) = tokio::io::duplex(32);
         writer.write_all(b"123456789").await.unwrap();
         drop(writer);
+        let mut reader = tokio::io::BufReader::new(reader);
 
         assert!(matches!(
             read_request_frame(&mut reader, 8).await,

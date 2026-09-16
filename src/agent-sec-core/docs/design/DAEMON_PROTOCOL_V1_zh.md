@@ -862,3 +862,17 @@ ResponseTooLarge，注明 operationMayHaveCommitted；完整版本可用 export 
 可执行合同：`v2/fixtures/skillguard/consumer.json`、`v2/apps/asc-cli/tests/skill_guard.rs`、
 `v2/crates/daemon/asc-daemon-handler/src/skill_guard.rs` 测试。样例覆盖正常、风险、未初始化、超时、
 执行失败与激活未完成，不能作为 Agent Hook 或真实 FUSE 联调证据。
+
+### SkillGuard 第一阶段的 SkillFS 兼容实现
+
+当前 Rust 适配层在 V2 公共 socket 上识别 `auth.init`，完成现有 SkillFS HMAC 握手后，只接收
+notify schema version 2。请求保留 `id/method/params/trace_context/timeout_ms`，响应保留
+`id/ok/data` 和 `accepted/queued/coalesced`；合并事件仍为 `queued=true`，保留 6.3 节
+的 `skill/reason` 数据及 V1 `request_id/stdout/stderr/exit_code`、结构化错误字段。
+`request_id` 由 daemon 生成，不信任客户端 `id` 作为服务端身份。认证失败关闭连接，认证后的业务拒绝也带有
+server frame proof。普通 V2 请求仍由原 closed envelope 解析，不接受旧 RPC 顶层 `id`。
+
+每个连接只接受一次 notify；会话入站上限四帧、单帧 64 KiB、首帧后的会话期限五秒。
+实时 pending 上限为 256 个不同 canonical Skill，满队列返回签名业务拒绝；已确认接受不表示
+持久化或已完成激活。完整配置、权限和恢复语义见
+[SkillGuard 第一阶段迁移](SKILL_GUARD_PHASE_ONE_zh.md#第六批-skillfs-边界)。

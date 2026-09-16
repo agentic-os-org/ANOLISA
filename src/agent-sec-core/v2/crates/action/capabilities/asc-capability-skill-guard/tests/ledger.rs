@@ -495,3 +495,30 @@ fn frozen_v1_lifecycle_contracts_match() {
         }
     }
 }
+
+#[test]
+fn resolved_directory_replacement_is_rejected_before_ledger_access() {
+    use std::os::unix::fs::MetadataExt as _;
+    let f = Fixture::new();
+    f.certify("fixture", &json!([]));
+    let metadata = fs::metadata(&f.root.io_dir).unwrap();
+    let pinned = SkillRoot::resolved(f.root.identity.clone(), f.root.io_dir.clone())
+        .unwrap()
+        .with_file_identity(metadata.dev(), metadata.ino())
+        .unwrap();
+    assert_eq!(
+        f.service.check(&pinned, deadline()).unwrap()["status"],
+        "pass"
+    );
+    let original = f.root.io_dir.with_extension("original");
+    fs::rename(&f.root.io_dir, &original).unwrap();
+    fs::create_dir(&f.root.io_dir).unwrap();
+    fs::write(f.root.io_dir.join("SKILL.md"), "replacement").unwrap();
+    assert!(f.service.check(&pinned, deadline()).is_err());
+    assert!(
+        f.service
+            .scan(&pinned, &ScanOptions::default(), deadline())
+            .is_err()
+    );
+    assert!(!f.root.io_dir.join(".skill-meta").exists());
+}

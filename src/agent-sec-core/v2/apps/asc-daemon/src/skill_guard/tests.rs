@@ -79,7 +79,7 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
         let events = Arc::new(Events::default());
         let finalizer = Finalizer::new(events.clone());
         if !committed {
-            assert!(recover(&service, finalizer.clone()).is_err());
+            assert!(recover(&service, finalizer.clone(), None).is_err());
             assert!(intent.exists());
             assert_eq!(
                 service.key_status(deadline()).unwrap()["fingerprint"],
@@ -97,7 +97,7 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
                 fs::metadata(&parked).unwrap().ino()
             );
         }
-        recover(&service, finalizer).unwrap();
+        recover(&service, finalizer, None).unwrap();
         let after = service.key_status(deadline()).unwrap();
         assert_eq!(after["rotationPending"], false);
         assert!(!intent.exists());

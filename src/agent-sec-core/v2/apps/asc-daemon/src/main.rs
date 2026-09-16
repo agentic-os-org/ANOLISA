@@ -79,7 +79,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let skill_guard = match skill_guard::start(cli.skillguard_config.as_deref()) {
+    let (skill_guard, skillfs_config) = match skill_guard::start(cli.skillguard_config.as_deref()) {
         Ok(service) => service,
         Err(error) => {
             report_error(&error);
@@ -94,7 +94,14 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    if let Err(error) = skill_guard::recover(&skill_guard, finalizer.clone()) {
+    let skillfs = match start_skillfs(skillfs_config, &skill_guard, &finalizer) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            report_error(&error);
+            return (ExitCode::FAILURE, Some(event_sinks));
+        }
+    };
+    if let Err(error) = skill_guard::recover(&skill_guard, finalizer.clone(), skillfs.as_deref()) {
         report_error(&error);
         eprintln!(
             "agent-sec-daemon: SkillGuard recovery is degraded; status and administrator retry remain available"
@@ -121,10 +128,13 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = Arc::new(
+    let mut dispatcher =
         DaemonDispatcher::new_with_finalizer(pap, policy_for_handler, finalizer.clone())
-            .with_skill_guard(skill_guard, finalizer),
-    );
+            .with_skill_guard(skill_guard, finalizer);
+    if let Some(bridge) = &skillfs {
+        dispatcher = dispatcher.with_skillfs(bridge.clone());
+    }
+    let dispatcher = Arc::new(dispatcher);
     eprintln!("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
     let shutdown = ShutdownToken::new();
@@ -143,15 +153,7 @@ async fn run(
     if let Some(health_task) = health_task {
         health_task.abort();
     }
-    // The UDS service has stopped admission and drained requests. Retain the
-    // blocking join task even on timeout; only process exit may cut off calls.
-    let drain = tokio::task::spawn_blocking(move || {
-        policy_runtime.map_or(Ok(()), ReconciliationRuntime::shutdown)
-    });
-    let exit_code = if matches!(
-        tokio::time::timeout(Duration::from_secs(30), drain).await,
-        Ok(Ok(Ok(())))
-    ) {
+    let exit_code = if drain_runtimes(skillfs, policy_runtime).await {
         match result {
             Ok(_) => ExitCode::SUCCESS,
             Err(problem) => {
@@ -164,6 +166,42 @@ async fn run(
         ExitCode::FAILURE
     };
     (exit_code, Some(event_sinks))
+}
+
+fn start_skillfs(
+    config: Option<asc_daemon_handler::skillfs::SkillFsConfig>,
+    service: &Arc<asc_capability_skill_guard::SkillGuardService>,
+    finalizer: &Finalizer,
+) -> Result<
+    Option<Arc<asc_daemon_handler::skillfs::SkillFsBridge>>,
+    asc_daemon_handler::skillfs::SkillFsError,
+> {
+    config
+        .map(|config| {
+            asc_daemon_handler::skillfs::SkillFsBridge::start(
+                config,
+                service.clone(),
+                finalizer.clone(),
+            )
+            .map(Arc::new)
+        })
+        .transpose()
+}
+
+async fn drain_runtimes(
+    skillfs: Option<Arc<asc_daemon_handler::skillfs::SkillFsBridge>>,
+    policy: Option<ReconciliationRuntime>,
+) -> bool {
+    // Retain both blocking joins through bounded shutdown; process exit is the final cutoff.
+    let guard =
+        tokio::task::spawn_blocking(move || skillfs.map_or(Ok(()), |bridge| bridge.shutdown()));
+    let policy =
+        tokio::task::spawn_blocking(move || policy.map_or(Ok(()), ReconciliationRuntime::shutdown));
+    let (guard, policy) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(65), guard),
+        tokio::time::timeout(Duration::from_secs(30), policy),
+    );
+    matches!(guard, Ok(Ok(Ok(())))) && matches!(policy, Ok(Ok(Ok(()))))
 }
 
 fn event_finalizer()

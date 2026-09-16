@@ -22,6 +22,8 @@ pub struct SkillRoot {
     pub identity: SkillIdentity,
     /// Physical directory supplied by the verified resolver or equal to the direct source path.
     pub io_dir: PathBuf,
+    file_identity: Option<(u64, u64)>,
+    resolution_error: Option<String>,
 }
 
 impl SkillRoot {
@@ -34,6 +36,8 @@ impl SkillRoot {
         Ok(Self {
             io_dir: identity.path().into(),
             identity,
+            file_identity: None,
+            resolution_error: None,
         })
     }
 
@@ -43,7 +47,68 @@ impl SkillRoot {
     /// Rejects an invalid physical path. The caller must authenticate the mapping before calling.
     pub fn resolved(identity: SkillIdentity, io_dir: PathBuf) -> Result<Self, GuardError> {
         SkillIdentity::new(&io_dir)?;
-        Ok(Self { identity, io_dir })
+        Ok(Self {
+            identity,
+            io_dir,
+            file_identity: None,
+            resolution_error: None,
+        })
+    }
+    /// Preserves a per-Skill resolver failure in aggregate results without reading the FUSE view.
+    pub fn unavailable(identity: SkillIdentity, message: String) -> Self {
+        Self {
+            io_dir: identity.path().into(),
+            identity,
+            file_identity: None,
+            resolution_error: Some(message),
+        }
+    }
+
+    /// Pins the physical directory returned by an authenticated shared-path resolver.
+    ///
+    /// # Errors
+    /// Rejects a replacement directory or unsafe traversal before accepting the mapping.
+    pub fn with_file_identity(mut self, device: u64, inode: u64) -> Result<Self, GuardError> {
+        self.file_identity = Some((device, inode));
+        self.open_verified()?;
+        Ok(self)
+    }
+
+    pub(crate) fn open_verified(&self) -> Result<Directory, GuardError> {
+        if [self.identity.path(), self.io_dir.as_path()]
+            .iter()
+            .any(|path| {
+                path.components()
+                    .any(|part| part.as_os_str() == ".skill-meta")
+            })
+        {
+            return Err(GuardError::Invalid(
+                "Skill root must be outside reserved Ledger metadata".into(),
+            ));
+        }
+        if let Some(message) = &self.resolution_error {
+            return Err(GuardError::Integrity(message.clone()));
+        }
+        let directory = Directory::open(&self.io_dir)?;
+        if let Some(expected) = self.file_identity {
+            let meta = directory
+                .file
+                .metadata()
+                .map_err(|e| io_error(&self.io_dir, e))?;
+            if (meta.dev(), meta.ino()) != expected {
+                return Err(GuardError::Integrity(
+                    "resolved Skill directory identity changed".into(),
+                ));
+            }
+        }
+        Ok(directory)
+    }
+
+    pub(crate) fn verify_mapping(&self) -> Result<(), GuardError> {
+        if self.file_identity.is_some() || self.resolution_error.is_some() {
+            self.open_verified()?;
+        }
+        Ok(())
     }
 }
 
@@ -402,18 +467,7 @@ impl SkillGuardService {
         self.require_no_rotation(deadline)?;
         let lock = self.skill_lock(&root.identity)?;
         let _guard = timed_lock(&lock, deadline)?;
-        if [root.identity.path(), root.io_dir.as_path()]
-            .iter()
-            .any(|path| {
-                path.components()
-                    .any(|part| part.as_os_str() == ".skill-meta")
-            })
-        {
-            return Err(GuardError::Invalid(
-                "Skill root must be outside reserved Ledger metadata".into(),
-            ));
-        }
-        let directory = Directory::open(&root.io_dir)?;
+        let directory = root.open_verified()?;
         let result = operation(&directory);
         drop(generation);
         result
