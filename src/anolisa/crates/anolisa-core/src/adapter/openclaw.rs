@@ -1125,6 +1125,16 @@ impl FrameworkDriver for OpenClawDriver {
         validate_config_claim_state(claim)?;
         validate_pending_config_selection(claim, &selected_config_indices, ctx)?;
 
+        // Write-ahead, ahead of the first host mutation this enable performs. The
+        // install below registers the bundle and runs OpenClaw's exclusive slot
+        // selection before it can fail, so its non-zero exit is a report about a
+        // command that has already re-performed a hand-off the same-home cleanup
+        // undid — and the receipt the Manager swapped in before calling this method
+        // is the only durable record left to say so. Empty for a skill bundle, which
+        // installs nothing and displaces nothing.
+        let staged_dropped =
+            stage_dropped_recovery_candidates(claim, &dropped_prior_displacements, progress)?;
+
         let plugin = if ctx.is_skill_bundle() {
             None
         } else {
@@ -1177,12 +1187,13 @@ impl FrameworkDriver for OpenClawDriver {
         // later and unreachable if any of them fails — see the method.
         if plugin.is_some() {
             self.record_slot_selection_handoffs(claim, &home, ctx, progress)?;
-            self.record_recovered_dropped_handoffs(
+            self.settle_recovered_dropped_handoffs(
                 claim,
-                &dropped_prior_displacements,
+                &staged_dropped,
                 &home,
                 ctx,
                 progress,
+                DroppedRelease::Keep,
             )?;
         }
 
@@ -1236,12 +1247,15 @@ impl FrameworkDriver for OpenClawDriver {
             // it is here because verification is the next fallible step, and a
             // hand-off the host performed must not depend on it succeeding.
             self.record_slot_selection_handoffs(claim, &home, ctx, progress)?;
-            self.record_recovered_dropped_handoffs(
+            // Last slot selection this enable runs, so the last pass that may
+            // release a staged entry the host rules it out of.
+            self.settle_recovered_dropped_handoffs(
                 claim,
-                &dropped_prior_displacements,
+                &staged_dropped,
                 &home,
                 ctx,
                 progress,
+                DroppedRelease::Unperformed,
             )?;
 
             // Post-enable runtime verification: the plugin must report
@@ -2326,70 +2340,80 @@ impl OpenClawDriver {
         Ok(())
     }
 
-    /// Record in the receipt this enable is writing a displacement the contract
-    /// dropped but this enable's own registration performed again.
+    /// Settle the dropped displacements [`stage_dropped_recovery_candidates`] put in
+    /// this receipt, against the host as the install and enable left it.
     ///
-    /// The other half of the same-home re-enable's dropped-displacement duty, and
-    /// the half that has to run here: [`Self::cleanup_replaced_claim`] hands a
-    /// dropped plugin back *before* `apply_enable` installs this adapter's own
-    /// plugin, and `plugins install` and `plugins enable` both apply OpenClaw's
-    /// exclusive slot selection — which turns every other plugin of the selected
-    /// kind off. A bundle that still competes for the slot therefore undoes the
-    /// restore on its own, and the replacement receipt is the only place left that
-    /// could say so. Leaving it silent is the strand: the receipt swap already
-    /// deleted the prior record, the `disable` that follows finds nothing to
-    /// restore, reports a complete cleanup and removes itself, and the bundled
-    /// backend stays off with no operator anywhere in the sequence.
+    /// The confirmation half of the same-home re-enable's dropped-displacement duty.
+    /// [`Self::cleanup_replaced_claim`] hands a dropped plugin back *before*
+    /// `apply_enable` installs this adapter's own plugin, and `plugins install` and
+    /// `plugins enable` both apply OpenClaw's exclusive slot selection — which turns
+    /// every other plugin of the selected kind off. A bundle that still competes for
+    /// the slot therefore undoes the restore on its own, and the replacement receipt
+    /// is the only place left that can say so. Leaving it silent is the strand: the
+    /// receipt swap already deleted the prior record, the `disable` that follows
+    /// finds nothing to restore, reports a complete cleanup and removes itself, and
+    /// the bundled backend stays off with no operator anywhere in the sequence.
     ///
     /// So the question is asked of the host *after* the mutation that could have
-    /// re-performed the hand-off, through the same
-    /// [`Self::handoff_attribution`] every other recovery mark asks, and only a
-    /// positive answer records ownership:
+    /// re-performed the hand-off, through the same [`Self::handoff_attribution`]
+    /// every other recovery mark asks, and over the candidates the staging pass
+    /// actually wrote — never over one the replacement receipt claimed itself, which
+    /// the current contract declares and this enable has no business releasing:
     ///
     /// - [`HandoffAttribution::Performed`] — the slot names this adapter's own
-    ///   plugin and the plugin's flag reads off, the state slot selection produces
-    ///   by construction — is carried as applied, and a later `disable` hands it
-    ///   back.
+    ///   plugin and the plugin's flag reads off, the state slot selection produces by
+    ///   construction — marks the staged entry applied, and a later `disable` hands
+    ///   it back.
     /// - [`HandoffAttribution::NotPerformed`] is the bundle that does not compete:
-    ///   the restore held, the plugin is on, and the contract change really did
-    ///   take effect. Nothing is recorded, which is what lets it take effect.
-    /// - [`HandoffAttribution::Unknown`] is carried as *unapplied*. That claims no
-    ///   transition, and it is not the loss it looks like: the entry still names
-    ///   the plugin, so `status` reports it and a `disable` asks
-    ///   [`Self::record_recovered_slot_selection_handoffs`] to recover the
-    ///   attribution from its own capture before the uninstall destroys it. What
-    ///   it must not do is be spent as `NotPerformed`, because the receipt swap
-    ///   that follows is not retryable.
+    ///   the restore held, the plugin is on, and the contract change really did take
+    ///   effect. [`DroppedRelease::Unperformed`] releases the staged entry, which is
+    ///   what lets it take effect — keeping one would leave the receipt naming a
+    ///   displacement the contract dropped and the host does not show, and `status`
+    ///   would report a collision that is not there. [`DroppedRelease::Keep`] holds
+    ///   it instead, because the install's selection is not the last mutation that
+    ///   can perform the hand-off: `plugins enable` runs the same selection again,
+    ///   and releasing between the two would delete a responsibility the next
+    ///   command is about to create.
+    /// - [`HandoffAttribution::Unknown`] leaves the entry staged and *unapplied* on
+    ///   both passes. That claims no transition, and it is not the loss it looks
+    ///   like: the entry still names the plugin, so `status` reports it and a
+    ///   `disable` asks [`Self::record_recovered_slot_selection_handoffs`] to recover
+    ///   the attribution from its own capture before the uninstall destroys it. What
+    ///   it must not do is be spent as `NotPerformed`, because the receipt swap that
+    ///   preceded this call is not retryable.
+    ///
+    ///   One shape cannot be recovered that way, and it is worth naming rather than
+    ///   burying: an entry staged slotless by the collision case has no slot for that
+    ///   capture to be asked against, so `Unknown` there is terminal — the disable
+    ///   skips the restore and *says so* instead of reporting a cleanup complete over
+    ///   a silence nobody recorded. Recovering it needs a receipt that can hold a
+    ///   recoverable attribution alongside a slot another entry owns, which is the
+    ///   format change this deliberately is not.
     ///
     /// Write-ahead, like every other mark in this driver: each entry is persisted as
-    /// it is recorded, so a failure in a later step of `apply_enable` leaves the
+    /// it is settled, so a failure in a later step of `apply_enable` leaves the
     /// receipt describing the host rather than the host describing nothing.
     ///
-    /// Two shapes are deliberately left unrecorded, both because the receipt cannot
-    /// express them rather than because the evidence is missing:
-    ///
-    /// - a plugin the replacement receipt already claims, which is what
-    ///   [`preserve_openclaw_displaced_facts`] makes of a declaration this enable's
-    ///   own probe declined to claim; adding it again would be a duplicate claim;
-    /// - a slotful entry whose slot the replacement receipt already gave to another
-    ///   plugin, which [`claim_displaced_plugins`] rejects outright. A contract that
-    ///   moved the same slot from one bundled plugin to another can therefore still
-    ///   strand the first one; expressing both would mean letting two entries share
-    ///   an exclusive slot, and the restore order that needs is a receipt-format
-    ///   change rather than a fix here.
+    /// The attribution is asked with the slot the *prior* receipt named rather than
+    /// the one the entry was staged with, because the question is which slot this
+    /// adapter's own selection took and a slotless record still has to answer it —
+    /// see the collision case in [`stage_dropped_recovery_candidates`].
     ///
     /// # Errors
     ///
-    /// A receipt-consistency error from [`claim_own_plugin`], an invalid plugin id,
-    /// and a persistence failure from `progress` — which aborts the enable with the
-    /// host already registered rather than leaving a hand-off nobody recorded.
-    fn record_recovered_dropped_handoffs(
+    /// A receipt-consistency error from [`claim_own_plugin`],
+    /// [`claim_displaced_plugins`], [`mark_displacement_applied`] or
+    /// [`release_displacement_claim`], an invalid plugin id, and a persistence
+    /// failure from `progress` — which aborts the enable with the host already
+    /// registered rather than leaving a hand-off nobody recorded.
+    fn settle_recovered_dropped_handoffs(
         &self,
         claim: &mut AdapterClaim,
         dropped: &[DroppedPriorDisplacement],
         home: &Path,
         ctx: &DriverCtx,
         progress: &mut dyn ClaimProgress,
+        release: DroppedRelease,
     ) -> Result<(), AdapterError> {
         if dropped.is_empty() {
             return Ok(());
@@ -2398,22 +2422,16 @@ impl OpenClawDriver {
         for entry in dropped {
             validate_plugin_id(&entry.plugin_id)?;
             let claimed = claim_displaced_plugins(claim)?;
-            if claimed
+            // Already settled, or already marked by
+            // [`Self::record_slot_selection_handoffs`], which asks the same question
+            // over every unapplied entry in the receipt and runs first.
+            let Some(staged_entry) = claimed
                 .iter()
-                .any(|claimed| claimed.plugin_id == entry.plugin_id)
-            {
+                .find(|staged_entry| staged_entry.resource == entry.resource.id)
+            else {
                 continue;
-            }
-            if claimed
-                .iter()
-                .any(|claimed| entry.slot.is_some() && claimed.slot == entry.slot)
-            {
-                continue;
-            }
-            // Defensive rather than reachable: a reference whose resource the prior
-            // receipt did not hold was rejected when it was resolved, and one whose
-            // id the replacement receipt already uses would collide with it.
-            if claim.resource(&entry.resource.id).is_some() {
+            };
+            if staged_entry.applied {
                 continue;
             }
             let resolved = DisplacedPlugin {
@@ -2422,30 +2440,25 @@ impl OpenClawDriver {
                 slot: entry.slot.clone(),
                 applied: false,
             };
-            let applied = match self.handoff_attribution(
+            match self.handoff_attribution(
                 &resolved,
                 own_plugin_id.as_deref(),
                 SlotReadings::Live,
                 home,
                 ctx,
             ) {
-                HandoffAttribution::Performed => true,
-                HandoffAttribution::NotPerformed => continue,
-                HandoffAttribution::Unknown => false,
-            };
-            claim.resources.push(entry.resource.clone());
-            let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
-                return Err(invalid_displaced_claim(
-                    claim,
-                    "receipt payload is not OpenClaw",
-                ));
-            };
-            payload.displaced_plugins.push(DisplacedPluginRef {
-                resource: entry.resource.id.clone(),
-                slot: entry.slot.clone(),
-                applied,
-            });
-            progress.persist_claim(claim)?;
+                HandoffAttribution::Performed => {
+                    mark_displacement_applied(claim, &entry.resource.id)?;
+                    progress.persist_claim(claim)?;
+                }
+                HandoffAttribution::NotPerformed => {
+                    if matches!(release, DroppedRelease::Unperformed) {
+                        release_displacement_claim(claim, &entry.resource.id)?;
+                        progress.persist_claim(claim)?;
+                    }
+                }
+                HandoffAttribution::Unknown => {}
+            }
         }
         Ok(())
     }
@@ -2505,8 +2518,8 @@ impl OpenClawDriver {
             let plugin_id = entry.plugin_id.clone();
             validate_plugin_id(&plugin_id)?;
             // An entry the contract being enabled does not declare is one
-            // [`Self::record_recovered_dropped_handoffs`] put in the receipt, and
-            // this enable owes no `plugins disable` for it. The host already
+            // [`stage_dropped_recovery_candidates`] put in the receipt, and this
+            // enable owes no `plugins disable` for it. The host already
             // performed that hand-off through its own slot selection, which is the
             // evidence the entry was recorded on, so the command could only be a
             // no-op — except over an entry recorded on an *unreadable* attribution,
@@ -6365,6 +6378,30 @@ enum HandoffAttribution {
     Unknown,
 }
 
+/// What a confirmation pass may do with a staged dropped displacement the host
+/// shows this enable did *not* re-perform.
+///
+/// [`OpenClawDriver::settle_recovered_dropped_handoffs`] runs twice per enable, once
+/// after `plugins install` and once after `plugins enable`, and the two are not
+/// interchangeable. Both install and enable apply OpenClaw's exclusive slot
+/// selection, so a `NotPerformed` read between them is an answer about a host the
+/// next command is about to change again: releasing there would delete a recovery
+/// responsibility the enable then re-creates, over a receipt the Manager has already
+/// swapped and cannot put back. Only the pass after the last selection may release.
+///
+/// Marking is not gated this way. A `Performed` read is positive evidence, and
+/// recording it as early as it exists is the write-ahead every other mark in this
+/// driver performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DroppedRelease {
+    /// Keep the staged entry whatever the attribution says, marking it only on
+    /// [`HandoffAttribution::Performed`].
+    Keep,
+    /// Release a staged entry the host rules this adapter out of, so the contract
+    /// change that dropped the declaration really does take effect.
+    Unperformed,
+}
+
 /// Whether a re-enable recovers an ownership the prior receipt never marked.
 ///
 /// The verdict of [`OpenClawDriver::recovered_prior_handoff`], which both
@@ -7227,6 +7264,108 @@ fn dropped_prior_displacements(
         });
     }
     Ok(dropped)
+}
+
+/// Put every dropped displacement this receipt can express into it as an
+/// *unapplied* entry, before the install that can re-perform the hand-off.
+///
+/// Write-ahead, and the reason is the shape of `plugins install`: it is not an
+/// atomic step. On a host whose plugin declares a slot kind it registers the
+/// bundle *and* runs OpenClaw's exclusive slot selection before it can fail, so a
+/// non-zero exit is a report about a command that has already turned the plugin the
+/// same-home cleanup just handed back off again. Everything durable at that moment
+/// is the receipt the Manager swapped in before calling `apply_enable` —
+/// [`PreparedEnable`] dies with the process — and a confirmation recorded only once
+/// the install returns successfully covers neither that exit nor a process killed
+/// between the command and the save. In both, the `disable` an operator runs next
+/// finds nothing to restore, reports a complete cleanup, removes itself, and leaves
+/// the bundled backend off with no record of why.
+///
+/// An unapplied entry claims no transition. It is the shape `prepare_enable` leaves
+/// a declared displacement in when the hand-off has not run yet, and the shape is
+/// safe for exactly the reason it is safe there: a restore asks the attribution
+/// before it acts, so an entry nobody can attribute is skipped and reported rather
+/// than spent. Staging one only buys the question a durable place to be asked from —
+/// [`OpenClawDriver::record_slot_selection_handoffs`] and
+/// [`OpenClawDriver::settle_recovered_dropped_handoffs`] confirm it once the
+/// mutations that could have re-performed the hand-off have run, and a `disable`
+/// that still finds it unapplied asks
+/// [`OpenClawDriver::record_recovered_slot_selection_handoffs`] before it restores.
+///
+/// Returns the candidates actually staged, which is the only list the confirmation
+/// passes are allowed to settle: one the replacement receipt already claimed is left
+/// to the entry that is there, and settling it here would release a displacement the
+/// current contract declares.
+///
+/// The slot an entry is staged with is the one this receipt can hold. A dropped
+/// entry whose slot the replacement receipt already gave to another plugin cannot
+/// keep it, because [`claim_displaced_plugins`] rejects two entries sharing one
+/// exclusive slot — and rightly: a restore of the first makes it a third owner for
+/// the second, whose guard then steps aside over a plugin this adapter really did
+/// disable. Such an entry is staged *slotless* rather than skipped. The slot is
+/// contract metadata and not history, and the current contract does not declare this
+/// plugin at all, so there is no contract slot for the restore to be guarded by;
+/// the entry the contract does declare carries the guard for that exclusive slot,
+/// and what this entry exists to keep is the plugin id together with whether this
+/// adapter turned it off — neither of which is the slot.
+///
+/// # Errors
+///
+/// An invalid plugin id, a receipt-consistency error from
+/// [`claim_displaced_plugins`], and a persistence failure from `progress` — which
+/// aborts the enable with the host still untouched rather than running an install
+/// nobody recorded the recovery responsibility for.
+fn stage_dropped_recovery_candidates(
+    claim: &mut AdapterClaim,
+    dropped: &[DroppedPriorDisplacement],
+    progress: &mut dyn ClaimProgress,
+) -> Result<Vec<DroppedPriorDisplacement>, AdapterError> {
+    let mut staged = Vec::new();
+    for entry in dropped {
+        validate_plugin_id(&entry.plugin_id)?;
+        let claimed = claim_displaced_plugins(claim)?;
+        // The replacement receipt already claims this plugin, which is what
+        // [`preserve_openclaw_displaced_facts`] makes of a declaration this enable's
+        // own probe declined to claim. That entry is the one carrying the
+        // responsibility; staging a second would be a duplicate claim.
+        if claimed
+            .iter()
+            .any(|claimed| claimed.plugin_id == entry.plugin_id)
+        {
+            continue;
+        }
+        // Defensive rather than reachable: a reference whose resource the prior
+        // receipt did not hold was rejected when it was resolved, and one whose id
+        // the replacement receipt already uses would collide with it.
+        if claim.resource(&entry.resource.id).is_some() {
+            continue;
+        }
+        let slot_taken_by_another = entry.slot.as_deref().is_some_and(|held| {
+            claimed
+                .iter()
+                .any(|taken| taken.slot.as_deref() == Some(held))
+        });
+        let slot = if slot_taken_by_another {
+            None
+        } else {
+            entry.slot.clone()
+        };
+        claim.resources.push(entry.resource.clone());
+        let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
+            return Err(invalid_displaced_claim(
+                claim,
+                "receipt payload is not OpenClaw",
+            ));
+        };
+        payload.displaced_plugins.push(DisplacedPluginRef {
+            resource: entry.resource.id.clone(),
+            slot,
+            applied: false,
+        });
+        progress.persist_claim(claim)?;
+        staged.push(entry.clone());
+    }
+    Ok(staged)
 }
 
 /// Carry a prior receipt's displaced-plugin facts into its replacement — but

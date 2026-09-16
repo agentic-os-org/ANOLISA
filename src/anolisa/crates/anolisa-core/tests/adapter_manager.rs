@@ -5526,9 +5526,10 @@ fn rename_displacement_resource(world: &World, new_id: &str) {
         .expect("persist the renamed receipt");
 }
 
-/// The plugin ids the persisted receipt still claims as displaced, resolved
-/// through its resources the way the driver resolves them.
-fn persisted_displacement_ids(world: &World) -> Vec<String> {
+/// Every displaced-plugin entry the persisted receipt still claims, resolved
+/// through its resources the way the driver resolves them, as
+/// `(plugin id, slot, applied)`.
+fn persisted_displacements(world: &World) -> Vec<(String, Option<String>, bool)> {
     let state = world.load_state();
     let claim = state
         .find_adapter_claim(COMPONENT, FRAMEWORK)
@@ -5540,13 +5541,25 @@ fn persisted_displacement_ids(world: &World) -> Vec<String> {
     payload
         .displaced_plugins
         .iter()
-        .map(|entry| match claim.resource(&entry.resource) {
-            Some(resource) => match &resource.kind {
-                ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => plugin_id.clone(),
-                other => panic!("displacement resource is not a framework plugin: {other:?}"),
-            },
-            None => panic!("dangling displacement reference {:?}", entry.resource),
+        .map(|entry| {
+            let plugin_id = match claim.resource(&entry.resource) {
+                Some(resource) => match &resource.kind {
+                    ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => plugin_id.clone(),
+                    other => panic!("displacement resource is not a framework plugin: {other:?}"),
+                },
+                None => panic!("dangling displacement reference {:?}", entry.resource),
+            };
+            (plugin_id, entry.slot.clone(), entry.applied)
         })
+        .collect()
+}
+
+/// The plugin ids the persisted receipt still claims as displaced, resolved
+/// through its resources the way the driver resolves them.
+fn persisted_displacement_ids(world: &World) -> Vec<String> {
+    persisted_displacements(world)
+        .into_iter()
+        .map(|(plugin_id, _, _)| plugin_id)
         .collect()
 }
 
@@ -10999,6 +11012,270 @@ fn independent_dropped_handoff_survives_remaining_install() {
         Some("true"),
         "the final state is a bundled backend that is really back on, not a report \
          claiming the cleanup was complete over one that is off"
+    );
+}
+
+/// An install that fails *after* its own slot selection ran still owes the recovery.
+///
+/// The failure-window half of the duty
+/// [`independent_dropped_handoff_survives_remaining_install`] proves for a successful
+/// enable, and the half a confirmation recorded only on success cannot reach.
+/// `plugins install` is not an atomic step: it registers the bundle and applies
+/// OpenClaw's exclusive slot selection before the exit status is decided, so a
+/// non-zero exit is a report about a command that has already turned the dropped
+/// plugin back off. The same-home cleanup had handed `memory-core` back, the receipt
+/// the Manager swapped in before `apply_enable` named nothing to restore, and the
+/// candidates lived only in `PreparedEnable` — which dies with the process. The
+/// `disable` an operator ran next reported `cleanup_complete`, removed the receipt,
+/// and left the bundled backend off with nothing recording why.
+///
+/// Staging the candidates as unapplied entries *before* the install is what closes
+/// it: the record exists ahead of the command that can invalidate it, and the
+/// disable's own attribution recovers the ownership from the capture it takes before
+/// its uninstall destroys it.
+#[test]
+fn review_dropped_handoff_survives_install_error_after_registration() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    // Register, select the slot, *then* fail: the mutation has already happened by
+    // the time the driver reads the exit status.
+    guard.set("FAKE_OPENCLAW_FAIL", "install_after_register");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("an install that exits non-zero must fail the enable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        format!("{err}").contains("boom-after-register"),
+        "and must fail on that install: {err}"
+    );
+    assert!(
+        appended
+            .iter()
+            .any(|line| line.starts_with("plugins install ") && !line.contains("--help")),
+        "the install really ran: {appended:?}"
+    );
+
+    // The side effect the failure is a report about: the cleanup's restore was
+    // undone by the very command that then failed, and the slot proves it was this
+    // adapter's own selection that did it.
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "the install's slot selection turns the restored plugin back off"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "and names this adapter's own plugin, which is the attribution a later \
+         disable recovers the ownership from"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "the recovery responsibility has to survive an install that failed after it \
+         mutated, which is what staging it before the command is for"
+    );
+    assert!(
+        !persisted_displacement(&world).applied,
+        "staged rather than claimed: the enable never reached the pass that could \
+         confirm it, and an unconfirmed entry must not read as ownership"
+    );
+
+    // Whatever broke the install is over. The record left behind has to be enough.
+    guard.unset("FAKE_OPENCLAW_FAIL");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the restore the staged entry makes possible: {appended:?}"
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the final state is a bundled backend that is really back on, not a report \
+         of a complete cleanup over one that is off"
+    );
+}
+
+/// The contrast that keeps the staging honest: an install that fails *before* it
+/// mutates must leave a candidate nobody can spend.
+///
+/// Staging is write-ahead, so a failed enable leaves the entry in the receipt either
+/// way — the two windows are told apart by the attribution, not by the record. Here
+/// the cleanup's restore held and nothing turned the plugin back off, so the slot
+/// names the plugin itself and the flag reads on: the disable recovers no ownership,
+/// restores nothing, and says so. Recording the candidate must not become claiming
+/// it, or an operator who never lost the backend is handed a `plugins enable` for a
+/// plugin they may since have closed themselves.
+#[test]
+fn review_dropped_handoff_is_not_claimed_when_the_install_never_mutated() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    // Exit before the registration and therefore before the slot selection.
+    guard.set("FAKE_OPENCLAW_FAIL", "install");
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("an install that exits non-zero must fail the enable");
+    assert!(
+        format!("{err}").contains("boom-install"),
+        "and must fail on that install: {err}"
+    );
+
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the cleanup's restore held: nothing turned the plugin back off"
+    );
+
+    // Read the receipt the failed enable left behind, but assert on it only after
+    // the behavioural payoff below, so that a different mechanism that gets the
+    // behaviour right does not fail this test.
+    let staged = persisted_displacements(&world);
+
+    guard.unset("FAKE_OPENCLAW_FAIL");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        !argv_contains(&appended, "plugins enable memory-core"),
+        "a staged candidate is not ownership: {appended:?}"
+    );
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("never disabled it")),
+        "and the report must say why nothing was restored: {:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the plugin is still on, exactly as the cleanup left it"
+    );
+
+    // The mechanism: write-ahead stages the candidate before the install either
+    // way, so the two windows are told apart by the mark and not by the record.
+    assert_eq!(
+        staged,
+        vec![("memory-core".to_string(), Some("memory".to_string()), false)],
+        "staged, and unapplied because no mutation performed the hand-off"
+    );
+}
+
+/// A contract that moves one exclusive slot from one bundled plugin to another owes
+/// *both* plugins a recovery, and the receipt has room for both.
+///
+/// No fault injected anywhere: every read answers and every command succeeds. The
+/// same-home cleanup hands `memory-core` back, the install and enable that follow
+/// re-select the memory slot for this adapter's own plugin and turn it off again
+/// together with the newly declared `memory-lancedb`, and the replacement receipt
+/// named only the new one. The dropped entry used to be skipped at that point
+/// because the receipt refuses two entries sharing one exclusive slot — and skipping
+/// it made an unsupported contract change *succeed*: the disable that followed
+/// reported `cleanup_complete` and removed itself over a host whose memory slot had
+/// been reset to `memory-core` by the uninstall, so the veto stepped aside for
+/// `memory-lancedb` too and nothing was left behind any backend.
+///
+/// What the entry loses is the slot, not the responsibility. The slot is contract
+/// metadata rather than history, and the current contract does not declare this
+/// plugin at all — so there is no contract slot to guard its restore with, while the
+/// entry the contract *does* declare carries the guard for that exclusive slot. The
+/// plugin id and the ownership of the transition are what a restore acts on, and
+/// both survive.
+#[test]
+fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    // Same kind as the bundle and as the plugin being dropped, so the host really
+    // does write the slot both of them compete for.
+    seed_bundled_plugin_with_kind(&world, "memory-lancedb", "memory");
+    redeclare_displacement(
+        &world,
+        &plugin_adapter_block_with_displacement("memory-lancedb", Some("memory")),
+    );
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable under a contract that moved the slot to another plugin");
+
+    let entries = persisted_displacements(&world);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(plugin_id, _, _)| plugin_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["memory-lancedb", "memory-core"],
+        "the replacement receipt keeps both responsibilities instead of letting the \
+         slot collision delete the older one: {entries:?}"
+    );
+    let lancedb = entries
+        .iter()
+        .find(|(id, _, _)| id == "memory-lancedb")
+        .unwrap();
+    assert_eq!(
+        lancedb.1.as_deref(),
+        Some("memory"),
+        "the declared plugin keeps the slot the current contract names: {entries:?}"
+    );
+    assert!(lancedb.2, "and the hand-off it performed: {entries:?}");
+    let core = entries
+        .iter()
+        .find(|(id, _, _)| id == "memory-core")
+        .unwrap();
+    assert_eq!(
+        core.1, None,
+        "a dropped plugin the contract no longer declares has no contract slot, and \
+         the receipt cannot give one exclusive slot to two entries: {entries:?}"
+    );
+    assert!(
+        core.2,
+        "the dropped plugin's hand-off is still owned, which is the whole point of \
+         keeping the entry: {entries:?}"
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the restore the retained entry makes possible: {appended:?}"
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "and the host ends with a backend behind the slot, not with every plugin of \
+         that kind switched off"
     );
 }
 

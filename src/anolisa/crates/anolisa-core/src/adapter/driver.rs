@@ -153,6 +153,14 @@ pub struct DriverPlan {
 /// built — and `apply_enable` never sees the prior receipt, which is why the
 /// entry travels through [`PreparedEnable`] rather than being re-derived there.
 ///
+/// Settling it is not the same as surviving to settle it, and the install is not an
+/// atomic step: it registers the bundle and runs the slot selection before it can
+/// fail, so a non-zero exit is a report about a mutation that has already happened.
+/// `apply_enable` therefore stages each candidate in the receipt *unapplied* before
+/// the command and confirms it afterwards — the same write-ahead split the rest of
+/// the driver uses, where an unapplied entry claims no transition and only buys the
+/// attribution question a durable place to be asked from.
+///
 /// Dropping it instead is what strands the host: the receipt swap deletes the
 /// only record that this adapter turned the plugin off, the install re-performs
 /// the disable, and the `disable` that follows has nothing to restore.
@@ -166,6 +174,11 @@ pub struct DroppedPriorDisplacement {
     /// Exclusive slot the plugin re-takes when restored, when the prior receipt
     /// recorded one. `None` means it competes for no slot, which also means this
     /// adapter's own selection cannot be what turns it off.
+    ///
+    /// This is the slot the *attribution* is asked against, and not necessarily the
+    /// one the replacement receipt ends up recording: a receipt that refuses two
+    /// entries sharing one exclusive slot has to stage the entry without it when the
+    /// current contract gave that slot to a different plugin.
     pub slot: Option<String>,
 }
 
@@ -214,10 +227,11 @@ pub enum PreparedEnable {
         freshly_claimed_displacements: Vec<String>,
         /// Displacements the prior receipt claims that this contract dropped.
         ///
-        /// `apply_enable` re-asks the hand-off attribution for each one *after*
-        /// its own install and enable have run, and records in the replacement
-        /// receipt whichever of them the host shows this adapter's own slot
-        /// selection having turned off again — see
+        /// `apply_enable` stages each one in the replacement receipt as an
+        /// *unapplied* entry before its own install runs, then re-asks the hand-off
+        /// attribution once the install and enable have, marking whichever of them
+        /// the host shows this adapter's own slot selection having turned off
+        /// again and releasing the ones it rules out — see
         /// [`DroppedPriorDisplacement`].
         dropped_prior_displacements: Vec<DroppedPriorDisplacement>,
     },
