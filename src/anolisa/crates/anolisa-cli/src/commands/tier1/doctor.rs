@@ -1580,7 +1580,11 @@ fn add_dependency_resolution(resolution: &DependencyResolution, out: &mut Doctor
                 Some(reason.clone()),
             ));
             out.fix_plan.push(suggestion(
-                "satisfy_platform_requirement",
+                if resolution.kind == DependencyKind::SystemPackage {
+                    "inspect_package_state"
+                } else {
+                    "satisfy_platform_requirement"
+                },
                 None,
                 reason.clone(),
             ));
@@ -4725,6 +4729,27 @@ mod tests {
         dry_run: bool,
         resolve: &ResolveRuntimeDependencies<'_>,
     ) -> DoctorPayload {
+        diagnose_runtime_fixture_with_env(
+            layout,
+            object,
+            deps,
+            dry_run,
+            resolve,
+            &ResolverEnv {
+                pkg_base: Some("rpm".into()),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn diagnose_runtime_fixture_with_env(
+        layout: &FsLayout,
+        object: Option<Installation>,
+        deps: Option<&str>,
+        dry_run: bool,
+        resolve: &ResolveRuntimeDependencies<'_>,
+        env: &ResolverEnv,
+    ) -> DoctorPayload {
         if let Some(deps) = deps {
             write_manifest_snapshot(
                 layout,
@@ -4738,14 +4763,10 @@ mod tests {
                 .map(state_with_component)
                 .unwrap_or_else(StateStore::empty),
         );
-        let env = ResolverEnv {
-            pkg_base: Some("rpm".to_string()),
-            ..Default::default()
-        };
         let service = FakeServiceManager::new();
         let user_service = FakeServiceManager::with_scope(ServiceScope::User);
         let ctx = DoctorViewContext {
-            resolver_env: &env,
+            resolver_env: env,
             resolve_runtime_dependencies: resolve,
             rpm_query: &MissingPackageQuery,
             current_system_service: &service,
@@ -4758,6 +4779,194 @@ mod tests {
         assert!(service.calls().is_empty());
         assert!(user_service.calls().is_empty());
         payload
+    }
+
+    #[test]
+    fn doctor_dpkg_state_output() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for scenario in ["installed", "config-files", "unpacked", "failure"] {
+            for mode in ["human", "json", "dry-run"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        format!("{module}::doctor_dpkg_output_child"),
+                        "--exact".into(),
+                        "--nocapture".into(),
+                    ])
+                    .env("ANOLISA_TEST_DPKG_OUTPUT", format!("{scenario}:{mode}"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stderr.is_empty());
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let rendered = stdout
+                    .split_once("DPKG_BEGIN\n")
+                    .unwrap()
+                    .1
+                    .split_once("DPKG_END\n")
+                    .unwrap()
+                    .0;
+                assert!(
+                    stdout.contains(if mode == "dry-run" || scenario == "installed" {
+                        "DOMAIN_EXIT=0"
+                    } else {
+                        "DOMAIN_EXIT=2"
+                    })
+                );
+                if mode == "dry-run" {
+                    assert!(!rendered.contains("[dependency_"));
+                    continue;
+                }
+                let (status, finding, action) = match scenario {
+                    "installed" => ("resolved", "", ""),
+                    "config-files" => ("unresolved", "dependency_unresolved", "install_package"),
+                    "unpacked" => (
+                        "unresolvable",
+                        "dependency_unresolvable",
+                        "inspect_package_state",
+                    ),
+                    _ => (
+                        "unresolvable",
+                        "dependency_probe_failed",
+                        "inspect_dependency_probe",
+                    ),
+                };
+                if mode == "json" {
+                    let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                    assert_eq!(json["command"], "doctor");
+                    assert_eq!(json["ok"], scenario == "installed");
+                    let component = &json["data"]["components"][0];
+                    assert_eq!(component["dependencies"][0]["status"], status);
+                    if scenario == "installed" {
+                        assert!(component.get("findings").is_none());
+                        assert!(component.get("fix_plan").is_none());
+                    } else {
+                        assert_eq!(component["findings"][0]["code"], finding);
+                        assert_eq!(component["fix_plan"].as_array().unwrap().len(), 1);
+                        assert_eq!(component["fix_plan"][0]["action"], action);
+                        if scenario == "config-files" {
+                            assert_eq!(
+                                component["fix_plan"][0]["command"],
+                                "sudo apt install libfoo"
+                            );
+                        } else {
+                            assert!(component["fix_plan"][0]["command"].is_null());
+                            assert_eq!(component["fix_plan"][0]["automatic"], false);
+                        }
+                    }
+                } else if scenario != "installed" {
+                    assert!(
+                        rendered.contains(&format!("[{finding}]")),
+                        "{scenario}/{mode}: {rendered}"
+                    );
+                    if scenario != "config-files" {
+                        assert!(rendered.contains(action));
+                    }
+                }
+                match scenario {
+                    "config-files" => assert!(rendered.contains("sudo apt install libfoo")),
+                    "unpacked" => {
+                        assert!(rendered.contains("install ok unpacked"));
+                        assert!(!rendered.contains("sudo apt install"));
+                    }
+                    "failure" => {
+                        assert!(rendered.contains("database unavailable"));
+                        assert!(!rendered.contains("sudo apt install"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_dpkg_output_child() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        if std::env::args().skip(1).collect::<Vec<_>>()
+            != [
+                format!("{module}::doctor_dpkg_output_child"),
+                "--exact".into(),
+                "--nocapture".into(),
+            ]
+        {
+            return;
+        }
+        let Ok(value) = std::env::var("ANOLISA_TEST_DPKG_OUTPUT") else {
+            return;
+        };
+        let Some((scenario, mode)) = value.split_once(':') else {
+            return;
+        };
+        if !matches!(
+            scenario,
+            "installed" | "config-files" | "unpacked" | "failure"
+        ) || !matches!(mode, "human" | "json" | "dry-run")
+        {
+            return;
+        }
+        let sandbox = crate::test_support::TestSandbox::new();
+        let ctx = sandbox.context_with(
+            crate::context::InstallMode::System,
+            crate::test_support::TestContextOptions {
+                json: mode == "json",
+                dry_run: mode == "dry-run",
+                quiet: false,
+                ..Default::default()
+            },
+        );
+        let runner = RuntimeRunner::new(vec![Ok(anolisa_platform::command::CommandOutput {
+            code: Some(if scenario == "failure" { 2 } else { 0 }),
+            stdout: if scenario == "failure" {
+                String::new()
+            } else {
+                format!("libfoo\tamd64\tinstall ok {scenario}\n")
+            },
+            stderr: if scenario == "failure" {
+                "database unavailable\n"
+            } else {
+                ""
+            }
+            .into(),
+        })]);
+        let resolver = DependencyResolver::with_probes(&runner, || panic!("no btrfs read"));
+        let payload = diagnose_runtime_fixture_with_env(
+            ctx.layout(),
+            Some(owned_object("runtime-tool", LifecycleStatus::Installed)),
+            Some("[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\""),
+            ctx.dry_run,
+            &|deps, env| resolver.resolve(deps, env),
+            &ResolverEnv {
+                pkg_base: Some("deb".into()),
+                ..Default::default()
+            },
+        );
+        if ctx.dry_run {
+            assert!(runner.calls.borrow().is_empty());
+        } else {
+            assert_eq!(
+                *runner.calls.borrow(),
+                [
+                    "dpkg-query --show --showformat=${Package}\t${Architecture}\t${Status}\n -- libfoo"
+                ]
+            );
+            assert!(runner.outputs.borrow().is_empty());
+        }
+        let has_issues = payload_has_issues(&payload);
+        println!("DPKG_BEGIN");
+        render_doctor(&ctx, &payload, !has_issues).unwrap();
+        println!("DPKG_END");
+        let code = if has_issues {
+            CliError::DiagnosticsFound {
+                command: COMMAND.into(),
+            }
+            .exit_code()
+        } else {
+            0
+        };
+        println!("DOMAIN_EXIT={code}");
     }
 
     #[test]
