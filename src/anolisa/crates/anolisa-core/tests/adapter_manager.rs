@@ -10634,6 +10634,366 @@ fn review_disable_preview_fails_like_the_real_disable_on_unreadable_capture() {
     assert_disable_preview_matches_real(&world, &manager, "unreadable-then-answered", true);
 }
 
+/// The actions an `enable --dry-run` planned, panicking if it applied instead.
+///
+/// Every preview assertion in this file needs the same two things — the plan's own
+/// wording, and the guarantee that reading it changed nothing — and the second is
+/// what makes the first worth asserting at all.
+fn planned_actions(outcome: EnableOutcome) -> Vec<String> {
+    match outcome {
+        EnableOutcome::Planned { plan, .. } => plan.actions,
+        EnableOutcome::Enabled(_) => panic!("a dry-run must return a plan"),
+    }
+}
+
+/// A contract that drops a displacement declaration must not be what turns an
+/// unreadable attribution into a lost ownership.
+///
+/// The reviewer's repro, and the path both of the last two rounds walked past.
+/// `prepare_enable` and `plan_enable` ask [`recovered_prior_handoff`] about every
+/// unapplied entry the prior receipt names, but they walk the *current* contract to
+/// find them — so a displacement the contract being enabled no longer declares is
+/// invisible to both, and the one place left that can act on it is
+/// `cleanup_replaced_claim`. Its restore asks the boolean collapse, which folds
+/// "the host could not say" into `SkipNotApplied`, and that fold is right for a
+/// `disable`: the receipt survives the skip and the next attempt is asked again. A
+/// same-home re-enable is the one caller it is wrong for, because its `Ok` is what
+/// lets the Manager replace the prior receipt with one naming no such plugin — so
+/// the skip is the last word on the ownership. One transient `config get` failure,
+/// no crash and no operator anywhere in the sequence, and the host is left with the
+/// bundled backend off, `cleanup_complete = true`, and nothing recording which
+/// adapter turned it off.
+///
+/// So the re-enable fails while the host cannot answer, before its first mutation
+/// and with the prior receipt exactly as it was, and the retry — with the host
+/// answering — really performs the restore the dropped declaration left to it
+/// instead of reporting it away.
+#[test]
+fn review_dropped_displacement_keeps_an_unreadable_handoff_out_of_the_replacement_receipt() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+
+    // The contract being enabled no longer displaces anything. This is what hides
+    // the entry from both of the recovery's callers and leaves the same-home
+    // cleanup as the only place that can still act on it.
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    // 1. One transient failure of the attribution read, and nothing else.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ONCE", "plugins.slots.memory");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err(
+            "an unreadable attribution must fail the re-enable, not be spent as \
+             'this adapter never disabled it'",
+        );
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        err.to_string().contains("memory-core"),
+        "the error must name the plugin whose ownership it could not settle: {err}"
+    );
+    // The failure must land before the first mutation: everything after this point
+    // is a host change the receipt swap would then have to describe.
+    assert_dry_run_only_probed(&appended);
+
+    // 2. The prior receipt is the thing being protected, and unlike the disable
+    //    side it has no later attempt to protect it — this is the last one.
+    assert!(
+        world.has_claim(),
+        "the failed re-enable must keep the receipt rather than swap in one that \
+         names nothing"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "and must not have dropped the displacement it is the only record of"
+    );
+    assert!(
+        !persisted_displacement(&world).applied,
+        "still unmarked, so the retry is asked the same question and can still \
+         answer it"
+    );
+    assert!(
+        world.registry_marker_exists(),
+        "this adapter's own plugin must still be installed: {err}"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "the slot must still name it, so the retry has something to recover the \
+         attribution from"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "and the bundled backend must be exactly as the failed enable left it"
+    );
+
+    // 3. The retry, with the host answering: the dropped displacement is really
+    //    handed back, which is the observable difference between asking the
+    //    tri-state and guessing at it.
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_ONCE");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the retry succeeds once the host answers the attribution");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "a transient read failure must not cost the operator the restore the \
+         dropped declaration left to this cleanup: {appended:?}"
+    );
+    assert!(
+        persisted_displacement_ids(&world).is_empty(),
+        "the replacement receipt names no displacement, because the contract being \
+         enabled declares none — which is exactly why the restore had to happen \
+         before the swap and not after it"
+    );
+}
+
+/// The dropped-displacement preview has to fail where the re-enable it describes
+/// fails, and for the same read.
+///
+/// `plan_dropped_displacement_restores` predicts the restore through
+/// `restore_decision`, whose `SkipNotApplied` arm is the boolean collapse — so a
+/// plan read while the host cannot answer used to promise "would leave openclaw
+/// plugin 'memory-core' alone ... this adapter never disabled it" over a re-enable
+/// that now refuses to run at all. That is the contradiction
+/// `review_disable_preview_fails_like_the_real_disable_on_unreadable_capture` pins
+/// for the disable, arriving on the re-enable side, and it is worse here than a
+/// wrong wording: the plan is the only place an operator can see that the contract
+/// change is about to let go of an ownership, and it is the place that said the
+/// ownership did not exist.
+///
+/// The second half keeps the gate honest in the other direction: once the host
+/// answers, the plan promises the hand-back and the re-enable performs it, so the
+/// preview fails *only* while the operation would.
+#[test]
+fn review_dropped_displacement_preview_fails_like_the_real_reenable() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ONCE", "plugins.slots.memory");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let plan_err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect_err("a plan must fail where the operation it describes fails");
+    let appended = argv_appended(&world, logged_before);
+    assert_dry_run_only_probed(&appended);
+    assert!(
+        plan_err.to_string().contains("memory-core"),
+        "and must name the plugin it could not settle, the way the operation does: \
+         {plan_err}"
+    );
+    assert!(
+        world.has_claim() && !persisted_displacement(&world).applied,
+        "a preview that could not be completed leaves the receipt exactly as it \
+         found it"
+    );
+
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_ONCE");
+    let actions = planned_actions(
+        manager
+            .enable(COMPONENT, Some(FRAMEWORK), true)
+            .expect("the plan completes once the host answers"),
+    );
+    assert!(
+        actions.iter().any(|action| action
+            .contains("would re-enable openclaw plugin 'memory-core'")
+            && action.contains("no longer displaces")),
+        "and then promises the hand-back the dropped declaration leaves to the \
+         cleanup: {actions:?}"
+    );
+    assert!(
+        !actions.iter().any(
+            |action| action.contains("leave openclaw plugin 'memory-core' alone")
+                && action.contains("never disabled it")
+        ),
+        "and must not describe the skip the stopped attempt would have guessed at: \
+         {actions:?}"
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the re-enable performs what the plan promised");
+    assert!(
+        argv_contains(
+            &argv_appended(&world, logged_before),
+            "plugins enable memory-core"
+        ),
+        "so the preview is exactly as wide as the operation and no wider"
+    );
+}
+
+/// Move the world's OpenClaw state directory to a fresh home, the way a resolver
+/// change does, and declare the bundled plugin there so the current contract's
+/// displacement declaration still resolves.
+///
+/// Returns the new home. The prior receipt keeps naming the old one, which is what
+/// makes the re-enable a migration and its cleanup a full `disable` of the prior
+/// receipt against the prior home.
+fn migrate_state_dir(guard: &OpenClawEnvGuard, world: &World) -> PathBuf {
+    let new_home = world.root().join("configured-openclaw-state");
+    for dir in ["registry", "config"] {
+        std::fs::create_dir_all(new_home.join(dir)).expect("new home dir");
+    }
+    std::fs::write(new_home.join("registry").join("memory-core"), "memory")
+        .expect("bundled plugin in the new home");
+    guard.set("OPENCLAW_STATE_DIR", &new_home);
+    new_home
+}
+
+/// A migration preview must fail where the migration it describes fails, on either
+/// half of the attribution.
+///
+/// Shared by the two tests below because they are one question asked of the two
+/// readings the attribution is built from, and guarding one without the other
+/// guards neither.
+///
+/// The cross-home branch of `cleanup_replaced_claim` is `return self.disable(prior,
+/// ctx, progress)`, so it inherited the attribution gate the last round gave the
+/// real disable — and `plan_reenable_cleanup`'s cross-home branch kept calling
+/// `restore_preview_lines` directly, because the gate had been added to
+/// `plan_disable_restores` rather than to something both previews share. The result
+/// was a dry-run that listed the prior home's uninstall, described the unapplied
+/// entry as a hand-off that never happened and needed no restore, and then an
+/// enable that stopped in the prior-home cleanup with "cannot read the evidence".
+/// An operator planning a migration was told the one thing the migration would not
+/// do, and told it by the command whose job is to say what the migration will do.
+fn assert_migration_preview_fails_like_the_real_cleanup(
+    world: &World,
+    manager: &AdapterManager,
+    guard: &OpenClawEnvGuard,
+    fail_key: &str,
+) {
+    // 1. Both halves of the operation and of the plan, read from one host state and
+    //    in the order an operator runs them.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_KEY", fail_key);
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let plan_err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect_err("a migration plan must fail where the migration it describes fails");
+    assert_dry_run_only_probed(&argv_appended(world, logged_before));
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let real_err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("an unreadable attribution must stop the migration cleanup");
+    assert_dry_run_only_probed(&argv_appended(world, logged_before));
+
+    for (which, err) in [("plan", &plan_err), ("operation", &real_err)] {
+        let reason = err.to_string();
+        assert!(
+            reason.contains("cannot read the evidence"),
+            "the {which} must fail on the attribution, not on something else: {reason}"
+        );
+        assert!(
+            reason.contains("memory-core"),
+            "and must name the plugin whose ownership it could not settle: {reason}"
+        );
+    }
+
+    // 2. Nothing ran, in the prior home or in the new one, so both the evidence and
+    //    the receipt the migration would have replaced are still there.
+    assert!(
+        world.has_claim(),
+        "the stopped migration must keep the prior receipt"
+    );
+    assert_eq!(
+        persisted_displacement_ids(world),
+        vec!["memory-core".to_string()],
+        "still naming the displacement it is the only record of"
+    );
+    assert!(
+        !persisted_displacement(world).applied,
+        "and still unmarked, so the retry is asked the same question"
+    );
+    assert!(
+        world.registry_marker_exists(),
+        "the prior installation must be untouched: {real_err}"
+    );
+    assert_eq!(
+        config_answer(world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "and the bundled backend must be exactly as the failed enable left it"
+    );
+
+    // 3. With the host answering, the plan promises the prior-home restore and the
+    //    migration performs it — so the gate is exactly as wide as the operation.
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_KEY");
+    let actions = planned_actions(
+        manager
+            .enable(COMPONENT, Some(FRAMEWORK), true)
+            .expect("the migration plan completes once the host answers"),
+    );
+    assert!(
+        actions.iter().any(|action| action
+            .contains("would re-enable openclaw plugin 'memory-core'")
+            && action.contains("in the prior state directory")),
+        "the plan must describe the restore the prior-home cleanup performs: \
+         {actions:?}"
+    );
+    assert!(
+        !actions.iter().any(
+            |action| action.contains("leave openclaw plugin 'memory-core'")
+                && action.contains("never disabled it")
+        ),
+        "and must not call the unmarked hand-off one that never happened, which is \
+         what it said while the host could not answer: {actions:?}"
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("the migration succeeds once the host answers the attribution");
+    assert!(
+        argv_contains(
+            &argv_appended(world, logged_before),
+            "plugins enable memory-core"
+        ),
+        "and must really hand the bundled backend back in the prior home"
+    );
+}
+
+/// The slot half: the prior home's `config get plugins.slots.memory` stops
+/// answering, so the attribution has no reading to reason from.
+///
+/// This is the reviewer's repro — the unmarked-handoff fixture moved to a new state
+/// directory, with the bundled plugin declared there so the current contract's
+/// displacement still resolves and the migration is one the trust boundary admits.
+#[test]
+fn review_migration_preview_fails_like_the_real_cleanup_on_unreadable_slot() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    migrate_state_dir(&guard, &world);
+    assert_migration_preview_fails_like_the_real_cleanup(
+        &world,
+        &manager,
+        &guard,
+        "plugins.slots.memory",
+    );
+}
+
+/// The enablement half: the slot reads perfectly well and the live `config get
+/// plugins.entries.memory-core.enabled` that corroborates it does not.
+///
+/// Neither half carries the attribution on its own, so a migration plan that guards
+/// only the slot still describes a restore the operation refuses to perform.
+#[test]
+fn review_migration_preview_fails_like_the_real_cleanup_on_unreadable_enablement_flag() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    migrate_state_dir(&guard, &world);
+    assert_migration_preview_fails_like_the_real_cleanup(
+        &world,
+        &manager,
+        &guard,
+        "plugins.entries.memory-core.enabled",
+    );
+}
+
 /// Name of the child half of the crash test below. The parent invokes it by
 /// string through the test binary, so the two cannot drift silently — the parent
 /// asserts the child died by SIGKILL, which only the real child can.

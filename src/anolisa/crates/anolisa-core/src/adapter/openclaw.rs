@@ -62,7 +62,12 @@
 //! the current contract, but `cleanup_replaced_claim` really performs first. A
 //! disable plan lists the restore a real disable performs, under the same
 //! condition the real branch applies, and `validate_claim` rejects on the
-//! dry-run path exactly the receipts the real disable would. `status` verifies
+//! dry-run path exactly the receipts the real disable would. Neither plan promises
+//! more than its operation will do either: where the operation stops — on a hand-off
+//! attribution the host cannot answer, the one question whose negative direction
+//! destroys its own evidence — the plan stops on the same read, because a plan
+//! describing a restore the operation then refuses to perform is the same lie told
+//! earlier, and to somebody who is still deciding whether to run it. `status` verifies
 //! the displacement too: a bundled plugin re-enabled behind this adapter's back
 //! holds the tool names again while every other condition still reads clean, and
 //! that reports `False`. A plugin merely *recorded* as disabled reports
@@ -505,9 +510,17 @@ impl FrameworkDriver for OpenClawDriver {
         // would omit the restore it is about to perform. The verdict comes from
         // the same `restore_decision` the real restore calls, read against that
         // prior home, so this preview cannot drift from the operation either.
+        let prior_displaced = claim_displaced_plugins(prior)?;
+        // That `disable` also inherits the attribution gate the real disable gained,
+        // so this plan has to ask it too — against the *prior* home, which is the one
+        // the operation reads and not the one `ctx` resolves to. Without it the
+        // migration dry-run described a prior-home restore the migration then refused
+        // to perform, which is the divergence the shared gate exists to rule out and
+        // the reason it takes the receipt rather than resolving a home of its own.
+        self.gate_disable_restores_on_attribution(prior, &prior_displaced, ctx)?;
         actions.extend(self.restore_preview_lines(
             prior,
-            &claim_displaced_plugins(prior)?,
+            &prior_displaced,
             ctx,
             &format!(" in the prior state directory {}", prior_home.display()),
             "which the prior receipt displaced",
@@ -825,21 +838,8 @@ impl FrameworkDriver for OpenClawDriver {
         // would restore, because a real disable now fails on an answer the host
         // cannot give: a preview promising "left alone, this adapter never disabled
         // it" over a command that refuses to run describes a disable that does not
-        // exist. Live, like every other reading a preview takes — it has no capture
-        // of its own. See [`Self::recovered_disable_attribution`].
-        let home = claim_state_dir(claim)?;
-        for entry in &displaced {
-            if entry.applied {
-                continue;
-            }
-            self.recovered_disable_attribution(
-                entry,
-                own_plugin_id.as_deref(),
-                SlotReadings::Live,
-                &home,
-                ctx,
-            )?;
-        }
+        // exist.
+        self.gate_disable_restores_on_attribution(claim, &displaced, ctx)?;
         self.restore_preview_lines(
             claim,
             &displaced,
@@ -964,6 +964,14 @@ impl FrameworkDriver for OpenClawDriver {
         // Nothing here mutates the host before the restore — a same-home
         // re-enable keeps the prior installation, and this hook runs after it —
         // so the live host is the one the decision should read.
+        //
+        // Ask the attribution before the restore rather than letting the restore
+        // decide it, because the restore's own `SkipNotApplied` folds "the host
+        // could not say" into "this adapter never did" — right for a `disable`,
+        // whose receipt survives the skip and gets asked again, and wrong here,
+        // where the receipt that would be asked again is the one this hook's
+        // `Ok` lets the Manager replace.
+        self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
         self.restore_displaced_plugins(prior, &dropped, &prior_home, ctx, SlotReadings::Live)
     }
 
@@ -2639,6 +2647,16 @@ impl OpenClawDriver {
     /// Describe the restore `cleanup_replaced_claim` performs for a same-home
     /// re-enable: every plugin the prior receipt claims as displaced that the
     /// contract being enabled no longer declares.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] from
+    /// [`Self::attribute_dropped_prior_handoffs`] when the host cannot answer the
+    /// attribution for an unapplied entry the operation is about to let go of, and
+    /// whatever [`Self::restore_preview_lines`] propagates. Failing the plan is the
+    /// point: the operation fails on the same answer, and a preview that described
+    /// the restore anyway would promise a host mutation the re-enable then refuses
+    /// to make.
     fn plan_dropped_displacement_restores(
         &self,
         prior: &AdapterClaim,
@@ -2652,6 +2670,7 @@ impl OpenClawDriver {
                     .any(|spec| spec.id == entry.plugin_id)
             })
             .collect();
+        self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
         self.restore_preview_lines(
             prior,
             &dropped,
@@ -3051,6 +3070,59 @@ impl OpenClawDriver {
         }
     }
 
+    /// The read-only gate every preview of a `disable` shares with the operation:
+    /// each unapplied entry the receipt names must have an attribution the host can
+    /// actually answer before anything describes — or performs — the restore that
+    /// follows it.
+    ///
+    /// One function for two callers because they have to agree, and they are not the
+    /// two callers of one operation: [`Self::plan_disable_restores`] previews a
+    /// disable of the current receipt in its own home, while
+    /// [`Self::plan_reenable_cleanup`] previews the *cross-home* re-enable cleanup,
+    /// whose operation is a full `disable` of the prior receipt against the prior
+    /// home. That second one is easy to miss precisely because it is a re-enable, and
+    /// it was missed: the plan listed the prior home's uninstall and its restores
+    /// while the operation refused to run at all. The operation's own gate is
+    /// [`Self::record_recovered_slot_selection_handoffs`], which asks the same
+    /// question of its pre-uninstall capture instead of of the live host — the only
+    /// difference between them, and the one [`SlotReadings`] exists to state.
+    ///
+    /// Reads live because a preview has no capture of its own, and stands before the
+    /// host has been touched, so the live reading is the one the capture will take.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] from [`Self::recovered_disable_attribution`] on
+    /// the first entry whose attribution is [`HandoffAttribution::Unknown`], and a
+    /// receipt-consistency error from [`claim_own_plugin`] or [`claim_state_dir`].
+    /// Both callers are plans, so nothing has run and the retry asks the same
+    /// question of an unchanged host.
+    fn gate_disable_restores_on_attribution(
+        &self,
+        claim: &AdapterClaim,
+        displaced: &[DisplacedPlugin],
+        ctx: &DriverCtx,
+    ) -> Result<(), AdapterError> {
+        if displaced.iter().all(|entry| entry.applied) {
+            return Ok(());
+        }
+        let own_plugin_id = claim_own_plugin(claim)?;
+        let home = claim_state_dir(claim)?;
+        for entry in displaced {
+            if entry.applied {
+                continue;
+            }
+            self.recovered_disable_attribution(
+                entry,
+                own_plugin_id.as_deref(),
+                SlotReadings::Live,
+                &home,
+                ctx,
+            )?;
+        }
+        Ok(())
+    }
+
     /// The `plugins.slots.<slot>` token to reason from, from a capture when the
     /// caller has one and from the host when it does not.
     fn slot_owner(
@@ -3234,8 +3306,8 @@ impl OpenClawDriver {
     /// Whether a re-enable recovers an ownership the prior receipt recorded but
     /// never marked as performed.
     ///
-    /// One function rather than a copy per caller because the two callers are the
-    /// two halves of one promise: [`Self::prepare_enable`] decides what the
+    /// One function rather than a copy per caller because its first two callers are
+    /// the two halves of one promise: [`Self::prepare_enable`] decides what the
     /// replacement receipt carries, and [`Self::plan_enable`] decides what the
     /// preview says about it. They disagreed, and the disagreement was the worst
     /// kind — a dry-run reading "leave it alone, it is not claimed and disable will
@@ -3243,6 +3315,13 @@ impl OpenClawDriver {
     /// performed and whose disable then really did re-enable the plugin. An operator
     /// assessing what a later uninstall would cost got the opposite of the truth
     /// from the one command whose job is to tell them.
+    ///
+    /// The judgment itself is [`Self::prior_handoff_recovery`], and this function is
+    /// its map lookup. One further caller asks the judgment directly:
+    /// [`Self::attribute_dropped_prior_handoffs`], which gates an entry the
+    /// replacement receipt does not carry at all — a displacement the contract being
+    /// enabled dropped. It already holds its entries and consumes no verdict, only
+    /// the failure, so it has nothing to look them up in.
     ///
     /// Asked only for a plugin a prior receipt *for this same instance* already
     /// names as unapplied — `unrecorded` is [`prior_unrecorded_displacements`], so
@@ -3256,15 +3335,10 @@ impl OpenClawDriver {
     ///
     /// # Errors
     ///
-    /// [`AdapterError::FrameworkCli`] when the host cannot answer the attribution,
-    /// i.e. on [`HandoffAttribution::Unknown`]. Failing is the only answer that
-    /// keeps both directions honest: recovering on a read failure would claim a
-    /// disable the operator made themselves, and declining on one would drop the
-    /// only record of a disable this adapter made — after which the same-home
-    /// cleanup hands the plugin back, this enable's own install switches it off
-    /// again, and the disable that follows reports a receipt naming nothing to
-    /// restore. Both callers raise it before any mutation, so the prior receipt
-    /// survives untouched and the retry gets to ask again.
+    /// Propagates [`Self::prior_handoff_recovery`]'s, which is the whole of this
+    /// function's own contract: the lookup it adds cannot fail, and an entry the map
+    /// does not name is a *verdict* — [`PriorHandoffRecovery::NothingToRecover`],
+    /// with no host read at all — rather than an error.
     fn recovered_prior_handoff(
         &self,
         unrecorded: &BTreeMap<String, DisplacedPlugin>,
@@ -3276,11 +3350,106 @@ impl OpenClawDriver {
         let Some(entry) = unrecorded.get(displaced_id) else {
             return Ok(PriorHandoffRecovery::NothingToRecover);
         };
+        self.prior_handoff_recovery(entry, own_plugin_id, home, ctx)
+    }
+
+    /// [`Self::handoff_attribution`] with its `Unknown` turned into an error, on the
+    /// re-enable side — the counterpart of [`Self::recovered_disable_attribution`],
+    /// and the whole of what [`Self::recovered_prior_handoff`] does once its map
+    /// lookup has answered. Split out because a caller that already holds the entry
+    /// should not have to index a map to ask about it.
+    ///
+    /// Reads the slot live rather than from a capture, which is the difference the
+    /// two counterparts have and the one [`SlotReadings`] states: nothing on the
+    /// re-enable side runs behind an uninstall that would invalidate a reading, so
+    /// there is no capture to preserve and the live host is the correct one to ask.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the host cannot answer the attribution,
+    /// i.e. on [`HandoffAttribution::Unknown`]. Failing is the only answer that
+    /// keeps both directions honest: recovering on a read failure would claim a
+    /// disable the operator made themselves, and declining on one would drop the
+    /// only record of a disable this adapter made — after which the same-home
+    /// cleanup hands the plugin back, this enable's own install switches it off
+    /// again, and the disable that follows reports a receipt naming nothing to
+    /// restore. Every caller raises it before any mutation, so the prior receipt
+    /// survives untouched and the retry gets to ask again.
+    fn prior_handoff_recovery(
+        &self,
+        entry: &DisplacedPlugin,
+        own_plugin_id: Option<&str>,
+        home: &Path,
+        ctx: &DriverCtx,
+    ) -> Result<PriorHandoffRecovery, AdapterError> {
         match self.handoff_attribution(entry, own_plugin_id, SlotReadings::Live, home, ctx) {
             HandoffAttribution::Performed => Ok(PriorHandoffRecovery::Recovered),
             HandoffAttribution::NotPerformed => Ok(PriorHandoffRecovery::NothingToRecover),
-            HandoffAttribution::Unknown => Err(unreadable_handoff_evidence(ctx, displaced_id)),
+            HandoffAttribution::Unknown => Err(unreadable_handoff_evidence(ctx, &entry.plugin_id)),
         }
+    }
+
+    /// Whether a same-home re-enable may let go of the displacements its replacement
+    /// receipt no longer claims — and the failure that stops it when the host cannot
+    /// answer for one of them.
+    ///
+    /// [`Self::prior_handoff_recovery`] asked of every *unapplied* entry in
+    /// `dropped`, which is the set [`dropped_displaced_plugins`] leaves once the
+    /// replacement receipt is known. Both of its verdicts are safe to act on here and
+    /// neither is consumed: an entry the host positively rules out is the one
+    /// [`Self::restore_displaced_plugins`] honestly reports as never performed, and
+    /// an entry it attributes to this adapter is the one it honestly hands back. The
+    /// third answer is the reason this exists.
+    ///
+    /// For a *dropped* entry, "skip the restore" is not the inaction it is everywhere
+    /// else. The Manager's next durable action is to replace the prior receipt with
+    /// one that names no such plugin, and nothing puts the entry back into it. So the
+    /// skip is the last word on the ownership: it deletes the only record that this
+    /// adapter turned the plugin off, over a host that still shows the plugin off,
+    /// and reports `cleanup_complete` while doing it. Spending
+    /// [`HandoffAttribution::Unknown`] that way needs one
+    /// transient `config get` failure and nothing else — no crash, no operator — and
+    /// leaves the retry with no receipt to retry from, which is the loss
+    /// [`Self::recovered_prior_handoff`] was added to block arriving through the one
+    /// path that does not ask it: `prepare_enable` and `plan_enable` both walk the
+    /// *current* contract, so a displacement that contract dropped is invisible to
+    /// them however unapplied the prior receipt leaves it, and
+    /// [`preserve_openclaw_displaced_facts`] carries an entry into the replacement
+    /// only when that contract still declares it *and* the prior receipt marks it
+    /// applied — so neither route into the new receipt is open to this one either.
+    ///
+    /// Reads live, and may: nothing has mutated the host when either caller asks,
+    /// because a same-home re-enable keeps the prior installation and this runs
+    /// before `apply_enable`. That is also what makes the failure recoverable rather
+    /// than merely honest.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] from [`Self::prior_handoff_recovery`] on the
+    /// first unapplied entry whose attribution is [`HandoffAttribution::Unknown`],
+    /// and a receipt-consistency error from [`claim_own_plugin`] or
+    /// [`claim_state_dir`]. [`Self::cleanup_replaced_claim`] answers the first by
+    /// propagating it, which is how the Manager learns to keep the prior receipt
+    /// durable and fail the re-enable; [`Self::plan_dropped_displacement_restores`]
+    /// is a plan, so nothing had run either way.
+    fn attribute_dropped_prior_handoffs(
+        &self,
+        prior: &AdapterClaim,
+        dropped: &[DisplacedPlugin],
+        ctx: &DriverCtx,
+    ) -> Result<(), AdapterError> {
+        if dropped.iter().all(|entry| entry.applied) {
+            return Ok(());
+        }
+        let own_plugin_id = claim_own_plugin(prior)?;
+        let home = claim_state_dir(prior)?;
+        for entry in dropped {
+            if entry.applied {
+                continue;
+            }
+            self.prior_handoff_recovery(entry, own_plugin_id.as_deref(), &home, ctx)?;
+        }
+        Ok(())
     }
 
     /// Run `openclaw plugins list` and decide whether `plugin_id` is still
