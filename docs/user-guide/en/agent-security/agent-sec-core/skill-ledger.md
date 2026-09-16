@@ -1,5 +1,8 @@
 # Skill Ledger User Guide
 
+This page describes the Python V1 deployment and Agent integrations. For the Rust V2 core,
+system signing key and root daemon, use the [SkillGuard V2 guide](skillguard-v2.md).
+
 Skill Ledger is the security subsystem of agent-sec-core that maintains a version chain of file hashes, scan results, and cryptographic signatures for AI Agent Skills, helping detect tampered Skills or injected malicious content. The default quick scan runs automatically via the built-in static scanner; an optional deep scan is driven by the Agent following the `skill-vetter` protocol.
 
 ---

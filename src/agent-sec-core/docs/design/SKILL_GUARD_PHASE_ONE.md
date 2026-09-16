@@ -3,9 +3,9 @@
 [中文版](SKILL_GUARD_PHASE_ONE_zh.md)
 
 SkillGuard separates Skill scanning, content authentication, version storage and activation inside
-one `asc-capability-skill-guard` crate. `SkillGuardService` will coordinate these modules in the
-system daemon. This document tracks the migration contract and implementation batches; a planned
-row is not evidence that the capability is already available.
+one `asc-capability-skill-guard` crate. `SkillGuardService` coordinates these modules in the
+system daemon. This document records the migration contract, implementation batches and Linux
+acceptance boundaries.
 
 ## Delivery and acceptance
 
@@ -23,7 +23,7 @@ Phase-two policy integration is outside this PR.
 | 4 | Activation | Implemented; Linux gates passed | Decisions, active/pending/hidden, rollback, publish failure and startup reconcile |
 | 5 | daemon, CLI and audit | Linux acceptance passed | Real CLI requests, outputs/exit codes, peer identity, audit, deadlines, admin rotation, consumer fixtures |
 | 6 | SkillFS | Linux acceptance passed | One socket, authenticated notify/resolver, no downgrade, real FUSE effects, ordinary IPC regression |
-| 7 | Deployment | Planned | Source/RPM installation, root systemd service, local non-root callers, complete core workflow |
+| 7 | Deployment | Linux acceptance passed | Source/RPM installation, root systemd service, local non-root callers, complete core workflow |
 
 Each batch is one independently compiling logical commit with its tests and documentation.
 Failures introduced by a batch are fixed in that commit. Linux tests are required; macOS formatting
@@ -288,7 +288,11 @@ Rotation takes the service generation write lock, records a private intent, and 
 registered exposure before replacing the key. A pending rollback must first reconcile. A failed
 withdrawal retains the old key and fences ordinary Ledger operations until administrator retry or
 startup recovery succeeds. A changed fingerprint during recovery proves replacement already
-committed and prevents a second rotation. Startup recovery uses the public Action Runtime; failed
+committed and permits intent cleanup without resolving mappings or rotating again. The intent stores
+only the previous fingerprint and canonical Skill identities. Startup, `rotate-keys`, and
+`init --force-keys` resolve current physical mappings and inodes again before withdrawal; the service
+requires exactly the recorded Skill set. Resolver failure retains the intent and old key for retry.
+Startup recovery uses the public Action Runtime; failed
 Skill recovery is visible without disabling unrelated daemon methods.
 
 The public Finalizer/Sink receives controlled command, counts, verdict/status, version and execution
@@ -395,3 +399,54 @@ completed 25 real daemon/SkillFS operations, including authenticated notify/reso
 invalid identity/key/plaintext rejection and daemon-only restart recovery. SkillFS Clippy used the
 repository's pinned Rust 1.86; V2 used Rust 1.93.1. These are core/FUSE results, not Agent Hook or
 installed-systemd acceptance.
+
+## Batch seven: deployment boundary
+
+V2 `install-core-v2` installs the Rust binaries, root system unit and initial private configuration.
+The V2 RPM shares the binary and system-unit installation targets and uses systemd system-service
+scriptlets. V1 retains its original user unit. Neither source installation nor the unit enables
+Agent Hooks or imports V1 state. Existing operator settings survive source reinstallation and RPM
+upgrade (`%config(noreplace)`). The signing key is created by a business operation, not installation.
+
+The system unit owns `/run/agent-sec-core` (0755), `/var/lib/agent-sec/skillguard` (0700) and
+`/var/log/agent-sec` (0700), with umask 0077. It runs as root with only DAC override, CHOWN and
+FOWNER capabilities, `NoNewPrivileges`, `SystemCallFilter=@system-service`, native syscall
+architecture, `MemoryDenyWriteExecute` and kernel protections. HOME, `/tmp`, system Skill roots
+and shared mounts remain accessible because these are supported content locations. The daemon
+does not receive SYS_ADMIN. A systemd test container's separate namespace-management capability
+is a test-runtime requirement, not part of the product service's capability set.
+
+The V2 CLI RPM no longer depends on Python, GPG or loongshield; unchanged Hook packages retain
+their own dependencies. The full repository RPM recipe still builds those plugin packages and
+the sandbox. Its OpenClaw build dependency requires Node.js 22.14 or later; V2 CI uses Node 22.
+`V2_CARGO_TARGET_DIR` allows a task-owned cache while preserving the real release-build path.
+
+`tests/packaging/test-skillguard-install.sh` checks real built binaries in a temporary DESTDIR,
+configuration preservation, absence of automatic activation/key creation and V1 unit isolation.
+The installed Python V2 E2E fixtures isolate daemon state/audit and exercise ordinary-UID PAP
+denial against a root process. These checks remain distinct from actual systemd lifecycle and
+real FUSE evidence. The
+[core guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/skillguard-v2.md) gives
+source/RPM commands, shared-volume requirements and state-matched upgrade/rollback instructions.
+
+Linux delivery acceptance passed on Alibaba Cloud Linux 4, x86_64. After alignment with the upstream system daemon, the
+source-installed suite passed 914 tests, with 38 skips including the unavailable system manager.
+The RPM suite passed 914 tests with 37 skips; its corrected systemd lifecycle case passed separately,
+for 915 unique installed cases. Both exclude two real-model cases. The other skips concern
+source-only rule inventory/metadata and telemetry;
+SkillGuard, PAP and daemon lifecycle cases ran. Python Ledger was unavailable to these suites.
+The repository recipe produced the RPMs, and DNF installed the core and Skill resources with
+normal dependency checks. This is repository-built artifact evidence, not a GitHub CI result.
+
+The unchanged product unit completed 45 operations under actual PID 1 systemd 255. Its effective
+and bounding capabilities were exactly CHOWN, DAC_OVERRIDE and FOWNER, with `NoNewPrivileges`.
+UID 1001 managed private HOME, `/tmp`, system and shared-volume Skills; rollback remained editable,
+rotation stayed root-only, restart retained trust, and public audit omitted sensitive details.
+Twelve package lifecycle checks passed: reinstallation retained configuration, removal saved
+modified configuration and retained the private key, and restoration preserved trust and package
+verification. This verifies V2 package recovery, not a V1 downgrade or Agent Hook integration.
+
+The system-manager fixture also verifies the shipped 75-second forced-stop deadline and startup
+rate limit. It uses the selected executable in place because `/run` may be noexec, injects a
+non-terminating stop signal only in the isolated test unit, and checks actual admission rejection
+instead of a distribution-specific `Result` string. Earlier failed fixture attempts remain recorded.

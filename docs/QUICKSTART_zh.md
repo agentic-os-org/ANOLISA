@@ -48,6 +48,7 @@ export PATH="$HOME/.local/bin:$PATH"
 |------|----------|
 | 观察 Agent 活动与 Token 使用 | [AgentSight](user-guide/zh/agent-observability/agentsight/README.md) |
 | 增加安全策略 | [Agent Sec Core](user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md) |
+| 评估 Rust SkillGuard 核心 | [SkillGuard V2](user-guide/zh/agent-security/agent-sec-core/skillguard-v2.md) |
 | 创建工作区恢复点 | [ws-ckpt](user-guide/zh/runtime/ws-ckpt.md) |
 | 按需挂载 Skills | [SkillFS](user-guide/zh/runtime/skillfs.md) |
 | 跨 Session 复用上下文 | [Agent Memory](user-guide/zh/token-saving/agent-memory.md) |

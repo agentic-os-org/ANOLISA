@@ -381,7 +381,8 @@ build_agent_sec_core_v2() {
     # wrapper scripts, which are therefore absent from this tarball.
     tar -cf - -C "${SEC_DIR}" \
         --exclude='target' \
-        v2/ | tar -xf - -C "$pkg_dir/"
+        v2/ \
+        packaging/systemd/skillguard.json | tar -xf - -C "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
