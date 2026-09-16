@@ -178,6 +178,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let plugin = plugin_name(bundle, ctx);
@@ -206,6 +207,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = plugin_name(bundle, ctx);
@@ -262,7 +264,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let plugin = claim_plugin(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
@@ -425,8 +427,9 @@ impl FrameworkDriver for ClaudeCodeDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         // Deregistration is only possible through the CLI. ANOLISA must not
         // hand-edit ~/.claude/settings.json, so without the CLI we report
@@ -773,6 +776,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,
@@ -847,6 +851,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: true,

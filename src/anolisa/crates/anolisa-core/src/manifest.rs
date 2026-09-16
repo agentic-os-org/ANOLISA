@@ -890,6 +890,46 @@ where
     }
 }
 
+/// One framework plugin an OpenClaw adapter displaces while it is enabled.
+///
+/// Some frameworks ship a bundled plugin whose tool names collide with the
+/// adapter's own, and the framework's tool registry resolves that collision by
+/// silently dropping the later plugin's tool (`plugin tool name conflict`). The
+/// bundled plugin stays loaded even after this adapter takes the framework's
+/// exclusive slot for it, so installing the adapter alone does not release the
+/// names. Declaring the bundled plugin here makes `adapter enable` disable it
+/// and `adapter disable` hand it back.
+///
+/// This is the built-in driver's contract only. A bundle's own `install.sh` /
+/// `uninstall.sh` script entry point does not read this declaration and performs
+/// no hand-off, so a script install has to release the colliding names itself.
+///
+/// This is publishing metadata, not an execution hook: the built-in framework
+/// driver owns every command it runs, exactly as it does for
+/// `[[adapters.openclaw.config]]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplacedPluginSpec {
+    /// Framework-native plugin id to disable while this adapter is enabled.
+    /// Whitelist-validated before it ever reaches an argv.
+    pub id: String,
+    /// Exclusive framework slot the displaced plugin re-takes when it is
+    /// enabled again — the key suffix under `plugins.slots`, e.g. `"memory"`
+    /// for `plugins.slots.memory`. When present, `adapter disable` skips the
+    /// restore while that slot belongs to some *third* plugin or has been
+    /// explicitly closed, so an operator who moved the slot elsewhere after
+    /// enabling — or turned it off outright — keeps that choice; restoring
+    /// would re-run the framework's exclusive slot selection and undo it.
+    ///
+    /// Absent does **not** make the restore unconditional — it only removes the
+    /// slot from the set of things consulted. The framework driver still skips a
+    /// restore the host has made impossible or pointless, e.g. because the plugin
+    /// has left its inventory or a policy key keeps it off. Declare `slot` when
+    /// the displaced plugin re-takes an exclusive slot, and omit it when it does
+    /// not; neither choice promises the plugin will be re-enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+}
+
 /// OpenClaw-specific adapter configuration. When present on an
 /// `[[adapters]]` entry whose `framework = "openclaw"`, the driver uses
 /// these fields instead of the generic adapter-level ones.
@@ -913,6 +953,12 @@ pub struct OpenClawAdapterSpec {
     /// Static, display-only operator notices for the OpenClaw adapter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<AdapterNotice>,
+    /// Framework plugins this adapter displaces while it is enabled. The
+    /// OpenClaw driver disables each one after its own plugin is verified
+    /// loaded, records the transition in the receipt, and reverses exactly
+    /// what it recorded on disable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displaces: Vec<DisplacedPluginSpec>,
 }
 
 impl OpenClawAdapterSpec {
@@ -922,6 +968,7 @@ impl OpenClawAdapterSpec {
             && self.skills.is_empty()
             && self.config.is_empty()
             && self.notices.is_empty()
+            && self.displaces.is_empty()
     }
 }
 

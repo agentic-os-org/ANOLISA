@@ -145,6 +145,7 @@ impl FrameworkDriver for CodexDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let layout = MarketplaceLayout::resolve(bundle, ctx)?;
@@ -184,6 +185,7 @@ impl FrameworkDriver for CodexDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let layout = MarketplaceLayout::resolve(bundle, ctx)?;
@@ -256,7 +258,7 @@ impl FrameworkDriver for CodexDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let layout = MarketplaceLayout::from_claim(claim)?;
 
@@ -408,8 +410,9 @@ impl FrameworkDriver for CodexDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;

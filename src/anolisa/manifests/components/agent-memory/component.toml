@@ -78,3 +78,20 @@ detect = { binary = "openclaw" }
 
 [adapters.bundle]
 entry = "openclaw.plugin.json"
+# OpenClaw ships a bundled `memory-core` plugin that owns the `memory_get` /
+# `memory_search` tool names, and it stays loaded even after this plugin takes
+# the memory slot — the loader exempts it from slot exclusivity. The
+# framework's tool registry is first-wins, so it drops this adapter's own
+# same-named tools and `memory_get` keeps binding to `memory-core` (#3218).
+# Declaring the displacement makes `anolisa adapter enable agent-memory
+# openclaw` release those names and `adapter disable` hand them back. This is
+# the driver's contract only: the bundle's own install.sh / uninstall.sh script
+# entry point does not read this key and does not perform the hand-off, so a
+# script install still needs `openclaw plugins disable memory-core` by hand.
+# `slot` names the exclusive slot the bundled plugin re-takes when it is
+# re-enabled, so disable steps aside for an operator who moved
+# `plugins.slots.memory` to another backend — or closed the slot outright with
+# `plugins.slots.memory = "none"` — afterwards.
+[[adapters.openclaw.displaces]]
+id = "memory-core"
+slot = "memory"

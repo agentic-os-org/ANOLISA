@@ -149,6 +149,7 @@ impl FrameworkDriver for CoshDriver {
     fn plan_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let dst = extension_dir(bundle, ctx)?;
@@ -168,6 +169,7 @@ impl FrameworkDriver for CoshDriver {
     fn prepare_enable(
         &self,
         bundle: &AdapterBundle,
+        _prior: Option<&AdapterClaim>,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let dst = extension_dir(bundle, ctx)?;
@@ -233,7 +235,7 @@ impl FrameworkDriver for CoshDriver {
         claim: &mut AdapterClaim,
         _prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<(), AdapterError> {
         let dst = claim_extension_dir(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
@@ -336,8 +338,9 @@ impl FrameworkDriver for CoshDriver {
 
     fn disable(
         &self,
-        claim: &AdapterClaim,
+        claim: &mut AdapterClaim,
         ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::ClaimProgress,
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
@@ -661,6 +664,7 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            declared_displaces: Vec::new(),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
             dry_run: false,
@@ -690,7 +694,7 @@ mod tests {
         let bundle = driver.read_bundle(&ctx).expect("read bundle");
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
 
-        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, None, &ctx).expect("claim");
         attach_materialized_inventory(&mut claim, &resource_root);
         driver
             .apply_enable(&mut claim, &prepared, &ctx, &mut ())
@@ -710,7 +714,7 @@ mod tests {
                     && c.status == ConditionStatus::True)
         );
 
-        let disabled = driver.disable(&claim, &ctx).expect("disable");
+        let disabled = driver.disable(&mut claim, &ctx, &mut ()).expect("disable");
         assert!(disabled.cleanup_complete);
         assert!(!ext_dir.exists(), "extension dir removed");
         assert!(
@@ -739,7 +743,7 @@ mod tests {
         let driver = CoshDriver::new();
 
         let bundle = driver.read_bundle(&ctx).expect("read bundle");
-        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, None, &ctx).expect("claim");
         let err = driver
             .apply_enable(&mut claim, &prepared, &ctx, &mut ())
             .expect_err("must refuse to clobber non-ANOLISA extension");

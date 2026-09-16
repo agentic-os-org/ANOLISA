@@ -28,15 +28,28 @@ sudo yum install agent-memory
 
 ### OpenClaw 适配器
 
-随包附带的插件（`memory-anolisa`）由
-`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh` 部署，默认授予插件声明的能力。设置
-`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
-`AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
+**推荐** —— adapter 入口会部署随包插件（`memory-anolisa`），**并**执行工具名交接：
+
+```bash
+anolisa adapter enable agent-memory openclaw
+anolisa adapter status agent-memory
+```
+
+OpenClaw 自带的 `memory-core` 插件占用 `memory_get` 与 `memory_search` 这两个工具名，而 OpenClaw 的插件工具注册表是「先到先得」：只要 `memory-core` 仍处于加载状态，它就继续持有这两个名字，本插件的同名工具会被丢弃，`memory_get` 也会由 `memory-core` 而非 agent-memory 应答。`adapter enable` 会禁用它，并把这次状态变更记录在适配器 receipt 中；`anolisa adapter disable agent-memory` 依据该 receipt 恢复。禁用 `memory-core` 的代价不止冲突的那两个工具名——详见用户指南的「禁用 `memory-core` 的代价」。
+
+或使用随包脚本部署插件：
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw plugins disable memory-core   # 脚本不会执行这一步
 openclaw gateway restart
 ```
+
+`install.sh` 刻意**不**处理 `memory-core`，因此以该方式安装后冲突仍然存在，直到你自行禁用该插件（撤销用 `openclaw plugins enable memory-core`）。只有 adapter 路径会把这次交接记录进 receipt、在 `--dry-run` 下预览它，并在冲突日后回归时通过 `adapter status` 报告。若你的 OpenClaw 配置为不热重载插件配置，则启用或禁用后执行 `openclaw gateway restart`；会热重载的宿主两者都自行生效。
+
+脚本默认授予插件声明的能力。设置
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
+`AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
 
 两个可选安装参数都从 `openclaw plugins install --help` 协商，但两个开关并不对称。只有宿主列出完整的 `--accept-capabilities` 时才传递它——当前宿主会列出，因此 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 在这些宿主上仍然会改变 argv：取 `1` 时在 `openclaw plugins install <插件目录> --force` 之后追加 `--accept-capabilities`，取 `0` 时省略它，带同意门禁的宿主随后会拒绝这次安装。只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，两种取值下都不会收到它，因此 `AGENT_MEMORY_SAFE_INSTALL` 在这些宿主上不产生任何差别，安装期安全由运维自有的 `security.installPolicy` 决定。安装日志会说明命中的是哪一种情况。
 

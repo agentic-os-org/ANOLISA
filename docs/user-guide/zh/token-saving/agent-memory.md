@@ -114,6 +114,23 @@ anolisa adapter status agent-memory
 
 **前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
 
+**工具名交接**：OpenClaw 自带的 `memory-core` 插件占用 `memory_get` 与 `memory_search` 这两个工具名，而 OpenClaw 的插件工具注册表是「先到先得」。只要 `memory-core` 仍处于加载状态，它就继续持有这两个名字，本插件的同名工具会被丢弃，`memory_get` 也会由 `memory-core` 而非 agent-memory 应答。
+
+只有 `anolisa adapter` 入口执行这次交接：
+
+- `anolisa adapter enable agent-memory openclaw` 禁用 `memory-core`，并把这次状态变更记录在适配器 receipt 中，由组件契约里的 `[[adapters.openclaw.displaces]]` 声明驱动；`anolisa adapter disable agent-memory` 依据该 receipt 恢复。`adapter enable --dry-run` 会把这次交接列为计划动作，`adapter disable --dry-run` 会列出恢复动作。
+- 之后若 `memory-core` 被重新启用（人工命令或框架升级都可能），冲突即已回归，尽管本插件自身仍注册且加载正常——`anolisa adapter status agent-memory` 会因此报告 degraded。对已记录的 displacement，它报告的同样是 **unknown** 而不是 healthy：`plugins disable` 只写配置，而 ANOLISA 没有通往正在运行的网关的通道，因此只能确认交接已被**记录**，无法确认网关是否已**生效**。是否还需要额外动作取决于 OpenClaw 的插件 reload 模式：会热重载 `plugins.entries.*` 的模式自行生效，不会的则需要 `openclaw gateway restart`。注意重启**不会**把这个 `unknown` 变成 `healthy`，因为重启之后 ANOLISA 依然观测不到网关。此处的 `unknown` 应理解为「无法观测」，而不是故障。要自行确认交接是否生效，请调用一次 `memory_get` 看是哪个插件应答——真实的工具调用会穿过正在运行的网关。**不要**用 `openclaw plugins list` 或 `plugins inspect` 来确认：两者读取的都是持久化的 registry 与配置，因此在重启之前它们会显示 `memory-core` 已禁用，而旧网关可能仍在提供它的工具——那看起来像确认，其实不是。
+
+上面的 `install.sh` 入口**不会**处理 `memory-core`。以该方式安装后，请自行执行 `openclaw plugins disable memory-core`（撤销用 `openclaw plugins enable memory-core`），或改用 `anolisa adapter enable agent-memory openclaw`。
+
+adapter 路径不会重新启用你在 enable 之前自己禁用的 `memory-core`，也不会从你之后做出的选择手里抢回 memory slot：如果移除时 `plugins.slots.memory` 已指向其他插件，或你用 `plugins.slots.memory = "none"` 显式关闭了该 slot，`memory-core` 会保持禁用并说明原因。若你的 OpenClaw 配置为不热重载插件配置，则启用或禁用后执行 `openclaw gateway restart`；会热重载的宿主两者都自行生效。
+
+**禁用 `memory-core` 的代价**：这次交接禁用的是整个自带插件，而不只是冲突的那两个工具名。因此只要 agent-memory 处于启用状态，`memory-core` 在这两个名字之外提供的一切都不可用 —— 它自己的 `memory_*` 工具、`openclaw memory` 命令入口，以及该插件在后台运行的 dreaming / consolidation 生命周期。这不是边缘情况：每次 `adapter enable` 都会如此。
+
+这期间检索路径由 agent-memory 承担（见下文「MCP 工具集」与「自动 Consolidation」），但它读写的是 `~/.anolisa/memory`，不是 `memory-core` 自己的存储 —— 所以 `memory-core` 此前积累的内容原封不动，同时也不可访问，要等该插件重新启用后才恢复，且两边的存储不会自动合并。
+
+`anolisa adapter disable agent-memory` 恢复 `memory-core`，前提是满足上面那条让位规则：如果 `plugins.slots.memory` 此后已交给别的后端或被显式关闭，它会保持禁用，需要你自行执行 `openclaw plugins enable memory-core`。与上文同理，不热重载插件配置的宿主需要为任一变更执行 `openclaw gateway restart`。
+
 执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。
 
 安装期环境变量（运行期 `MEMORY_*` 变量见「环境变量」一节）：

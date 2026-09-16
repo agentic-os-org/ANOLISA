@@ -40,10 +40,36 @@ pub const CLAIM_SCHEMA_VERSION: u32 = 2;
 
 /// Schema version for [`DriverPayload`]. Bumped independently of
 /// [`CLAIM_SCHEMA_VERSION`] when a driver's typed payload changes shape.
-pub const DRIVER_SCHEMA_VERSION: u32 = 3;
+///
+/// 4 adds [`OpenClawClaim::displaced_plugins`], whose entries carry
+/// [`DisplacedPluginRef::applied`]. Both are defaulted on the wire, so a
+/// version-3 receipt still parses and a version-4 receipt written before
+/// `applied` existed still reads as applied; the bump records that a payload
+/// written from version 4 on may carry them.
+///
+/// **Write-time version, never a read gate.** This is the number every driver
+/// stamps into the receipt it is writing *now*; it says nothing about which
+/// fields an older receipt on disk could have carried. A driver that needs to
+/// know whether a receipt already had one of its fields must gate on a
+/// driver-local constant naming the version that introduced it — see
+/// `QODER_INSTALL_CONFIRMED_MIN_SCHEMA` in [`super::qoder`]. Gating a read on
+/// this shared constant instead would revoke that field's meaning from every
+/// existing receipt the moment an unrelated driver's payload changed shape.
+pub const DRIVER_SCHEMA_VERSION: u32 = 4;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// [`DisplacedPluginRef::applied`] defaults to applied, which is the compatible
+/// reading for a receipt written before the field existed — see its doc for why
+/// that is also the safer of the two defaults.
+fn displacement_applied_default() -> bool {
+    true
 }
 
 /// A single adapter receipt: "the current user's `component` has, through
@@ -614,6 +640,60 @@ pub struct OpenClawClaim {
     /// Resource ids of applied config key/value pairs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_resources: Vec<String>,
+    /// Framework plugins this enable displaced, each an id reference plus the
+    /// exclusive slot the plugin re-takes when restored. Empty on receipts
+    /// written before [`DRIVER_SCHEMA_VERSION`] 4 and for adapters that
+    /// displace nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displaced_plugins: Vec<DisplacedPluginRef>,
+}
+
+/// One displaced framework plugin recorded in an [`OpenClawClaim`].
+///
+/// Holds a [`ClaimResource::id`] reference — never a path — so the validated
+/// `resources` list stays the single source of truth for what was taken over.
+/// The resource it points at is a
+/// [`ClaimResourceKind::FrameworkPlugin`] whose `plugin_id` is the plugin the
+/// driver disabled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplacedPluginRef {
+    /// Resource id of the displaced plugin
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub resource: String,
+    /// Exclusive framework slot the plugin re-takes when it is enabled again,
+    /// as the key suffix under `plugins.slots` (e.g. `memory`).
+    ///
+    /// `None` does **not** make the restore unconditional; it only means there is
+    /// no slot to consult. The driver still skips a restore the host has made
+    /// pointless or impossible — the plugin has left its inventory, or a policy
+    /// key keeps it off — and reports that as released rather than failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    /// Whether the framework command that performs this hand-off has been issued.
+    ///
+    /// A driver records a displacement while it is still preparing the enable,
+    /// and the receipt is persisted before anything mutates — deliberately, so a
+    /// crash cannot leave a framework mutation with no receipt behind it. But the
+    /// command itself may only run much later, after the adapter's own plugin is
+    /// installed and verified, so an enable that fails in between leaves a
+    /// `cleanup_failed` receipt describing a hand-off that never happened.
+    ///
+    /// Acting on that record is worse than not having it: a later disable would
+    /// restore a plugin this adapter never displaced, undoing a disable the
+    /// operator did themselves in the meantime and leaving nothing behind to show
+    /// why. So the driver sets this once the command has been issued, and every
+    /// consumer that would act on the ownership — the restore branch, its dry-run
+    /// preview, and `status` — checks it first.
+    ///
+    /// Absent means applied. Besides being the compatible reading for an older
+    /// receipt, it is the safer default: the alternative silently drops ownership
+    /// a host may be relying on, and a stranded host with nothing behind the slot
+    /// costs more than one unwanted restore.
+    #[serde(
+        default = "displacement_applied_default",
+        skip_serializing_if = "is_true"
+    )]
+    pub applied: bool,
 }
 
 /// Hermes driver payload. Holds only [`ClaimResource::id`] references.
@@ -1368,6 +1448,8 @@ mod tests {
                 plugin_resource: "openclaw_plugin".to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+
+                displaced_plugins: Vec::new(),
             }),
         }
     }
@@ -1801,6 +1883,8 @@ mod tests {
                 plugin_resource: "plugin".to_string(),
                 skill_resources: vec!["skill_sec_audit".to_string()],
                 config_resources: vec!["config_enabled".to_string()],
+
+                displaced_plugins: Vec::new(),
             }),
         };
         let json = serde_json::to_string(&claim).expect("serialize");
@@ -2120,7 +2204,7 @@ mod tests {
             text.contains("plugin_install_confirmed = true"),
             "native TOML: {text}"
         );
-        assert_eq!(wrapper.adapter_claims[0].driver_schema, 3);
+        assert_eq!(wrapper.adapter_claims[0].driver_schema, 4);
         let parsed: Wrapper = toml::from_str(&text).expect("parse native Qoder receipt");
         assert_eq!(wrapper, parsed);
     }
@@ -2382,5 +2466,61 @@ mod tests {
             matches!(err, ClaimValidationError::FrameworkMismatch { .. }),
             "got {err:?}"
         );
+    }
+
+    /// [`DisplacedPluginRef::applied`] is defaulted in both directions, and both
+    /// halves carry weight: an entry written before the field existed must read as
+    /// applied, or an upgrade would silently drop ownership a host is relying on;
+    /// and an applied entry must serialize *without* the field, or every receipt on
+    /// disk would change shape for a value that means "as before".
+    #[test]
+    fn displaced_plugin_ref_defaults_to_applied_and_omits_it_when_true() {
+        let legacy: DisplacedPluginRef =
+            serde_json::from_str(r#"{"resource":"openclaw_displaced_plugin_memory-core"}"#)
+                .expect("a receipt written before `applied` existed still parses");
+        assert!(
+            legacy.applied,
+            "absent must read as applied: a stranded host costs more than one \
+             unwanted restore"
+        );
+        assert_eq!(legacy.slot, None);
+
+        let applied = DisplacedPluginRef {
+            resource: "openclaw_displaced_plugin_memory-core".to_string(),
+            slot: Some("memory".to_string()),
+            applied: true,
+        };
+        let json = serde_json::to_string(&applied).expect("serialize applied");
+        assert!(
+            !json.contains("applied"),
+            "an applied entry must serialize exactly as it did before the field: {json}"
+        );
+        let back: DisplacedPluginRef = serde_json::from_str(&json).expect("parse applied");
+        assert_eq!(applied, back);
+
+        let pending = DisplacedPluginRef {
+            applied: false,
+            ..applied.clone()
+        };
+        let json = serde_json::to_string(&pending).expect("serialize pending");
+        assert!(
+            json.contains("\"applied\":false"),
+            "an unapplied entry is the only one that has to say so: {json}"
+        );
+        let back: DisplacedPluginRef = serde_json::from_str(&json).expect("parse pending");
+        assert!(!back.applied);
+
+        // Receipts are TOML on disk, so the same defaults have to hold there.
+        let toml_text = toml::to_string(&applied).expect("serialize applied TOML");
+        assert!(
+            !toml_text.contains("applied"),
+            "TOML must omit it too: {toml_text}"
+        );
+        let back: DisplacedPluginRef = toml::from_str(&toml_text).expect("parse applied TOML");
+        assert!(back.applied);
+        let legacy_toml: DisplacedPluginRef =
+            toml::from_str("resource = \"openclaw_displaced_plugin_memory_core\"\n")
+                .expect("a version-4 receipt without the field still parses from TOML");
+        assert!(legacy_toml.applied);
     }
 }
