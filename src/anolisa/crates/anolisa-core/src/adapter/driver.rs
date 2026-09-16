@@ -17,7 +17,7 @@ use serde::Serialize;
 use anolisa_platform::fs_layout::FsLayout;
 
 use super::AdapterError;
-use super::claim::AdapterClaim;
+use super::claim::{AdapterClaim, ClaimResource};
 use super::managed_files::MaterializedMapping;
 
 /// Read-only host facts a driver may inspect during [`FrameworkDriver::detect`].
@@ -142,6 +142,33 @@ pub struct DriverPlan {
     pub register_command: Option<String>,
 }
 
+/// A displacement a prior receipt claims that the contract being enabled no
+/// longer declares, carried from `prepare_enable` to `apply_enable`.
+///
+/// `apply_enable` is the only scope that can settle what such an entry is worth:
+/// the same-home cleanup hands the plugin back *before* the install runs, and the
+/// install then re-runs the framework's own exclusive slot selection, which can
+/// turn the plugin straight off again. Whether it did is a fact about the host
+/// after the mutation, so it cannot be decided where the replacement receipt is
+/// built — and `apply_enable` never sees the prior receipt, which is why the
+/// entry travels through [`PreparedEnable`] rather than being re-derived there.
+///
+/// Dropping it instead is what strands the host: the receipt swap deletes the
+/// only record that this adapter turned the plugin off, the install re-performs
+/// the disable, and the `disable` that follows has nothing to restore.
+#[derive(Debug, Clone)]
+pub struct DroppedPriorDisplacement {
+    /// The prior receipt's own resource for the plugin, so a reference it renamed
+    /// survives into the replacement instead of being re-derived.
+    pub resource: ClaimResource,
+    /// Framework-native plugin id the prior receipt displaced.
+    pub plugin_id: String,
+    /// Exclusive slot the plugin re-takes when restored, when the prior receipt
+    /// recorded one. `None` means it competes for no slot, which also means this
+    /// adapter's own selection cannot be what turns it off.
+    pub slot: Option<String>,
+}
+
 /// Driver-private state produced by [`FrameworkDriver::prepare_enable`] and
 /// handed to [`FrameworkDriver::apply_enable`] within the same locked enable.
 ///
@@ -185,6 +212,14 @@ pub enum PreparedEnable {
         /// would read "somebody else turned it off" and release ownership the
         /// receipt legitimately holds.
         freshly_claimed_displacements: Vec<String>,
+        /// Displacements the prior receipt claims that this contract dropped.
+        ///
+        /// `apply_enable` re-asks the hand-off attribution for each one *after*
+        /// its own install and enable have run, and records in the replacement
+        /// receipt whichever of them the host shows this adapter's own slot
+        /// selection having turned off again — see
+        /// [`DroppedPriorDisplacement`].
+        dropped_prior_displacements: Vec<DroppedPriorDisplacement>,
     },
     /// Qoder native-plugin capabilities resolved before installation.
     QoderNative {

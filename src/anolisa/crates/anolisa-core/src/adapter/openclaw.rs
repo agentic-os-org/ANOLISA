@@ -143,8 +143,8 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimProgress, ClaimResourceRef, CliOutput, ConditionStatus, DetectResult, DisableReport,
-    DriverCtx, DriverPlan, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
-    find_binary_in_path,
+    DriverCtx, DriverPlan, DroppedPriorDisplacement, FrameworkCommand, FrameworkDriver, HostEnv,
+    PreparedEnable, find_binary_in_path,
 };
 use super::managed_files::{MaterializedMapping, copy_materialized_resource};
 use crate::manifest::{AdapterConfigSetSpec, DisplacedPluginSpec};
@@ -524,9 +524,17 @@ impl FrameworkDriver for OpenClawDriver {
             ctx,
             &format!(" in the prior state directory {}", prior_home.display()),
             "which the prior receipt displaced",
-            // That `disable` unregisters the prior plugin first, so the allowlist
-            // the restore reads is the one that uninstall leaves behind.
-            AllowlistReading::AfterOwnUninstall(prior_own_plugin.as_deref()),
+            RestoreReadings {
+                slots: SlotReadings::Live,
+                // That `disable` unregisters the prior plugin first, so the
+                // allowlist the restore reads is the one that uninstall leaves
+                // behind.
+                allowlist: AllowlistReading::AfterOwnUninstall(prior_own_plugin.as_deref()),
+                // A migration cleanup is a `disable` of the prior receipt, and a
+                // `disable` settles nothing here — see the call site in
+                // [`Self::disable`].
+                settled: &SettledHandoffs::new(),
+            },
         )?);
         Ok(actions)
     }
@@ -575,6 +583,7 @@ impl FrameworkDriver for OpenClawDriver {
                     .collect(),
                 // Filled in below, once the displacement probe has run.
                 freshly_claimed_displacements: Vec::new(),
+                dropped_prior_displacements: Vec::new(),
             }
         };
 
@@ -611,6 +620,9 @@ impl FrameworkDriver for OpenClawDriver {
         // whether an older receipt already owns the transition.
         let mut displaced_plugins = Vec::new();
         let mut freshly_claimed_displacements: Vec<String> = Vec::new();
+        // Plugin ids the receipt built below names, so the dropped set at the end of
+        // this scope can be told apart from the ones this enable probed.
+        let mut claimed_displacement_ids: HashSet<String> = HashSet::new();
         if plugin_id.is_some() {
             let inventory = (!ctx.declared_displaces.is_empty())
                 .then(|| self.read_plugin_inventory(&home, ctx))
@@ -746,6 +758,7 @@ impl FrameworkDriver for OpenClawDriver {
                         }
                     };
                 let resource_id = displaced_resource_id(&spec.id);
+                claimed_displacement_ids.insert(spec.id.clone());
                 resources.push(ClaimResource {
                     id: resource_id.clone(),
                     purpose: PURPOSE_DISPLACED_PLUGIN.to_string(),
@@ -782,12 +795,21 @@ impl FrameworkDriver for OpenClawDriver {
             skill_resources.push(res_id);
         }
 
+        // What the prior receipt for this instance claims and the receipt just
+        // built does not. `preserve_openclaw_displaced_facts` runs after this and
+        // can still carry one of them back, so `apply_enable` re-checks the
+        // replacement receipt before it acts on the list rather than trusting it.
+        let dropped_prior_displacements =
+            dropped_prior_displacements(prior, &claimed_displacement_ids, ctx)?;
+
         if let PreparedEnable::OpenClaw {
-            freshly_claimed_displacements: slot,
+            freshly_claimed_displacements: fresh_slot,
+            dropped_prior_displacements: dropped_slot,
             ..
         } = &mut prepared
         {
-            *slot = freshly_claimed_displacements;
+            *fresh_slot = freshly_claimed_displacements;
+            *dropped_slot = dropped_prior_displacements;
         }
 
         let claim = AdapterClaim {
@@ -846,7 +868,14 @@ impl FrameworkDriver for OpenClawDriver {
             ctx,
             "",
             "which this adapter displaced",
-            AllowlistReading::AfterOwnUninstall(own_plugin_id.as_deref()),
+            RestoreReadings {
+                slots: SlotReadings::Live,
+                allowlist: AllowlistReading::AfterOwnUninstall(own_plugin_id.as_deref()),
+                // A `disable` settles nothing into a stack frame — its gate writes
+                // the verdict into the receipt as `applied` — so the preview reads
+                // the host live exactly as the operation does.
+                settled: &SettledHandoffs::new(),
+            },
         )
     }
 
@@ -971,8 +1000,23 @@ impl FrameworkDriver for OpenClawDriver {
         // whose receipt survives the skip and gets asked again, and wrong here,
         // where the receipt that would be asked again is the one this hook's
         // `Ok` lets the Manager replace.
-        self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
-        self.restore_displaced_plugins(prior, &dropped, &prior_home, ctx, SlotReadings::Live)
+        // The verdicts are handed to the restore rather than left for it to
+        // re-ask: a gate that stops the first failed attribution read but lets the
+        // restore spend the second one as "never performed" gates nothing.
+        let settled = self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
+        self.restore_displaced_plugins(
+            prior,
+            &dropped,
+            &prior_home,
+            ctx,
+            RestoreReadings {
+                slots: SlotReadings::Live,
+                // A same-home re-enable runs no uninstall, so the host's current
+                // allowlist is the one the restore meets.
+                allowlist: AllowlistReading::Live,
+                settled: &settled,
+            },
+        )
     }
 
     fn apply_enable(
@@ -1009,6 +1053,7 @@ impl FrameworkDriver for OpenClawDriver {
             verify_with_runtime,
             selected_config_indices,
             freshly_claimed_displacements,
+            dropped_prior_displacements,
         ) = if ctx.is_skill_bundle() {
             if !matches!(prepared, PreparedEnable::None) {
                 return Err(prepared_state_mismatch(
@@ -1017,7 +1062,15 @@ impl FrameworkDriver for OpenClawDriver {
             }
             // Skill bundles run no plugin install and no runtime verification;
             // these values are unused for them.
-            (false, false, false, false, Vec::new(), Vec::new())
+            (
+                false,
+                false,
+                false,
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
         } else {
             match prepared {
                 PreparedEnable::OpenClaw {
@@ -1028,6 +1081,7 @@ impl FrameworkDriver for OpenClawDriver {
                     supports_inspect_runtime,
                     selected_config_indices,
                     freshly_claimed_displacements,
+                    dropped_prior_displacements,
                 } => {
                     if !supports_inspect_json {
                         return Err(AdapterError::FrameworkCli {
@@ -1053,6 +1107,7 @@ impl FrameworkDriver for OpenClawDriver {
                         *supports_inspect_runtime,
                         selected_config_indices.clone(),
                         freshly_claimed_displacements.clone(),
+                        dropped_prior_displacements.clone(),
                     )
                 }
                 PreparedEnable::None => {
@@ -1122,6 +1177,13 @@ impl FrameworkDriver for OpenClawDriver {
         // later and unreachable if any of them fails — see the method.
         if plugin.is_some() {
             self.record_slot_selection_handoffs(claim, &home, ctx, progress)?;
+            self.record_recovered_dropped_handoffs(
+                claim,
+                &dropped_prior_displacements,
+                &home,
+                ctx,
+                progress,
+            )?;
         }
 
         for skill in &ctx.declared_skills {
@@ -1174,6 +1236,13 @@ impl FrameworkDriver for OpenClawDriver {
             // it is here because verification is the next fallible step, and a
             // hand-off the host performed must not depend on it succeeding.
             self.record_slot_selection_handoffs(claim, &home, ctx, progress)?;
+            self.record_recovered_dropped_handoffs(
+                claim,
+                &dropped_prior_displacements,
+                &home,
+                ctx,
+                progress,
+            )?;
 
             // Post-enable runtime verification: the plugin must report
             // loaded. A non-loaded status surfaces the framework diagnostics
@@ -1432,12 +1501,22 @@ impl FrameworkDriver for OpenClawDriver {
         //    order claimed. Only what the receipt records is restored: a plugin
         //    the operator had already disabled before enable was never claimed,
         //    so it is never re-enabled here.
+        // Nothing is settled for a `disable`: its own attribution gate writes the
+        // verdict into the receipt as `applied` before the uninstall destroys the
+        // evidence, so an entry that reaches the restore with the question still
+        // open is one the host has to answer again — see [`SettledHandoffs`].
         let restore = self.restore_displaced_plugins(
             claim,
             &displaced,
             &home,
             ctx,
-            SlotReadings::Captured(&slots),
+            RestoreReadings {
+                slots: SlotReadings::Captured(&slots),
+                // The restore runs *after* this disable's own uninstall, so the live
+                // `plugins.allow` is the one that uninstall left behind.
+                allowlist: AllowlistReading::Live,
+                settled: &SettledHandoffs::new(),
+            },
         )?;
         messages.extend(restore.messages);
         cleanup_complete = cleanup_complete && restore.cleanup_complete;
@@ -2247,6 +2326,130 @@ impl OpenClawDriver {
         Ok(())
     }
 
+    /// Record in the receipt this enable is writing a displacement the contract
+    /// dropped but this enable's own registration performed again.
+    ///
+    /// The other half of the same-home re-enable's dropped-displacement duty, and
+    /// the half that has to run here: [`Self::cleanup_replaced_claim`] hands a
+    /// dropped plugin back *before* `apply_enable` installs this adapter's own
+    /// plugin, and `plugins install` and `plugins enable` both apply OpenClaw's
+    /// exclusive slot selection — which turns every other plugin of the selected
+    /// kind off. A bundle that still competes for the slot therefore undoes the
+    /// restore on its own, and the replacement receipt is the only place left that
+    /// could say so. Leaving it silent is the strand: the receipt swap already
+    /// deleted the prior record, the `disable` that follows finds nothing to
+    /// restore, reports a complete cleanup and removes itself, and the bundled
+    /// backend stays off with no operator anywhere in the sequence.
+    ///
+    /// So the question is asked of the host *after* the mutation that could have
+    /// re-performed the hand-off, through the same
+    /// [`Self::handoff_attribution`] every other recovery mark asks, and only a
+    /// positive answer records ownership:
+    ///
+    /// - [`HandoffAttribution::Performed`] — the slot names this adapter's own
+    ///   plugin and the plugin's flag reads off, the state slot selection produces
+    ///   by construction — is carried as applied, and a later `disable` hands it
+    ///   back.
+    /// - [`HandoffAttribution::NotPerformed`] is the bundle that does not compete:
+    ///   the restore held, the plugin is on, and the contract change really did
+    ///   take effect. Nothing is recorded, which is what lets it take effect.
+    /// - [`HandoffAttribution::Unknown`] is carried as *unapplied*. That claims no
+    ///   transition, and it is not the loss it looks like: the entry still names
+    ///   the plugin, so `status` reports it and a `disable` asks
+    ///   [`Self::record_recovered_slot_selection_handoffs`] to recover the
+    ///   attribution from its own capture before the uninstall destroys it. What
+    ///   it must not do is be spent as `NotPerformed`, because the receipt swap
+    ///   that follows is not retryable.
+    ///
+    /// Write-ahead, like every other mark in this driver: each entry is persisted as
+    /// it is recorded, so a failure in a later step of `apply_enable` leaves the
+    /// receipt describing the host rather than the host describing nothing.
+    ///
+    /// Two shapes are deliberately left unrecorded, both because the receipt cannot
+    /// express them rather than because the evidence is missing:
+    ///
+    /// - a plugin the replacement receipt already claims, which is what
+    ///   [`preserve_openclaw_displaced_facts`] makes of a declaration this enable's
+    ///   own probe declined to claim; adding it again would be a duplicate claim;
+    /// - a slotful entry whose slot the replacement receipt already gave to another
+    ///   plugin, which [`claim_displaced_plugins`] rejects outright. A contract that
+    ///   moved the same slot from one bundled plugin to another can therefore still
+    ///   strand the first one; expressing both would mean letting two entries share
+    ///   an exclusive slot, and the restore order that needs is a receipt-format
+    ///   change rather than a fix here.
+    ///
+    /// # Errors
+    ///
+    /// A receipt-consistency error from [`claim_own_plugin`], an invalid plugin id,
+    /// and a persistence failure from `progress` — which aborts the enable with the
+    /// host already registered rather than leaving a hand-off nobody recorded.
+    fn record_recovered_dropped_handoffs(
+        &self,
+        claim: &mut AdapterClaim,
+        dropped: &[DroppedPriorDisplacement],
+        home: &Path,
+        ctx: &DriverCtx,
+        progress: &mut dyn ClaimProgress,
+    ) -> Result<(), AdapterError> {
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let own_plugin_id = claim_own_plugin(claim)?;
+        for entry in dropped {
+            validate_plugin_id(&entry.plugin_id)?;
+            let claimed = claim_displaced_plugins(claim)?;
+            if claimed
+                .iter()
+                .any(|claimed| claimed.plugin_id == entry.plugin_id)
+            {
+                continue;
+            }
+            if claimed
+                .iter()
+                .any(|claimed| entry.slot.is_some() && claimed.slot == entry.slot)
+            {
+                continue;
+            }
+            // Defensive rather than reachable: a reference whose resource the prior
+            // receipt did not hold was rejected when it was resolved, and one whose
+            // id the replacement receipt already uses would collide with it.
+            if claim.resource(&entry.resource.id).is_some() {
+                continue;
+            }
+            let resolved = DisplacedPlugin {
+                resource: entry.resource.id.clone(),
+                plugin_id: entry.plugin_id.clone(),
+                slot: entry.slot.clone(),
+                applied: false,
+            };
+            let applied = match self.handoff_attribution(
+                &resolved,
+                own_plugin_id.as_deref(),
+                SlotReadings::Live,
+                home,
+                ctx,
+            ) {
+                HandoffAttribution::Performed => true,
+                HandoffAttribution::NotPerformed => continue,
+                HandoffAttribution::Unknown => false,
+            };
+            claim.resources.push(entry.resource.clone());
+            let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
+                return Err(invalid_displaced_claim(
+                    claim,
+                    "receipt payload is not OpenClaw",
+                ));
+            };
+            payload.displaced_plugins.push(DisplacedPluginRef {
+                resource: entry.resource.id.clone(),
+                slot: entry.slot.clone(),
+                applied,
+            });
+            progress.persist_claim(claim)?;
+        }
+        Ok(())
+    }
+
     /// Disable every framework plugin the receipt claims as displaced, having
     /// re-confirmed each claim immediately beforehand.
     ///
@@ -2301,6 +2504,22 @@ impl OpenClawDriver {
         for entry in &claimed {
             let plugin_id = entry.plugin_id.clone();
             validate_plugin_id(&plugin_id)?;
+            // An entry the contract being enabled does not declare is one
+            // [`Self::record_recovered_dropped_handoffs`] put in the receipt, and
+            // this enable owes no `plugins disable` for it. The host already
+            // performed that hand-off through its own slot selection, which is the
+            // evidence the entry was recorded on, so the command could only be a
+            // no-op — except over an entry recorded on an *unreadable* attribution,
+            // where "off" is precisely what nobody could confirm and the command
+            // would be a real mutation. It would also mark that entry applied,
+            // claiming a transition this adapter has no positive evidence for.
+            if !ctx
+                .declared_displaces
+                .iter()
+                .any(|spec| spec.id == plugin_id)
+            {
+                continue;
+            }
             // Re-confirm at the last read-only moment before the mutation — but
             // only for a claim this enable can attribute to itself. Absent from
             // `freshly_claimed` is a claim carried over from a prior receipt, and
@@ -2523,15 +2742,11 @@ impl OpenClawDriver {
         // entry is skipped only when the host does *not* show this adapter's own
         // selection having done the work; when it does, the entry is restored like
         // any applied one and the report says so.
-        if !entry.applied
-            && !self.handoff_performed_by_slot_selection(
-                entry,
-                host.own_plugin_id,
-                host.slots,
-                home,
-                ctx,
-            )
-        {
+        //
+        // The attribution itself comes from [`Self::restore_handoff_performed`],
+        // which spends a verdict the caller already settled before it will ask the
+        // host — see [`SettledHandoffs`] for the loss a second ask allows.
+        if !entry.applied && !self.restore_handoff_performed(entry, host, home, ctx) {
             return RestoreDecision::SkipNotApplied;
         }
         match self.displacement_block(
@@ -2596,14 +2811,19 @@ impl OpenClawDriver {
     /// `plugins.slots.<slot>`, all of which are reads. Nothing is written and no
     /// receipt is touched.
     ///
-    /// `allowlist` is the one input the caller has to supply rather than the host,
-    /// because a preview cannot observe the uninstall it has not run: it says
+    /// [`RestoreReadings::allowlist`] is the one reading a preview cannot take from
+    /// the host, because it cannot observe the uninstall it has not run: it says
     /// whether the operation being previewed removes this adapter's own plugin from
     /// `plugins.allow` before the restore it predicts. Every other reading is taken
     /// live, and for the slot that is the right answer on both sides — the veto
     /// asks who owns the slot when the `plugins enable` would run, which a preview
     /// can no more predict than the operation can, and which the caller's own
     /// capture therefore does not feed into here. See [`AllowlistReading`].
+    ///
+    /// [`RestoreReadings::settled`] is the same caller-supplied correction on the
+    /// other axis, and a preview needs it for the same reason the operation does:
+    /// without it the two would ask the attribution a different number of times and
+    /// could land on different answers over one transient read failure.
     fn restore_preview_lines(
         &self,
         claim: &AdapterClaim,
@@ -2611,7 +2831,7 @@ impl OpenClawDriver {
         ctx: &DriverCtx,
         scope: &str,
         why: &str,
-        allowlist: AllowlistReading<'_>,
+        readings: RestoreReadings<'_>,
     ) -> Result<Vec<String>, AdapterError> {
         // Resolved before the empty-entries shortcut, exactly where the callers
         // used to resolve it themselves: a receipt whose state directory cannot be
@@ -2628,8 +2848,9 @@ impl OpenClawDriver {
         let host = RestoreHost {
             own_plugin_id: own_plugin_id.as_deref(),
             inventory: inventory.as_deref(),
-            slots: SlotReadings::Live,
-            allowlist,
+            slots: readings.slots,
+            allowlist: readings.allowlist,
+            settled: readings.settled,
         };
         let mut lines = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -2670,18 +2891,44 @@ impl OpenClawDriver {
                     .any(|spec| spec.id == entry.plugin_id)
             })
             .collect();
-        self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
-        self.restore_preview_lines(
+        // The same verdicts the operation hands its restore, so the preview
+        // describes the branch the restore really takes instead of the one a second
+        // attribution read happens to land on.
+        let settled = self.attribute_dropped_prior_handoffs(prior, &dropped, ctx)?;
+        let mut lines = self.restore_preview_lines(
             prior,
             &dropped,
             ctx,
             "",
             "which the contract being enabled no longer displaces",
-            // A same-home re-enable keeps the prior installation, so nothing
-            // removes this adapter's own plugin from `plugins.allow` ahead of the
-            // restore and the host's current key is the one the operation reads.
-            AllowlistReading::Live,
-        )
+            RestoreReadings {
+                slots: SlotReadings::Live,
+                // A same-home re-enable keeps the prior installation, so nothing
+                // removes this adapter's own plugin from `plugins.allow` ahead of
+                // the restore and the host's current key is the one the operation
+                // reads.
+                allowlist: AllowlistReading::Live,
+                settled: &settled,
+            },
+        )?;
+        // The restore is not the end of the story for a slotful entry, and a
+        // preview that stopped here would describe a host state the enable does not
+        // leave behind: `apply_enable` installs and enables this adapter's own
+        // plugin next, and OpenClaw's exclusive slot selection can turn the plugin
+        // this restore just handed back straight off again. What the operation does
+        // about that is decided from the host *after* the install, so it cannot be
+        // predicted here — but it can be announced, which is the difference between
+        // a dry-run that omits a receipt entry the real run writes and one that says
+        // the entry is conditional.
+        if dropped.iter().any(|entry| entry.slot.is_some()) {
+            lines.push(
+                "if registering this adapter's own plugin re-selects the slot a plugin above \
+                 competes for, OpenClaw turns that plugin back off and the replacement receipt \
+                 keeps the displacement, so disable still hands it back"
+                    .to_string(),
+            );
+        }
+        Ok(lines)
     }
 
     /// Re-enable the framework plugins this adapter displaced, honoring a slot
@@ -2716,7 +2963,7 @@ impl OpenClawDriver {
         displaced: &[DisplacedPlugin],
         home: &Path,
         ctx: &DriverCtx,
-        slots: SlotReadings<'_>,
+        readings: RestoreReadings<'_>,
     ) -> Result<DisableReport, AdapterError> {
         if displaced.is_empty() {
             return Ok(DisableReport {
@@ -2732,14 +2979,16 @@ impl OpenClawDriver {
         // `disable` restores in its step 3, after the step-2 `plugins uninstall`
         // has already rewritten the host, and the same-home `cleanup_replaced_claim`
         // branch runs no uninstall at all because a same-home re-enable keeps the
-        // prior installation. So the live `plugins.allow` is the answer the restore
-        // really meets, and the slot readings come from whatever capture the caller
-        // took.
+        // prior installation. So both pass the live `plugins.allow` as the answer the
+        // restore really meets, and differ only in the slot readings — a capture on
+        // the one side, a live read on the other — and in whether an attribution was
+        // settled ahead of them. See [`RestoreReadings`].
         let host = RestoreHost {
             own_plugin_id: own_plugin_id.as_deref(),
             inventory: inventory.as_deref(),
-            slots,
-            allowlist: AllowlistReading::Live,
+            slots: readings.slots,
+            allowlist: readings.allowlist,
+            settled: readings.settled,
         };
         for entry in displaced {
             // Already whitelist-validated when the references were resolved,
@@ -3303,6 +3552,38 @@ impl OpenClawDriver {
         )
     }
 
+    /// Whether the hand-off behind one *unapplied* entry was performed, asked of
+    /// the attribution the caller already settled and only then of the host.
+    ///
+    /// [`Self::restore_decision`]'s first branch through the one input that differs
+    /// between its callers. A `disable` has settled nothing — its own gate writes
+    /// the verdict into the receipt as `applied`, so no unapplied entry reaches here
+    /// with an answer pending — and reads the host live, exactly as before. A
+    /// same-home re-enable cleanup has already asked
+    /// [`Self::attribute_dropped_prior_handoffs`], whose verdict arrives in
+    /// [`RestoreHost::settled`], and re-asking would be a second transient-read
+    /// window over a decision whose negative direction deletes the only record of
+    /// the ownership.
+    ///
+    /// [`HandoffAttribution::Unknown`] is never settled — the gate errors on it
+    /// instead — and is treated as unsettled here rather than as an answer, so a
+    /// caller that somehow carries one degrades to the live read instead of
+    /// spending it.
+    fn restore_handoff_performed(
+        &self,
+        entry: &DisplacedPlugin,
+        host: &RestoreHost<'_>,
+        home: &Path,
+        ctx: &DriverCtx,
+    ) -> bool {
+        match host.settled.get(&entry.plugin_id) {
+            Some(HandoffAttribution::Performed) => return true,
+            Some(HandoffAttribution::NotPerformed) => return false,
+            Some(HandoffAttribution::Unknown) | None => {}
+        }
+        self.handoff_performed_by_slot_selection(entry, host.own_plugin_id, host.slots, home, ctx)
+    }
+
     /// Whether a re-enable recovers an ownership the prior receipt recorded but
     /// never marked as performed.
     ///
@@ -3401,6 +3682,16 @@ impl OpenClawDriver {
     /// an entry it attributes to this adapter is the one it honestly hands back. The
     /// third answer is the reason this exists.
     ///
+    /// The verdicts come back rather than being spent here, because "neither is
+    /// consumed" stopped being true the moment the restore was allowed to ask the
+    /// question a second time: [`Self::restore_decision`] decides its
+    /// [`RestoreDecision::SkipNotApplied`] branch through the *boolean* collapse, so
+    /// an attribution this gate had just settled as `Performed` could come back
+    /// `Unknown` from a second transient read failure and be spent as "never
+    /// performed" after all. Both callers therefore hand the map to
+    /// [`RestoreHost::settled`], which is what makes the gate the last word on the
+    /// attribution instead of the first of two.
+    ///
     /// For a *dropped* entry, "skip the restore" is not the inaction it is everywhere
     /// else. The Manager's next durable action is to replace the prior receipt with
     /// one that names no such plugin, and nothing puts the entry back into it. So the
@@ -3437,9 +3728,10 @@ impl OpenClawDriver {
         prior: &AdapterClaim,
         dropped: &[DisplacedPlugin],
         ctx: &DriverCtx,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<SettledHandoffs, AdapterError> {
+        let mut settled = SettledHandoffs::new();
         if dropped.iter().all(|entry| entry.applied) {
-            return Ok(());
+            return Ok(settled);
         }
         let own_plugin_id = claim_own_plugin(prior)?;
         let home = claim_state_dir(prior)?;
@@ -3447,9 +3739,16 @@ impl OpenClawDriver {
             if entry.applied {
                 continue;
             }
-            self.prior_handoff_recovery(entry, own_plugin_id.as_deref(), &home, ctx)?;
+            // `prior_handoff_recovery` raises the error on `Unknown`, so both
+            // verdicts that reach the map are answers the host gave.
+            let attribution =
+                match self.prior_handoff_recovery(entry, own_plugin_id.as_deref(), &home, ctx)? {
+                    PriorHandoffRecovery::Recovered => HandoffAttribution::Performed,
+                    PriorHandoffRecovery::NothingToRecover => HandoffAttribution::NotPerformed,
+                };
+            settled.insert(entry.plugin_id.clone(), attribution);
         }
-        Ok(())
+        Ok(settled)
     }
 
     /// Run `openclaw plugins list` and decide whether `plugin_id` is still
@@ -6450,15 +6749,37 @@ enum SlotReadings<'a> {
     Captured(&'a CapturedSlots),
 }
 
+/// Hand-off attributions a caller has already settled, keyed by plugin id.
+///
+/// [`OpenClawDriver::attribute_dropped_prior_handoffs`] produces these and
+/// [`RestoreHost::settled`] carries them, so the restore it gates reasons from the
+/// answer the gate got instead of asking the host a second time.
+///
+/// The second ask is the whole problem this type exists to close. Both reads are
+/// `config get`, both can fail transiently, and a gate that passes on the first
+/// says nothing about the second: an attribution re-asked inside
+/// [`OpenClawDriver::restore_decision`] comes back
+/// [`HandoffAttribution::Unknown`], its boolean collapse reads "this adapter never
+/// did it", and the restore is skipped by a caller whose next step is to let the
+/// Manager replace the only receipt that ever named the ownership. Settling it once
+/// and handing the verdict forward is what makes the gate mean something.
+///
+/// An entry the map does not cover has not been settled, and the decision asks the
+/// host for it — which is every entry on the `disable` side, whose attribution gate
+/// writes its verdict into the receipt as `applied` rather than into a stack frame.
+type SettledHandoffs = BTreeMap<String, HandoffAttribution>;
+
 /// The host readings one [`OpenClawDriver::restore_decision`] is made against.
 ///
-/// Bundled because all four are resolved once per operation and then asked about
-/// once per displaced plugin, and because two of them say *when* a reading was
-/// taken rather than what it says: `plugins uninstall` rewrites both
-/// `plugins.slots.<slot>` and `plugins.allow`, so the two sides of that uninstall
-/// do not read the same host. Keeping the two corrections in one type is what stops
-/// a caller from applying one and forgetting the other — which is how a preview
-/// came to promise the opposite of the operation it described.
+/// Bundled because every one of them is resolved once per operation and then asked
+/// about once per displaced plugin, and because three of them say *when* or *by
+/// whom* a reading was taken rather than what it says: `plugins uninstall` rewrites
+/// both `plugins.slots.<slot>` and `plugins.allow`, so the two sides of that
+/// uninstall do not read the same host, and a caller that already settled an
+/// attribution must not have it re-read behind its back. Keeping the corrections in
+/// one type is what stops a caller from applying one and forgetting the other —
+/// which is how a preview came to promise the opposite of the operation it
+/// described.
 #[derive(Debug, Clone, Copy)]
 struct RestoreHost<'a> {
     /// This adapter's own plugin id, from the receipt being restored. `None` when
@@ -6470,6 +6791,31 @@ struct RestoreHost<'a> {
     slots: SlotReadings<'a>,
     /// Which `plugins.allow` to weigh — see [`AllowlistReading`].
     allowlist: AllowlistReading<'a>,
+    /// Attributions the caller already settled, so the unapplied-entry branch does
+    /// not re-ask the host for one it has an answer to — see [`SettledHandoffs`].
+    ///
+    /// Empty everywhere except the same-home re-enable cleanup and its preview, the
+    /// two callers [`OpenClawDriver::attribute_dropped_prior_handoffs`] gates.
+    settled: &'a SettledHandoffs,
+}
+
+/// The three inputs to a restore that the caller supplies rather than the
+/// operation resolving from the host.
+///
+/// [`RestoreHost`] minus the two readings every caller resolves the same way, and
+/// bundled for the reason [`RestoreHost`] gives: two of the three say *when* or *by
+/// whom* a reading was taken rather than what it says, and a caller that applies one
+/// correction while forgetting another gets a preview that promises the opposite of
+/// the operation it describes. Keeping them in one type is also what keeps the
+/// argument list of the two functions that take them inside the clippy limit.
+#[derive(Debug, Clone, Copy)]
+struct RestoreReadings<'a> {
+    /// Where the two slot readings come from — see [`SlotReadings`].
+    slots: SlotReadings<'a>,
+    /// Which `plugins.allow` to weigh — see [`AllowlistReading`].
+    allowlist: AllowlistReading<'a>,
+    /// Attributions the caller already settled — see [`SettledHandoffs`].
+    settled: &'a SettledHandoffs,
 }
 
 /// What the persisted `plugins.entries.<id>.enabled` flag says about a
@@ -6824,6 +7170,63 @@ fn prior_unrecorded_displacements(
         .filter(|entry| !entry.applied)
         .map(|entry| (entry.plugin_id.clone(), entry))
         .collect())
+}
+
+/// The displacements a prior receipt for this instance claims that the receipt
+/// `prepare_enable` is building does not.
+///
+/// [`dropped_displaced_plugins`] answers the same question from two receipts and
+/// runs later, in `cleanup_replaced_claim`; this answers it from one receipt and the
+/// set of ids `prepare_enable` probed, because the scope that has to *act* on the
+/// answer is `apply_enable` and the only channel between them is
+/// [`PreparedEnable`]. The two agree: `preserve_openclaw_displaced_facts` carries an
+/// entry over only when the contract still declares it, and `claimed` is exactly the
+/// declared set this enable wrote an entry for — except that it runs first, so an
+/// entry the probe declined to claim and the preserve hook then carried anyway is
+/// listed here and claimed by the time apply looks. Apply re-checks the replacement
+/// receipt for that reason rather than trusting the list.
+///
+/// Why apply has to act on it at all is the strand this closes: the same-home
+/// cleanup hands a dropped plugin back *before* `apply_enable` installs this
+/// adapter's own plugin, and OpenClaw's exclusive slot selection turns every other
+/// plugin of the selected kind off — so an install whose bundle still competes for
+/// that slot re-disables the plugin the cleanup just restored, over a replacement
+/// receipt that names nothing to restore. The contract change, the slot selection
+/// and the recovery record have to describe one final state, and the only scope that
+/// can observe the slot selection is the one that ran it.
+///
+/// # Errors
+///
+/// Propagates an unresolvable state directory or an unresolvable displacement
+/// reference from the prior receipt, both before any mutation.
+fn dropped_prior_displacements(
+    prior: Option<&AdapterClaim>,
+    claimed: &HashSet<String>,
+    ctx: &DriverCtx,
+) -> Result<Vec<DroppedPriorDisplacement>, AdapterError> {
+    let Some(prior) = prior_for_this_instance(prior, ctx)? else {
+        return Ok(Vec::new());
+    };
+    let mut dropped = Vec::new();
+    for entry in claim_displaced_plugins(prior)? {
+        if claimed.contains(&entry.plugin_id) {
+            continue;
+        }
+        // A reference whose resource the receipt does not hold is one
+        // `claim_displaced_plugins` would already have rejected, so this is
+        // defensive rather than a reachable branch — but inheriting a resource id
+        // the replacement receipt then cannot resolve would fail validation after
+        // the Manager persisted it, which is the expensive place to find out.
+        let Some(resource) = prior.resource(&entry.resource).cloned() else {
+            continue;
+        };
+        dropped.push(DroppedPriorDisplacement {
+            resource,
+            plugin_id: entry.plugin_id,
+            slot: entry.slot,
+        });
+    }
+    Ok(dropped)
 }
 
 /// Carry a prior receipt's displaced-plugin facts into its replacement — but
@@ -8711,6 +9114,7 @@ mod tests {
                     supports_inspect_runtime: true,
                     selected_config_indices: Vec::new(),
                     freshly_claimed_displacements: Vec::new(),
+                    dropped_prior_displacements: Vec::new(),
                 },
                 &mk_ctx(Some("skill_bundle"), false),
                 &mut (),
@@ -8730,6 +9134,7 @@ mod tests {
                     supports_inspect_runtime: false,
                     selected_config_indices: Vec::new(),
                     freshly_claimed_displacements: Vec::new(),
+                    dropped_prior_displacements: Vec::new(),
                 },
                 &mk_ctx(None, false),
                 &mut (),
@@ -8750,6 +9155,7 @@ mod tests {
                     supports_inspect_runtime: false,
                     selected_config_indices: Vec::new(),
                     freshly_claimed_displacements: Vec::new(),
+                    dropped_prior_displacements: Vec::new(),
                 },
                 &mk_ctx(None, true),
                 &mut (),

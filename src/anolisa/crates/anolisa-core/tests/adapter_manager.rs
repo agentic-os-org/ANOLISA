@@ -10743,11 +10743,23 @@ fn review_dropped_displacement_keeps_an_unreadable_handoff_out_of_the_replacemen
         "a transient read failure must not cost the operator the restore the \
          dropped declaration left to this cleanup: {appended:?}"
     );
+    // The restore is not the end of the story, and asserting an empty receipt
+    // here used to be: this enable's own install re-selects the same slot and turns
+    // `memory-core` straight off again, so what the swap has to leave behind is the
+    // *responsibility* rather than nothing.
+    // `independent_dropped_handoff_survives_remaining_install` walks that half with
+    // no fault injected at all; what this test owes is that one transient read
+    // failure costs neither the restore nor the record that outlives it.
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "the replacement receipt keeps the displacement its own registration \
+         performed again, so the restore the retry just ran is not the last word \
+         on the ownership"
+    );
     assert!(
-        persisted_displacement_ids(&world).is_empty(),
-        "the replacement receipt names no displacement, because the contract being \
-         enabled declares none — which is exactly why the restore had to happen \
-         before the swap and not after it"
+        persisted_displacement(&world).applied,
+        "and marks the hand-off performed, which is what a later disable acts on"
     );
 }
 
@@ -10824,6 +10836,169 @@ fn review_dropped_displacement_preview_fails_like_the_real_reenable() {
             "plugins enable memory-core"
         ),
         "so the preview is exactly as wide as the operation and no wider"
+    );
+}
+
+/// A second transient read failure must not spend an attribution the first read
+/// already settled.
+///
+/// The half of the dropped-displacement gate that
+/// `review_dropped_displacement_keeps_an_unreadable_handoff_out_of_the_replacement_receipt`
+/// does not reach. That test fails the *first* `config get plugins.slots.memory`
+/// the re-enable issues, which is the one `attribute_dropped_prior_handoffs` asks,
+/// and the gate stops the operation before it mutates anything. This one lets that
+/// read succeed and fails the *second* — the one `restore_decision` used to ask
+/// again when it decided whether an unapplied entry is a hand-off this adapter
+/// performed. Asking the host twice is two windows, not one: a failure in the
+/// second collapsed into `RestoreDecision::SkipNotApplied`, the restore was
+/// reported as never owed, `cleanup_complete` stayed true, and the receipt swap
+/// deleted the only record of the ownership. The enable "succeeded" over
+/// `displaced_plugins = []` with no `plugins enable memory-core` anywhere in its
+/// argv, and nothing about the host explained why — one failed read, no operator,
+/// no crash.
+///
+/// The verdict the gate settled is now handed to the restore instead of being
+/// re-asked, so the second window has no attribution left to get wrong. The only
+/// read still live in it is the slot *veto*, whose unanswerable answer keeps the
+/// restore rather than declining it.
+#[test]
+fn independent_dropped_handoff_second_read_failure() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    // The first `config get plugins.slots.memory` succeeds and settles the
+    // attribution as this adapter's own; the second fails.
+    guard.set("FAKE_OC_CONFIG_GET_FAIL_ON_NTH", "plugins.slots.memory:2");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager.enable(COMPONENT, Some(FRAMEWORK), false).expect(
+        "a read failure inside the restore's own attribution window must not fail \
+         an enable whose attribution is already settled",
+    );
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the settled attribution has to reach the restore, not be re-asked where a \
+         second transient failure can spend it as 'never disabled it': {appended:?}"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "and the recovery responsibility has to survive the receipt swap, because \
+         this enable's own install re-selects the slot the restore just released"
+    );
+    assert!(
+        persisted_displacement(&world).applied,
+        "marked performed, on the evidence the post-install attribution read"
+    );
+
+    // The final state — the one assertion a command in the argv cannot stand in
+    // for, because argv proves a command ran and not that the plugin ended up on.
+    guard.unset("FAKE_OC_CONFIG_GET_FAIL_ON_NTH");
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the bundled backend must really be back on"
+    );
+}
+
+/// A contract change, the slot selection that follows it and the recovery record
+/// have to describe one final state.
+///
+/// The ordering half, with no fault injected anywhere: every read answers and every
+/// command succeeds. The same-home cleanup restores `memory-core` before
+/// `apply_enable` runs, and the install and enable that follow re-select the memory
+/// slot for this adapter's own plugin — OpenClaw's exclusive selection turning
+/// every other plugin of that kind off again. The restore is undone by the very
+/// operation it made room for, and the replacement receipt named nothing, so the
+/// disable that followed reported a complete cleanup and removed itself over a
+/// bundled backend still switched off. A test that asserted only "`plugins enable
+/// memory-core` ran" and "the new receipt is empty" passed over that host, because
+/// both halves are true of it.
+///
+/// Moving the restore after the install is not the fix and cannot be: `plugins
+/// enable memory-core` re-runs the same selection from the other side, so restoring
+/// last would switch *this adapter's own* plugin off and report success over a
+/// plugin it had just unseated. What changes is the record. The enable asks the
+/// attribution again once its own registration has run and keeps whichever dropped
+/// displacements the host shows it having performed again, so the receipt, the host
+/// and the disable that follows all describe the same state.
+#[test]
+fn independent_dropped_handoff_survives_remaining_install() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_with_unmarked_handoff(&guard);
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable under a contract that no longer displaces anything");
+    let appended = argv_appended(&world, logged_before);
+
+    // The restore still runs first and the install that undoes it still runs. That
+    // ordering is not the bug and is not what changed.
+    let restore_at = appended
+        .iter()
+        .position(|line| line == "plugins enable memory-core")
+        .expect("the dropped displacement must be handed back before the swap");
+    let install_at = appended
+        .iter()
+        .position(|line| line.starts_with("plugins install ") && !line.contains("--help"))
+        .expect("the re-enable installs this adapter's own plugin");
+    assert!(
+        restore_at < install_at,
+        "the restore has to precede the registration that re-selects the slot: \
+         {appended:?}"
+    );
+
+    // ... so the host after the enable holds a plugin this adapter turned off, and
+    // the receipt is what has to say so.
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "the install's own slot selection turns the restored plugin back off"
+    );
+    assert_eq!(
+        persisted_displacement_ids(&world),
+        vec!["memory-core".to_string()],
+        "and the replacement receipt keeps the responsibility for it instead of \
+         letting the swap delete the only record"
+    );
+    assert!(
+        persisted_displacement(&world).applied,
+        "marked performed, because this enable's own selection is what performed it"
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the restore the retained entry makes possible: {appended:?}"
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the final state is a bundled backend that is really back on, not a report \
+         claiming the cleanup was complete over one that is off"
     );
 }
 
