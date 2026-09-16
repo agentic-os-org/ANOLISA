@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-09-16
+
+### Changed
+
+- `anolisa upgrade --dry-run` now checks the combined set of new RPM installs
+  with the native dependency solver when run as root. Conflicts appear as
+  errors; non-root previews remain available with an explicit warning that
+  install conflicts were not checked. Rerun with `sudo` and preserve any
+  `--target` option to perform the check
+  ([#3294](https://github.com/agentic-os-org/ANOLISA/pull/3294)).
+- The bundled ws-ckpt adapter metadata now requires OpenClaw `>=2026.2.13`,
+  preventing adapter enablement on older hosts whose config writes can persist
+  expanded environment values and runtime defaults
+  ([#3239](https://github.com/agentic-os-org/ANOLISA/pull/3239)).
+
+### Fixed
+
+- `anolisa adapter enable <component> openclaw` now explicitly activates the
+  plugin after installation, restoring plugins left disabled by a previous
+  uninstall. Capability consent is detected separately for activation, and
+  `--dry-run` includes the activation command
+  ([#3223](https://github.com/agentic-os-org/ANOLISA/pull/3223)).
+- Sandbox install and uninstall now honor DNF's exit status even when its
+  output contains phrases such as “already installed” or “No match”. Failed
+  installs no longer continue to later setup phases or record success
+  ([#3226](https://github.com/agentic-os-org/ANOLISA/pull/3226)).
+- RPM package and file-owner queries now distinguish clean absence from
+  database and command failures, avoiding false “not installed” observations
+  ([#3230](https://github.com/agentic-os-org/ANOLISA/pull/3230)).
+- Raw component service management now reports failed `systemctl is-active`
+  queries instead of treating them as missing units; valid inactive and
+  failed service states remain supported
+  ([#3240](https://github.com/agentic-os-org/ANOLISA/pull/3240)).
+- Runtime dependency checks now stop automatic provisioning when RPM queries
+  fail or system-package and language-runtime probes encounter permission,
+  execution, or signal failures. `anolisa doctor` retains the diagnostic and
+  recommends inspecting the probe instead of installing a supposedly missing
+  dependency
+  ([#3280](https://github.com/agentic-os-org/ANOLISA/pull/3280),
+  [#3285](https://github.com/agentic-os-org/ANOLISA/pull/3285)).
+- Debian runtime dependency checks now distinguish usable packages, absent
+  packages, incomplete package states, and query failures. Incomplete states
+  require manual recovery before provisioning; `doctor` directs users to
+  inspect the package state. Multi-Arch queries select the native architecture
+  unless the dependency explicitly requests one
+  ([#3292](https://github.com/agentic-os-org/ANOLISA/pull/3292)).
+
 ## [0.3.11] - 2026-09-09
 
 ### Added

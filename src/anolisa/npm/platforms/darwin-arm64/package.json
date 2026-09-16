@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/cli-darwin-arm64",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "ANOLISA CLI native binary for macOS arm64",
   "license": "Apache-2.0",
   "repository": {
