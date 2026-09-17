@@ -98,6 +98,11 @@ The current crates are:
   [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
+- `asc-model-client`: shared, loopback-only HTTP client for local model
+  inference backends (Ollama); injected by scanner crates.
+- `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
+  a rule engine, model-backed classification and multi-turn intent detection;
+  daemon wiring is later work.
 
 The crate relationships, acceptance types, executable pass/fail matrix,
 compatibility report, direct-consumer evidence, and rollback boundary are recorded

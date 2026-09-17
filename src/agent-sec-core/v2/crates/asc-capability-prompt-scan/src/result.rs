@@ -4,7 +4,7 @@
 //! emit confidence values.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Type of detected threat.
 ///
@@ -94,7 +94,7 @@ pub struct ThreatDetail {
 /// Result from a single detection layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerResult {
-    /// Layer name, e.g. "rule_engine", "ml_classifier".
+    /// Layer name, e.g. "`rule_engine`", "`ml_classifier`".
     pub layer_name: String,
     /// Whether this layer detected a threat.
     pub detected: bool,
@@ -120,13 +120,13 @@ pub struct ScanResult {
     /// absorbed it, so summing `engine_init_ms` across a scanner's results
     /// never double-counts the cost.
     pub engine_init_ms: f64,
-    /// Free-form metadata (original_length, source, decoded_variants, ...).
+    /// Free-form metadata (`original_length`, source, `decoded_variants`, ...).
     pub metadata: Map<String, Value>,
     pub verdict: Verdict,
 }
 
 impl ScanResult {
-    /// Serialize to the CLI JSON output format (schema_version 1.0).
+    /// Serialize to the CLI JSON output format (`schema_version` 1.0).
     ///
     /// The `confidence` key is only present when a threat was detected.
     pub fn to_json_value(&self) -> Value {
@@ -195,19 +195,21 @@ impl ScanResult {
         // a non-truncated scan (e.g. results built by hand in tests).
         out.insert(
             "input_truncated".into(),
-            json!(self
-                .metadata
-                .get("input_truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)),
+            json!(
+                self.metadata
+                    .get("input_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
         );
         out.insert(
             "input_bytes_scanned".into(),
-            json!(self
-                .metadata
-                .get("input_bytes_scanned")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)),
+            json!(
+                self.metadata
+                    .get("input_bytes_scanned")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            ),
         );
         // Same accounting group, one question further: was every configured
         // layer able to answer?  `degraded` is always present so consumers can
@@ -290,13 +292,13 @@ impl ScanResult {
 
         let raw_conf = best_confidence(&self.layer_results);
         // A 0.0 confidence suppresses the suffix.
-        let conf_str = if raw_conf != 0.0 {
+        let conf_str = if raw_conf == 0.0 {
+            String::new()
+        } else {
             format!(
                 " (confidence: {}%)",
                 fmt_float(round_py(raw_conf * 100.0, 1))
             )
-        } else {
-            String::new()
         };
 
         let evidence = self
@@ -347,8 +349,7 @@ impl ScanResult {
         self.metadata
             .get("layers_failed")
             .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -362,7 +363,7 @@ fn layer_short(layer_name: &str) -> &str {
     }
 }
 
-/// Map a Verdict to a risk_level string for the JSON output.
+/// Map a Verdict to a `risk_level` string for the JSON output.
 fn verdict_to_risk_level(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Pass => "low",
@@ -478,6 +479,9 @@ mod tests {
     }
 
     #[test]
+    // Both sides come from the same computation, so exact equality is the
+    // assertion; an epsilon comparison would weaken it.
+    #[allow(clippy::float_cmp)]
     fn elapsed_ms_is_the_sum_of_engine_init_and_scan() {
         // `elapsed_ms` is documented as the *total* cost. Engine construction
         // (rule-set regex compilation) dominates it on a cold process, so the
@@ -547,10 +551,13 @@ mod tests {
     }
 
     #[test]
+    // Banker's rounding must hold exactly; an epsilon comparison would hide
+    // a rounding-mode regression.
+    #[allow(clippy::float_cmp)]
     fn round_py_uses_banker_rounding() {
         assert_eq!(round_py(0.125, 2), 0.12); // banker's rounding
         assert_eq!(round_py(2.345, 2), 2.35);
-        assert_eq!(round_py(0.951234, 3), 0.951);
+        assert_eq!(round_py(0.951_234, 3), 0.951);
     }
 
     #[test]
@@ -745,9 +752,11 @@ mod tests {
         assert_eq!(value["degraded"], true);
         assert_eq!(value["layers_failed"][0]["layer"], "ml_classifier");
         assert_eq!(value["layers_failed"][0]["error"], "model inference failed");
-        assert!(value["summary"]
-            .as_str()
-            .expect("summary")
-            .ends_with("[degraded scan: ml_classifier unavailable]"));
+        assert!(
+            value["summary"]
+                .as_str()
+                .expect("summary")
+                .ends_with("[degraded scan: ml_classifier unavailable]")
+        );
     }
 }

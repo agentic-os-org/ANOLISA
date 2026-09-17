@@ -1,6 +1,6 @@
-//! Qwen3Guard classifier wrapper backed by Ollama.
+//! `Qwen3Guard` classifier wrapper backed by Ollama.
 //!
-//! Qwen3Guard is served by Ollama rather than loaded in-process.  The Gen
+//! `Qwen3Guard` is served by Ollama rather than loaded in-process.  The Gen
 //! variant returns a structured moderation result with a three-tier
 //! severity label and optional safety categories:
 //!
@@ -9,23 +9,23 @@
 //! Categories: Violent
 //! ```
 //!
-//! Models derived from Qwen3Guard speak the same protocol, so the parsing and
+//! Models derived from `Qwen3Guard` speak the same protocol, so the parsing and
 //! chat plumbing here take a crate-internal `Qwen3GuardDialect` instead of
-//! hard-coding Qwen3Guard's vocabulary — see [`crate::models::warden_gen`].
+//! hard-coding `Qwen3Guard`'s vocabulary — see [`crate::models::warden_gen`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::ScannerError;
 use crate::models::{Classifier, ClassifierResult};
-use model_service::{create_client, ModelClient, ModelOptions};
+use asc_model_client::{ModelClient, ModelOptions, create_client};
 
 /// Ollama tag for the guard model.
 ///
-/// Points at the project-owned ModelScope repository, which Ollama can pull
+/// Points at the project-owned `ModelScope` repository, which Ollama can pull
 /// directly by this path — no local renaming step is required.
 pub const MODEL_QWEN3_GUARD: &str = "modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF";
 
@@ -33,7 +33,7 @@ pub const MODEL_QWEN3_GUARD: &str = "modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-G
 /// safety verdict.  Consumers fail open on it — see [`is_unknown_label`].
 const LABEL_UNKNOWN: &str = "UNKNOWN";
 
-/// Official Qwen3Guard category names, lowercase.
+/// Official `Qwen3Guard` category names, lowercase.
 ///
 /// Only these are accepted; anything else is logged and dropped so a
 /// drifting model cannot inject arbitrary strings into result labels.
@@ -58,21 +58,21 @@ const EMPTY_CATEGORY_SENTINELS: [&str; 5] = ["none", "null", "n/a", "na", "safe"
 /// "personally identifiable information" wins over "pii".
 static CATEGORY_RE: LazyLock<Regex> = LazyLock::new(|| build_category_re(&KNOWN_CATEGORIES));
 
-/// Qwen3Guard's own dialect of the protocol.
+/// `Qwen3Guard`'s own dialect of the protocol.
 static QWEN3GUARD_DIALECT: Qwen3GuardDialect = Qwen3GuardDialect {
     display_name: "Qwen3Guard",
     category_re: &CATEGORY_RE,
 };
 
-/// The per-model half of the Qwen3Guard output protocol.
+/// The per-model half of the `Qwen3Guard` output protocol.
 ///
-/// Qwen3Guard and the models derived from it (today Warden-Gen) emit the same
+/// `Qwen3Guard` and the models derived from it (today Warden-Gen) emit the same
 /// `Safety:`/`Categories:` shape, so parsing, confidence recovery and the chat
 /// round trip are shared; only the accepted category vocabulary and the name
 /// shown in logs differ.
 ///
 /// Vocabularies must stay per-model and must never be merged: Warden-Gen
-/// declares the short `pii` while Qwen3Guard also declares the long
+/// declares the short `pii` while `Qwen3Guard` also declares the long
 /// `personally identifiable information`, so an alias a model never emits
 /// would disturb the longest-first match order in [`build_category_re`].
 pub(crate) struct Qwen3GuardDialect {
@@ -107,17 +107,17 @@ pub(crate) fn build_category_re(names: &[&str]) -> Regex {
 static NON_WORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("[^a-z0-9]+").expect("static regex is valid"));
 
-/// Whether `model_name` is the supported Qwen3Guard model
+/// Whether `model_name` is the supported `Qwen3Guard` model
 /// (case-insensitive).
 ///
 /// Compares case-insensitively rather than lowercasing the input first: the
-/// ModelScope path carries mixed case (`ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`),
+/// `ModelScope` path carries mixed case (`ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`),
 /// which a lowercased input would never match.
 pub fn is_qwen3_guard_model(model_name: &str) -> bool {
     MODEL_QWEN3_GUARD.eq_ignore_ascii_case(model_name.trim())
 }
 
-/// Whether `label` marks an unparseable Qwen3Guard response.
+/// Whether `label` marks an unparseable `Qwen3Guard` response.
 ///
 /// [`Qwen3GuardClassifier`] emits it when the output cannot be parsed
 /// into Safe/Controversial/Unsafe.  It is not positive evidence of a
@@ -126,7 +126,7 @@ pub fn is_unknown_label(label: &str) -> bool {
     label == LABEL_UNKNOWN
 }
 
-/// Wrapper around the Qwen3Guard model served by Ollama.
+/// Wrapper around the `Qwen3Guard` model served by Ollama.
 pub struct Qwen3GuardClassifier {
     model_name: String,
     client: Box<dyn ModelClient>,
@@ -160,12 +160,12 @@ impl Qwen3GuardClassifier {
         &self.model_name
     }
 
-    /// Whether Ollama can serve the configured Qwen3Guard model.
+    /// Whether Ollama can serve the configured `Qwen3Guard` model.
     pub fn check_ready(&self) -> bool {
         self.client.check_model(&self.model_name)
     }
 
-    /// Verify that Qwen3Guard is already available in Ollama.
+    /// Verify that `Qwen3Guard` is already available in Ollama.
     ///
     /// The model is never downloaded automatically; operators must pull it
     /// before scanning.
@@ -288,7 +288,7 @@ pub(crate) fn classify_via_chat(
     let logprobs = body
         .get("logprobs")
         .and_then(Value::as_array)
-        .map(|v| v.as_slice());
+        .map(std::vec::Vec::as_slice);
     Ok(response_to_result(&raw_text, logprobs, dialect))
 }
 
@@ -298,14 +298,14 @@ pub(crate) fn classify_via_chat(
 /// than falling through to `response`, so a structurally broken chat
 /// reply is reported as a service error instead of being misread.
 fn extract_response_text(body: &Value) -> String {
-    if let Some(message) = body.get("message") {
-        if message.is_object() {
-            return message
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|content| content.trim().to_string())
-                .unwrap_or_default();
-        }
+    if let Some(message) = body.get("message")
+        && message.is_object()
+    {
+        return message
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|content| content.trim().to_string())
+            .unwrap_or_default();
     }
     body.get("response")
         .and_then(Value::as_str)
@@ -327,11 +327,8 @@ fn response_to_result(
     dialect: &Qwen3GuardDialect,
 ) -> ClassifierResult {
     let parsed = parse_guard_response(raw_text);
-    let safety = normalize_safety(parsed.get("safety").map(String::as_str).unwrap_or(""));
-    let categories = parse_categories(
-        parsed.get("categories").map(String::as_str).unwrap_or(""),
-        dialect,
-    );
+    let safety = normalize_safety(parsed.get("safety").map_or("", String::as_str));
+    let categories = parse_categories(parsed.get("categories").map_or("", String::as_str), dialect);
 
     // The wrapper owns the threat decision: Controversial/Unsafe are threats,
     // Safe is benign, and unparseable output fails open (detected = false).
@@ -374,7 +371,7 @@ fn response_to_result(
 /// Recover the model's confidence in the chosen safety label from Ollama's
 /// per-token logprobs.
 ///
-/// Qwen3Guard emits `Safety: <label>\nCategories: ...`; the label is decided
+/// `Qwen3Guard` emits `Safety: <label>\nCategories: ...`; the label is decided
 /// at the first token after `Safety` + `:`.  That token's `top_logprobs`
 /// lists the candidate labels (Safe / Controversial / Unsafe) with their
 /// log-probabilities — `exp` + normalise across the matched candidates yields
@@ -406,7 +403,7 @@ fn find_label_token_index(logprobs: &[Value]) -> Option<usize> {
     None
 }
 
-/// The three safety labels Qwen3Guard may emit, lowercase.
+/// The three safety labels `Qwen3Guard` may emit, lowercase.
 const SAFETY_LABELS: [&str; 3] = ["safe", "controversial", "unsafe"];
 
 /// Map a label token (e.g. ` Safe`, ` Cont`, ` Unsafe`) to its base safety
@@ -439,9 +436,8 @@ fn collect_label_probabilities(top: &[Value]) -> HashMap<String, f64> {
     let mut raw: HashMap<String, f64> = HashMap::new();
     for t in top {
         let tok = t.get("token").and_then(Value::as_str).unwrap_or("");
-        let lp = match t.get("logprob").and_then(Value::as_f64) {
-            Some(v) => v,
-            None => continue,
+        let Some(lp) = t.get("logprob").and_then(Value::as_f64) else {
+            continue;
         };
         if let Some(label) = match_label_token(tok) {
             let p = lp.exp();
@@ -460,7 +456,7 @@ fn collect_label_probabilities(top: &[Value]) -> HashMap<String, f64> {
     raw.into_iter().map(|(k, v)| (k, v / sum)).collect()
 }
 
-/// Parse `Safety: ...` / `Categories: ...` lines from Qwen3Guard output.
+/// Parse `Safety: ...` / `Categories: ...` lines from `Qwen3Guard` output.
 fn parse_guard_response(raw_text: &str) -> BTreeMap<String, String> {
     let mut parsed = BTreeMap::new();
     for line in raw_text.lines() {
@@ -546,7 +542,7 @@ fn normalize_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model_service::GenerateRequest;
+    use asc_model_client::GenerateRequest;
 
     /// Client returning a canned chat reply.
     struct FakeClient {
@@ -571,7 +567,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!("Qwen3Guard uses the chat endpoint only")
         }
 
@@ -582,7 +578,7 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             Ok(self.reply.clone())
         }
     }
@@ -598,7 +594,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!()
         }
 
@@ -609,8 +605,8 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
-            Err(model_service::ModelServiceError::Inference(
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
+            Err(asc_model_client::ModelServiceError::Inference(
                 "connection refused".into(),
             ))
         }

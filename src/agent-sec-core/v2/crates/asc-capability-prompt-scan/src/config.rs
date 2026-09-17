@@ -138,6 +138,8 @@ mod tests {
     }
 
     #[test]
+    // Exact literal: the preset must keep the documented default.
+    #[allow(clippy::float_cmp)]
     fn defaults_target_qwen3guard_and_the_documented_threshold() {
         let config = ScanConfig::default();
         assert_eq!(config.model_name, MODEL_QWEN3_GUARD);

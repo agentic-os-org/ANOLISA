@@ -4,9 +4,9 @@ use crate::result::{LayerResult, Verdict};
 
 /// Layers whose detection is treated as a confirmed threat → DENY.
 ///
-/// L1 (rule_engine) alone → WARN because regex has a higher false-positive
+/// L1 (`rule_engine`) alone → WARN because regex has a higher false-positive
 /// rate and its signal should be confirmed by L2 when L2 is present.
-/// L4 multi_turn_intent is authoritative for its own dimension.
+/// L4 `multi_turn_intent` is authoritative for its own dimension.
 const CONFIRM_LAYERS: [&str; 2] = ["ml_classifier", "multi_turn_intent"];
 
 fn is_confirm_layer(name: &str) -> bool {
@@ -17,7 +17,7 @@ fn is_confirm_layer(name: &str) -> bool {
 ///
 /// Decision rules (evaluated in order):
 ///
-/// 1. Any confirm-layer (L2 ML or L4 multi_turn_intent) detected → DENY
+/// 1. Any confirm-layer (L2 ML or L4 `multi_turn_intent`) detected → DENY
 /// 2. L1 detected AND no confirm-layer was present (FAST mode) → DENY
 /// 3. L1 detected AND confirm-layer present but did not fire → WARN
 /// 4. No layer detected → PASS

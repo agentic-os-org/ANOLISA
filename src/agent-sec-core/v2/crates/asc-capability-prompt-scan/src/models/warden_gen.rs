@@ -1,6 +1,6 @@
 //! Warden-Gen classifier wrapper backed by Ollama.
 //!
-//! Warden-Gen speaks the same `Safety:`/`Categories:` protocol as Qwen3Guard,
+//! Warden-Gen speaks the same `Safety:`/`Categories:` protocol as `Qwen3Guard`,
 //! so parsing and the chat round trip are reused from
 //! [`crate::models::qwen3_guard`]; only the model tag, the category vocabulary
 //! and the generation options live here.
@@ -34,16 +34,16 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
 use crate::error::ScannerError;
-use crate::models::qwen3_guard::{build_category_re, classify_via_chat, Qwen3GuardDialect};
+use crate::models::qwen3_guard::{Qwen3GuardDialect, build_category_re, classify_via_chat};
 use crate::models::{Classifier, ClassifierResult};
-use model_service::{create_client, ModelClient, ModelOptions};
+use asc_model_client::{ModelClient, ModelOptions, create_client};
 
 /// Ollama tag for the Warden-Gen model (prompt and code domains).
 ///
-/// Points at the project-owned ModelScope repository, which Ollama can pull
+/// Points at the project-owned `ModelScope` repository, which Ollama can pull
 /// directly by this path — the repository resolves an untagged name to
 /// `:latest`, so no quantisation tag is needed (mirroring
 /// [`MODEL_QWEN3_GUARD`](crate::models::qwen3_guard::MODEL_QWEN3_GUARD)).
@@ -51,9 +51,9 @@ pub const MODEL_WARDEN_GEN: &str = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF";
 
 /// Categories declared by Warden-Gen's safety policy, lowercase.
 ///
-/// The first nine are inherited from Qwen3Guard's policy, the rest cover the
+/// The first nine are inherited from `Qwen3Guard`'s policy, the rest cover the
 /// agent/code domain.  Note the short `pii`: this model does not use
-/// Qwen3Guard's long `personally identifiable information`, and the two
+/// `Qwen3Guard`'s long `personally identifiable information`, and the two
 /// vocabularies must stay separate — see [`Qwen3GuardDialect`].
 const WARDEN_CATEGORIES: [&str; 18] = [
     "violent",
@@ -90,7 +90,7 @@ const NUM_PREDICT: u32 = 32;
 static WARDEN_CATEGORY_RE: LazyLock<Regex> =
     LazyLock::new(|| build_category_re(&WARDEN_CATEGORIES));
 
-/// Warden-Gen's dialect of the Qwen3Guard protocol.
+/// Warden-Gen's dialect of the `Qwen3Guard` protocol.
 static WARDEN_DIALECT: Qwen3GuardDialect = Qwen3GuardDialect {
     display_name: "Warden-Gen",
     category_re: &WARDEN_CATEGORY_RE,
@@ -100,7 +100,7 @@ static WARDEN_DIALECT: Qwen3GuardDialect = Qwen3GuardDialect {
 /// (case-insensitive).
 ///
 /// Compares case-insensitively rather than lowercasing the input first: the
-/// ModelScope path carries mixed case (`ANOLISA/Warden-Gen-0.6B-GGUF`), which a
+/// `ModelScope` path carries mixed case (`ANOLISA/Warden-Gen-0.6B-GGUF`), which a
 /// lowercased input would never match.
 pub fn is_warden_gen_model(model_name: &str) -> bool {
     MODEL_WARDEN_GEN.eq_ignore_ascii_case(model_name.trim())
@@ -204,8 +204,8 @@ impl Classifier for WardenGenClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3_guard::{Qwen3GuardClassifier, MODEL_QWEN3_GUARD};
-    use model_service::GenerateRequest;
+    use crate::models::qwen3_guard::{MODEL_QWEN3_GUARD, Qwen3GuardClassifier};
+    use asc_model_client::GenerateRequest;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
@@ -239,7 +239,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!("Warden-Gen uses the chat endpoint only")
         }
 
@@ -250,7 +250,7 @@ mod tests {
             options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             *self.seen_options.lock().expect("options lock") = Some(options.clone());
             Ok(self.reply.clone())
         }
@@ -267,7 +267,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!()
         }
 
@@ -278,8 +278,8 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
-            Err(model_service::ModelServiceError::Inference(
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
+            Err(asc_model_client::ModelServiceError::Inference(
                 "connection refused".into(),
             ))
         }

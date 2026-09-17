@@ -4,7 +4,7 @@
 //!
 //! - preprocessing: Unicode normalisation and obfuscation decoding
 //! - L1 `rule_engine`: regex rules over the prompt and decoded variants
-//! - L2 `ml_classifier`: model-backed classification (Qwen3Guard or
+//! - L2 `ml_classifier`: model-backed classification (`Qwen3Guard` or
 //!   Warden-Gen on Ollama)
 //! - L4 `multi_turn_intent`: conversation-level intent classification
 //!
@@ -27,10 +27,10 @@ pub mod rules;
 pub mod scanner;
 pub mod verdict;
 
+pub use asc_model_client::{ModelClient, OllamaClient};
 pub use config::{ScanConfig, ScanMode};
 pub use detectors::{Conversation, DetectInput, DetectionLayer};
 pub use error::ScannerError;
-pub use model_service::{ModelClient, OllamaClient};
 pub use models::multi_turn_intent::Turn;
 pub use models::qwen3_guard::MODEL_QWEN3_GUARD;
 pub use models::warden_gen::MODEL_WARDEN_GEN;

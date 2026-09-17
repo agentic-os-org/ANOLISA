@@ -54,7 +54,7 @@ impl<'a> DetectInput<'a> {
 /// A single detection layer (L1 rules, L2 ML, L4 multi-turn intent).
 pub trait DetectionLayer: Send + Sync {
     /// Stable layer name used in results and verdict rules
-    /// (e.g. "rule_engine", "ml_classifier").
+    /// (e.g. "`rule_engine`", "`ml_classifier`").
     fn name(&self) -> &'static str;
 
     /// Whether this layer's dependencies are available.
