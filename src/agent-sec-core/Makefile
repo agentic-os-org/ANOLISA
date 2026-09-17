@@ -116,7 +116,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/cli/test_session_report_e2e.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
-		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
 		--ignore=tests/e2e/qoder-hooks/test_qoder_skill_ledger_hook_e2e.py \
 		--ignore=tests/e2e/qwen-code-extension/test_qwen_direct_hook_execution.py \
 		--ignore=tests/e2e/skill-ledger/e2e_test.py \
@@ -129,7 +128,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@#   cli/test_session_report_e2e.py           -> session report
 	@#   codex|qoder|qwen hook tests              -> hooks calling the V2 CLI
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
-	@#   prompt-scanner/test_prompt_scanner_e2e.py -> prompt scanning
 	@#   skill-ledger, skill-signing              -> retired V1 per-user keys and Agent hooks
 	@# Rust core lifecycle is covered by tests/v2/e2e/test_skillsec_cli_e2e.py.
 	@#   linux-sandbox                            -> privileged container (same as V1)
