@@ -22,6 +22,7 @@ mkdir -p \
     "$ADAPTERS/claude-code/.claude-plugin" \
     "$ADAPTERS/claude-code/hooks" \
     "$ADAPTERS/codex/.codex-plugin" \
+    "$ADAPTERS/opencode/scripts" \
     "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
     "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
     "$ADAPTERS/qwencode/hooks" \
@@ -36,6 +37,35 @@ cat > "$CONTRACT" <<EOF
 [component]
 name = "tokenless"
 version = "$VERSION"
+
+[[adapters]]
+framework = "claude-code"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/claude-code"
+dest = "{datadir}/adapters/{component}/claude-code/"
+
+[[adapters]]
+framework = "opencode"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/opencode"
+dest = "{datadir}/adapters/{component}/opencode/"
+EOF
+
+# A contract that drops one shipped adapter: the raw backend lays only what the
+# contract names, so packaging must refuse it instead of shipping a silent gap.
+cat > "$TMP/contract-missing-opencode.toml" <<EOF
+[component]
+name = "tokenless"
+version = "$VERSION"
+
+[[adapters]]
+framework = "claude-code"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/claude-code"
+dest = "{datadir}/adapters/{component}/claude-code/"
 EOF
 
 write_json_version() {
@@ -43,7 +73,8 @@ write_json_version() {
     printf '{"name":"tokenless","version":"%s"}\n' "$VERSION" > "$1"
 }
 
-write_json_version "$ADAPTERS/manifest.json"
+printf '{"component":"tokenless","version":"%s","targets":{"claude-code":{},"opencode":{}}}\n' \
+    "$VERSION" > "$ADAPTERS/manifest.json"
 write_json_version "$ADAPTERS/openclaw/package.json"
 write_json_version "$ADAPTERS/openclaw/openclaw.plugin.json"
 printf '{"lockfileVersion":3}\n' > "$ADAPTERS/openclaw/package-lock.json"
@@ -54,6 +85,10 @@ write_json_version "$ADAPTERS/codex/.codex-plugin/plugin.json"
 write_json_version "$ADAPTERS/qwencode/qwen-extension.json"
 write_json_version "$ADAPTERS/qwenpaw/plugin.json"
 printf 'plugin = None\n' > "$ADAPTERS/qwenpaw/plugin.py"
+printf 'export const Tokenless = {};\n' > "$ADAPTERS/opencode/plugin.js"
+for action in detect install uninstall; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/opencode/scripts/$action.sh"
+done
 printf 'anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/download/tokenless/v%s/anolisa_tokenless-%s-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; sys_platform == "linux"\n' \
     "$VERSION" "$VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
 printf '{"name":"anolisa-tokenless"}\n' \
@@ -156,6 +191,17 @@ if run_pack linux aarch64 "$LINUX_X64" "$TMP/mislabeled" 2>/dev/null; then
     echo "ERROR: mislabeled x86_64 binaries unexpectedly passed as aarch64" >&2
     exit 1
 fi
+if TOKENLESS_SOURCE_DIR="$SOURCE" \
+    RAW_CONTRACT="$TMP/contract-missing-opencode.toml" \
+    BIN_DIR="$LINUX_X64" \
+    TARGET_OS=linux \
+    TARGET_ARCH=x86_64 \
+    OUTPUT_DIR="$TMP/undeclared-adapter" \
+    SOURCE_DATE_EPOCH=1700000000 \
+    "$ROOT/packaging/raw/package.sh" package >/dev/null 2>&1; then
+    echo "ERROR: a contract omitting the opencode adapter unexpectedly passed" >&2
+    exit 1
+fi
 
 EXTRACTED="$TMP/extracted"
 mkdir -p "$EXTRACTED"
@@ -170,6 +216,13 @@ for relative in \
     test -f "$EXTRACTED/$relative"
     test ! -L "$EXTRACTED/$relative"
     cmp "$ADAPTERS/common/hooks/run-hook.sh" "$EXTRACTED/$relative"
+done
+for relative in \
+    adapters/opencode/plugin.js \
+    adapters/opencode/scripts/detect.sh \
+    adapters/opencode/scripts/install.sh \
+    adapters/opencode/scripts/uninstall.sh; do
+    test -f "$EXTRACTED/$relative"
 done
 test -f "$EXTRACTED/adapters/dsh/package.json"
 test -f "$EXTRACTED/adapters/dsh/cordis.patch.yml"
@@ -191,9 +244,37 @@ test -z "$(find "$EXTRACTED" \( \
 test "$(stat -c '%a' "$EXTRACTED/bin/tokenless")" = 755
 test "$(stat -c '%a' "$EXTRACTED/adapters/manifest.json")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/common/hooks/run-hook.sh")" = 755
+test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/plugin.js")" = 644
+test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/scripts/install.sh")" = 755
 
 grep -Fq 'source = "bin/tokenless"' "$ROOT/.anolisa/component.toml.in"
 grep -Fq 'source = "extensions/tokenless"' "$ROOT/.anolisa/component.toml.in"
 test "$(grep -o '@VERSION@' "$ROOT/.anolisa/component.toml.in" | wc -l)" = 1
+grep -Fq 'framework = "opencode"' "$ROOT/.anolisa/component.toml.in"
+grep -Fq 'source = "adapters/manifest.json"' "$ROOT/.anolisa/component.toml.in"
+
+# Every adapter target the manifest ships needs a matching [[adapters]] entry,
+# otherwise the raw install silently drops that adapter. verify-release.py
+# enforces this while packaging; assert it on the shipped sources as well.
+python3 - "$ROOT/adapters/tokenless/manifest.json.in" \
+    "$ROOT/.anolisa/component.toml.in" <<'DRIFT_PY'
+import json
+import re
+import sys
+
+manifest_path, contract_path = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as handle:
+    targets = set(json.load(handle).get("targets", {}))
+with open(contract_path, encoding="utf-8") as handle:
+    contract_text = handle.read()
+blocks = re.findall(r"(?ms)^\[\[adapters\]\]\s*$.*?(?=^\[|\Z)", contract_text)
+frameworks = {re.search(r'(?m)^framework\s*=\s*"([^"]+)"', b).group(1) for b in blocks}
+undeclared = sorted(targets - frameworks)
+unshipped = sorted(frameworks - targets)
+if undeclared or unshipped:
+    sys.exit(
+        "ERROR: adapter contract drift: undeclared={} unshipped={}".format(undeclared, unshipped)
+    )
+DRIFT_PY
 
 echo "tokenless component-owned raw package tests passed"

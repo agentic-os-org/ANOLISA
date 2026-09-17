@@ -13,6 +13,8 @@ WORKSPACE_VERSION = re.compile(
     r"(?ms)^\[workspace\.package\]\s*$.*?^version\s*=\s*\"([^\"]+)\""
 )
 COMPONENT = re.compile(r"(?ms)^\[component\]\s*$.*?(?=^\[|\Z)")
+ADAPTER_BLOCK = re.compile(r"(?ms)^\[\[adapters\]\]\s*$.*?(?=^\[|\Z)")
+FRAMEWORK = re.compile(r'(?m)^framework\s*=\s*"([^"]+)"')
 FIELD = r"(?m)^{}\s*=\s*\"([^\"]+)\""
 
 
@@ -46,6 +48,35 @@ def read_hermes_version(path: Path) -> str:
     if match is None:
         raise SystemExit(f"ERROR: {path} has no version")
     return match.group(1)
+
+
+def read_manifest_targets(path: Path) -> set[str]:
+    """Return the framework targets declared by the generated manifest."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
+    targets = document.get("targets") if isinstance(document, dict) else None
+    if targets is None:
+        return set()
+    if not isinstance(targets, dict):
+        raise SystemExit(f"ERROR: {path} has a non-object targets table")
+    return set(targets)
+
+
+def read_contract_frameworks(contract: Path) -> set[str]:
+    """Return every framework named by an [[adapters]] block in the contract."""
+    try:
+        text = contract.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"ERROR: cannot read {contract}: {error}") from error
+    frameworks = set()
+    for block in ADAPTER_BLOCK.finditer(text):
+        match = FRAMEWORK.search(block.group(0))
+        if match is None:
+            raise SystemExit(f"ERROR: {contract} has an [[adapters]] block without framework")
+        frameworks.add(match.group(1))
+    return frameworks
 
 
 def verify_versions(root: Path, contract: Path) -> str:
@@ -111,6 +142,30 @@ def verify_versions(root: Path, contract: Path) -> str:
     return expected
 
 
+def verify_adapter_coverage(root: Path, contract: Path) -> None:
+    """Fail when the install contract and the adapter manifest disagree.
+
+    The raw backend lays exactly the payload the contract names, so an adapter
+    that ships in the archive but has no [[adapters]] entry is silently absent
+    after install. Compare both directions: an undeclared target loses its
+    files, and a declared framework with no target installs a dead bundle.
+    """
+    manifest = root / "adapters" / "tokenless" / "manifest.json"
+    targets = read_manifest_targets(manifest)
+    frameworks = read_contract_frameworks(contract)
+    undeclared = sorted(targets - frameworks)
+    if undeclared:
+        names = ", ".join(undeclared)
+        raise SystemExit(f"ERROR: {contract} declares no [[adapters]] entry for: {names}")
+    unshipped = sorted(frameworks - targets)
+    if unshipped:
+        names = ", ".join(unshipped)
+        raise SystemExit(
+            f"ERROR: {contract} declares adapters that {manifest.relative_to(root)} "
+            f"does not ship: {names}"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse source and contract paths."""
     parser = argparse.ArgumentParser()
@@ -122,7 +177,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     """Print the verified release version for the packaging shell script."""
     args = parse_args()
-    print(verify_versions(args.source_root.resolve(), args.contract.resolve()))
+    root = args.source_root.resolve()
+    contract = args.contract.resolve()
+    version = verify_versions(root, contract)
+    verify_adapter_coverage(root, contract)
+    print(version)
     return 0
 
 

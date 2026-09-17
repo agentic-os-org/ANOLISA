@@ -99,6 +99,10 @@ stage_payload() {
         claude-code/.claude-plugin/plugin.json \
         claude-code/hooks/run-hook.sh \
         codex/.codex-plugin/plugin.json \
+        opencode/plugin.js \
+        opencode/scripts/detect.sh \
+        opencode/scripts/install.sh \
+        opencode/scripts/uninstall.sh \
         qwencode/qwen-extension.json \
         qwencode/hooks/run-hook.sh \
         qwenpaw/plugin.json \

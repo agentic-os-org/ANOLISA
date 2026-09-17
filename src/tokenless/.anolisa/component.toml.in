@@ -61,6 +61,14 @@ source = "adapters/common/"
 target = "{datadir}/adapters/{component}/common/"
 mode = "0644"
 
+# The adapter manifest describes every framework target and is read from the
+# installed adapter root, so it is laid beside the adapter bundles. The RPM
+# channel ships the same file at the same relative path.
+[[component.layout.files]]
+source = "adapters/manifest.json"
+target = "{datadir}/adapters/{component}/manifest.json"
+mode = "0644"
+
 [component.health_check]
 type = "binary_version"
 binary = "{bindir}/tokenless"
@@ -150,6 +158,19 @@ dest = "{datadir}/adapters/{component}/codex/"
 
 [adapters.bundle]
 entry = ".codex-plugin/plugin.json"
+
+# OpenCode local-plugin adapter. ANOLISA ships no built-in opencode driver, so
+# install only lays the bundle under the conventional adapter root; enabling it
+# stays with the adapter's own scripts, exactly as on the RPM channel.
+[[adapters]]
+framework = "opencode"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/opencode"
+dest = "{datadir}/adapters/{component}/opencode/"
+
+[adapters.bundle]
+entry = "plugin.js"
 
 [[adapters]]
 framework = "cosh"
