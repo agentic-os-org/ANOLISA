@@ -5,8 +5,6 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_SCRIPT="$PROJECT_ROOT/scripts/openclaw/install-openclaw.sh"
-REPO_ROOT="$(cd "$PROJECT_ROOT/../.." && pwd)"
-PLUGIN_SRC="$PROJECT_ROOT/src/plugins/openclaw"
 TMPDIR_TEST="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
@@ -17,7 +15,13 @@ WRITTEN_ALLOW="$TMPDIR_TEST/written-allow.json"
 STATE_DIR="$TMPDIR_TEST/state"
 DEFAULT_CONFIG="$STATE_DIR/openclaw.json"
 
+FIXTURE_PROJECT_ROOT="$TMPDIR_TEST/project-root"
+PLUGIN_SRC="$FIXTURE_PROJECT_ROOT/src/ws-ckpt/src/plugins/openclaw"
 FAKE_TARGET_DIR="$TMPDIR_TEST/staged-target"
+mkdir -p "$PLUGIN_SRC/dist/src"
+touch "$PLUGIN_SRC/package.json" \
+    "$PLUGIN_SRC/openclaw.plugin.json" \
+    "$PLUGIN_SRC/dist/src/index.js"
 mkdir -p "$FAKE_TARGET_DIR/share/anolisa/runtime/ws-ckpt/plugins/openclaw"
 
 export ANOLISA_DRY_RUN=1
@@ -208,7 +212,7 @@ run_case() {
         HOME="$case_home"
         OPENCLAW_BIN="$FAKE_OPENCLAW"
         OPENCLAW_STATE_DIR="$STATE_DIR"
-        ANOLISA_PROJECT_ROOT="$REPO_ROOT"
+        ANOLISA_PROJECT_ROOT="$FIXTURE_PROJECT_ROOT"
     )
     if [ -n "$config_path" ]; then
         env_args+=(OPENCLAW_CONFIG_PATH="$config_path" EXPECT_CONFIG_PATH="$config_path")
@@ -529,5 +533,56 @@ if [ -e "$WRITTEN_ALLOW" ]; then
     exit 1
 fi
 grep -Fq "$CUSTOM_CONFIG uses \$include" "$STDERR_LOG"
+
+DISCOVERY_TARGET="$TMPDIR_TEST/discovery-target"
+DISCOVERY_PROJECT="$TMPDIR_TEST/discovery-project"
+PARTIAL_OPENCLAW="$DISCOVERY_TARGET/share/anolisa/runtime/ws-ckpt/plugins/openclaw"
+COMPLETE_OPENCLAW="$DISCOVERY_PROJECT/src/ws-ckpt/src/plugins/openclaw"
+mkdir -p "$PARTIAL_OPENCLAW" "$COMPLETE_OPENCLAW/dist/src"
+touch "$PARTIAL_OPENCLAW/package.json" "$PARTIAL_OPENCLAW/openclaw.plugin.json"
+touch "$COMPLETE_OPENCLAW/package.json" \
+    "$COMPLETE_OPENCLAW/openclaw.plugin.json" \
+    "$COMPLETE_OPENCLAW/dist/src/index.js"
+resolved_plugin="$(
+    ANOLISA_TARGET_DIR="$DISCOVERY_TARGET" \
+        ANOLISA_PROJECT_ROOT="$DISCOVERY_PROJECT" \
+        bash -c 'source "$1"; find_plugin_src openclaw' \
+        _ "$PROJECT_ROOT/scripts/openclaw/lib-discover.sh"
+)"
+if [ "$resolved_plugin" != "$COMPLETE_OPENCLAW" ]; then
+    echo "FAIL (OpenClaw plugin discovery): expected $COMPLETE_OPENCLAW, got $resolved_plugin" >&2
+    exit 1
+fi
+
+PARTIAL_HERMES="$DISCOVERY_TARGET/share/anolisa/runtime/ws-ckpt/plugins/hermes"
+COMPLETE_HERMES="$DISCOVERY_PROJECT/src/ws-ckpt/src/plugins/hermes"
+mkdir -p "$PARTIAL_HERMES" "$COMPLETE_HERMES"
+touch "$PARTIAL_HERMES/plugin.yaml"
+touch "$COMPLETE_HERMES/plugin.yaml" "$COMPLETE_HERMES/__init__.py"
+resolved_plugin="$(
+    ANOLISA_TARGET_DIR="$DISCOVERY_TARGET" \
+        ANOLISA_PROJECT_ROOT="$DISCOVERY_PROJECT" \
+        bash -c 'source "$1"; find_plugin_src hermes' \
+        _ "$PROJECT_ROOT/scripts/hermes/lib-discover.sh"
+)"
+if [ "$resolved_plugin" != "$COMPLETE_HERMES" ]; then
+    echo "FAIL (Hermes plugin discovery): expected $COMPLETE_HERMES, got $resolved_plugin" >&2
+    exit 1
+fi
+
+PARTIAL_SKILL="$DISCOVERY_TARGET/share/anolisa/runtime/skills/ws-ckpt"
+COMPLETE_SKILL="$DISCOVERY_PROJECT/src/ws-ckpt/src/skills/ws-ckpt"
+mkdir -p "$PARTIAL_SKILL" "$COMPLETE_SKILL"
+touch "$COMPLETE_SKILL/SKILL.md"
+resolved_skill="$(
+    ANOLISA_TARGET_DIR="$DISCOVERY_TARGET" \
+        ANOLISA_PROJECT_ROOT="$DISCOVERY_PROJECT" \
+        bash -c 'source "$1"; find_skill_src' \
+        _ "$PROJECT_ROOT/scripts/openclaw/lib-discover.sh"
+)"
+if [ "$resolved_skill" != "$COMPLETE_SKILL" ]; then
+    echo "FAIL (skill discovery): expected $COMPLETE_SKILL, got $resolved_skill" >&2
+    exit 1
+fi
 
 echo "OpenClaw install script tests passed"

@@ -579,11 +579,66 @@ fn generate_auto_id() -> String {
         .to_string()
 }
 
-fn handle_plugin(action: PluginAction) -> Result<()> {
-    handle_plugin_with_adapter_root(action, Path::new("/usr/share/anolisa/adapters/ws-ckpt"))
+const ADAPTER_RELATIVE_ROOT: &str = "anolisa/adapters/ws-ckpt";
+const SYSTEM_ADAPTER_DATA_DIRS: [&str; 2] = ["/usr/share", "/usr/local/share"];
+
+fn plugin_adapter_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = SYSTEM_ADAPTER_DATA_DIRS
+        .iter()
+        .map(|data_dir| PathBuf::from(data_dir).join(ADAPTER_RELATIVE_ROOT))
+        .collect::<Vec<_>>();
+    if let Some(home) = home {
+        roots.push(home.join(".local/share").join(ADAPTER_RELATIVE_ROOT));
+    }
+    roots
 }
 
+fn resolve_plugin_adapter_dir(
+    runtime_dir: &str,
+    required_scripts: &[&str],
+    adapter_roots: &[PathBuf],
+) -> Result<PathBuf> {
+    let candidates = adapter_roots
+        .iter()
+        .map(|root| root.join(runtime_dir))
+        .collect::<Vec<_>>();
+
+    if let Some(candidate) = candidates.iter().find(|candidate| {
+        required_scripts
+            .iter()
+            .all(|script| candidate.join(script).is_file())
+    }) {
+        return Ok(candidate.clone());
+    }
+
+    let searched = candidates
+        .iter()
+        .flat_map(|candidate| {
+            required_scripts
+                .iter()
+                .map(move |script| format!("  - {}", candidate.join(script).display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "cannot find a complete ws-ckpt {runtime_dir} adapter; searched:\n{searched}\nis ws-ckpt installed?"
+    )
+}
+
+fn handle_plugin(action: PluginAction) -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let adapter_roots = plugin_adapter_roots(home.as_deref());
+    handle_plugin_with_adapter_roots(action, &adapter_roots)
+}
+
+#[cfg(test)]
 fn handle_plugin_with_adapter_root(action: PluginAction, adapter_root: &Path) -> Result<()> {
+    handle_plugin_with_adapter_roots(action, &[adapter_root.to_path_buf()])
+}
+
+fn handle_plugin_with_adapter_roots(action: PluginAction, adapter_roots: &[PathBuf]) -> Result<()> {
     let (runtime, runtime_dir) = match &action {
         PluginAction::Install { runtime } | PluginAction::Uninstall { runtime } => match runtime {
             PluginRuntime::Openclaw => (runtime, "openclaw"),
@@ -591,16 +646,34 @@ fn handle_plugin_with_adapter_root(action: PluginAction, adapter_root: &Path) ->
         },
     };
 
-    let adapter_dir = adapter_root.join(runtime_dir);
+    let action_script = match &action {
+        PluginAction::Install { .. } => format!("install-{runtime_dir}.sh"),
+        PluginAction::Uninstall { .. } => format!("uninstall-{runtime_dir}.sh"),
+    };
+    let detect_script = format!("detect-{runtime_dir}.sh");
+    let required_scripts = match (&action, runtime) {
+        (PluginAction::Install { .. }, PluginRuntime::Openclaw) => vec![
+            detect_script.as_str(),
+            action_script.as_str(),
+            "lib-discover.sh",
+            "lib-openclaw.sh",
+        ],
+        (PluginAction::Uninstall { .. }, PluginRuntime::Openclaw) => {
+            vec![action_script.as_str(), "lib-openclaw.sh"]
+        }
+        (PluginAction::Install { .. }, PluginRuntime::Hermes) => vec![
+            detect_script.as_str(),
+            action_script.as_str(),
+            "lib-discover.sh",
+        ],
+        (PluginAction::Uninstall { .. }, PluginRuntime::Hermes) => {
+            vec![action_script.as_str()]
+        }
+    };
+    let adapter_dir = resolve_plugin_adapter_dir(runtime_dir, &required_scripts, adapter_roots)?;
 
     if let PluginAction::Install { .. } = &action {
-        let detect_script = adapter_dir.join(format!("detect-{runtime_dir}.sh"));
-        if !detect_script.is_file() {
-            anyhow::bail!(
-                "cannot find {}; is ws-ckpt installed?",
-                detect_script.display()
-            );
-        }
+        let detect_script = adapter_dir.join(detect_script);
         let detect_code = std::process::Command::new("bash")
             .arg(&detect_script)
             .status()
@@ -624,18 +697,7 @@ fn handle_plugin_with_adapter_root(action: PluginAction, adapter_root: &Path) ->
         }
     }
 
-    let action_script = match &action {
-        PluginAction::Install { .. } => format!("install-{runtime_dir}.sh"),
-        PluginAction::Uninstall { .. } => format!("uninstall-{runtime_dir}.sh"),
-    };
     let script_path = adapter_dir.join(&action_script);
-    if !script_path.is_file() {
-        anyhow::bail!(
-            "cannot find {}; is ws-ckpt installed?",
-            script_path.display()
-        );
-    }
-
     let status = std::process::Command::new("bash")
         .arg(&script_path)
         .status()
@@ -2102,6 +2164,10 @@ mod tests {
             "#!/bin/bash\n: > \"${0%/*}/install-ran\"\n",
         )
         .unwrap();
+        std::fs::write(adapter_dir.join("lib-discover.sh"), "").unwrap();
+        if let PluginRuntime::Openclaw = &runtime {
+            std::fs::write(adapter_dir.join("lib-openclaw.sh"), "").unwrap();
+        }
 
         let result =
             handle_plugin_with_adapter_root(PluginAction::Install { runtime }, &adapter_root);
@@ -2120,6 +2186,104 @@ mod tests {
     #[test]
     fn hermes_install_keeps_existing_plugin() {
         assert_existing_plugin_install_behavior(PluginRuntime::Hermes, "hermes", false);
+    }
+
+    #[test]
+    fn plugin_adapter_roots_cover_supported_install_locations() {
+        assert_eq!(
+            plugin_adapter_roots(Some(Path::new("/home/test"))),
+            vec![
+                PathBuf::from("/usr/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/usr/local/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/home/test/.local/share/anolisa/adapters/ws-ckpt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_adapter_resolution_uses_first_complete_candidate() {
+        let test_root =
+            std::env::temp_dir().join(format!("ws-ckpt-adapter-resolution-{}", std::process::id()));
+        let first = test_root.join("first");
+        let second = test_root.join("second");
+        let first_runtime = first.join("openclaw");
+        let second_runtime = second.join("openclaw");
+        let _ = std::fs::remove_dir_all(&test_root);
+        std::fs::create_dir_all(&first_runtime).unwrap();
+        std::fs::create_dir_all(&second_runtime).unwrap();
+        std::fs::write(first_runtime.join("install-openclaw.sh"), "").unwrap();
+        std::fs::write(second_runtime.join("detect-openclaw.sh"), "").unwrap();
+        std::fs::write(second_runtime.join("install-openclaw.sh"), "").unwrap();
+
+        let roots = vec![first.clone(), second.clone()];
+        let scripts = ["detect-openclaw.sh", "install-openclaw.sh"];
+        assert_eq!(
+            resolve_plugin_adapter_dir("openclaw", &scripts, &roots).unwrap(),
+            second_runtime
+        );
+
+        std::fs::write(first_runtime.join("detect-openclaw.sh"), "").unwrap();
+        assert_eq!(
+            resolve_plugin_adapter_dir("openclaw", &scripts, &roots).unwrap(),
+            first_runtime
+        );
+        std::fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn plugin_install_skips_adapter_missing_sourced_helper() {
+        let test_root = std::env::temp_dir().join(format!(
+            "ws-ckpt-adapter-helper-resolution-{}",
+            std::process::id()
+        ));
+        let first_runtime = test_root.join("first/openclaw");
+        let second_runtime = test_root.join("second/openclaw");
+        let _ = std::fs::remove_dir_all(&test_root);
+
+        for adapter_dir in [&first_runtime, &second_runtime] {
+            std::fs::create_dir_all(adapter_dir).unwrap();
+            std::fs::write(adapter_dir.join("detect-openclaw.sh"), "exit 1\n").unwrap();
+            std::fs::write(
+                adapter_dir.join("install-openclaw.sh"),
+                "#!/bin/bash\n: > \"${0%/*}/install-ran\"\n",
+            )
+            .unwrap();
+            std::fs::write(adapter_dir.join("lib-discover.sh"), "").unwrap();
+        }
+        std::fs::write(second_runtime.join("lib-openclaw.sh"), "").unwrap();
+
+        let roots = vec![test_root.join("first"), test_root.join("second")];
+        let result = handle_plugin_with_adapter_roots(
+            PluginAction::Install {
+                runtime: PluginRuntime::Openclaw,
+            },
+            &roots,
+        );
+        let first_install_ran = first_runtime.join("install-ran").is_file();
+        let second_install_ran = second_runtime.join("install-ran").is_file();
+        let _ = std::fs::remove_dir_all(&test_root);
+
+        result.unwrap();
+        assert!(!first_install_ran);
+        assert!(second_install_ran);
+    }
+
+    #[test]
+    fn plugin_adapter_resolution_reports_all_searched_paths() {
+        let roots = vec![PathBuf::from("/first"), PathBuf::from("/second")];
+        let scripts = ["detect-hermes.sh", "install-hermes.sh"];
+        let error = resolve_plugin_adapter_dir("hermes", &scripts, &roots)
+            .unwrap_err()
+            .to_string();
+
+        for expected in [
+            "/first/hermes/detect-hermes.sh",
+            "/first/hermes/install-hermes.sh",
+            "/second/hermes/detect-hermes.sh",
+            "/second/hermes/install-hermes.sh",
+        ] {
+            assert!(error.contains(expected), "missing {expected} in {error}");
+        }
     }
 
     // ── Subcommand basic parsing ──
