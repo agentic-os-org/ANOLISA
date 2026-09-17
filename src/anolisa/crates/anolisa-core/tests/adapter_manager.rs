@@ -22,8 +22,13 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{
     AdapterClaim, ClaimResourceKind, ClaimStatus, ConfigApplyState, DriverPayload,
 };
-use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
-use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
+use anolisa_core::adapter::driver::{
+    AdapterConditionKind, AdapterStatusReport, AdapterSummary, ConditionStatus,
+};
+use anolisa_core::adapter::manager::{
+    AdapterManager, AdapterSourceStatus, EnableOptions, EnableOutcome, ScanEntry, ScanReport,
+};
+use anolisa_core::central_log::LogRecord;
 use anolisa_core::domain::ProviderBinding;
 use anolisa_core::manifest::{NoticeLevel, NoticeWhen};
 use anolisa_core::state::{
@@ -358,7 +363,12 @@ fn restore_env(key: &str, value: Option<&OsString>) {
 /// home, a fake CLI, the adapter resource bundle, and a seeded state file
 /// recording the component as installed.
 fn stage() -> World {
-    let root = tempfile::tempdir().expect("tempdir");
+    stage_in(tempfile::tempdir().expect("tempdir"))
+}
+
+/// The same staged world rooted at a caller-chosen temp dir, for tests that
+/// need to pin the shape of the prefix path itself.
+fn stage_in(root: tempfile::TempDir) -> World {
     let prefix = root.path().to_path_buf();
     let layout = FsLayout::system(Some(prefix.clone()));
 
@@ -3996,5 +4006,558 @@ dest = "{{datadir}}/adapters/{{component}}/hermes/"
             .find_adapter_claim(COMPONENT, "hermes")
             .is_none(),
         "no receipt for a rejected unsafe authorization"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Adapter observation contracts (#3310, first slice of #3309)
+//
+// Behavior-preserving regression coverage for the two read-only adapter
+// collectors — `AdapterManager::scan` (candidate and receipt rows) and
+// `AdapterManager::status` (per-receipt condition projection). These pin the
+// shared facts the evidence-pipeline consolidation in #3309 must not change:
+// source authority, candidate versus receipt sets, integrity precedence, and
+// the read-only boundary (including which framework queries each collector is
+// allowed to issue).
+// ---------------------------------------------------------------------------
+
+/// Every path under `root` with a content digest for regular files, sorted.
+/// A read-only collector must leave this identical.
+fn tree_snapshot(root: &Path) -> Vec<(PathBuf, Option<String>)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, Option<String>)>) {
+        let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("read snapshot dir")
+            .map(|entry| entry.expect("snapshot dir entry").path())
+            .collect();
+        children.sort();
+        for path in children {
+            let metadata = std::fs::symlink_metadata(&path).expect("snapshot metadata");
+            if metadata.file_type().is_dir() {
+                out.push((path.clone(), None));
+                walk(&path, out);
+            } else {
+                let digest = std::fs::read(&path)
+                    .ok()
+                    .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+                out.push((path, digest));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    if root.is_dir() {
+        out.push((root.to_path_buf(), None));
+        walk(root, &mut out);
+    }
+    out
+}
+
+/// The `(component, framework)` scan row, failing with the whole report when
+/// the collector dropped it.
+fn scan_row<'a>(report: &'a ScanReport, component: &str, framework: &str) -> &'a ScanEntry {
+    report
+        .entries
+        .iter()
+        .find(|entry| entry.component == component && entry.framework == framework)
+        .unwrap_or_else(|| {
+            panic!(
+                "no scan row for {component}/{framework}; got {:?}",
+                report
+                    .entries
+                    .iter()
+                    .map(|entry| (
+                        entry.component.clone(),
+                        entry.framework.clone(),
+                        entry.declared,
+                        entry.enabled
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// The tri-state result of one condition kind, failing with the projected
+/// condition list when the collector omitted it.
+fn condition(report: &AdapterStatusReport, kind: AdapterConditionKind) -> ConditionStatus {
+    report
+        .conditions
+        .iter()
+        .find(|condition| condition.kind == kind)
+        .unwrap_or_else(|| {
+            panic!(
+                "condition {kind:?} missing; got {:?}",
+                report
+                    .conditions
+                    .iter()
+                    .map(|condition| condition.kind)
+                    .collect::<Vec<_>>()
+            )
+        })
+        .status
+}
+
+/// How many times `kind` appears in a status report. Manager-owned conditions
+/// must never be duplicated by whatever the driver reported.
+fn condition_count(report: &AdapterStatusReport, kind: AdapterConditionKind) -> usize {
+    report
+        .conditions
+        .iter()
+        .filter(|condition| condition.kind == kind)
+        .count()
+}
+
+/// Whether one recorded framework argv is a read-only query: a version probe,
+/// a registry/runtime listing, or a `--help` capability probe. Every verb that
+/// could change framework state (install, uninstall, enable, disable, config)
+/// is a mutation unless it is the `--help` form the drivers use to discover
+/// host capabilities.
+fn read_only_framework_query(argv: &str) -> bool {
+    let mut tokens = argv.split_whitespace();
+    match tokens.next() {
+        Some("--version") => tokens.next().is_none(),
+        Some("plugins") => match tokens.next() {
+            Some("list") | Some("inspect") => true,
+            Some("install") | Some("uninstall") | Some("enable") | Some("disable") => {
+                tokens.next() == Some("--help")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Byte length of the central log, or 0 while the file does not exist yet.
+/// Lets a test scope an audit assertion to the records one phase appended
+/// instead of matching text an earlier phase already wrote.
+fn central_log_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// The framework argv of every `framework cli` record appended to the central
+/// log after `offset`, in log order. The exact `program` token the driver
+/// recorded is stripped, so the result is directly comparable with the fake
+/// CLI's own argv log: one entry per spawned query. Stripping at the first
+/// space instead would mis-parse any program path that contains one, which is
+/// what a `TMPDIR` with a space in it hands every staged world.
+fn central_log_framework_argv_after(path: &Path, offset: u64, program: &Path) -> Vec<String> {
+    const PREFIX: &str = "framework cli: ";
+    let program = program.to_string_lossy();
+    let bytes = std::fs::read(path).expect("read central log");
+    assert!(
+        u64::try_from(bytes.len()).expect("log length") >= offset,
+        "central log shrank below the recorded offset {offset}"
+    );
+    let appended =
+        String::from_utf8(bytes[offset as usize..].to_vec()).expect("central log is utf-8");
+    appended
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<LogRecord>(line)
+                .unwrap_or_else(|error| panic!("central log line is not a record: {error}: {line}"))
+        })
+        .filter(|record| record.message.starts_with(PREFIX))
+        .map(|record| {
+            // `<program> <args…>` → `<args…>`, which is what the fake CLI
+            // writes for `$*`.
+            let command = &record.message[PREFIX.len()..];
+            let args = command
+                .strip_prefix(program.as_ref())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "audited command does not start with the staged CLI {program}: {command}"
+                    )
+                })
+                .strip_prefix(' ')
+                .unwrap_or_default();
+            args.to_string()
+        })
+        .collect()
+}
+
+/// A candidate row — declared by the contract and/or discovered on disk, but
+/// with no receipt — carries no source verdict at all, and produces no
+/// `status` row. Source health is a persisted-state concern, so it only exists
+/// once a receipt does; receipt-only status stays distinct from candidate scan.
+#[test]
+fn scan_candidate_row_carries_no_source_verdict_or_status_row() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let report = manager.scan().expect("scan");
+    let row = scan_row(&report, COMPONENT, FRAMEWORK);
+    assert!(row.declared, "the installed manifest declares this adapter");
+    assert!(!row.enabled, "a candidate row has no receipt");
+    assert_eq!(row.claim_status, None);
+    assert_eq!(
+        row.source_status, None,
+        "a candidate row must not carry a source verdict"
+    );
+    assert_eq!(row.source_reason, None);
+    assert_eq!(row.resource_root.as_ref(), Some(&world.resource_root));
+
+    let status = manager.status(None).expect("status");
+    assert!(
+        status.entries.is_empty(),
+        "status must not re-project the candidate set; got {:?}",
+        status
+            .entries
+            .iter()
+            .map(|entry| (entry.component.clone(), entry.framework.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Once a receipt exists the same row gains the source-authority verdict: the
+/// component is still visibly installed and its contract still resolves to a
+/// valid bundle, so the source is `Available` with no operator explanation.
+#[test]
+fn scan_receipt_row_reports_available_source() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let report = manager.scan().expect("scan");
+    let row = scan_row(&report, COMPONENT, FRAMEWORK);
+    assert!(row.enabled);
+    assert_eq!(row.claim_status, Some(ClaimStatus::Enabled));
+    assert_eq!(row.source_status, Some(AdapterSourceStatus::Available));
+    assert_eq!(
+        row.source_reason, None,
+        "an available source needs no operator explanation"
+    );
+    assert_eq!(row.resource_root.as_ref(), Some(&world.resource_root));
+}
+
+/// A receipt outlives its source. When the package-owned bundle disappears the
+/// row stays visible — there is still something to clean up — but flips to
+/// `Missing` with an operator-facing reason, and the vanished directory is no
+/// longer offered as a usable resource root.
+#[test]
+fn scan_receipt_row_reports_missing_source_after_bundle_loss() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    std::fs::remove_dir_all(&world.resource_root).expect("remove package-owned bundle");
+
+    let report = manager.scan().expect("scan");
+    let row = scan_row(&report, COMPONENT, FRAMEWORK);
+    assert!(row.enabled, "the receipt survives its source");
+    assert_eq!(row.claim_status, Some(ClaimStatus::Enabled));
+    assert_eq!(row.source_status, Some(AdapterSourceStatus::Missing));
+    let reason = row
+        .source_reason
+        .clone()
+        .expect("a missing source explains itself");
+    assert!(
+        reason.contains(COMPONENT),
+        "the reason names the component whose source vanished: {reason}"
+    );
+    assert_eq!(
+        row.resource_root, None,
+        "a lost bundle must not be reported as a usable resource root"
+    );
+}
+
+/// `status` projects source authority ahead of integrity: the source verdict
+/// is always the first condition, the package-owned integrity signals follow
+/// in a fixed order, and the manager's own copies are never duplicated by
+/// whatever the driver reported.
+#[test]
+fn status_orders_source_authority_before_integrity() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries.len(), 1);
+    let report = &status.entries[0].report;
+    assert_eq!(report.summary, AdapterSummary::Healthy);
+
+    let kinds = report
+        .conditions
+        .iter()
+        .map(|condition| condition.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds[0],
+        AdapterConditionKind::SourceAvailable,
+        "source authority leads the projection: {kinds:?}"
+    );
+    assert_eq!(kinds[1], AdapterConditionKind::ManagedBundleMatches);
+    assert_eq!(kinds[2], AdapterConditionKind::SourceRevisionMatches);
+
+    for kind in [
+        AdapterConditionKind::SourceAvailable,
+        AdapterConditionKind::ManagedBundleMatches,
+        AdapterConditionKind::SourceRevisionMatches,
+    ] {
+        assert_eq!(
+            condition_count(report, kind),
+            1,
+            "{kind:?} must appear exactly once: {kinds:?}"
+        );
+    }
+    assert!(
+        condition_count(report, AdapterConditionKind::MaterializedBundleMatches) <= 1,
+        "materialized integrity is driver-optional but must never be duplicated: {kinds:?}"
+    );
+
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceAvailable),
+        ConditionStatus::True
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::ManagedBundleMatches),
+        ConditionStatus::True
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceRevisionMatches),
+        ConditionStatus::True
+    );
+}
+
+/// A lost source degrades the receipt, but the integrity signals that can no
+/// longer be read stay `Unknown` — "could not verify", never "verified
+/// absent". Conflating the two would tell an operator the package files were
+/// proven gone when in fact nothing could be proven at all.
+#[test]
+fn status_missing_source_degrades_without_faking_integrity() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    std::fs::remove_dir_all(&world.resource_root).expect("remove package-owned bundle");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries.len(), 1);
+    let report = &status.entries[0].report;
+    assert_eq!(report.summary, AdapterSummary::Degraded);
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceAvailable),
+        ConditionStatus::False
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::ManagedBundleMatches),
+        ConditionStatus::Unknown,
+        "an unreadable source is unverified, not verified-absent"
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceRevisionMatches),
+        ConditionStatus::Unknown,
+        "an unreadable source is unverified, not verified-absent"
+    );
+}
+
+/// Tampering a package-owned source file is *verified* drift, not missing
+/// evidence, and it is attributed to exactly one of the two integrity signals.
+/// `ManagedBundleMatches` reads the bytes on disk, so it goes `False`;
+/// `SourceRevisionMatches` compares the authoritative package metadata
+/// revision captured at enable, which on-disk tampering does not change, so it
+/// stays `True` — a tampered file is not a package upgrade. `False` outranks
+/// `Unknown`, so the summary is Degraded while source authority stays `True`.
+#[test]
+fn status_tampered_package_source_degrades_with_false_integrity() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    // Still a valid bundle marker with the same plugin id, but different
+    // bytes: the package-owned file no longer matches the recorded inventory.
+    std::fs::write(
+        world.resource_root.join("openclaw.plugin.json"),
+        format!(r#"{{"id":"{COMPONENT}","name":"Tokenless (tampered)"}}"#),
+    )
+    .expect("tamper package-owned source");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries.len(), 1);
+    let report = &status.entries[0].report;
+    assert_eq!(report.summary, AdapterSummary::Degraded);
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceAvailable),
+        ConditionStatus::True,
+        "the source is still there; only its bytes drifted"
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::ManagedBundleMatches),
+        ConditionStatus::False,
+        "the bytes on disk no longer match the recorded package inventory"
+    );
+    assert_eq!(
+        condition(report, AdapterConditionKind::SourceRevisionMatches),
+        ConditionStatus::True,
+        "tampering is not a package revision change; the two signals stay independent"
+    );
+}
+
+/// The audited argv must survive a staged prefix whose path contains a space.
+/// `tempfile` inherits `TMPDIR`, so a developer machine or CI runner with a
+/// space in its temp root stages a fake CLI whose absolute path has one too;
+/// stripping the program token at the first space then leaves a path fragment
+/// in the audited argv and the comparison fails on a host where both the
+/// production call and the audit record are correct.
+#[test]
+fn central_log_argv_audit_survives_a_staged_prefix_with_spaces() {
+    let guard = OpenClawEnvGuard::acquire();
+    let parent = tempfile::tempdir().expect("parent tempdir");
+    let spaced = parent.path().join("prefix with spaces");
+    std::fs::create_dir_all(&spaced).expect("spaced prefix");
+    let root = tempfile::Builder::new()
+        .tempdir_in(&spaced)
+        .expect("tempdir under a spaced prefix");
+    let world = stage_in(root);
+    assert!(
+        world.fake_bin.to_string_lossy().contains(' '),
+        "pre-condition: the staged CLI path must contain a space, got {:?}",
+        world.fake_bin
+    );
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let argv_log = world.argv_log();
+    let _ = std::fs::remove_file(&argv_log);
+    guard.set("FAKE_OC_ARGV_LOG", &argv_log);
+    let offset = central_log_len(&world.layout.central_log);
+
+    manager.status(None).expect("status");
+
+    let queries = argv_lines(&argv_log);
+    assert!(
+        !queries.is_empty(),
+        "status must have queried the framework to verify the receipt"
+    );
+    assert_eq!(
+        central_log_framework_argv_after(&world.layout.central_log, offset, &world.fake_bin),
+        queries,
+        "the central log must record exactly the framework queries status \
+         issued, spaces in the staged CLI path included"
+    );
+}
+
+/// The read-only boundary, asserted three ways: `scan` never spawns the
+/// framework at all, `status` only issues read-only framework queries, and
+/// neither collector mutates installed state, the package-owned source tree or
+/// framework-side state, nor takes the install lock. The queries themselves
+/// stay auditable through the existing central log and framework argv log.
+#[test]
+fn scan_and_status_stay_inside_the_read_only_boundary() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    std::fs::remove_file(&world.layout.lock_file).expect("remove released seed lock file");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    let datadir_before = tree_snapshot(&world.layout.datadir);
+    let framework_before = tree_snapshot(&world.openclaw_home);
+    assert!(
+        world.registry_marker_exists(),
+        "pre-condition: the plugin must be registered after enable"
+    );
+
+    // Record the framework argv — and the central-log offset — for the
+    // read-only phase only: `enable` above already wrote its own records.
+    let argv_log = world.argv_log();
+    let _ = std::fs::remove_file(&argv_log);
+    guard.set("FAKE_OC_ARGV_LOG", &argv_log);
+    let central_log_offset = central_log_len(&world.layout.central_log);
+
+    // Detection is side-effect-free by contract: it inspects PATH and the
+    // filesystem, so scan never spawns the framework.
+    let scan = manager.scan().expect("scan");
+    assert!(!scan.entries.is_empty());
+    let scan_queries = argv_lines(&argv_log);
+    assert!(
+        scan_queries.is_empty(),
+        "scan must not spawn a framework query; got {scan_queries:?}"
+    );
+
+    // status may query the framework, but only through read-only verbs.
+    let status = manager.status(None).expect("status");
+    assert_eq!(status.entries.len(), 1);
+    let queries = argv_lines(&argv_log);
+    assert!(
+        !queries.is_empty(),
+        "status must have queried the framework to verify the receipt"
+    );
+    for argv in &queries {
+        assert!(
+            read_only_framework_query(argv),
+            "status issued a mutating framework command: {argv}"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state after the collectors"),
+        state_before,
+        "installed.toml must be byte-identical after scan+status"
+    );
+    assert_eq!(
+        tree_snapshot(&world.layout.datadir),
+        datadir_before,
+        "the package-owned source tree changed under a read-only collector"
+    );
+    assert_eq!(
+        tree_snapshot(&world.openclaw_home),
+        framework_before,
+        "framework-side state changed under a read-only collector"
+    );
+    assert!(
+        !world.layout.lock_file.exists(),
+        "read-only collectors must not take the install lock"
+    );
+    assert!(
+        world.registry_marker_exists(),
+        "the plugin registration must survive a read-only status"
+    );
+    assert!(
+        world.has_claim(),
+        "the receipt must survive a read-only scan+status"
+    );
+
+    // The framework queries stay auditable, and only the read-only phase can
+    // prove it: every query the fake CLI saw must have its own central-log
+    // record appended after `enable`, in the same order. Matching the whole
+    // file instead would be satisfied by the install phase's records, so the
+    // assertion would survive `status` going silent entirely.
+    assert_eq!(
+        central_log_framework_argv_after(
+            &world.layout.central_log,
+            central_log_offset,
+            &world.fake_bin,
+        ),
+        queries,
+        "the central log must record exactly the framework queries status issued"
     );
 }
