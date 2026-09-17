@@ -40,6 +40,10 @@ pub const POLICY_BINDINGS_DELETE: &str = "policy.bindings.delete";
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
 /// Detect personal information and credentials without authorizing an operation.
 pub const ACTION_PII_SCAN: &str = "action.pii_scan";
+/// Scan one prompt for injection or jailbreak attempts before it reaches a model.
+pub const ACTION_PROMPT_SCAN: &str = "action.prompt_scan";
+/// Probe that the models a prompt-scan mode requires are ready to serve.
+pub const ACTION_PROMPT_SCAN_WARMUP: &str = "action.prompt_scan.warmup";
 /// Manage Skill scanning, integrity, history and activation.
 pub const ACTION_SKILL_SEC: &str = "action.skill_sec";
 
@@ -63,7 +67,13 @@ pub const PAP_METHODS: [&str; 15] = [
 ];
 
 /// Complete Action-capability method inventory for this protocol version.
-pub const ACTION_METHODS: [&str; 3] = [ACTION_CODE_SCAN, ACTION_PII_SCAN, ACTION_SKILL_SEC];
+pub const ACTION_METHODS: [&str; 5] = [
+    ACTION_CODE_SCAN,
+    ACTION_PII_SCAN,
+    ACTION_PROMPT_SCAN,
+    ACTION_PROMPT_SCAN_WARMUP,
+    ACTION_SKILL_SEC,
+];
 
 /// One Policy operation resolved from its exact wire method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +138,10 @@ pub enum ActionMethod {
     CodeScan,
     /// PII and credential scan.
     PiiScan,
+    /// Pre-execution prompt scan.
+    PromptScan,
+    /// Readiness probe for the models a prompt-scan mode requires.
+    PromptScanWarmup,
     /// `SkillSec` core operations.
     SkillSec,
 }
@@ -196,6 +210,8 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         POLICY_BINDINGS_DELETE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Delete))),
         ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
         ACTION_PII_SCAN => Some(MethodId::Action(ActionMethod::PiiScan)),
+        ACTION_PROMPT_SCAN => Some(MethodId::Action(ActionMethod::PromptScan)),
+        ACTION_PROMPT_SCAN_WARMUP => Some(MethodId::Action(ActionMethod::PromptScanWarmup)),
         ACTION_SKILL_SEC => Some(MethodId::Action(ActionMethod::SkillSec)),
         _ => None,
     }

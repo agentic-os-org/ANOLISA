@@ -3,6 +3,10 @@ use asc_action_runtime::{ActionRuntime, Finalizer};
 use asc_action_types::ActionId;
 use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
 use asc_capability_pii_scan::{PiiAuditProjector, PiiRuleSet, PiiScanExecutor};
+use asc_capability_prompt_scan::{
+    CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    ScannerProvider,
+};
 use asc_daemon_core::ActionService;
 use std::sync::Arc;
 
@@ -13,6 +17,15 @@ pub fn scan_application(finalizer: Finalizer, pii_rules: Arc<PiiRuleSet>) -> Arc
 }
 
 fn scan_service(finalizer: Finalizer, pii_rules: Arc<PiiRuleSet>) -> ActionService {
+    // The finalizer shares one sink set across capabilities; cloning it forks
+    // the Arc handles, not the sinks, so every runtime finalizes identically.
+    //
+    // The provider builds scanners lazily per mode, so daemon startup
+    // never depends on model-service configuration and the rule-set
+    // compilation cost is paid once per mode, not per request. The warmup
+    // probe shares it, so a successful check warms exactly the scanner
+    // instance the next scan of that mode and model reuses.
+    let provider: Arc<dyn ScannerProvider> = Arc::new(CachingScannerProvider::default());
     ActionService::new(
         ActionRuntime::new(
             ActionId::CodeScan,
@@ -24,12 +37,19 @@ fn scan_service(finalizer: Finalizer, pii_rules: Arc<PiiRuleSet>) -> ActionServi
             ActionId::PiiScan,
             PiiScanExecutor::new(pii_rules),
             PiiAuditProjector,
+            finalizer.clone(),
+        ),
+        ActionRuntime::new(
+            ActionId::PromptScan,
+            PromptScanExecutor::new(Arc::clone(&provider)),
+            PromptScanAuditProjector,
             finalizer,
         ),
+        PromptScanWarmup::new(provider),
     )
 }
 
-/// Registers `SkillSec`, Code Scan and PII against the same lifecycle outputs.
+/// Registers `SkillSec`, Code Scan, PII and prompt scan against the same lifecycle outputs.
 #[must_use]
 pub fn skill_application(
     finalizer: Finalizer,

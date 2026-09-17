@@ -108,7 +108,10 @@ The current crates are:
   inference backends (Ollama); injected by scanner crates.
 - `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
   a rule engine, model-backed classification and multi-turn intent detection;
-  daemon wiring is later work.
+  served by the daemon through `action.prompt_scan`. It supports `fast`,
+  `standard`, and `strict` single-turn text scans, plus `multi_turn` with the
+  conversation triple in `history`/`text`/`assistantResponse`; an optional
+  `model` field overrides the L2 backend.
 
 The crate relationships, acceptance types, executable pass/fail matrix,
 compatibility report, direct-consumer evidence, and rollback boundary are recorded
@@ -117,8 +120,8 @@ in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_
 The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
 maps Prompt Scan and Code Scan migration work onto the repository architecture, including module
 locations, dependency order, interface boundaries, and acceptance requirements.
-The workspace now exposes `action.code_scan` and `action.pii_scan` through the common
-Action Runtime. PII migration and its future policy boundary are described in the
+The workspace now exposes `action.code_scan`, `action.pii_scan` and `action.prompt_scan`
+through the common Action Runtime. PII migration and its future policy boundary are described in the
 [two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
 
 ## PII scanning
@@ -349,7 +352,7 @@ invocation automatically finalizes; handlers and capabilities do not own sinks.
 `asc-telemetry` provides the V1 scan field allowlist and policy gates;
 `asc-event-sink::telemetry::TelemetryWriter` appends only to an existing uploader-owned
 file. Audit JSONL/SQLite and telemetry attempts remain synchronous and independent.
-Code Scan and PII Scan share this lifecycle. PII parameters and normalized business
+Code Scan, PII Scan and prompt scan share this lifecycle. PII parameters and normalized business
 metadata enter the typed `ActionService`; authorized parameter rejection uses
 `Invocation.reject` and the same finalizer. Telemetry retains only allowlisted
 scalars, including PII verdict and elapsed time, independently of audit output.

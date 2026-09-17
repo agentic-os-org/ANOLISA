@@ -80,6 +80,9 @@ mod tests {
     };
     use asc_action_types::ActionId;
     use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
+    use asc_capability_prompt_scan::{
+        CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    };
     use asc_capability_skill_sec::SkillSecService;
     use asc_capability_skill_sec::executor::{SkillSecAuditProjector, SkillSecExecutor};
     use asc_capability_skill_sec::{SkillSecConfig, scanner::ScannerRegistry};
@@ -114,6 +117,13 @@ mod tests {
                     asc_capability_pii_scan::PiiAuditProjector,
                     asc_action_runtime::testing::discarding_finalizer(),
                 ),
+                ActionRuntime::new(
+                    ActionId::PromptScan,
+                    PromptScanExecutor::default(),
+                    PromptScanAuditProjector,
+                    asc_action_runtime::testing::discarding_finalizer(),
+                ),
+                PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
             )
             .with_skill_sec(ActionRuntime::new(
                 ActionId::SkillSec,
@@ -267,6 +277,13 @@ mod tests {
                     asc_capability_pii_scan::PiiAuditProjector,
                     asc_action_runtime::testing::discarding_finalizer(),
                 ),
+                ActionRuntime::new(
+                    ActionId::PromptScan,
+                    PromptScanExecutor::default(),
+                    PromptScanAuditProjector,
+                    asc_action_runtime::testing::discarding_finalizer(),
+                ),
+                PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
             )
             .with_skill_sec(ActionRuntime::new(
                 ActionId::SkillSec,

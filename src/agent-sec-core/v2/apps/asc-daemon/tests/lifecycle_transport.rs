@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use asc_action_runtime::{
     ActionRuntime, AuditProjector, CapabilityExecutor, Diagnostic, DiagnosticSink,
-    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus,
+    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus, WarmupStatus,
 };
-use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CodeScanRequest};
+use asc_action_types::{
+    ActionId, ActionOutcome, AuditProjection, CodeScanRequest, PromptScanRequest,
+    PromptScanWarmupRequest,
+};
 use asc_daemon::{BootstrapConfig, serve};
 use asc_daemon_core::{ActionService, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
@@ -75,6 +78,34 @@ impl AuditProjector for Projector {
         }
     }
 }
+// The scenario drives `action.code_scan` only; the prompt-scan registration
+// just has to satisfy the service's constructor.
+struct UnusedPromptScan;
+impl CapabilityExecutor for UnusedPromptScan {
+    type Request = PromptScanRequest;
+    fn execute(&self, _: &ExecutionControl, _: &PromptScanRequest) -> ActionOutcome {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan")
+    }
+}
+struct UnusedPromptScanProjector;
+impl AuditProjector for UnusedPromptScanProjector {
+    type Request = PromptScanRequest;
+    fn project(&self, _: &PromptScanRequest, outcome: &ActionOutcome) -> AuditProjection {
+        AuditProjection::Completed {
+            request: Map::new(),
+            result: outcome.data.clone(),
+            failure: None,
+        }
+    }
+}
+// The warmup registration likewise just satisfies the service's constructor.
+struct UnusedWarmup;
+impl asc_action_runtime::CapabilityWarmup for UnusedWarmup {
+    type Request = PromptScanWarmupRequest;
+    fn warmup(&self, _: &PromptScanWarmupRequest) -> WarmupStatus {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan.warmup")
+    }
+}
 #[derive(Default)]
 struct Outputs {
     audit: Mutex<Vec<SecurityEvent>>,
@@ -125,6 +156,13 @@ fn controlled_actions(
                 asc_capability_pii_scan::PiiAuditProjector,
                 asc_action_runtime::testing::discarding_finalizer(),
             ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
         )
         .with_skill_sec(ActionRuntime::new(
             ActionId::SkillSec,
@@ -143,6 +181,13 @@ fn controlled_actions(
                 asc_capability_pii_scan::PiiAuditProjector,
                 asc_action_runtime::testing::discarding_finalizer(),
             ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
         )
     }
 }

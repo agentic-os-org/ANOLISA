@@ -11,6 +11,7 @@ use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, Resp
 use crate::action::CodeScanHandler;
 use crate::pap::PapHandler;
 use crate::pii::PiiScanHandler;
+use crate::prompt_scan::PromptScanHandler;
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
@@ -18,6 +19,7 @@ pub struct DaemonDispatcher {
     code_scan: CodeScanHandler,
     pii_scan: PiiScanHandler,
     skill_sec: crate::skill_sec::SkillSecHandler,
+    prompt_scan: PromptScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -35,7 +37,8 @@ impl DaemonDispatcher {
             pap: PapHandler::new(application),
             code_scan: CodeScanHandler::new(Arc::clone(&actions)),
             pii_scan: PiiScanHandler::new(Arc::clone(&actions)),
-            skill_sec: crate::skill_sec::SkillSecHandler::new(actions),
+            skill_sec: crate::skill_sec::SkillSecHandler::new(Arc::clone(&actions)),
+            prompt_scan: PromptScanHandler::new(actions),
             principal_policy,
         }
     }
@@ -114,6 +117,13 @@ impl DaemonDispatcher {
                     self.pii_scan
                         .handle(request_id, peer, control, request.params)
                 }
+                method::ActionMethod::PromptScan => {
+                    self.prompt_scan
+                        .handle(request_id, peer, control, request.params)
+                }
+                method::ActionMethod::PromptScanWarmup => {
+                    self.prompt_scan.handle_warmup(request_id, request.params)
+                }
             },
         }
     }
@@ -132,6 +142,14 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 impl RequestDispatcher for DaemonDispatcher {
     fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        // Prompt scanning waits on a local L2 model call whose own budget
+        // defaults to 30s (`AGENT_SEC_MODEL_SERVICE_TIMEOUT`), so the family
+        // needs a dispatch budget that outlives the slowest configured scan.
+        if request.method == method::ACTION_PROMPT_SCAN
+            || request.method == method::ACTION_PROMPT_SCAN_WARMUP
+        {
+            return Some(std::time::Duration::from_secs(35));
+        }
         if request.method != method::ACTION_SKILL_SEC {
             return None;
         }

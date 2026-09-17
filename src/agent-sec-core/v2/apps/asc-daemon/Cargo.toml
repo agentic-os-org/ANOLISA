@@ -19,6 +19,7 @@ socket2.workspace = true
 uuid.workspace = true
 asc-action-types.workspace = true
 asc-capability-code-scan.workspace = true
+asc-capability-prompt-scan.workspace = true
 asc-capability-skill-sec.workspace = true
 asc-telemetry.workspace = true
 asc-capability-pii-scan = { workspace = true }

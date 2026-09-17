@@ -93,6 +93,9 @@ mod tests {
     use asc_action_types::{ActionId, ActionOutcome};
     use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
     use asc_capability_pii_scan::PiiAuditProjector;
+    use asc_capability_prompt_scan::{
+        CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    };
     use asc_security_events::SecurityEvent;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -128,6 +131,13 @@ mod tests {
                 PiiAuditProjector,
                 audit_finalizer(sink.clone()),
             ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                PromptScanExecutor::default(),
+                PromptScanAuditProjector,
+                discarding_finalizer(),
+            ),
+            PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
         )));
         let context = asc_observability::bind_trace_context_input(
             &asc_observability::Context::new(),

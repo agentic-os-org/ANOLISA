@@ -6,6 +6,7 @@ mod common;
 mod policy;
 mod scan_code;
 mod scan_pii;
+mod scan_prompt;
 mod scope;
 mod skill_ledger;
 
@@ -18,6 +19,8 @@ use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
 use self::scan_pii::ScanPiiCommand;
+use self::scan_prompt::ScanPromptCommand;
+pub use self::scan_prompt::{PromptScanPlan, ScanPromptInputError};
 use self::scope::ScopeCommand;
 use crate::InputError;
 
@@ -36,6 +39,8 @@ pub(crate) enum Command {
     ScanCode(ScanCodeCommand),
     /// Detect PII and credentials through the daemon.
     ScanPii(ScanPiiCommand),
+    /// Scan a prompt for injection or jailbreak attempts.
+    ScanPrompt(ScanPromptCommand),
     /// Manage Skill scanning, signatures, history and activation.
     #[command(subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
@@ -51,6 +56,9 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::ScanPii(command) => command.request(),
+            // Scan-prompt resolves its own request batch (it may read stdin
+            // or a batch file), so the single-request path refuses it.
+            Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
             Self::SkillLedger(command) => command.request(),
         }
@@ -66,6 +74,15 @@ impl Command {
         }
     }
 
+    pub(crate) fn prompt_scan_run(&self) -> Result<scan_prompt::PromptScanPlan, InputError> {
+        match self {
+            Self::ScanPrompt(command) => command.plan().map_err(InputError::from),
+            // The plan resolves stdin and input files before any transport,
+            // so only the scan-prompt command has one.
+            _ => Err(InputError::LocalCommand),
+        }
+    }
+
     pub(crate) const fn is_scan_code(&self) -> bool {
         matches!(self, Self::ScanCode(_))
     }
@@ -75,6 +92,10 @@ impl Command {
             Self::ScanPii(command) => Some(command.format),
             _ => None,
         }
+    }
+
+    pub(crate) const fn is_scan_prompt(&self) -> bool {
+        matches!(self, Self::ScanPrompt(_))
     }
 
     /// Returns the command when it runs locally instead of through the daemon.

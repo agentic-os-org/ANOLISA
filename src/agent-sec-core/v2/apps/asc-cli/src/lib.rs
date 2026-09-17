@@ -14,7 +14,7 @@ use asc_daemon_protocol::DaemonRequest;
 use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
 use commands::Command;
-pub use commands::{CapabilitiesCommand, PiiOutputFormat};
+pub use commands::{CapabilitiesCommand, PiiOutputFormat, PromptScanPlan, ScanPromptInputError};
 
 /// Parsed invocation for one CLI command.
 #[derive(Debug)]
@@ -49,6 +49,7 @@ struct Arguments {
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
+    /// When omitted, the default depends on the command (see [`Cli::timeout`]).
     #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
     timeout_ms: Option<u32>,
     /// Version 1 W3C traceparent/tracestate/baggage JSON carrier.
@@ -117,10 +118,12 @@ impl Cli {
             socket,
             timeout_ms: arguments
                 .timeout_ms
-                .unwrap_or(if arguments.command.is_skill_sec() {
+                .unwrap_or(if arguments.command.is_scan_prompt() {
+                    120_000
+                } else if arguments.command.is_skill_sec() {
                     60_000
                 } else {
-                    5000
+                    5_000
                 }),
             context: context::parse(
                 arguments.otel_context.as_deref(),
@@ -152,17 +155,30 @@ impl Cli {
     }
 
     /// Returns the single call deadline duration.
+    ///
+    /// Defaults are resolved per command at parse time: prompt scans wait
+    /// for a model-backed layer whose inference can take tens of seconds
+    /// (the daemon budgets 35 s for a prompt-scan dispatch, and the V1 CLI
+    /// had no timeout at all), Skill Ledger calls may run signature tooling
+    /// that outlasts an interactive exchange, and every other command keeps
+    /// the 5 s interactive default.
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(u64::from(self.timeout_ms))
     }
 
     /// Delegates to the selected command to construct a typed daemon request.
     ///
+    /// Scan-prompt invocations may carry several requests (a batch file or
+    /// one per conversation payload); [`Cli::prompt_scan_run`] is the
+    /// scan-prompt entry point, and this method serves the single-request
+    /// commands.
+    ///
     /// # Errors
     /// Returns a file read, template decode, or request encoding error.
     pub fn request(&self) -> Result<DaemonRequest, InputError> {
         let mut request = self.command.request()?;
         if self.command.is_skill_sec() {
+            // The dispatcher clamps the method budget to 120 s either way.
             request.params["timeoutMs"] = serde_json::json!(self.timeout_ms.min(120_000));
         }
         Ok(request)
@@ -179,6 +195,15 @@ impl Cli {
         self.command.after_success(request, output);
     }
 
+    /// Resolves a scan-prompt invocation into its requests and warnings.
+    ///
+    /// # Errors
+    /// Returns input-collection failures (empty stdin, malformed JSON
+    /// payload, missing input file) before any daemon traffic.
+    pub fn prompt_scan_run(&self) -> Result<PromptScanPlan, InputError> {
+        self.command.prompt_scan_run()
+    }
+
     /// Whether this invocation uses the V1-compatible scan-code projection.
     pub const fn is_scan_code(&self) -> bool {
         self.command.is_scan_code()
@@ -187,6 +212,11 @@ impl Cli {
     /// Selected PII presentation, or `None` for another command.
     pub const fn pii_format(&self) -> Option<PiiOutputFormat> {
         self.command.pii_format()
+    }
+
+    /// Whether this invocation uses the prompt-scan projection.
+    pub const fn is_scan_prompt(&self) -> bool {
+        self.command.is_scan_prompt()
     }
 }
 
@@ -217,6 +247,10 @@ fn resolve_socket(
 }
 
 /// Local input failures, reported as execution failures rather than daemon errors.
+///
+/// Shared variants cover routing and the authoring commands; each command
+/// family that needs family-specific wording owns its own error type and is
+/// wrapped here, keeping this enum the single exit-path contract.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
     /// Local PII file or stdin access failed.
@@ -242,7 +276,7 @@ pub enum InputError {
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,
-    /// Template file access failed.
+    /// Policy template file access failed.
     #[error("cannot read Policy template: {0}")]
     Read(#[from] std::io::Error),
     /// Bound input before parsing or constructing a request.
@@ -254,6 +288,37 @@ pub enum InputError {
     /// A locally rendered command was asked for a daemon request.
     #[error("this command is rendered locally and sends no daemon request")]
     LocalCommand,
+    /// The scan-prompt command builds its request batch (and reads stdin)
+    /// through [`Cli::prompt_scan_run`], not the single-request path.
+    #[error("scan-prompt requests are resolved through prompt_scan_run")]
+    PromptScanBatch,
+    /// A scan-prompt input failure; that command owns its variants and
+    /// wording, mirroring V1's scan-specific messages.
+    #[error(transparent)]
+    ScanPrompt(#[from] ScanPromptInputError),
+}
+
+impl InputError {
+    /// Whether the message already reads as a terminal usage error, so the
+    /// binary prints it verbatim instead of behind the `agent-sec-cli:`
+    /// prefix. The scan commands own their hints this way, mirroring V1.
+    #[must_use]
+    pub const fn is_usage_hint(&self) -> bool {
+        match self {
+            Self::EmptyCode => true,
+            Self::ScanPrompt(error) => error.is_usage_hint(),
+            Self::PiiRead(_)
+            | Self::PiiUtf8
+            | Self::PiiTooLarge
+            | Self::SkillSec(_)
+            | Self::AnalyzeInput { .. }
+            | Self::Read(_)
+            | Self::TooLarge
+            | Self::Json(_)
+            | Self::LocalCommand
+            | Self::PromptScanBatch => false,
+        }
+    }
 }
 
 #[cfg(test)]

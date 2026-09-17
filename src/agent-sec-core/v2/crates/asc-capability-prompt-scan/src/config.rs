@@ -14,7 +14,7 @@ use crate::models::qwen3_guard::MODEL_QWEN3_GUARD;
 /// - `MultiTurn`: L4 only.  Judges a full conversation triple (history,
 ///   current query, assistant response) and is decoupled from L1/L2
 ///   because it consumes a richer input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScanMode {
     Fast,
     Standard,

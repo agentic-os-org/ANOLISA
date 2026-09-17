@@ -290,10 +290,14 @@ pub(super) fn start(
 mod tests {
     use super::*;
     use asc_action_runtime::{
-        ActionRuntime, CapabilityExecutor, SecurityEventSink, testing::audit_finalizer,
+        ActionRuntime, CapabilityExecutor, SecurityEventSink,
+        testing::{audit_finalizer, discarding_finalizer},
     };
     use asc_action_types::{ActionId, ActionOutcome, SkillSecRequest};
     use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
+    use asc_capability_prompt_scan::{
+        CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    };
     use asc_capability_skill_sec::executor::SkillSecAuditProjector;
     use asc_security_events::SecurityEvent;
 
@@ -318,6 +322,13 @@ mod tests {
                     asc_capability_pii_scan::PiiAuditProjector,
                     finalizer.clone(),
                 ),
+                ActionRuntime::new(
+                    ActionId::PromptScan,
+                    PromptScanExecutor::default(),
+                    PromptScanAuditProjector,
+                    discarding_finalizer(),
+                ),
+                PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
             )
             .with_skill_sec(ActionRuntime::new(
                 ActionId::SkillSec,

@@ -12,6 +12,7 @@ mod action;
 mod dispatcher;
 mod pap;
 mod pii;
+mod prompt_scan;
 mod rejection;
 mod skill_sec;
 

@@ -109,9 +109,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use asc_action_runtime::{ActionRuntime, SecurityEventSink, testing::audit_finalizer};
+    use asc_action_runtime::{
+        ActionRuntime, CapabilityExecutor, SecurityEventSink,
+        testing::{audit_finalizer, discarding_finalizer},
+    };
     use asc_action_types::ActionId;
     use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
+    use asc_capability_prompt_scan::{
+        CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    };
     use asc_security_events::SecurityEvent;
 
     use super::*;
@@ -132,12 +138,24 @@ mod tests {
     }
 
     fn with_sink(sink: Arc<dyn SecurityEventSink>) -> CodeScanHandler {
-        CodeScanHandler::new(Arc::new(ActionService::new(
+        CodeScanHandler::new(action_service_with_code_executor(sink, CodeScanExecutor))
+    }
+
+    /// Builds an `ActionService` with a custom code-scan executor; the prompt
+    /// runtime stays the real one because these tests never invoke it.
+    fn action_service_with_code_executor<E>(
+        sink: Arc<dyn SecurityEventSink>,
+        code_executor: E,
+    ) -> Arc<ActionService>
+    where
+        E: CapabilityExecutor<Request = CodeScanRequest> + 'static,
+    {
+        Arc::new(ActionService::new(
             ActionRuntime::new(
                 ActionId::CodeScan,
-                CodeScanExecutor,
+                code_executor,
                 CodeScanAuditProjector,
-                audit_finalizer(sink),
+                audit_finalizer(sink.clone()),
             ),
             ActionRuntime::new(
                 ActionId::PiiScan,
@@ -145,9 +163,16 @@ mod tests {
                     asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
                 )),
                 asc_capability_pii_scan::PiiAuditProjector,
-                asc_action_runtime::testing::discarding_finalizer(),
+                discarding_finalizer(),
             ),
-        )))
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                PromptScanExecutor::default(),
+                PromptScanAuditProjector,
+                audit_finalizer(sink),
+            ),
+            PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
+        ))
     }
 
     fn handler() -> CodeScanHandler {
@@ -258,22 +283,10 @@ mod tests {
     #[test]
     fn unexpected_execution_failure_is_a_safe_core_error_after_finalization() {
         let sink = Arc::new(RecordingSink::default());
-        let handler = CodeScanHandler::new(Arc::new(ActionService::new(
-            ActionRuntime::new(
-                ActionId::CodeScan,
-                PanickingExecutor,
-                CodeScanAuditProjector,
-                audit_finalizer(sink.clone()),
-            ),
-            ActionRuntime::new(
-                ActionId::PiiScan,
-                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
-                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
-                )),
-                asc_capability_pii_scan::PiiAuditProjector,
-                asc_action_runtime::testing::discarding_finalizer(),
-            ),
-        )));
+        let handler = CodeScanHandler::new(action_service_with_code_executor(
+            sink.clone(),
+            PanickingExecutor,
+        ));
         let response = handler.handle(
             RequestId::new("test").unwrap(),
             PeerCredentials::new(1001, 1002, 1003),
