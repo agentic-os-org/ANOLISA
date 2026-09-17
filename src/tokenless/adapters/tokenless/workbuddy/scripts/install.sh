@@ -149,35 +149,62 @@ fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
 )
 try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    # Every privileged operation below goes through the descriptor mkstemp
+    # handed back (closefd=False keeps it open past the write) instead of
+    # re-resolving tmp_path: chmod/chown/stat by path would follow a symlink
+    # that the owner of codebuddy_home swapped in, and a privileged
+    # installer would then re-mode and re-own an arbitrary file for them.
+    with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    if existing is not None:
-        os.chmod(tmp_path, stat.S_IMODE(existing.st_mode))
+    wanted = None
+    if existing is None:
+        os.fchmod(fd, 0o600)
+    else:
+        os.fchmod(fd, stat.S_IMODE(existing.st_mode))
         try:
-            os.chown(tmp_path, existing.st_uid, existing.st_gid)
+            os.fchown(fd, existing.st_uid, existing.st_gid)
         except OSError:
             # Restoring ownership needs the file's owner or privilege. The
             # verification below decides whether the replace may proceed;
             # swallowing the error here only keeps the diagnostic readable.
             pass
-        staged = os.stat(tmp_path)
-        if (staged.st_uid, staged.st_gid) != (existing.st_uid, existing.st_gid):
-            # Replacing now would move a credential-bearing config to the
-            # installer account: with the original mode restored (typically
-            # 0600) the real owner could lose access to their own
-            # settings.json. Refuse instead; the BaseException handler below
-            # removes the staged temp file.
-            print(
-                f"cannot preserve the ownership of {config_path}: staged "
-                f"{staged.st_uid}:{staged.st_gid}, existing "
-                f"{existing.st_uid}:{existing.st_gid}. Re-run as the file's "
-                "owner, or with privilege to chown.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    else:
-        os.chmod(tmp_path, 0o600)
+        wanted = (existing.st_uid, existing.st_gid)
+    staged = os.fstat(fd)
+    if wanted is not None and (staged.st_uid, staged.st_gid) != wanted:
+        # Replacing now would move a credential-bearing config to the
+        # installer account: with the original mode restored (typically
+        # 0600) the real owner could lose access to their own
+        # settings.json. Refuse instead; the BaseException handler below
+        # removes the staged temp file.
+        print(
+            f"cannot preserve the ownership of {config_path}: staged "
+            f"{staged.st_uid}:{staged.st_gid}, existing "
+            f"{wanted[0]}:{wanted[1]}. Re-run as the file's owner, or with "
+            "privilege to chown.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # os.replace re-resolves tmp_path, and codebuddy_home belongs to the
+    # account being configured, so its owner can swap the staged name for a
+    # symlink or for a file of their own between any two calls. rename(2)
+    # never follows a symlink source, which is what keeps a late swap from
+    # moving an unrelated file, but quietly replacing settings.json with an
+    # impostor would still be corruption: match the directory entry against
+    # the inode this run staged and refuse the rewrite on a mismatch.
+    entry = os.lstat(tmp_path)
+    swapped = (
+        not stat.S_ISREG(entry.st_mode)
+        or (entry.st_dev, entry.st_ino) != (staged.st_dev, staged.st_ino)
+    )
+    if swapped:
+        print(
+            f"the staged temp file for {config_path} is no longer the inode "
+            f"this run created: {tmp_path} was replaced underneath the "
+            "rewrite. Refusing to touch the config.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     os.replace(tmp_path, config_path)
 except BaseException:
     try:
@@ -185,6 +212,8 @@ except BaseException:
     except OSError:
         pass
     raise
+finally:
+    os.close(fd)
 
 with open(config_path, encoding="utf-8") as handle:
     verify = json.load(handle)

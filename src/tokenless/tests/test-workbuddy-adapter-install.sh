@@ -321,6 +321,95 @@ else
     skip "cross-owner rewrite refusal needs a secondary gid plus an unprivileged user namespace (unshare --user)"
 fi
 
+# --- Test 5e: a staged temp file swapped under the rewrite is refused --------
+# Both scripts stage the replacement with tempfile.mkstemp inside
+# ~/.codebuddy, a directory owned by the account being configured. When the
+# installer runs privileged for another account, that directory's owner can
+# unlink the staged temp file and drop a symlink in its place; a chmod, chown
+# or stat that re-resolves the path then follows the link, so a root install
+# would re-mode and re-own an arbitrary file on the attacker's behalf. The
+# scripts must keep using the descriptor mkstemp handed back and refuse the
+# replace when the directory entry is no longer the inode they staged.
+#
+# The swap is injected deterministically through sitecustomize.py, which
+# CPython imports during startup: the wrapper returns the real (fd, path)
+# pair from mkstemp -- the descriptor still points at the staged inode, as it
+# would mid-race -- after replacing the directory entry with a symlink to a
+# canary file whose mode differs from settings.json's.
+export HOME="$SANDBOX/home-swap"
+mkdir -p "$HOME/.codebuddy" "$SANDBOX/swap-inject"
+swap_settings="$HOME/.codebuddy/settings.json"
+swap_canary="$SANDBOX/swap-canary.json"
+echo '{"canary": "unrelated file"}' > "$swap_canary"
+chmod 0755 "$swap_canary"
+echo '{"model": "default-model"}' > "$swap_settings"
+chmod 0600 "$swap_settings"
+
+cat > "$SANDBOX/swap-inject/sitecustomize.py" <<'PYEOF'
+import os
+import tempfile
+
+_real_mkstemp = tempfile.mkstemp
+_CANARY = os.environ["TOKENLESS_TEST_SWAP_TARGET"]
+
+
+def _mkstemp(*args, **kwargs):
+    fd, path = _real_mkstemp(*args, **kwargs)
+    # Stand in for the home owner winning the race: the staged entry is gone
+    # and a symlink to an unrelated file sits at the same name. The caller
+    # keeps the original descriptor, exactly as it would in a live race.
+    os.unlink(path)
+    os.symlink(_CANARY, path)
+    return fd, path
+
+
+tempfile.mkstemp = _mkstemp
+PYEOF
+
+run_swapped() {
+    env PYTHONPATH="$SANDBOX/swap-inject" TOKENLESS_TEST_SWAP_TARGET="$swap_canary" \
+        HOME="$HOME" ANOLISA_TARGET=workbuddy ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        bash "$ADAPTER_DIR/workbuddy/scripts/$1" 2>&1
+}
+
+canary_before="$(stat_identity "$swap_canary")"
+settings_before="$(stat_identity "$swap_settings")"
+settings_content_before="$(cat "$swap_settings")"
+
+swap_out="$(run_swapped install.sh)"
+swap_rc=$?
+if [ "$swap_rc" -ne 0 ] \
+    && printf '%s' "$swap_out" | grep -qi "replaced" \
+    && [ "$(stat_identity "$swap_canary")" = "$canary_before" ] \
+    && [ "$(stat_identity "$swap_settings")" = "$settings_before" ] \
+    && [ "$(cat "$swap_settings")" = "$settings_content_before" ] \
+    && [ ! -L "$swap_settings" ] \
+    && [ "$(count_tokenless_entries "$swap_settings")" = "0" ]; then
+    pass "install refuses a staged temp file swapped for a symlink"
+else
+    fail "install followed the swapped temp path (rc=$swap_rc): $swap_out"
+fi
+
+# uninstall: a real install first (no injection), then the same swap.
+ANOLISA_TARGET=workbuddy ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    HOME="$HOME" bash "$ADAPTER_DIR/workbuddy/scripts/install.sh" >/dev/null 2>&1
+canary_before="$(stat_identity "$swap_canary")"
+settings_before="$(stat_identity "$swap_settings")"
+settings_content_before="$(cat "$swap_settings")"
+swap_out="$(run_swapped uninstall.sh)"
+swap_rc=$?
+if [ "$swap_rc" -ne 0 ] \
+    && printf '%s' "$swap_out" | grep -qi "replaced" \
+    && [ "$(stat_identity "$swap_canary")" = "$canary_before" ] \
+    && [ "$(stat_identity "$swap_settings")" = "$settings_before" ] \
+    && [ "$(cat "$swap_settings")" = "$settings_content_before" ] \
+    && [ ! -L "$swap_settings" ] \
+    && [ "$(count_tokenless_entries "$swap_settings")" = "3" ]; then
+    pass "uninstall refuses a staged temp file swapped for a symlink"
+else
+    fail "uninstall followed the swapped temp path (rc=$swap_rc): $swap_out"
+fi
+
 # --- Test 6: uninstall removes only tokenless entries -----------------------
 export HOME="$SANDBOX/home-wb"
 if ANOLISA_TARGET=workbuddy bash "$ADAPTER_DIR/workbuddy/scripts/uninstall.sh" >"$SANDBOX/out6" 2>&1; then
@@ -372,7 +461,7 @@ fi
 
 # --- Test 10: no stray temp files are left behind -----------------------------
 leftovers="$(find "$SANDBOX/home-perms/.codebuddy" "$SANDBOX/home-perms-fresh/.codebuddy" \
-    "$SANDBOX/home-ownership/.codebuddy" \
+    "$SANDBOX/home-ownership/.codebuddy" "$SANDBOX/home-swap/.codebuddy" \
     -maxdepth 1 -name '*.tmp' -print -quit 2>/dev/null)"
 if [ -z "$leftovers" ]; then
     pass "no temp files left behind in .codebuddy"

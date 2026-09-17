@@ -100,26 +100,50 @@ fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
 )
 try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    # See install.sh: fchmod/fchown/fstat act on the inode this run created,
+    # so a symlink swapped in by the owner of codebuddy_home cannot redirect
+    # a privileged chmod/chown onto an arbitrary file.
+    with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    os.chmod(tmp_path, stat.S_IMODE(existing.st_mode))
+    os.fchmod(fd, stat.S_IMODE(existing.st_mode))
     try:
-        os.chown(tmp_path, existing.st_uid, existing.st_gid)
+        os.fchown(fd, existing.st_uid, existing.st_gid)
     except OSError:
         # The verification below decides whether the replace may proceed;
         # swallowing the error here only keeps the diagnostic readable.
         pass
-    staged = os.stat(tmp_path)
-    if (staged.st_uid, staged.st_gid) != (existing.st_uid, existing.st_gid):
+    staged = os.fstat(fd)
+    wanted = (existing.st_uid, existing.st_gid)
+    if (staged.st_uid, staged.st_gid) != wanted:
         # See install.sh: an un-preserveable owner must abort the rewrite,
         # not hand the config to the installer account. The BaseException
         # handler below removes the staged temp file.
         print(
             f"cannot preserve the ownership of {config_path}: staged "
             f"{staged.st_uid}:{staged.st_gid}, existing "
-            f"{existing.st_uid}:{existing.st_gid}. Re-run as the file's "
-            "owner, or with privilege to chown.",
+            f"{wanted[0]}:{wanted[1]}. Re-run as the file's owner, or with "
+            "privilege to chown.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # os.replace re-resolves tmp_path, and codebuddy_home belongs to the
+    # account being configured, so its owner can swap the staged name for a
+    # symlink or for a file of their own between any two calls. rename(2)
+    # never follows a symlink source, which is what keeps a late swap from
+    # moving an unrelated file, but quietly replacing settings.json with an
+    # impostor would still be corruption: match the directory entry against
+    # the inode this run staged and refuse the rewrite on a mismatch.
+    entry = os.lstat(tmp_path)
+    swapped = (
+        not stat.S_ISREG(entry.st_mode)
+        or (entry.st_dev, entry.st_ino) != (staged.st_dev, staged.st_ino)
+    )
+    if swapped:
+        print(
+            f"the staged temp file for {config_path} is no longer the inode "
+            f"this run created: {tmp_path} was replaced underneath the "
+            "rewrite. Refusing to touch the config.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -130,6 +154,8 @@ except BaseException:
     except OSError:
         pass
     raise
+finally:
+    os.close(fd)
 print(f"[tokenless] tokenless hooks removed from {config_path}.")
 PYEOF
 
