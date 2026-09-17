@@ -144,6 +144,12 @@ fn invalid_and_ambiguous_options_are_usage_errors() {
         let error = Cli::parse_from(args.clone()).unwrap_err();
         assert!(error.use_stderr(), "{args:?} unexpectedly produced help");
     }
+    assert_eq!(
+        Cli::parse_from(["agent-sec-cli", "policy", "list"])
+            .unwrap()
+            .socket(),
+        Some(std::path::Path::new("/run/agent-sec-core/daemon.sock"))
+    );
     assert!(
         Cli::parse_from([
             "agent-sec-cli",

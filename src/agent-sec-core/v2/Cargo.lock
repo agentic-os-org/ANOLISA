@@ -133,9 +133,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-capability-skill-guard"
+version = "0.12.0"
+dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
+ "asc-capability-code-scan",
+ "base64",
+ "chrono",
+ "fancy-regex",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "asc-cli"
 version = "0.12.0"
 dependencies = [
+ "asc-action-runtime",
+ "asc-capability-skill-guard",
  "asc-daemon",
  "asc-daemon-client",
  "asc-daemon-core",
@@ -147,7 +169,10 @@ dependencies = [
  "asc-pap-repository-memory",
  "asc-policy-engine",
  "asc-policy-types",
+ "asc-security-events",
  "clap",
+ "dirs",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",
@@ -161,7 +186,9 @@ name = "asc-daemon"
 version = "0.12.0"
 dependencies = [
  "asc-action-runtime",
+ "asc-action-types",
  "asc-agentsight-client",
+ "asc-capability-skill-guard",
  "asc-daemon-core",
  "asc-daemon-handler",
  "asc-daemon-protocol",
@@ -178,7 +205,9 @@ dependencies = [
  "asc-policy-types",
  "asc-security-events",
  "rustix",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "uuid",
@@ -212,12 +241,23 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-code-scan",
+ "asc-capability-skill-guard",
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-pap",
+ "asc-pap-repository-memory",
+ "asc-policy-engine",
  "asc-security-events",
+ "base64",
+ "ring",
+ "rustix",
  "serde",
  "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "uuid",
 ]
 
@@ -610,6 +650,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -951,6 +1012,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libredox"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d0a00925a9f930d679b6789b721e3a7f9ed110f41b86d2497caa780c3a070a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1045,6 +1115,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1094,6 +1170,17 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "redox_users"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
+dependencies = [
+ "getrandom 0.2.17",
+ "libredox",
+ "thiserror",
+]
 
 [[package]]
 name = "regex-automata"

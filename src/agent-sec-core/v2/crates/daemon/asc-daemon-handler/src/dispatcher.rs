@@ -16,6 +16,7 @@ use crate::pap::PapHandler;
 pub struct DaemonDispatcher {
     pap: PapHandler,
     code_scan: CodeScanHandler,
+    skill_guard: Option<crate::skill_guard::SkillGuardHandler>,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -40,8 +41,31 @@ impl DaemonDispatcher {
         Self {
             pap: PapHandler::new(application),
             code_scan: CodeScanHandler::new(finalizer),
+            skill_guard: None,
             principal_policy,
         }
+    }
+
+    /// Adds `SkillGuard` using the same service and public finalizer as other entrypoints.
+    #[must_use]
+    pub fn with_skill_guard(
+        mut self,
+        service: Arc<asc_capability_skill_guard::SkillGuardService>,
+        finalizer: Finalizer,
+    ) -> Self {
+        self.skill_guard = Some(crate::skill_guard::SkillGuardHandler::new(
+            service, finalizer,
+        ));
+        self
+    }
+
+    /// Adds authenticated `SkillFS` compatibility on the same socket as ordinary V2 requests.
+    #[must_use]
+    pub fn with_skillfs(mut self, bridge: Arc<crate::skillfs::SkillFsBridge>) -> Self {
+        if let Some(handler) = &mut self.skill_guard {
+            handler.skillfs = Some(bridge);
+        }
+        self
     }
 
     /// Handles one decoded request using transport-authenticated peer identity.
@@ -90,6 +114,14 @@ impl DaemonDispatcher {
                     .handle(request_id, &principal, method, request.params)
             }
             MethodId::Action(method) => match method {
+                method::ActionMethod::SkillGuard => match &self.skill_guard {
+                    Some(handler) => handler.handle(request_id, peer, control, request.params),
+                    None => DaemonResponse::error(
+                        request_id,
+                        error_code::INTERNAL,
+                        "SkillGuard is not configured",
+                    ),
+                },
                 method::ActionMethod::CodeScan => {
                     self.code_scan
                         .handle(request_id, peer, control, request.params)
@@ -110,6 +142,31 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 }
 
 impl RequestDispatcher for DaemonDispatcher {
+    fn start_session(
+        &self,
+        peer: asc_daemon_service::PeerCredentials,
+        payload: &[u8],
+    ) -> Result<Option<asc_daemon_service::StartedSession>, DispatchError> {
+        match self.skill_guard.as_ref().and_then(|h| h.skillfs.as_ref()) {
+            Some(bridge) => bridge.start_session(peer, payload),
+            None => Ok(None),
+        }
+    }
+
+    fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
+        let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        if request.method != method::ACTION_SKILL_GUARD || self.skill_guard.is_none() {
+            return None;
+        }
+        let millis = request
+            .params
+            .get("timeoutMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(60_000)
+            .clamp(1, 120_000);
+        Some(std::time::Duration::from_millis(millis))
+    }
+
     fn dispatch(
         &self,
         request: DispatchRequest,

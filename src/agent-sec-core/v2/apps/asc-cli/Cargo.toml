@@ -18,12 +18,17 @@ asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
 asc-policy-types = { workspace = true }
 clap = { workspace = true }
+dirs = { workspace = true }
+rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 unicode-properties = { workspace = true }
 
 [dev-dependencies]
+asc-capability-skill-guard = { workspace = true }
+asc-action-runtime = { workspace = true }
+asc-security-events = { workspace = true }
 tokio = { workspace = true }
 asc-daemon = { workspace = true }
 asc-daemon-core = { workspace = true }

@@ -9,6 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
+ring = { workspace = true }
+rustix = { workspace = true }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+asc-capability-skill-guard = { workspace = true }
 asc-action-runtime = { workspace = true }
 asc-action-types = { workspace = true }
 asc-capability-code-scan = { workspace = true }
@@ -22,3 +28,10 @@ uuid = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+asc-pap = { workspace = true }
+asc-pap-repository-memory = { workspace = true }
+asc-policy-engine = { workspace = true }
+tokio = { workspace = true }

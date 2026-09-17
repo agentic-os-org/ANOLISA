@@ -1,0 +1,50 @@
+{
+  "oracle": "Python standard json/hashlib canonicalization; OpenSSL 3.6.1 Ed25519. Synthetic seed bytes 0..31; never use for deployment.",
+  "pkcs8Hex": "3051020101300506032b657004220420000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f81210003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "publicKeyHex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "canonicalJson": "{\"canonicalSkillDir\":\"/srv/skills/示例\",\"createdAt\":\"2026-09-15T00:00:00.000000Z\",\"fileHashes\":{\"SKILL.md\":\"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"},\"policy\":\"warning\",\"previousManifestSignature\":null,\"previousVersionId\":null,\"scanStatus\":\"warn\",\"scans\":[{\"findings\":[{\"level\":\"warn\",\"message\":\"fixture ✓\",\"metadata\":{\"a\":{\"a\":null,\"z\":false},\"z\":2},\"rule\":\"synthetic\"}],\"scannedAt\":\"2026-09-15T00:00:00.000000Z\",\"scanner\":\"skill-vetter\",\"status\":\"warn\",\"version\":\"0.1.0\"}],\"skillName\":\"示例\",\"updatedAt\":\"2026-09-15T00:00:00.000000Z\",\"userDecision\":null,\"version\":2,\"versionId\":\"v000001\"}",
+  "manifest": {
+    "version": 2,
+    "versionId": "v000001",
+    "previousVersionId": null,
+    "canonicalSkillDir": "/srv/skills/示例",
+    "skillName": "示例",
+    "fileHashes": {
+      "SKILL.md": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    },
+    "scans": [
+      {
+        "scanner": "skill-vetter",
+        "version": "0.1.0",
+        "status": "warn",
+        "findings": [
+          {
+            "rule": "synthetic",
+            "level": "warn",
+            "message": "fixture ✓",
+            "metadata": {
+              "z": 2,
+              "a": {
+                "z": false,
+                "a": null
+              }
+            }
+          }
+        ],
+        "scannedAt": "2026-09-15T00:00:00.000000Z"
+      }
+    ],
+    "scanStatus": "warn",
+    "userDecision": null,
+    "policy": "warning",
+    "createdAt": "2026-09-15T00:00:00.000000Z",
+    "updatedAt": "2026-09-15T00:00:00.000000Z",
+    "previousManifestSignature": null,
+    "manifestHash": "sha256:8df6627edca5205506a9130b1ced7113a2a3356409087a45a526cf297df60a72",
+    "signature": {
+      "algorithm": "ed25519",
+      "value": "AjUoaDCj0GT/lBJeeZ40Kx5v430o53GDN3hzoFkWLGOydFuJDNCwnV0HYM0FKzepYlf7XHukcvBhd9xrQcq+CA==",
+      "keyFingerprint": "sha256:56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c"
+    }
+  }
+}

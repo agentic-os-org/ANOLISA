@@ -497,6 +497,11 @@ redacted text；只保存 text length/SHA-256、扫描选项和 sanitized findin
 [`SKILL_LEDGER_zh.md`](SKILL_LEDGER_zh.md) 定义；SkillFS/daemon 集成由
 [`SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md`](SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md) 定义。
 
+V2 SkillGuard 的分批迁移与已确认的兼容性变更见
+[`SKILL_GUARD_PHASE_ONE_zh.md`](SKILL_GUARD_PHASE_ONE_zh.md)。新 manifest 使用 `version: 2`
+并签署 canonical Skill 身份，使用系统密钥，不导入 V1 历史或保留旧密钥验签。
+此变更不修改本节记录的 V1 oracle，也不改变 SkillFS notify、resolver 和 activation 的协议版本。
+
 ### 10.2 六种 Skill Ledger 状态
 
 Skill Ledger 完整性状态恰好为以下六种，文档和实现不得删减：
@@ -666,3 +671,24 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 - PII schema/redaction：`agent_sec_cli/pii_checker/models.py`、`scanner.py`、`audit.py`。
 - Skill Ledger：`agent_sec_cli/skill_ledger/core/`、`signing/`、`scanner/`。
 - action characterization：`tests/unit-test/security_middleware/backends/`。
+
+## 14. [TARGET V2] SkillGuard Action Runtime 合同
+
+`asc-capability-skill-guard` 的 SkillGuardExecutor 通过共享 SkillGuardService 执行业务，
+SkillGuardAuditProjector 单独生成公共审计投影，ActionRuntime/Finalizer/Sink 统一收尾。
+ActionId::SkillGuard 的 event_type/category 均保持 `skill_ledger`。调用者 UID/PID 来自内核，
+请求 JSON 无法覆盖；启动 reconcile 记录实际 daemon 进程身份。
+
+[PRESERVE V1] scan/certify 完成风险扫描仍退出 0；check deny/tampered/error 退出 1；
+audit 根据 valid 退出；analyze 完整风险结果退出 0、覆盖不足 1、非法输入 2。业务失败与执行错误
+分别记录：风险拒绝可有 success=false 且 errorType 为空。公共审计包括 command、数量、受控
+status/version/exitCode 和错误类别；不复制源码、findings、路径、人工理由、导入证据或密钥。
+
+[批准替代] key/status 使用系统密钥身份，不包含用户公钥路径、口令或历史 keyring；init-keys 和
+--passphrase 不保留。init --no-baseline 只建密钥，force-keys 与 rotate-keys 为 root-only。
+完整输出仍通过 Rust CLI 提供，CLI 不执行任何本地能力回退。每次最多两个 SkillGuard 执行，
+满载返回 Busy 并经过相同 finalizer；同 Skill 的写操作继续由 Service 锁串行化。
+
+SAR-001/002/003/005/006/007/010 的本模块证据位于 capability 的 executor、administration 测试、
+`v2/apps/asc-cli/tests/skill_guard.rs` 和 `v2/fixtures/skillguard/consumer.json`；前四批冻结的
+V1 Scanner/Ledger/Activation fixtures 继续约束完整业务语义。未声明真实 Agent Hook 接入成功。

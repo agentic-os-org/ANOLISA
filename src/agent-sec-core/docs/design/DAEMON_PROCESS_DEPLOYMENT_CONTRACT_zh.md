@@ -272,16 +272,17 @@ framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 trans
 目录不可由 group/other 写入，锁保持 0600。
 `BoundUnixSocket` 允许 other 读写位，继续拒绝执行位、特殊位和缺少 owner 读写的 mode。
 跨 UID fixture 检查普通 UID 可连接且 PAP 管理仍被拒绝；该 fixture 需要 root，
-缺少权限时跳过，不计为验收通过。本次不交付扫描接口。
-进程设置 umask 0077，最终 socket mode 显式设置为 0666。unit 不授予 capabilities，
-启用 NoNewPrivileges、只读系统路径等 hardening，stdout/stderr 进入 journal。
+缺少权限时跳过，不计为验收通过。SkillGuard 扫描与业务接口见第 11 节。
+进程设置 umask 0077，最终 socket mode 显式设置为 0666。unit 启用 NoNewPrivileges，
+stdout/stderr 进入 journal；SkillGuard 目录访问与最小 capabilities 见第 11 节。
 **DPROC-V2-HARDENING-1（2026-09-10，获准实施，跟踪 issue #2861）**：V2 默认启用
 `SystemCallFilter=@system-service`、`SystemCallArchitectures=native` 和
-`MemoryDenyWriteExecute=true`，并保留空 `CapabilityBoundingSet`/`AmbientCapabilities`。
+`MemoryDenyWriteExecute=true`；SkillGuard 将 CapabilityBoundingSet 限定为
+`CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER`，AmbientCapabilities 仍为空。
 打包 fixture 锁定这些生效指令；实际 syscall/W^X 兼容性需在目标发行版的 systemd
 服务下验收当前业务路径，不能用 unit 语法检查或普通进程测试替代。
-V2 spec 暂保留原有 Python、GPG/PGPy、loongshield 依赖声明及 strip/自动依赖
-排除设置；发布前按能力迁移结果单独审计，不在本次 system-service 变更中清理。
+SkillGuard 核心 CLI 子包不再依赖 Python、GPG/PGPy 或 loongshield；未迁移 Hook
+子包仍保留自身依赖。自动依赖排除设置保持不变。
 不再打包 sysusers 文件或执行账户创建脚本。V1/V2 源包分别收录各自的 unit
 模板；构建和安装继续复制共享的 `.anolisa/component.toml`。该 manifest 仍声明
 V1 user scope，尚未适配 V2 的 system-service 编排，不能作为 V2 服务管理的验收证据。
@@ -301,8 +302,8 @@ runner 工作目录的 owner、权限和 umask。
 服务 UID 与 root 是可信边界；客户端不得拥有目录写权限。显式 `--socket` 允许在另一
 安全目录建立隔离开发实例，不代表防止特权操作者故意创建第二个 namespace。
 
-当前正常退出包含 UDS drain 2s、reconciliation join 30s 和 Tokio shutdown 1s 的上限；
-unit 另设 `TimeoutStopSec=45`，超时由 systemd 对 control group 发 SIGKILL。
+当前正常退出包含 UDS drain 2s、SkillFS worker join 30s、reconciliation join 30s
+和 Tokio shutdown 1s 的上限；unit 另设 `TimeoutStopSec=75`，超时由 systemd 对 control group 发 SIGKILL。
 SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
 `Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
 Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。
@@ -312,7 +313,8 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 使用 root 身份的 system unit 和独立安装检查。V2 不再沿用此前的 XDG socket 默认值。服务环境由 systemd 配置，终端变量不会自动
 传给服务；自定义路径时，部署者须同时配置服务和客户端。
 回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
-持久化、业务重启恢复、readiness/持续健康检查和 OTel 不在本次交付范围。
+PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
+SkillGuard 持久化与激活恢复见第 11 节。
 
 RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
 V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
@@ -344,15 +346,18 @@ response 和 output failure 退出 1，参数用法错误退出 2。
 
 请求发送后的超时或协议失败不证明业务未执行；CLI 不自动重试，也不把 Binding
 `PENDING_APPLY`/`PENDING_DELETE` 表述为目标生效或删除完成。CREATE identity、current
-revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；当前命令范围仅覆盖本节的 PAP
-命令，不代表已替代 V1 全量能力或提供 V1 wire adapter。
+revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；
+本节仅冻结 PAP 子集。现有 Code Scan 和新增 SkillGuard 命令分别依照各自合同，不表示
+Rust binary 已替代 V1 全量能力或提供通用 V1 wire adapter。
 
 DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
 共同运行的双进程 E2E 位于 `tests/v2/e2e/`。
 `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root`
-验证真实 daemon binary 的只读授权和信号退出，不依赖 Client 默认凭据是否可用。测试不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
+在 root 环境验证真实 daemon binary 的管理员配置与信号退出，在非 root 环境验证系统 daemon
+明确拒绝启动。普通用户 CLI 调用 root daemon 的证据见 DPROC-SG-001。
+测试注入独立配置、状态及审计目录，不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
 完整 PAP CRUD 保留在 `asc-daemon/tests/pap_protocol.rs` 的进程内 UDS fixture 中；后台下发
 装配由 DPROC-021 验证，CLI/daemon 进程链路由上述 pytest E2E 验证。完整范围与命令见
 [`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
@@ -440,3 +445,47 @@ DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→
   v2/apps/asc-daemon/tests/bootstrap.rs；
 - Rust PAP 完整 serialized UDS scenario：
   v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json。
+
+## 11. [TARGET V2] SkillGuard 系统身份与恢复
+
+SkillGuard 第一阶段使用 root 系统 daemon。`/run/agent-sec-core/daemon.sock` 为默认公共端点，
+CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；无 HOME/XDG socket 回退。
+现有库内 BootstrapConfig::new 仍默认 0600，实际进程使用 0666。单实例锁贯穿已准入请求 drain
+与外层 Tokio 退出；残留恢复拒绝普通文件、符号链接、错误所有者和活跃/不确定监听者。
+
+领域状态默认 `/var/lib/agent-sec/skillguard`，root 所有、0700，当前 signing-key.pk8 为 0600。
+`/etc/agent-sec/skillguard.json` 或 --skillguard-config 可注入 stateDir、精确 managedSkillDirs、
+scanners 和 parsers；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+配置、状态与 runtime 路径校验不跟随符号链接。客户端有业务访问权限不意味着有密钥或配置权限。
+
+换钥不执行 DPROC-017 的 V1 state migration：本模块明确采用新信任域，不导入历史密钥和记录。
+旧部署回退须使用对应 V1 状态，不能混合两个写入者。启动恢复先完成私有换钥 intent，再 reconcile
+登记 Skill；通过公共 Action Runtime 留审计。恢复失败保留状态供管理员排查，不伪装成功；普通
+方法仍可提供状态与诊断。
+
+第七批交付 `packaging/systemd/agent-sec-core-v2.service.in`，安装到 system unit 目录，
+不安装 V1 user unit。服务以 root 运行，`UMask=0077`，runtime 为 0755，state/log 为 0700；
+仅保留 `CAP_DAC_OVERRIDE`、`CAP_CHOWN`、`CAP_FOWNER`，不授予 `CAP_SYS_ADMIN`。
+`NoNewPrivileges` 和内核保护保持开启；HOME、`/tmp`、系统 Skill 目录及共享挂载必须可访问，
+以支持扫描、发布和恢复。`TimeoutStopSec=75` 覆盖连接 drain、SkillFS worker 收尾与运行时退出。
+服务 active 仍不等于业务就绪，必须通过 CLI 状态查询和真实业务验证。
+
+`make install-core-v2` 安装核心二进制、system unit 及初始 0600 配置；保留已有配置，
+不创建签名密钥或启用 Hook。V2 RPM 的 CLI 子包采用 systemd system macros 和
+`%config(noreplace)`，不依赖 Python Ledger。V1/V2 CLI 包名和二进制路径相同，切换前必须停止
+旧写入者并备份匹配状态。源码 staging 检查不替代真实 RPM 安装或 systemd 生命周期验收。
+第七批已在 Alibaba Cloud Linux 4 x86_64 完成源码安装、正常依赖解析的 RPM 安装、真实 PID 1
+systemd 255 下的 45 项操作及 12 项包恢复检查。与新主线对齐后，源码安装套件通过 914 项，
+RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周期用例（含 75s 超时及限流）；
+源码套件跳过 38 项（含无 systemd PID 1），RPM 跳过 37 项规则元数据/清单及 telemetry；
+两套均排除 2 项真实模型用例，失败尝试与单项复验证据分开保存。
+这些结果不代表 Agent Hook 接入或 V1 降级验收。
+
+| ID | 必须验证 | 可执行证据 |
+|---|---|---|
+| DPROC-SG-001 | 公共 socket 上普通 UID 调用、换钥拒绝、导出归属 | `v2/apps/asc-cli/tests/skill_guard.rs` |
+| DPROC-SG-002 | 启动换钥恢复、旧密钥撤销与重新建立信任 | `asc-capability-skill-guard/src/service/administration.rs` 测试 |
+| DPROC-SG-003 | 核心接口保持普通方法原超时和权限 | `asc-daemon-handler/src/skill_guard.rs` 测试与原 PAP/CodeScan 回归 |
+| DPROC-SG-004 | 真实二进制 staging、配置权限/保留、V1/V2 unit 分离 | `tests/packaging/test-skillguard-install.sh` |
+| DPROC-SG-005 | 安装后 CLI 核心流程、公共审计及进程退出 | `tests/v2/e2e/test_skillguard_cli_e2e.py`、`test_daemon_process_e2e.py` |
+| DPROC-SG-006 | 实际 RPM 安装、system unit 启停/重启、普通 UID 与用户/系统 Skill 操作 | 第七批独立 Linux 安装环境执行；staging 和进程 fixture 不替代此证据 |

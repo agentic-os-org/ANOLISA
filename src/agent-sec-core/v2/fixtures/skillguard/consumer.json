@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 2,
+  "scope": "SkillGuard phase-one consumer contract; no Agent Hook integration evidence",
+  "cases": [
+    {
+      "name": "normal-check",
+      "request": {"method": "action.skill_guard", "params": {"command": "check", "skillDir": "/srv/skills/example"}},
+      "response": {"requestId": "fixture", "result": {"success": true, "exitCode": 0, "error": null, "errorType": "", "data": {"status": "pass", "versionId": "v000001", "canonicalSkillDir": "/srv/skills/example", "skillName": "example"}}},
+      "exitCode": 0, "stderrContains": ""
+    },
+    {
+      "name": "risk-check",
+      "request": {"method": "action.skill_guard", "params": {"command": "check", "skillDir": "/srv/skills/example"}},
+      "response": {"requestId": "fixture", "result": {"success": false, "exitCode": 1, "error": null, "errorType": "", "data": {"status": "deny", "versionId": "v000001", "findings": [{"rule": "fixture-risk", "level": "deny", "message": "Synthetic risk"}]}}},
+      "exitCode": 1, "stderrContains": ""
+    },
+    {
+      "name": "uninitialized-system",
+      "request": {"method": "action.skill_guard", "params": {"command": "status"}},
+      "response": {"requestId": "fixture", "result": {"success": true, "exitCode": 0, "error": null, "errorType": "", "data": {"keys": {"initialized": false, "fingerprint": null, "encrypted": false, "keyringSize": 0, "rotationPending": false}, "skills": {"discovered": 0, "health": "empty"}}}},
+      "exitCode": 0, "stderrContains": ""
+    },
+    {
+      "name": "uninitialized-check",
+      "request": {"method": "action.skill_guard", "params": {"command": "check", "skillDir": "/srv/skills/example"}},
+      "response": {"requestId": "fixture", "result": {"success": true, "exitCode": 0, "error": null, "errorType": "", "data": {"status": "none", "canonicalSkillDir": "/srv/skills/example", "skillName": "example", "versionId": null, "createdAt": null, "updatedAt": null, "fileCount": null, "manifestHash": null, "userDecision": null}}},
+      "exitCode": 0, "stderrContains": ""
+    },
+    {
+      "name": "uninitialized-audit",
+      "request": {"method": "action.skill_guard", "params": {"command": "audit", "skillDir": "/srv/skills/example", "verifySnapshots": true}},
+      "response": {"requestId": "fixture", "result": {"success": true, "exitCode": 0, "error": null, "errorType": "", "data": {"canonicalSkillDir": "/srv/skills/example", "skillName": "example", "valid": true, "versions_checked": 0, "errors": [], "message": "No versions found — nothing to audit"}}},
+      "exitCode": 0, "stderrContains": ""
+    },
+    {
+      "name": "execution-timeout",
+      "request": {"method": "action.skill_guard", "params": {"command": "scan", "skillDir": "/srv/skills/example", "timeoutMs": 1}},
+      "response": {"requestId": "fixture", "result": {"success": false, "exitCode": 1, "error": "SkillGuard execution deadline exceeded", "errorType": "TimeoutError", "data": {"status": "error", "error": "SkillGuard execution deadline exceeded"}}},
+      "exitCode": 1, "stderrContains": "deadline exceeded"
+    },
+    {
+      "name": "execution-failure",
+      "request": {"method": "action.skill_guard", "params": {"command": "rotate-keys"}},
+      "response": {"requestId": "fixture", "result": {"success": false, "exitCode": 1, "error": "SkillGuard operation requires root administrator", "errorType": "PermissionDenied", "data": {"status": "error", "error": "SkillGuard operation requires root administrator"}}},
+      "exitCode": 1, "stderrContains": "root administrator"
+    },
+    {
+      "name": "committed-activation-pending",
+      "request": {"method": "action.skill_guard", "params": {"command": "scan", "skillDir": "/srv/skills/example"}},
+      "response": {"requestId": "fixture", "result": {"success": true, "exitCode": 0, "error": null, "errorType": "", "data": {"status": "scanned", "scanStatus": "pass", "versionId": "v000001", "newVersion": true, "activation": {"activeVersionId": "v000001", "target": ".skill-meta/versions/v000001.snapshot", "contractWritten": true, "activationPending": true, "activationXattr": {"written": false}}}}},
+      "exitCode": 0, "stderrContains": ""
+    },
+    {
+      "name": "transport-dispatch-timeout",
+      "request": {"method": "action.skill_guard", "params": {"command": "scan", "skillDir": "/srv/skills/example"}},
+      "response": {"requestId": "fixture", "error": {"code": "deadline_exceeded", "message": "request dispatch deadline expired"}},
+      "exitCode": 1, "stderrContains": "deadline expired"
+    }
+  ]
+}

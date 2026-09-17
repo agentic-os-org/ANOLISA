@@ -13,6 +13,7 @@ name = "agent-sec-daemon"
 path = "src/main.rs"
 
 [dependencies]
+asc-capability-skill-guard = { workspace = true }
 asc-policy-runtime.workspace = true
 asc-pcp.workspace = true
 asc-agentsight-client.workspace = true
@@ -20,7 +21,7 @@ asc-policy-adapter-agentsight.workspace = true
 asc-policy-types.workspace = true
 asc-policy-repository.workspace = true
 asc-action-runtime = { workspace = true }
-rustix.workspace = true
+asc-action-types = { workspace = true }
 asc-daemon-core = { workspace = true }
 asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }
@@ -31,12 +32,15 @@ asc-pap-repository-memory = { workspace = true }
 asc-policy-engine = { workspace = true }
 asc-security-events = { workspace = true }
 thiserror = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
-serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [lints]

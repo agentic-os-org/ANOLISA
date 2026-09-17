@@ -522,3 +522,37 @@ persistent Repository；这些边界见 [Runtime 设计](BINDING_RECONCILER_RUNT
 - [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)：
   background run span、root/parent 关系和 context propagation 的标准语义。attempt child span
   与 contributor Span Links 不属于 Rust 首版要求。
+
+## 14. [TARGET V2] SkillGuard 启动恢复边界
+
+第五批在 UDS 准入前执行一次 SkillGuard 恢复：首先恢复私有换钥 intent，再按已登记的精确根目录
+调用 reconcile。任务共享 SkillGuardService 和公共 Action Runtime，使用 120 秒总预算，不启动
+周期调度器。单 Skill 恢复失败记录公开错误类别和进程诊断，继续处理其他 Skill；后续写操作在同一
+锁内再次检查其恢复 intent。换钥未完成时普通 Ledger 操作拒绝，但 status 与管理员重试可用。
+启动恢复与最近一次业务结果分开；进程启动不代表每个 Skill 均已激活。
+
+DJOB-SG-001 的可执行核心证据是 `asc-capability-skill-guard/src/service/administration.rs` 和
+`src/service/rollback.rs` 的中断恢复测试；进程装配位于 `v2/apps/asc-daemon/src/skill_guard.rs`。
+SkillFS notify 驱动的后台合并队列、重试、shutdown、健康与实际 FUSE 生效在第六批接入，不由本节
+提前声称完成。
+
+## SkillGuard 第一阶段落地边界
+
+上述 Python Job 和早期 Rust 建议由第一阶段的具体实现收口：当前使用一个进程内 worker，
+共享 `SkillGuardService`、Action Runtime 和公共 Finalizer。没有另建 Python 子进程协议或
+通用 Job 调度器。每项变更分别执行 scan 和 activation，前者失败也会尝试后者；业务错误不
+自动重放，仅执行前的 `Busy` 在同一有界期限内重试。
+
+实时通知按 canonical 身份合并，500 ms debounce，持续输入时最多延迟两秒；相同 Skill
+的具体文件列表不影响扫描范围，因此 worker 始终扫描完整 Skill。实时 pending 限制为 256
+个不同 Skill，满队列返回签名拒绝。这是取代上文无界 map 的明确资源边界。启动任务来自
+已有私有 registry，完整安排所有显式注册的挂载 Skill，不受该实时 pending 上限截断。
+
+关闭停止接收并等待当前有界操作。内存 pending 不持久化，daemon 重启后通过全量注册目录
+补扫恢复，而非重新发送原通知或承诺 exactly-once。`status` 的 `skillfs` 对象返回 queued、
+running、processed、failed、lastError；各次 Action 使用公共审计记录，未增加独立 Job
+trace-ID 或第二套审计输出。worker 意外退出时关闭队列准入，`healthy=false`、`running=false`，
+要求重启 daemon；不会继续确认无法处理的通知。可执行异常退出证据为
+`asc-daemon-handler/src/skillfs/worker.rs::unwinding_worker_closes_admission_and_reports_failed_health`。
+具体模块与验收边界见
+[SkillGuard 第一阶段迁移](SKILL_GUARD_PHASE_ONE_zh.md#第六批-skillfs-边界)。

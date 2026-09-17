@@ -47,8 +47,8 @@ struct Arguments {
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
-    #[arg(long, global = true, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..))]
-    timeout_ms: u32,
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    timeout_ms: Option<u32>,
     #[command(subcommand)]
     command: Command,
 }
@@ -104,7 +104,13 @@ impl Cli {
         };
         Ok(Self {
             socket,
-            timeout_ms: arguments.timeout_ms,
+            timeout_ms: arguments
+                .timeout_ms
+                .unwrap_or(if arguments.command.is_skill_guard() {
+                    60_000
+                } else {
+                    5000
+                }),
             command: arguments.command,
         })
     }
@@ -135,7 +141,24 @@ impl Cli {
     /// # Errors
     /// Returns a file read, template decode, or request encoding error.
     pub fn request(&self) -> Result<DaemonRequest, InputError> {
-        self.command.request()
+        let mut request = self.command.request()?;
+        if self.command.is_skill_guard() {
+            request.params["timeoutMs"] = serde_json::json!(self.timeout_ms.min(120_000));
+        }
+        Ok(request)
+    }
+
+    /// Whether this invocation uses the Skill Ledger business output projection.
+    pub const fn is_skill_guard(&self) -> bool {
+        self.command.is_skill_guard()
+    }
+
+    /// Performs caller-owned post-import cleanup after daemon success.
+    ///
+    /// # Errors
+    /// Refuses deletion of changed findings and reports local filesystem failures.
+    pub fn after_success(&self, request: &DaemonRequest) -> Result<(), InputError> {
+        self.command.after_success(request)
     }
 
     /// Whether this invocation uses the V1-compatible scan-code projection.
@@ -173,6 +196,17 @@ fn resolve_socket(
 /// Local input failures, reported as execution failures rather than daemon errors.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
+    /// Invalid `SkillGuard` business input.
+    #[error("SkillGuard input: {0}")]
+    SkillGuard(String),
+    /// Analyze retains its structured bad-input result.
+    #[error("{message}")]
+    AnalyzeInput {
+        /// Stable consumer error code.
+        code: &'static str,
+        /// Bounded public explanation.
+        message: &'static str,
+    },
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,

@@ -15,6 +15,8 @@ use serde_json::Value;
 pub enum ActionId {
     /// Scans Bash or Python code before execution.
     CodeScan,
+    /// Scans, authenticates and manages Skill versions and activation.
+    SkillGuard,
 }
 
 impl ActionId {
@@ -23,6 +25,7 @@ impl ActionId {
     pub const fn event_type(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::SkillGuard => "skill_ledger",
         }
     }
 
@@ -31,6 +34,7 @@ impl ActionId {
     pub const fn category(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::SkillGuard => "skill_ledger",
         }
     }
 }

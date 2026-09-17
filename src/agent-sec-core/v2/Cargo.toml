@@ -8,6 +8,7 @@ members = [
     "crates/action/asc-action-runtime",
     "crates/action/asc-action-types",
     "crates/action/capabilities/asc-capability-code-scan",
+    "crates/action/capabilities/asc-capability-skill-guard",
     "crates/daemon/asc-daemon-client",
     "crates/daemon/asc-daemon-core",
     "crates/daemon/asc-daemon-handler",
@@ -47,6 +48,7 @@ asc-action-runtime = { path = "crates/action/asc-action-runtime" }
 asc-action-types = { path = "crates/action/asc-action-types" }
 asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
 asc-capability-code-scan = { path = "crates/action/capabilities/asc-capability-code-scan" }
+asc-capability-skill-guard = { path = "crates/action/capabilities/asc-capability-skill-guard" }
 asc-daemon = { path = "apps/asc-daemon" }
 asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
 asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
@@ -70,10 +72,13 @@ asc-security-events = { path = "crates/data/asc-security-events" }
 asc-security-summary = { path = "crates/data/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/data/persistence/asc-sqlite-kernel" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+dirs = "6"
 fancy-regex = "0.16"
+ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1", features = ["fs", "process", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serial_test = "3"
