@@ -83,7 +83,7 @@ fn apply_env_overrides(config: &mut CoshConfig) {
         config.log_level = v;
     }
     // debug: true → map to "debug" level if log_level was not explicitly set
-    if config.debug && config.log_level == "warn" {
+    if config.debug && config.log_level == "info" {
         config.log_level = "debug".to_string();
     }
     if let Ok(v) = std::env::var("COSH_SHELL_LANG") {

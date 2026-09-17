@@ -29,6 +29,11 @@ pub(crate) fn install_terminal_recovery() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
+        // Persist the panic before the default hook prints it: stderr is
+        // consumed by the TUI, so this file is the only durable evidence.
+        crate::diagnostics::crash::record_panic(info);
+        // Best-effort cleanup; the crash record above carries the evidence.
+        crate::diagnostics::run_registry::remove_shell();
         prev_hook(info);
     }));
 
@@ -77,6 +82,9 @@ fn restore_terminal() {
 
 extern "C" fn restore_and_exit(sig: libc::c_int) {
     restore_terminal();
+    // Best-effort registry cleanup on the signal exit path (try_lock, so it
+    // can never block inside the handler).
+    crate::diagnostics::run_registry::remove_shell();
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);

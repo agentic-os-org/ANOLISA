@@ -27,6 +27,9 @@ impl OscParser {
                 .reason
                 .unwrap_or_else(|| "natural_language".to_string());
             let sensitive = marker.sensitive.unwrap_or(false);
+            // Feed the live routing-facts snapshot consumed by `/health`
+            // (issue #3055). Category and reason only, never the raw prompt.
+            crate::diagnostics::run_registry::update_last_route(&format!("intercept:{reason}"));
             self.intervention_cuts.push(self.clean.position());
             self.intervention_display_cuts
                 .push((self.display.position(), DisplayCutKind::Intercept));
@@ -63,6 +66,13 @@ impl OscParser {
         let command_id = correlated
             .then(|| self.current.as_ref().map(|command| command.id.clone()))
             .flatten();
+        // Feed the live routing-facts snapshot consumed by `/health`
+        // (issue #3055): the intent is the suppression reason (e.g. a user
+        // command-not-found handler took precedence); never the raw prompt.
+        crate::diagnostics::run_registry::update_last_route(&format!(
+            "fallback:{}",
+            marker.intent.as_deref().unwrap_or("missing")
+        ));
         self.events.push(routing_event(
             session_id,
             command_id,

@@ -104,6 +104,36 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 - **Cross-distro routing**: `Distro::detect()` reads `/etc/os-release` and routes to the correct package manager. Adding a new distro means adding a variant to the `Distro` enum in `cosh-platform/src/detect.rs` and updating the `pkg_manager()` method.
 - **CLI helpers**: `print_success()`, `print_failure()`, `build_meta()` in `cosh-cli/src/main.rs` handle all JSON serialization and exit codes — command modules return `i32` exit codes.
 
+## Diagnostic Logging
+
+Log levels default to `info`; the default level chain is `COSH_LOG` > `RUST_LOG` > TOML `[logging] level` > `info`. Diagnostics rely on two complementary surfaces:
+
+- `tracing` events land in `~/.copilot-shell/logs/cosh-{shell,core}.log.<date>` and are read back by `cosh-shell doctor` (logs collector) and `cosh-shell diagnostics export`.
+- Panics land in `~/.copilot-shell/cosh-*-crash.log` via the panic hook; process lifecycle facts land in `~/.copilot-shell/run/<kind>-<pid>.json` (run registry).
+
+### Info event checklist (acceptance standard)
+
+"Important flow" means this explicit event taxonomy, not ad-hoc judgement. Each entry must independently answer a diagnostic question; add only state-transition level, low-frequency events — never log `info` in high-frequency paths (keystrokes, stream chunks, per-line output):
+
+| Event class | Nodes | Required fields |
+|---|---|---|
+| Process lifecycle | shell/core start, exit (incl. exit code), restart | pid, version, exit_code, reason |
+| Session lifecycle | create, persist, restore, compaction trigger | session_id, scope, duration |
+| Request turns | turn start/end/failure | session_id, error, duration |
+| Adapter transport | core spawn, EOF, reset, recovery state transition | pid, reason |
+| Config/auth | load-failure fallback, provider switch | path, fallback |
+| Approval | approve/deny | mode, redacted command summary |
+| Input routing | every routing decision (NL→Agent / shell / fallback) | category, suppression_reason, shell kind (no raw prompt) |
+
+### Warn/error choke-point dual-write
+
+Do not add a warn/error at every fallible call. Log once at the choke-points where errors already converge (the whole subsystem's failures then reach the log file):
+
+- cosh-shell: `adapter/cosh_core_service/process.rs` output-thread read-failure/EOF, `service_loop` turn-failure and registry-transport-failure branches, `adapter/cosh_core/recovery.rs` recovery-state transition to `Failed`.
+- cosh-core: `headless.rs` turn-failure branch.
+
+Errors that only flow into the UI event channel must be dual-written to `tracing` (visible in logs for post-mortem diagnosis), because the TUI owns stderr and the log directory fallback can silently degrade.
+
 ## Security Heuristics
 
 When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-shell/src/tools/readonly_rules/`.

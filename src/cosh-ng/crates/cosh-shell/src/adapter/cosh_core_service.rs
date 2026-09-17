@@ -58,6 +58,13 @@ pub(crate) struct PersistentCoshCoreRuntime {
 }
 
 impl PersistentCoshCoreRuntime {
+    /// Whether a persistent core runtime has been started, regardless of
+    /// whether it currently answers. The `/health` live probe uses this to
+    /// tell "no runtime yet" apart from "runtime exists but busy/unresponsive".
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
+
     pub(super) fn start_run(
         &self,
         run_id: String,
@@ -230,6 +237,12 @@ impl PersistentCoshCoreRuntime {
         }
         let timeout = registry_timeout(domain, action);
         Some(response_rx.recv_timeout(timeout).unwrap_or_else(|_| {
+            // The service loop releases `busy` once it processes the queued
+            // Registry command, but a hung or dead core can delay that
+            // indefinitely. Clear it here so the next probe retries the live
+            // path instead of permanently falling back to a short-lived child
+            // and reporting a dead core as healthy (issue #3055 /health probe).
+            self.busy.store(false, Ordering::SeqCst);
             Err(RegistryQueryError::Transport(
                 "live registry query timed out".to_string(),
             ))
@@ -309,6 +322,10 @@ fn service_loop(
                         }
                     }
                     Err(error) => {
+                        // Choke-point dual-write: every turn-level failure (spawn,
+                        // protocol, stream errors) converges here; one warn covers
+                        // the whole run_turn surface for post-mortem logs.
+                        tracing::warn!(error = %error, "cosh-core turn failed; resetting process");
                         let _ = mark_recovery_failure(
                             &command.session_state,
                             &command.resume_attempt,
@@ -330,6 +347,13 @@ fn service_loop(
                     )),
                 };
                 if matches!(&result, Err(RegistryQueryError::Transport(_))) {
+                    // Transport failure means the live core stopped responding;
+                    // record it before reset so the log explains the reset.
+                    tracing::warn!(
+                        domain = %command.domain,
+                        action = %command.action,
+                        "live registry transport failed; resetting cosh-core process"
+                    );
                     reset_process(&mut process, &live, &active_stdin, &child_pid);
                 }
                 let _ = command.response_tx.send(result);
@@ -371,6 +395,14 @@ fn run_turn(
         let mut spawned = spawn_process(&command.prepared, command.mode)?;
         spawned.session_id = desired_session_id;
         spawned.workspace_scope.clone_from(&command.session_scope);
+        // Process lifecycle event: core spawn is a key diagnostic node
+        // (pid pairs shell and core in logs, run registry, and export).
+        tracing::info!(
+            pid = spawned.child.id(),
+            session_id = %spawned.session_id.as_deref().unwrap_or("default"),
+            "cosh-core spawned"
+        );
+        crate::diagnostics::run_registry::update_core_pid(spawned.child.id());
         *process = Some(spawned);
         let running = process.as_ref().expect("process was just spawned");
         live.store(true, Ordering::SeqCst);

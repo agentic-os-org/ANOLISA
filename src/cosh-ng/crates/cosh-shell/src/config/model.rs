@@ -98,7 +98,7 @@ impl Default for CoshConfig {
             startup_banner: true,
             startup_hooks: false,
             debug: false,
-            log_level: "warn".into(),
+            log_level: "info".into(),
             ai_enabled: true,
             input_wait_timeout_secs: 120,
             health: HealthConfig::default(),

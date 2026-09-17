@@ -70,6 +70,7 @@ pub(super) fn spawn_sync_cosh_core_child(
         "cosh-core",
         ProviderStdinMode::Piped,
         ProviderPromptArgMode::None,
+        &[],
     )?;
     // Keep the envelope and hook-only raw input structured on stdin. This
     // avoids exposing prompt contents through argv or hitting ARG_MAX.

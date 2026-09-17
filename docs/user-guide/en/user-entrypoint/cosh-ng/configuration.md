@@ -47,11 +47,11 @@ auto_persist = true
 persist_dir = "~/.copilot-shell/cosh-core/sessions"
 
 [logging]
-level = "warn"
+level = "info"
 
 [ui]
 language = "auto"
-log_level = "warn"
+log_level = "info"
 
 [shell]
 default = "auto"

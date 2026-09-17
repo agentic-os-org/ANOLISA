@@ -221,6 +221,10 @@ pub struct ShellEnvironmentSnapshot {
     pub marker_sequence: u64,
     pub generation: u64,
     pub path: String,
+    /// zsh `command_not_found_handler` ownership reported on precmd markers
+    /// (`missing` | `native` | `wrapping-user` | `overridden`); None for
+    /// bash and for shells that never reported it.
+    pub cnf_handler: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

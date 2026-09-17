@@ -42,7 +42,7 @@ pub use cosh_core::{
     SessionClearResult, SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient,
     SessionRecovery, SessionRecoveryState, SessionRuntimeState, SessionSummary,
 };
-pub(crate) use cosh_core_registry::RegistryQueryError;
+pub(crate) use cosh_core_registry::{CoreLiveness, RegistryQueryError};
 pub use fake::FakeAgentAdapter;
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,

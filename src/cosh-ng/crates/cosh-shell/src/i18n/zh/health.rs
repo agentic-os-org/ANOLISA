@@ -112,6 +112,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthCollectorHooks => "Hooks",
         MessageId::HealthCollectorPty => "PTY",
         MessageId::HealthCollectorPermissions => "权限",
+        MessageId::HealthCollectorRuntime => "运行时",
+        MessageId::HealthCollectorLogs => "日志",
         MessageId::DoctorTitle => "cosh-shell 体检",
         MessageId::DoctorStatusLabel => "状态",
         MessageId::DoctorChecksLabel => "检查项",
@@ -122,6 +124,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingHooksUntrusted => "项目 hooks 未信任",
         MessageId::HealthFindingPtyUnavailable => "PTY 支持不可用",
         MessageId::HealthFindingPermissionsUnwritable => "配置目录不可写",
+        MessageId::HealthFindingOrphanCore => "孤立的 cosh-core 进程（pid {pid}）",
+        MessageId::HealthFindingStaleEntry => {
+            "{kind} 进程留下残留条目（pid {pid}，启动于 {time}）"
+        }
+        MessageId::HealthFindingCrash => "{kind} 于 {time} 发生 panic：{panic}",
+        MessageId::HealthFindingRecentErrors => {
+            "{file} 24h 内有 {count} 条 ERROR（最近一条 {time}）"
+        }
+        MessageId::HealthFindingWarnFlood => {
+            "{file} 24h 内有 {count} 条 WARN（疑似重试循环）"
+        }
         MessageId::HealthRemediationProvider => {
             "为 adapter '{adapter}' 配置凭据（环境变量或 config.toml），或运行 /auth"
         }
@@ -144,6 +157,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthRemediationPermissions => {
             "修正 {path} 的权限，使 cosh-shell 能写入配置、日志与状态"
         }
+        MessageId::HealthRemediationOrphanCore => {
+            "没有 shell 持有该 core；用以下命令停止：kill {pid}"
+        }
+        MessageId::HealthRemediationStaleEntry => {
+            "请与 crash 记录关联查看；运行 `cosh-shell diagnostics export` 收集证据"
+        }
+        MessageId::HealthRemediationCrash => {
+            "运行 `cosh-shell diagnostics export` 并在 crashes 部分查看崩溃详情"
+        }
+        MessageId::HealthRemediationLogs => {
+            "运行 `cosh-shell diagnostics export` 并在 logs 部分查看错误日志"
+        }
         MessageId::HealthTryReasonMemoryLow => "可用内存偏低",
         MessageId::HealthTryReasonSwapWithContext => "swap 偏高且有压力上下文",
         MessageId::HealthTryReasonRecentOom => "近期 OOM 值得回溯原因",
@@ -151,6 +176,58 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "配置服务状态异常",
         MessageId::HealthTryReasonHighLoad => "最近负载持续偏高",
         MessageId::HealthTryReasonMissingCoreCheck => "核心健康检查缺失",
+        MessageId::HealthLiveSectionTitle => "活会话",
+        MessageId::HealthLiveCoreAlive => "core：存活（live registry 响应正常）",
+        MessageId::HealthLiveCoreNoResponse => "core：无响应（{reason}）",
+        MessageId::HealthLiveCoreNoRuntime => "core：无持久运行时",
+        MessageId::HealthLiveRecovery => "恢复状态：{state}",
+        MessageId::HealthLiveRoutingFacts => {
+            "路由：ai={ai}，assistance={assistance}，integration={integration}，marker generation={generation}"
+        }
+        MessageId::HealthLiveCnfHandler => "command-not-found 处理器：{ownership}",
+        MessageId::HealthLiveLastRoute => "最近路由决策：{route}",
+        MessageId::HealthLiveRoutingHint => {
+            "live 事实未发现路由异常；若自然语言输入仍不路由，请检查 wrapper 覆盖与 marker generation"
+        }
+        MessageId::HealthFindingRouteFallback => {
+            "路由兼容性回退，非 provider 故障：{reason}"
+        }
+        MessageId::HealthFindingCoreNoResponse => "core 对 live 探测无响应：{reason}",
+        MessageId::HealthFindingRecoveryFailed => "会话恢复处于异常状态（{state}）",
+        MessageId::HealthRemediationRouteFallback => "参见排查文档的“输入路由”章节",
+        MessageId::HealthRemediationCoreNoResponse => {
+            "运行 `cosh-shell diagnostics export` 收集证据，然后重启 cosh-shell"
+        }
+        MessageId::HealthLiveReasonAiDisabled => "AI 已禁用",
+        MessageId::HealthLiveReasonAssistanceOff => "assistance（路由）已关闭",
+        MessageId::HealthLiveReasonUserCnf => "用户自定义 command-not-found handler 优先",
+        MessageId::HealthLiveReasonCnfOverridden => {
+            "command-not-found handler 在启动后被覆盖"
+        }
+        MessageId::HealthLiveReasonCnfMissing => "command-not-found handler 已被移除",
+        MessageId::DoctorVersionLine => {
+            "版本：cosh-shell {shell_version}，cosh-core {core_version}"
+        }
+        MessageId::DoctorHostLine => "主机：{host}",
+        MessageId::DoctorRuntimeLine => "运行时：{summary}",
+        MessageId::DoctorRuntimeSummaryNone => "无活跃会话",
+        MessageId::DoctorRoutingLine => {
+            "路由：ai={ai}，integration={integration}，command-not-found handler={cnf}，最近路由决策={route}"
+        }
+        MessageId::DoctorRoutingUnavailable => {
+            "路由：live 探针不可用；请在受影响会话内运行 /health"
+        }
+        MessageId::DoctorLogsLine => {
+            "日志：level={level}，最近写入 {last}；24h 错误：{errors}"
+        }
+        MessageId::DoctorLogsNoFiles => "无日志文件",
+        MessageId::DoctorCrashesLine => "崩溃：24h 内 {count} 起{detail}",
+        MessageId::DoctorExportHint => {
+            "下一步：运行 `cosh-shell diagnostics export` 收集脱敏证据包（排查指引见 docs/user-guide/zh/user-entrypoint/cosh-ng/troubleshooting.md）"
+        }
+        MessageId::HelpDiagnosticsHint => {
+            "遇到问题：先在会话内运行 /health，或退出后运行 `cosh-shell doctor`；排查指引见 docs/user-guide/zh/user-entrypoint/cosh-ng/troubleshooting.md"
+        }
         _ => return None,
     })
 }

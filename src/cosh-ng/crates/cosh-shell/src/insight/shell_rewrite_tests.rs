@@ -16,6 +16,7 @@ fn snapshot(
         marker_sequence,
         generation,
         path: path.to_string(),
+        cnf_handler: None,
     }
 }
 

@@ -122,6 +122,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthCollectorHooks => "Hooks",
         MessageId::HealthCollectorPty => "PTY",
         MessageId::HealthCollectorPermissions => "Permissions",
+        MessageId::HealthCollectorRuntime => "Runtime",
+        MessageId::HealthCollectorLogs => "Logs",
         MessageId::DoctorTitle => "cosh-shell doctor",
         MessageId::DoctorStatusLabel => "status",
         MessageId::DoctorChecksLabel => "checks",
@@ -132,6 +134,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingHooksUntrusted => "project hooks not trusted",
         MessageId::HealthFindingPtyUnavailable => "PTY support unavailable",
         MessageId::HealthFindingPermissionsUnwritable => "config directory not writable",
+        MessageId::HealthFindingOrphanCore => "orphaned cosh-core process (pid {pid})",
+        MessageId::HealthFindingStaleEntry => {
+            "{kind} entry left behind (pid {pid}, started {time})"
+        }
+        MessageId::HealthFindingCrash => "{kind} panicked at {time}: {panic}",
+        MessageId::HealthFindingRecentErrors => {
+            "{count} ERROR entries in {file} within 24h (last {time})"
+        }
+        MessageId::HealthFindingWarnFlood => {
+            "{count} WARN entries in {file} within 24h (retry loop?)"
+        }
         MessageId::HealthRemediationProvider => {
             "configure credentials for adapter '{adapter}' (env or config.toml) or run /auth"
         }
@@ -156,6 +169,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthRemediationPermissions => {
             "fix permissions on {path} so cosh-shell can write config, logs and state"
         }
+        MessageId::HealthRemediationOrphanCore => {
+            "no shell owns this core; stop it with: kill {pid}"
+        }
+        MessageId::HealthRemediationStaleEntry => {
+            "correlate with crash records; run `cosh-shell diagnostics export` to collect evidence"
+        }
+        MessageId::HealthRemediationCrash => {
+            "run `cosh-shell diagnostics export` and inspect the crashes section"
+        }
+        MessageId::HealthRemediationLogs => {
+            "run `cosh-shell diagnostics export` and inspect the logs section"
+        }
         MessageId::HealthTryReasonMemoryLow => "available memory is low",
         MessageId::HealthTryReasonSwapWithContext => "swap is high with pressure context",
         MessageId::HealthTryReasonRecentOom => "recent OOM is worth reviewing",
@@ -163,6 +188,68 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "configured service state is unexpected",
         MessageId::HealthTryReasonHighLoad => "load is elevated across recent windows",
         MessageId::HealthTryReasonMissingCoreCheck => "a core health check is unavailable",
+        MessageId::HealthLiveSectionTitle => "live session",
+        MessageId::HealthLiveCoreAlive => "core: alive (live registry response)",
+        MessageId::HealthLiveCoreNoResponse => "core: no response ({reason})",
+        MessageId::HealthLiveCoreNoRuntime => "core: no persistent runtime",
+        MessageId::HealthLiveRecovery => "recovery: {state}",
+        MessageId::HealthLiveRoutingFacts => {
+            "routing: ai={ai}, assistance={assistance}, integration={integration}, marker generation={generation}"
+        }
+        MessageId::HealthLiveCnfHandler => "command-not-found handler: {ownership}",
+        MessageId::HealthLiveLastRoute => "last route: {route}",
+        MessageId::HealthLiveRoutingHint => {
+            "no routing anomaly in live facts; if natural-language input still does not route, check wrapper coverage and marker generation"
+        }
+        MessageId::HealthFindingRouteFallback => {
+            "routing compatibility fallback, not a provider failure: {reason}"
+        }
+        MessageId::HealthFindingCoreNoResponse => {
+            "core did not respond to the live probe: {reason}"
+        }
+        MessageId::HealthFindingRecoveryFailed => {
+            "session recovery is in an abnormal state ({state})"
+        }
+        MessageId::HealthRemediationRouteFallback => {
+            "see the troubleshooting guide section on input routing"
+        }
+        MessageId::HealthRemediationCoreNoResponse => {
+            "run `cosh-shell diagnostics export` to collect evidence, then restart cosh-shell"
+        }
+        MessageId::HealthLiveReasonAiDisabled => "AI is disabled",
+        MessageId::HealthLiveReasonAssistanceOff => "assistance (routing) is off",
+        MessageId::HealthLiveReasonUserCnf => {
+            "a user command-not-found handler takes precedence"
+        }
+        MessageId::HealthLiveReasonCnfOverridden => {
+            "the command-not-found handler was overridden after startup"
+        }
+        MessageId::HealthLiveReasonCnfMissing => {
+            "the command-not-found handler was removed"
+        }
+        MessageId::DoctorVersionLine => {
+            "version: cosh-shell {shell_version}, cosh-core {core_version}"
+        }
+        MessageId::DoctorHostLine => "host: {host}",
+        MessageId::DoctorRuntimeLine => "runtime: {summary}",
+        MessageId::DoctorRuntimeSummaryNone => "no active sessions",
+        MessageId::DoctorRoutingLine => {
+            "routing: ai={ai}, integration={integration}, command-not-found handler={cnf}, last route={route}"
+        }
+        MessageId::DoctorRoutingUnavailable => {
+            "routing: live probe unavailable; run /health inside the affected session"
+        }
+        MessageId::DoctorLogsLine => {
+            "logs: level={level}, last write {last}; 24h errors: {errors}"
+        }
+        MessageId::DoctorLogsNoFiles => "no log files",
+        MessageId::DoctorCrashesLine => "crashes: {count} in the last 24h{detail}",
+        MessageId::DoctorExportHint => {
+            "next step: run `cosh-shell diagnostics export` to collect a redacted evidence bundle (see docs/user-guide/en/user-entrypoint/cosh-ng/troubleshooting.md)"
+        }
+        MessageId::HelpDiagnosticsHint => {
+            "Troubleshooting: run /health inside the session, or `cosh-shell doctor` after exit; see docs/user-guide/en/user-entrypoint/cosh-ng/troubleshooting.md"
+        }
         _ => return None,
     })
 }

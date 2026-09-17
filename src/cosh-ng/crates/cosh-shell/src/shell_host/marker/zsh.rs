@@ -165,6 +165,7 @@ _cosh_emit_marker() {
   local handoff_fragment=""
   local physical_cwd_fragment=""
   local shell_path_names_fragment=""
+  local cnf_fragment=""
   local REPLY=""
   if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
     handoff_fragment=",\"handoff\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
@@ -184,7 +185,13 @@ _cosh_emit_marker() {
     _cosh_shell_path_names_fragment
     shell_path_names_fragment="$REPLY"
   fi
-  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s%s%s}\a' \
+  # The precmd/precmd-family markers report the command-not-found handler
+  # ownership so the host can flag routing compatibility fallbacks (issue
+  # #3055): the wrapper may have been replaced or removed after startup.
+  if [[ "$event" == "precmd" ]]; then
+    cnf_fragment=",\"cnf\":\"$(_cosh_cnf_ownership)\""
+  fi
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s%s%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
@@ -197,7 +204,22 @@ _cosh_emit_marker() {
     "${_COSH_ATTEMPT_GENERATION:-0}" \
     "$physical_cwd_fragment" \
     "$shell_path_names_fragment" \
-    "$handoff_fragment"
+    "$handoff_fragment" \
+    "$cnf_fragment"
+}
+_cosh_cnf_ownership() {
+  local current="${functions[command_not_found_handler]-}"
+  if [[ -z "$current" ]]; then
+    printf 'missing'
+  elif [[ "$current" == "${_COSH_CNF_WRAPPER_DEFINITION:-}" ]]; then
+    if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
+      printf 'wrapping-user'
+    else
+      printf 'native'
+    fi
+  else
+    printf 'overridden'
+  fi
 }
 _cosh_emit_intercept_marker() {
   local input="$1"
@@ -580,6 +602,10 @@ command_not_found_handler() {
   fi
   return "$result"
 }
+# Sentinel for the precmd ownership check: any later redefinition of
+# command_not_found_handler (e.g. by user dotfiles sourced after this
+# script) compares unequal and is reported as "overridden".
+_COSH_CNF_WRAPPER_DEFINITION="${functions[command_not_found_handler]}"
 _cosh_preexec_marker() {
   setopt localoptions noxtrace
   local command="$1"

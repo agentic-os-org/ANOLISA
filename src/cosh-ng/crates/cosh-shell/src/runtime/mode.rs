@@ -119,6 +119,7 @@ fn set_routing_mode<W: Write>(
     output: &mut W,
 ) -> std::io::Result<bool> {
     control.set_enabled(enabled)?;
+    crate::diagnostics::run_registry::update_assistance(enabled);
     let mode = routing_mode_label(state);
     render_notice_panel(
         output,

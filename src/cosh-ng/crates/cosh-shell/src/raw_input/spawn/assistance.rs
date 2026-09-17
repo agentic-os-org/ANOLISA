@@ -57,6 +57,7 @@ pub(super) fn resolve_assistance_shortcut<'a>(
     if control.toggle().is_err() {
         return Ok(Some(bytes));
     }
+    crate::diagnostics::run_registry::update_assistance(control.is_enabled());
     let _ = input_events.send(RawInputEvent::AssistanceToggled);
     if remainder.is_empty() {
         Ok(None)

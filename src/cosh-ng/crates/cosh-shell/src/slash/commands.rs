@@ -145,7 +145,7 @@ pub(super) fn render_slash_command<W: Write>(
             Ok(true)
         }
         SlashCommand::Health => {
-            render_health_command(state, shell_cwd, output)?;
+            render_health_command(state, shell_cwd, adapter, output)?;
             Ok(true)
         }
         SlashCommand::Status => {

@@ -138,6 +138,7 @@ pub(crate) fn start_cancellable_provider_process<S: ProviderDriverSpec>(
             S::PROVIDER_LABEL,
             ProviderStdinMode::Null,
             S::PLAIN_PROMPT_MODE,
+            &[],
         ) {
             Ok(child) => child,
             Err(err) => {
@@ -298,6 +299,7 @@ pub(crate) fn start_control_protocol_provider_process<S: ProviderDriverSpec>(
             S::PROVIDER_LABEL,
             ProviderStdinMode::Piped,
             ProviderPromptArgMode::None,
+            &[],
         ) {
             Ok(child) => child,
             Err(err) => {
