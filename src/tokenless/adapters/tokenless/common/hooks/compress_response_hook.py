@@ -60,6 +60,7 @@ from hook_utils import (
     build_post_tool_request,
     consume_output_optimization,
     detect_cosh_ng_runtime,
+    is_file_read_command,
     is_skill_file,
     is_tokenless_retrieve_command,
     parse_version,
@@ -338,6 +339,9 @@ def main() -> None:
         content_origin = "api_response"
     elif tool_name in SKIP_TOOLS:
         content_origin = "file_content"
+    elif is_file_read_command(tool_name, tool_input):
+        # A plain file read: data still compresses, a printed page stays verbatim.
+        content_origin = "file_read"
     elif tool_name in SHELL_TOOLS:
         content_origin = "command_output"
     else:

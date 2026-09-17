@@ -17,7 +17,7 @@ fn html_input(paragraphs: usize) -> String {
 #[test]
 fn html_is_opt_in_and_requires_recovery_and_text_replacement() {
     let input = html_input(10);
-    for mode in 0..10 {
+    for mode in 0..11 {
         let mut req = request(&input);
         let mut config = build_log_config();
         config.html_extraction_enabled = true;
@@ -33,10 +33,11 @@ fn html_is_opt_in_and_requires_recovery_and_text_replacement() {
             6 => req.tool_name = "Grep".into(),
             7 => req.status = ToolResultStatus::Error,
             8 => config.max_input_bytes = input.len() - 1,
-            9 => {}
+            9 => req.content_origin = ContentOrigin::FileRead,
+            10 => {}
             _ => unreachable!(),
         }
-        let run = PostToolPipeline::run(&req, &config, if mode == 9 { None } else { Some(&store) })
+        let run = PostToolPipeline::run(&req, &config, if mode == 10 { None } else { Some(&store) })
             .unwrap();
         assert_eq!(run.response.output, input, "mode {mode}");
         assert!(run.operations.is_empty(), "mode {mode}");

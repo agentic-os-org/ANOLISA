@@ -91,23 +91,29 @@ impl PostToolPipeline {
         // Tabular. Shape detection does not remove the need to retain every
         // match; other domain compressors may drop rows or rewrite source text.
         let search_only = request.tool_name == "Grep";
+        // Data printed by a shell file read (`cat build.log`) compresses like
+        // command output; a page printed that way is source the agent may edit,
+        // so only HTML keeps it verbatim. Read tool results were excluded above.
+        let shell_output = matches!(
+            request.content_origin,
+            ContentOrigin::CommandOutput | ContentOrigin::FileRead
+        );
         let diff_candidate = config.diff_compression_enabled
             && !search_only
             && content_type == ContentType::Diff
-            && request.content_origin == ContentOrigin::CommandOutput
+            && shell_output
             && request.capabilities.replace_with_text;
-        // Complete HTML documents from commands or APIs; file reads were excluded above.
         let html_candidate = config.html_extraction_enabled
             && !search_only
             && content_type == ContentType::Html
+            && request.content_origin != ContentOrigin::FileRead
             && request.capabilities.replace_with_text;
         let json_candidate = !search_only
             && (config.force_json
                 || content_type == ContentType::Json
                 || is_wrapped_structured_json(&request.content));
-        let build_log_candidate = !search_only
-            && content_type == ContentType::BuildLog
-            && request.content_origin == ContentOrigin::CommandOutput;
+        let build_log_candidate =
+            !search_only && content_type == ContentType::BuildLog && shell_output;
         let tabular_candidate = !search_only
             && content_type == ContentType::Tabular
             && request.capabilities.replace_with_text;
@@ -900,28 +906,32 @@ mod tests {
     #[test]
     fn diff_retains_changes_and_recovers_original_with_one_stash_write() {
         let input = diff_input(100);
-        let concrete = Arc::new(CountingStore::default());
-        let store: Arc<dyn StashStore> = concrete.clone();
-        let mut config = build_log_config();
-        config.diff_compression_enabled = true;
-        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+        for origin in [ContentOrigin::CommandOutput, ContentOrigin::FileRead] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut config = build_log_config();
+            config.diff_compression_enabled = true;
+            let mut req = request(&input);
+            req.content_origin = origin;
+            let run = PostToolPipeline::run(&req, &config, Some(&store)).unwrap();
 
-        assert_eq!(run.response.disposition, Disposition::Applied);
-        assert_eq!(
-            run.response.applied_operations,
-            [AppliedOperation::DiffReduction]
-        );
-        assert_eq!(run.response.recoverability, Recoverability::Retrievable);
-        assert!(run.response.output.contains("-old\n+new\n tail\n"));
-        assert!(run.response.output.contains("@@ -9,4 +9,4 @@"));
-        assert!(run.response.before_tokens - run.response.after_tokens >= 16);
-        assert_eq!(run.response.stash_keys.len(), 1);
-        assert_eq!(
-            concrete.retrieve(&run.response.stash_keys[0]).unwrap(),
-            Some(input)
-        );
-        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::DiffReduction]
+            );
+            assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+            assert!(run.response.output.contains("-old\n+new\n tail\n"));
+            assert!(run.response.output.contains("@@ -9,4 +9,4 @@"));
+            assert!(run.response.before_tokens - run.response.after_tokens >= 16);
+            assert_eq!(run.response.stash_keys.len(), 1);
+            assert_eq!(
+                concrete.retrieve(&run.response.stash_keys[0]).unwrap(),
+                Some(input.clone())
+            );
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]
@@ -966,23 +976,26 @@ mod tests {
 
     #[test]
     fn one_build_log_domain_reaches_one_final_commit() {
-        let concrete = Arc::new(CountingStore::default());
-        let store: Arc<dyn StashStore> = concrete.clone();
-        let run = PostToolPipeline::run(&request(&build_log()), &build_log_config(), Some(&store))
-            .unwrap();
+        for origin in [ContentOrigin::CommandOutput, ContentOrigin::FileRead] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(&build_log());
+            req.content_origin = origin;
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store)).unwrap();
 
-        assert_eq!(run.response.disposition, Disposition::Applied);
-        assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
-        assert_eq!(run.operations, [AppliedOperation::BuildLogReduction]);
-        assert_eq!(
-            run.response.applied_operations,
-            [AppliedOperation::BuildLogReduction]
-        );
-        assert_eq!(run.response.recoverability, Recoverability::Retrievable);
-        assert_eq!(run.response.stash_keys.len(), 1);
-        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(concrete.len(), 1);
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.operations, [AppliedOperation::BuildLogReduction]);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+            assert_eq!(run.response.stash_keys.len(), 1);
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(concrete.len(), 1);
+        }
     }
 
     #[test]

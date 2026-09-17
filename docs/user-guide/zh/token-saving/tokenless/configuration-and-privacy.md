@@ -117,8 +117,12 @@ Rust 使用 `RuntimeConfig.html_extraction_enabled`；Python 使用
 采用后的操作名为 `html_extraction`，恢复等级是 `retrievable`，而非 `lossless`：
 标记和被移除的元素不在可见输出中。原文仍在 Stash 时，可按输出中的 shell 或工具
 指令取回收到的原始内容。页面通过脚本加载的内容在视图中不可见。内容来源由
-adapter 按工具分类：文件读取透传，但 shell `cat` 打印的页面或 MCP 文件工具返回
-的页面会与抓取的页面一样被转写，需要取回才能看到源码。
+adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 Hermes 插件还把只打印本地
+文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、`bat`，以及 `-n` 模式下只含
+打印范围的 `sed`，可带 `cd … &&` 前缀）报告为 `file_read`。这类输出里的 JSON、CSV、构建
+日志和 diff 照常压缩，但打印出的 HTML 页面是 Agent 可能要编辑的源码，保持原样。带管道、
+重定向或其他命令的读取，以及 MCP 文件工具返回的页面，仍与抓取的页面一样被转写，需要取回
+才能看到源码。
 
 有限样本已验证局部转写及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
 因此该功能保持可选启用。

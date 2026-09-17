@@ -90,6 +90,7 @@ class ContentOrigin(StrEnum):
 
     COMMAND_OUTPUT = "command_output"
     FILE_CONTENT = "file_content"
+    FILE_READ = "file_read"
     API_RESPONSE = "api_response"
 
 

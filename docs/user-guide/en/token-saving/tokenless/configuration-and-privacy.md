@@ -134,9 +134,14 @@ The emitted operation is `html_extraction` and recoverability is `retrievable`, 
 `lossless`: markup and the removed elements are not in the visible output. Follow the
 emitted shell or tool instruction to retrieve the received original while it is in
 Stash. Content that a page loads through scripts is not visible in the view. Content
-origin is classified per tool by the adapters: file reads pass through, but a page
-printed by a shell `cat` or returned by an MCP file tool is rendered like a fetched
-page and must be retrieved to see its source.
+origin is classified by the adapters: file read tool results pass through, and the
+shared PostTool hook and the Hermes plugin report shell commands that only print local
+files (`cat`, `head`, `tail`, `nl`, `less`, `more`, `bat`, and `sed -n` with a
+print-only script, optionally after `cd … &&`) as `file_read`. JSON, CSV, build logs
+and diffs in such output still compress, but a printed HTML page is source the agent
+may edit and stays verbatim. A read combined with a pipe, redirection or another
+command, and a page returned by an MCP file tool, is still rendered like a fetched page
+and must be retrieved to see its source.
 
 Local rendering and original recovery have been verified on finite samples. Stable
 whole-Agent token savings have not been established, so this feature remains opt-in.

@@ -131,17 +131,20 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。工具错误、`file_content` 来源和
-低于 `min_input_chars` 的输入在入口直接透传；`Grep` 工具输出只允许进入无损的 Search Results
+低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类；共享 PostTool Hook
+与 Hermes 插件还把只打印本地文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、
+`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）报告为
+`file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样；`Grep` 工具输出只允许进入无损的 Search Results
 路径共享。通过入口后按下表静态派发，每个领域各调用一次：
 
 | ContentType | 前提 | 领域处理 | 默认 |
 |------|------|------|------|
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON | 启用 |
-| `build_log` | 来源为 `command_output` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
+| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：CSV/TSV 视图，保留单元格或可恢复选取整行 | 启用 |
 | `search_results` | 来源为 `api_response`，宿主支持文本替换 | `SearchResultsCompressor`：连续行共享重复路径，无损 | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
-| `diff` | 来源为 `command_output`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
-| `html` | 宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根，移除可枚举非内容元素后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 关闭，`TOKENLESS_HTML_EXTRACTION_ENABLED=true` 开启 |
+| `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
+| `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根，移除可枚举非内容元素后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 关闭，`TOKENLESS_HTML_EXTRACTION_ENABLED=true` 开启 |
 
 Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。Diff 与 HTML
 没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在 Shell `PATH` 中）时，即使已开启

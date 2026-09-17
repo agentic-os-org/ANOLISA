@@ -353,6 +353,8 @@ pub enum ContentOrigin {
     CommandOutput,
     /// A copy of authoritative file content.
     FileContent,
+    /// Local files printed by a shell command such as `cat`.
+    FileRead,
     /// A service or framework response.
     ApiResponse,
 }
@@ -364,6 +366,7 @@ impl ContentOrigin {
         match self {
             Self::CommandOutput => "command_output",
             Self::FileContent => "file_content",
+            Self::FileRead => "file_read",
             Self::ApiResponse => "api_response",
         }
     }

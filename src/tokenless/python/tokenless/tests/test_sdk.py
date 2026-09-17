@@ -146,6 +146,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             (enabled_sdk, ContentOrigin.COMMAND_OUTPUT, True),
             (enabled_sdk, ContentOrigin.API_RESPONSE, True),
             (enabled_sdk, ContentOrigin.FILE_CONTENT, False),
+            (enabled_sdk, ContentOrigin.FILE_READ, False),
         ):
             with self.subTest(enabled=sdk.config.html_extraction_enabled, origin=origin):
                 attribution = Attribution("sdk-agent", "sdk-session", "html-1")
