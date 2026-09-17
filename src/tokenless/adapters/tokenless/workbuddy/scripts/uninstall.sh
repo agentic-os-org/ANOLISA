@@ -93,7 +93,8 @@ for event in list(hooks.keys()):
 # under umask 022) must not widen a 0600 config on replace. mkstemp
 # creates the inode with the installer's UID/GID; the chown restores the
 # existing owner/group so a root- or cross-account run cannot reassign
-# the file.
+# the file, and the staged inode is verified afterwards so a restore that
+# did not take refuses the replace instead of silently adopting it.
 existing = os.stat(config_path)
 fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
@@ -106,9 +107,22 @@ try:
     try:
         os.chown(tmp_path, existing.st_uid, existing.st_gid)
     except OSError:
-        # Same-account runs succeed; without privilege the mode
-        # restoration above keeps the credential-safety guarantee.
+        # The verification below decides whether the replace may proceed;
+        # swallowing the error here only keeps the diagnostic readable.
         pass
+    staged = os.stat(tmp_path)
+    if (staged.st_uid, staged.st_gid) != (existing.st_uid, existing.st_gid):
+        # See install.sh: an un-preserveable owner must abort the rewrite,
+        # not hand the config to the installer account. The BaseException
+        # handler below removes the staged temp file.
+        print(
+            f"cannot preserve the ownership of {config_path}: staged "
+            f"{staged.st_uid}:{staged.st_gid}, existing "
+            f"{existing.st_uid}:{existing.st_gid}. Re-run as the file's "
+            "owner, or with privilege to chown.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     os.replace(tmp_path, config_path)
 except BaseException:
     try:

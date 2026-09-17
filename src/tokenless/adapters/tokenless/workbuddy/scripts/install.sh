@@ -141,7 +141,9 @@ config["hooks"] = hooks
 # file in the same directory, restore the original mode and ownership,
 # then replace. mkstemp creates the inode with the installer's UID/GID;
 # without the chown a root- or cross-account run would hand an existing
-# user's settings.json to the installer account.
+# user's settings.json to the installer account, so the staged inode is
+# verified against the original owner and the replace is refused when the
+# restore did not take.
 existing = os.stat(config_path) if os.path.exists(config_path) else None
 fd, tmp_path = tempfile.mkstemp(
     dir=codebuddy_home, prefix=".settings.json.", suffix=".tmp"
@@ -155,10 +157,25 @@ try:
         try:
             os.chown(tmp_path, existing.st_uid, existing.st_gid)
         except OSError:
-            # Restoring ownership needs the file's owner or privilege;
-            # same-account runs succeed, and the mode restoration above
-            # keeps the credential-safety guarantee either way.
+            # Restoring ownership needs the file's owner or privilege. The
+            # verification below decides whether the replace may proceed;
+            # swallowing the error here only keeps the diagnostic readable.
             pass
+        staged = os.stat(tmp_path)
+        if (staged.st_uid, staged.st_gid) != (existing.st_uid, existing.st_gid):
+            # Replacing now would move a credential-bearing config to the
+            # installer account: with the original mode restored (typically
+            # 0600) the real owner could lose access to their own
+            # settings.json. Refuse instead; the BaseException handler below
+            # removes the staged temp file.
+            print(
+                f"cannot preserve the ownership of {config_path}: staged "
+                f"{staged.st_uid}:{staged.st_gid}, existing "
+                f"{existing.st_uid}:{existing.st_gid}. Re-run as the file's "
+                "owner, or with privilege to chown.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         os.chmod(tmp_path, 0o600)
     os.replace(tmp_path, config_path)
