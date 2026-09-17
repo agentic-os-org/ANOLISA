@@ -120,6 +120,11 @@ complete a command before adding arguments; Enter submits drafts with arguments
 or multiple lines as written.
 Ordinary shell prompts keep native path completion.
 
+In `cosh-core`, configured Hooks run by default without `hooks.enabled = true`.
+Explicit `hooks.enabled = false` keeps config Hooks disabled even when Extensions
+are installed. See [Hooks](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md)
+for disable scope and fail-closed `PreToolUse` behavior.
+
 For `type = "aliyun"`, SysOM automatically prefers a reachable VPC endpoint.
 Set `ai.providers.<id>.sysom_endpoint` to pin an endpoint; `COSH_SYSOM_ENDPOINT`
 takes precedence, and `base_url` does not route SysOM. Only automatic VPC routes

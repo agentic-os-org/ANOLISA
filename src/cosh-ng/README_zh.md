@@ -111,6 +111,11 @@ bash: hello: command not found
 需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
 普通 Shell prompt 保留原生路径补全。
 
+`cosh-core` 中的配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
+显式设置 `hooks.enabled = false` 后，即使安装了 Extension，配置 Hook 也保持禁用。
+禁用范围和 `PreToolUse` 默认阻断行为详见
+[Hooks](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/hooks.md)。
+
 `type = "aliyun"` 时，SysOM 自动优先使用可达的 VPC 端点。
 设置 `ai.providers.<id>.sysom_endpoint` 可固定端点，`COSH_SYSOM_ENDPOINT` 优先级更高，
 `base_url` 不参与 SysOM 选路。仅自动选中的 VPC 路由绕过系统代理，显式覆盖与公网回退
