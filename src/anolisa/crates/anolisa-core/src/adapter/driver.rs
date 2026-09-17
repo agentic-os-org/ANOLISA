@@ -180,6 +180,16 @@ pub struct DroppedPriorDisplacement {
     /// entries sharing one exclusive slot has to stage the entry without it when the
     /// current contract gave that slot to a different plugin.
     pub slot: Option<String>,
+    /// Slot the prior receipt's entry consulted without owning it, when it recorded
+    /// one — [`DisplacedPluginRef::guard_slot`](super::claim::DisplacedPluginRef::guard_slot).
+    ///
+    /// Carried so a second re-enable does not lose it. The entry that gives an
+    /// exclusive slot up keeps the veto on it for as long as the receipt keeps the
+    /// responsibility, and a receipt is replaced more than once: dropping the field
+    /// here would stage the next replacement's entry slotless *and* guardless, and
+    /// the restore would be unguarded again one contract change later than the one
+    /// that removed the guard.
+    pub guard_slot: Option<String>,
 }
 
 /// Driver-private state produced by [`FrameworkDriver::prepare_enable`] and

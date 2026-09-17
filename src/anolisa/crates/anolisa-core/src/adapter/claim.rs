@@ -47,6 +47,12 @@ pub const CLAIM_SCHEMA_VERSION: u32 = 2;
 /// `applied` existed still reads as applied; the bump records that a payload
 /// written from version 4 on may carry them.
 ///
+/// 5 adds [`DisplacedPluginRef::guard_slot`], defaulted and omitted on the wire
+/// the same way: a version-4 receipt still parses, and reads as an entry that
+/// consults only the slot it owns, while a version-5 receipt written for an
+/// entry that owns its slot serializes exactly as the version-4 one did. The
+/// bump records that a payload written from version 5 on may carry it.
+///
 /// **Write-time version, never a read gate.** This is the number every driver
 /// stamps into the receipt it is writing *now*; it says nothing about which
 /// fields an older receipt on disk could have carried. A driver that needs to
@@ -55,7 +61,7 @@ pub const CLAIM_SCHEMA_VERSION: u32 = 2;
 /// `QODER_INSTALL_CONFIRMED_MIN_SCHEMA` in [`super::qoder`]. Gating a read on
 /// this shared constant instead would revoke that field's meaning from every
 /// existing receipt the moment an unrelated driver's payload changed shape.
-pub const DRIVER_SCHEMA_VERSION: u32 = 4;
+pub const DRIVER_SCHEMA_VERSION: u32 = 5;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -663,12 +669,33 @@ pub struct DisplacedPluginRef {
     /// Exclusive framework slot the plugin re-takes when it is enabled again,
     /// as the key suffix under `plugins.slots` (e.g. `memory`).
     ///
-    /// `None` does **not** make the restore unconditional; it only means there is
-    /// no slot to consult. The driver still skips a restore the host has made
+    /// `None` does **not** make the restore unconditional; it only means this
+    /// entry owns no slot. The driver still skips a restore the host has made
     /// pointless or impossible — the plugin has left its inventory, or a policy
-    /// key keeps it off — and reports that as released rather than failed.
+    /// key keeps it off — and reports that as released rather than failed, and it
+    /// still consults [`Self::guard_slot`] when the entry names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<String>,
+    /// Exclusive framework slot a restore of this plugin must *consult* when the
+    /// entry owns none, as the key suffix under `plugins.slots` (e.g. `memory`).
+    ///
+    /// One receipt gives one exclusive slot to one entry, and a second entry
+    /// claiming it is rejected — but the entry that has to give the slot up still
+    /// restores a plugin whose `plugins enable` re-runs the framework's slot
+    /// selection over that same key. Ownership and side effect are not the same
+    /// claim, and only the first one is exclusive. Without a key to read, the
+    /// restore of such an entry is unguarded: an operator who closed the slot or
+    /// moved it to a third plugin after the displacement has that choice silently
+    /// overwritten by a cleanup that then reports itself complete. This field is
+    /// the veto without the ownership.
+    ///
+    /// Set only where [`Self::slot`] is `None`; an entry that owns its slot
+    /// consults that one, and a receipt carrying both is rejected as
+    /// inconsistent rather than read with one of them ignored. `None` on an entry
+    /// that owns no slot means the plugin competes for nothing, which is also how
+    /// every receipt written before version 5 reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_slot: Option<String>,
     /// Whether the framework command that performs this hand-off has been issued.
     ///
     /// A driver records a displacement while it is still preparing the enable,
@@ -2204,7 +2231,7 @@ mod tests {
             text.contains("plugin_install_confirmed = true"),
             "native TOML: {text}"
         );
-        assert_eq!(wrapper.adapter_claims[0].driver_schema, 4);
+        assert_eq!(wrapper.adapter_claims[0].driver_schema, 5);
         let parsed: Wrapper = toml::from_str(&text).expect("parse native Qoder receipt");
         assert_eq!(wrapper, parsed);
     }
@@ -2484,10 +2511,16 @@ mod tests {
              unwanted restore"
         );
         assert_eq!(legacy.slot, None);
+        assert_eq!(
+            legacy.guard_slot, None,
+            "a receipt written before `guard_slot` existed owns the only slot it \
+             can consult"
+        );
 
         let applied = DisplacedPluginRef {
             resource: "openclaw_displaced_plugin_memory-core".to_string(),
             slot: Some("memory".to_string()),
+            guard_slot: None,
             applied: true,
         };
         let json = serde_json::to_string(&applied).expect("serialize applied");
@@ -2510,6 +2543,32 @@ mod tests {
         let back: DisplacedPluginRef = serde_json::from_str(&json).expect("parse pending");
         assert!(!back.applied);
 
+        // An entry that gave its exclusive slot up keeps the key its restore has
+        // to consult, and that key is the only part of the shape that has to
+        // travel: an entry owning its slot must still serialize without it.
+        let guarded = DisplacedPluginRef {
+            slot: None,
+            guard_slot: Some("memory".to_string()),
+            ..applied.clone()
+        };
+        let json = serde_json::to_string(&guarded).expect("serialize guarded");
+        assert!(
+            json.contains("\"guard_slot\":\"memory\""),
+            "a guard slot is the entry's only slot and must survive the wire: {json}"
+        );
+        assert!(
+            !json.contains("\"slot\""),
+            "and must not be written as an ownership claim on it: {json}"
+        );
+        let back: DisplacedPluginRef = serde_json::from_str(&json).expect("parse guarded");
+        assert_eq!(guarded, back);
+        assert!(
+            !serde_json::to_string(&applied)
+                .expect("serialize applied")
+                .contains("guard_slot"),
+            "an entry that owns its slot consults that one and says nothing else"
+        );
+
         // Receipts are TOML on disk, so the same defaults have to hold there.
         let toml_text = toml::to_string(&applied).expect("serialize applied TOML");
         assert!(
@@ -2522,5 +2581,17 @@ mod tests {
             toml::from_str("resource = \"openclaw_displaced_plugin_memory_core\"\n")
                 .expect("a version-4 receipt without the field still parses from TOML");
         assert!(legacy_toml.applied);
+        assert_eq!(legacy_toml.guard_slot, None);
+        let guarded_toml = toml::to_string(&guarded).expect("serialize guarded TOML");
+        assert!(
+            guarded_toml.contains("guard_slot = \"memory\""),
+            "TOML must carry it too: {guarded_toml}"
+        );
+        assert!(
+            !guarded_toml.contains("\nslot"),
+            "TOML must not turn it into an ownership claim: {guarded_toml}"
+        );
+        let back: DisplacedPluginRef = toml::from_str(&guarded_toml).expect("parse guarded TOML");
+        assert_eq!(guarded, back);
     }
 }

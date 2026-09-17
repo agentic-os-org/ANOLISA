@@ -770,6 +770,11 @@ impl FrameworkDriver for OpenClawDriver {
                 displaced_plugins.push(DisplacedPluginRef {
                     resource: resource_id,
                     slot: spec.slot.clone(),
+                    // A declared entry owns the slot its declaration names, and an
+                    // entry that owns its slot consults that one — see
+                    // [`DisplacedPlugin::slot_key`]. Nothing here has given a slot up
+                    // to another entry, which is the only thing a guard records.
+                    guard_slot: None,
                     // False unless this entry inherits a hand-off a prior receipt
                     // already performed. This enable's own hand-off has not run —
                     // it cannot, because this is still before the first mutation
@@ -2382,22 +2387,24 @@ impl OpenClawDriver {
     ///   it must not do is be spent as `NotPerformed`, because the receipt swap that
     ///   preceded this call is not retryable.
     ///
-    ///   One shape cannot be recovered that way, and it is worth naming rather than
-    ///   burying: an entry staged slotless by the collision case has no slot for that
-    ///   capture to be asked against, so `Unknown` there is terminal — the disable
-    ///   skips the restore and *says so* instead of reporting a cleanup complete over
-    ///   a silence nobody recorded. Recovering it needs a receipt that can hold a
-    ///   recoverable attribution alongside a slot another entry owns, which is the
-    ///   format change this deliberately is not.
+    ///   No shape is left out of that recovery. An entry the collision case staged
+    ///   without owning its slot still names the key it competes for —
+    ///   [`DisplacedPluginRef::guard_slot`] — so the capture reads it and the
+    ///   attribution asks it exactly as for a declared entry. It used to be terminal
+    ///   there, because a receipt that could not give one slot to two entries had
+    ///   nowhere to put the key; holding the veto without the ownership is what
+    ///   closed that, and it closes the restore-side hole the same record left at the
+    ///   same time.
     ///
     /// Write-ahead, like every other mark in this driver: each entry is persisted as
     /// it is settled, so a failure in a later step of `apply_enable` leaves the
     /// receipt describing the host rather than the host describing nothing.
     ///
-    /// The attribution is asked with the slot the *prior* receipt named rather than
+    /// The attribution is asked with the key the *prior* receipt named rather than
     /// the one the entry was staged with, because the question is which slot this
-    /// adapter's own selection took and a slotless record still has to answer it —
-    /// see the collision case in [`stage_dropped_recovery_candidates`].
+    /// adapter's own selection took and a record that gave the ownership of it up
+    /// still has to answer it — see the collision case in
+    /// [`stage_dropped_recovery_candidates`].
     ///
     /// # Errors
     ///
@@ -2438,6 +2445,7 @@ impl OpenClawDriver {
                 resource: entry.resource.id.clone(),
                 plugin_id: entry.plugin_id.clone(),
                 slot: entry.slot.clone(),
+                guard_slot: entry.guard_slot.clone(),
                 applied: false,
             };
             match self.handoff_attribution(
@@ -2780,7 +2788,17 @@ impl OpenClawDriver {
             }
             DisplacementBlock::None => {}
         }
-        if let Some(slot) = entry.slot.as_deref() {
+        if let Some(slot) = entry.slot_key() {
+            // The key, not the ownership: an entry that gave its exclusive slot up
+            // to another one still restores a plugin whose `plugins enable` re-runs
+            // the framework's selection over that slot, so the veto below is the
+            // only thing standing between that side effect and a choice the operator
+            // made after the displacement. Reading `entry.slot` here left the
+            // slotless half of a same-slot replacement unguarded — a `disable` that
+            // correctly stepped aside for the declared entry went straight on to
+            // `plugins enable` the older one, reopened the slot the operator had
+            // closed, and reported a complete cleanup.
+            //
             // A live read, not the capture, and the difference from the branch
             // above is the question. That one asks who turned the plugin off,
             // which is a fact about the past and is destroyed by this disable's own
@@ -2933,7 +2951,7 @@ impl OpenClawDriver {
         // predicted here — but it can be announced, which is the difference between
         // a dry-run that omits a receipt entry the real run writes and one that says
         // the entry is conditional.
-        if dropped.iter().any(|entry| entry.slot.is_some()) {
+        if dropped.iter().any(|entry| entry.slot_key().is_some()) {
             lines.push(
                 "if registering this adapter's own plugin re-selects the slot a plugin above \
                  competes for, OpenClaw turns that plugin back off and the replacement receipt \
@@ -3155,11 +3173,14 @@ impl OpenClawDriver {
     /// reads it as a statement about right now. An applied entry's slot veto keeps
     /// its live read on purpose — see the branch in [`Self::restore_decision`].
     ///
-    /// One read per distinct slot, not per entry: two entries cannot share a slot
-    /// (`claim_displaced_plugins` rejects that). Probe count is unchanged overall,
-    /// because an unapplied entry that gets restored used to read its slot twice —
-    /// once for the attribution and once for the veto — and now reads it once here
-    /// and once there. [`Self::record_recovered_slot_selection_handoffs`] is the
+    /// One read per distinct slot, not per entry. Two entries cannot *own* one slot
+    /// (`claim_displaced_plugins` rejects that), but they can consult one: the
+    /// slotless half of a same-slot replacement guards on the key the declared half
+    /// owns, and both are read here when neither hand-off was marked. Probe count is
+    /// unchanged overall, because an unapplied entry that gets restored used to read
+    /// its slot twice — once for the attribution and once for the veto — and now
+    /// reads it once here and once there.
+    /// [`Self::record_recovered_slot_selection_handoffs`] is the
     /// capture's other consumer and asks the same question over the same readings,
     /// after which `disable` re-resolves the receipt and the restore reads the mark
     /// instead of re-attributing it; only an entry nothing can attribute is probed
@@ -3175,11 +3196,16 @@ impl OpenClawDriver {
             if entry.applied {
                 continue;
             }
-            let Some(slot) = entry.slot.as_deref() else {
+            // The key the attribution will be asked against, which is the one the
+            // entry competes for whether or not the receipt still owns it.
+            let Some(slot) = entry.slot_key() else {
                 continue;
             };
+            if readings.contains_key(slot) {
+                continue;
+            }
             let reading = self.read_slot_owner(slot, home, ctx);
-            readings.entry(slot.to_string()).or_insert(reading);
+            readings.insert(slot.to_string(), reading);
         }
         readings
     }
@@ -3461,9 +3487,14 @@ impl OpenClawDriver {
         ctx: &DriverCtx,
     ) -> SlotAttribution {
         // No slot in the receipt is an answer, not a failed question: see the
-        // variant. A receipt with no plugin of its own cannot be attributed either
-        // way, and `apply_enable` rejects that shape before it reaches here.
-        let Some(slot) = entry.slot.as_deref() else {
+        // variant. It means the entry names no key at all — neither one it owns nor
+        // one it only guards — so there is no selection of this driver's that could
+        // explain the flag. An entry that gave its slot up still names the key it
+        // competes for, and asking that one is what lets a `disable` recover a
+        // hand-off the enable could not mark instead of disowning it. A receipt with
+        // no plugin of its own cannot be attributed either way, and `apply_enable`
+        // rejects that shape before it reaches here.
+        let Some(slot) = entry.slot_key() else {
             return SlotAttribution::NotDeclared;
         };
         let Some(own) = own_plugin_id else {
@@ -6063,10 +6094,34 @@ struct DisplacedPlugin {
     plugin_id: String,
     /// Exclusive slot the plugin re-takes when restored, when declared.
     slot: Option<String>,
+    /// Slot the plugin competes for without owning it, when the receipt recorded
+    /// one — [`DisplacedPluginRef::guard_slot`].
+    guard_slot: Option<String>,
     /// Whether the framework command that performed the hand-off was issued —
     /// [`DisplacedPluginRef::applied`]. An unapplied entry is a recorded
     /// intention, not ownership, and nothing may act on it as though it were.
     applied: bool,
+}
+
+impl DisplacedPlugin {
+    /// The `plugins.slots` key this entry's plugin competes for, whether the
+    /// receipt gives it ownership of that key or only a veto on it.
+    ///
+    /// Every question the driver asks the host about one entry is a question
+    /// about that key, and none of them is a question about ownership: whether
+    /// this adapter's own selection is what turned the plugin off
+    /// ([`OpenClawDriver::slot_attribution`]), and whether handing it back would
+    /// take the slot from whoever holds it now
+    /// ([`OpenClawDriver::restore_decision`]). Ownership is what
+    /// [`claim_displaced_plugins`] enforces when it refuses one key to two
+    /// entries, and an entry that had to give a key up does not thereby stop
+    /// competing for it — `plugins enable` re-runs the framework's slot selection
+    /// either way, which is the side effect the veto exists to check first.
+    ///
+    /// `None` only for a plugin that competes for nothing.
+    fn slot_key(&self) -> Option<&str> {
+        self.slot.as_deref().or(self.guard_slot.as_deref())
+    }
 }
 
 /// Resource id of a displaced framework plugin.
@@ -6926,6 +6981,14 @@ fn slot_restore_decision(
 /// adapter disabled with nothing recording why. An empty slot is rejected for the
 /// same reason the contract rejects it: `plugins.slots.` is not a key, and an
 /// entry that names one silently degrades to an unguarded restore.
+///
+/// The constraint is on *ownership*, which is [`DisplacedPluginRef::slot`] alone.
+/// [`DisplacedPluginRef::guard_slot`] is the key an entry's restore consults
+/// without owning it, and it is exempt on purpose: giving a slot up to another
+/// entry is exactly when the veto is still needed, because the plugin the entry
+/// restores re-runs the framework's selection over that same key. Two entries
+/// consulting one slot is the shape a same-slot replacement leaves behind, so
+/// counting a guard here would reject the receipt that shape produces.
 fn claim_displaced_plugins(claim: &AdapterClaim) -> Result<Vec<DisplacedPlugin>, AdapterError> {
     let DriverPayload::OpenClaw(payload) = &claim.driver_payload else {
         return Ok(Vec::new());
@@ -7010,6 +7073,41 @@ fn claim_displaced_plugins(claim: &AdapterClaim) -> Result<Vec<DisplacedPlugin>,
                 &format!("displaced plugin '{plugin_id}' is claimed more than once"),
             ));
         }
+        // A guard slot is a key to read, not a claim to enforce, so it is held to
+        // the key rules and deliberately kept out of `slots_taken`: two entries
+        // may consult one slot — that is the shape a same-slot replacement leaves
+        // behind — while only one of them may own it. Both-set is rejected rather
+        // than resolved by precedence, so a hand-edited receipt cannot leave two
+        // answers to "which slot does this restore consult" and have the driver
+        // pick one of them silently. No writer this driver has produces it.
+        if let Some(guard) = entry.guard_slot.as_deref() {
+            if let Some(owned) = entry.slot.as_deref() {
+                return Err(invalid_displaced_claim(
+                    claim,
+                    &format!(
+                        "displaced plugin '{plugin_id}' both claims slot '{owned}' and guards \
+                         slot '{guard}'; an entry consults the slot it owns, so one of the two \
+                         is a mistake"
+                    ),
+                ));
+            }
+            if guard.is_empty() {
+                return Err(invalid_displaced_claim(
+                    claim,
+                    &format!(
+                        "displaced plugin '{plugin_id}' names an empty guard slot; \
+                         `plugins.slots.` is not a key, and the entry would restore it with no \
+                         guard at all"
+                    ),
+                ));
+            }
+            validate_config_key(&format!("plugins.slots.{guard}")).map_err(|err| {
+                invalid_displaced_claim(
+                    claim,
+                    &format!("displaced plugin '{plugin_id}' guard slot: {err}"),
+                )
+            })?;
+        }
         if let Some(slot) = entry.slot.as_deref() {
             if slot.is_empty() {
                 return Err(invalid_displaced_claim(
@@ -7042,6 +7140,7 @@ fn claim_displaced_plugins(claim: &AdapterClaim) -> Result<Vec<DisplacedPlugin>,
             resource: entry.resource.clone(),
             plugin_id: plugin_id.clone(),
             slot: entry.slot.clone(),
+            guard_slot: entry.guard_slot.clone(),
             applied: entry.applied,
         });
     }
@@ -7261,6 +7360,7 @@ fn dropped_prior_displacements(
             resource,
             plugin_id: entry.plugin_id,
             slot: entry.slot,
+            guard_slot: entry.guard_slot,
         });
     }
     Ok(dropped)
@@ -7299,15 +7399,25 @@ fn dropped_prior_displacements(
 ///
 /// The slot an entry is staged with is the one this receipt can hold. A dropped
 /// entry whose slot the replacement receipt already gave to another plugin cannot
-/// keep it, because [`claim_displaced_plugins`] rejects two entries sharing one
-/// exclusive slot — and rightly: a restore of the first makes it a third owner for
-/// the second, whose guard then steps aside over a plugin this adapter really did
-/// disable. Such an entry is staged *slotless* rather than skipped. The slot is
-/// contract metadata and not history, and the current contract does not declare this
-/// plugin at all, so there is no contract slot for the restore to be guarded by;
-/// the entry the contract does declare carries the guard for that exclusive slot,
-/// and what this entry exists to keep is the plugin id together with whether this
-/// adapter turned it off — neither of which is the slot.
+/// keep *owning* it, because [`claim_displaced_plugins`] rejects two entries sharing
+/// one exclusive slot — and rightly: a restore of the first makes it a third owner
+/// for the second, whose guard then steps aside over a plugin this adapter really did
+/// disable. Such an entry is staged without the ownership rather than skipped, and
+/// keeps the key as a [`DisplacedPluginRef::guard_slot`].
+///
+/// Ownership and the veto are two different claims and only the first is exclusive.
+/// The plugin this entry restores still declares the slot's kind, so `plugins enable`
+/// on it re-runs OpenClaw's selection over that same key whichever entry owns it —
+/// the side effect the veto in [`OpenClawDriver::restore_decision`] exists to check
+/// before it acts. Staging the entry without the key therefore did not merely record
+/// less history, it removed the guard from the one restore that still has the side
+/// effect: a `disable` that correctly stepped aside for the declared entry, because
+/// the operator had closed the slot or handed it to a third plugin, went straight on
+/// to `plugins enable` this one, reopened the slot over that choice, and reported a
+/// complete cleanup. The declared entry's own guard cannot cover it, and this entry
+/// keeps the guard for exactly as long as it keeps the responsibility — including
+/// across a further replacement, which is why [`DroppedPriorDisplacement`] carries
+/// the key on too.
 ///
 /// # Errors
 ///
@@ -7350,6 +7460,16 @@ fn stage_dropped_recovery_candidates(
         } else {
             entry.slot.clone()
         };
+        // The key the restore consults, kept whether or not the ownership survived.
+        // An entry that still owns its slot needs no separate guard — `slot_key`
+        // reads the owned one first — while an entry that gave it up guards on the
+        // key it used to own, and one a prior replacement had already reduced to a
+        // guard keeps guarding that key rather than losing it here.
+        let guard_slot = if slot_taken_by_another {
+            entry.slot.clone()
+        } else {
+            entry.guard_slot.clone()
+        };
         claim.resources.push(entry.resource.clone());
         let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
             return Err(invalid_displaced_claim(
@@ -7360,6 +7480,7 @@ fn stage_dropped_recovery_candidates(
         payload.displaced_plugins.push(DisplacedPluginRef {
             resource: entry.resource.id.clone(),
             slot,
+            guard_slot,
             applied: false,
         });
         progress.persist_claim(claim)?;
@@ -7518,6 +7639,12 @@ fn preserve_openclaw_displaced_facts(
                 // moved the plugin to a different exclusive slot must restore it
                 // to the slot the current contract names.
                 slot: spec.slot.clone(),
+                // And a guard is not inherited by an entry that owns its slot
+                // again, which is what re-declaring this plugin does: the veto
+                // reads the owned slot from here on. A prior guard belonged to a
+                // receipt that had given that slot to a different entry, and this
+                // receipt has just taken it back.
+                guard_slot: None,
                 // Whether the hand-off ran *is* history, and the only honest
                 // source for it is the receipt that recorded it. Inheriting an
                 // unapplied entry as applied would claim a transition no enable

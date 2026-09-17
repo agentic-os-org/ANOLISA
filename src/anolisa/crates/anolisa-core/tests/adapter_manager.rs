@@ -5528,8 +5528,12 @@ fn rename_displacement_resource(world: &World, new_id: &str) {
 
 /// Every displaced-plugin entry the persisted receipt still claims, resolved
 /// through its resources the way the driver resolves them, as
-/// `(plugin id, slot, applied)`.
-fn persisted_displacements(world: &World) -> Vec<(String, Option<String>, bool)> {
+/// `(plugin id, slot, guard slot, applied)`.
+///
+/// The two slot columns are what the receipt distinguishes: the slot an entry owns,
+/// which is exclusive, and the one its restore consults without owning it, which is
+/// not — see [`DisplacedPluginRef::guard_slot`].
+fn persisted_displacements(world: &World) -> Vec<(String, Option<String>, Option<String>, bool)> {
     let state = world.load_state();
     let claim = state
         .find_adapter_claim(COMPONENT, FRAMEWORK)
@@ -5549,7 +5553,12 @@ fn persisted_displacements(world: &World) -> Vec<(String, Option<String>, bool)>
                 },
                 None => panic!("dangling displacement reference {:?}", entry.resource),
             };
-            (plugin_id, entry.slot.clone(), entry.applied)
+            (
+                plugin_id,
+                entry.slot.clone(),
+                entry.guard_slot.clone(),
+                entry.applied,
+            )
         })
         .collect()
 }
@@ -5559,7 +5568,7 @@ fn persisted_displacements(world: &World) -> Vec<(String, Option<String>, bool)>
 fn persisted_displacement_ids(world: &World) -> Vec<String> {
     persisted_displacements(world)
         .into_iter()
-        .map(|(plugin_id, _, _)| plugin_id)
+        .map(|(plugin_id, _, _, _)| plugin_id)
         .collect()
 }
 
@@ -6427,6 +6436,26 @@ fn displacement_forgeries() -> Vec<DisplacementForgery> {
             "the same reference twice",
             |entries: &mut Vec<DisplacedPluginRef>| {
                 entries.push(entries[0].clone());
+            },
+        ),
+        (
+            "an entry that both claims and guards one slot",
+            |entries: &mut Vec<DisplacedPluginRef>| {
+                // A guard is the key an entry consults *because* another entry owns
+                // it. Both on one entry is two answers to "which slot does this
+                // restore read", and only one of them can be the one a later
+                // `disable` acts on.
+                entries[0].guard_slot = entries[0].slot.clone();
+            },
+        ),
+        (
+            "an empty guard slot",
+            |entries: &mut Vec<DisplacedPluginRef>| {
+                // `plugins.slots.` is not a key: an entry that names one reads as
+                // guarded and consults nothing, which is the unguarded restore the
+                // field exists to prevent.
+                entries[0].slot = None;
+                entries[0].guard_slot = Some(String::new());
             },
         ),
     ]
@@ -11179,7 +11208,12 @@ fn review_dropped_handoff_is_not_claimed_when_the_install_never_mutated() {
     // way, so the two windows are told apart by the mark and not by the record.
     assert_eq!(
         staged,
-        vec![("memory-core".to_string(), Some("memory".to_string()), false)],
+        vec![(
+            "memory-core".to_string(),
+            Some("memory".to_string()),
+            None,
+            false
+        )],
         "staged, and unapplied because no mutation performed the hand-off"
     );
 }
@@ -11198,12 +11232,15 @@ fn review_dropped_handoff_is_not_claimed_when_the_install_never_mutated() {
 /// been reset to `memory-core` by the uninstall, so the veto stepped aside for
 /// `memory-lancedb` too and nothing was left behind any backend.
 ///
-/// What the entry loses is the slot, not the responsibility. The slot is contract
-/// metadata rather than history, and the current contract does not declare this
-/// plugin at all — so there is no contract slot to guard its restore with, while the
-/// entry the contract *does* declare carries the guard for that exclusive slot. The
-/// plugin id and the ownership of the transition are what a restore acts on, and
-/// both survive.
+/// What the entry loses is the *ownership* of the slot, not the responsibility and
+/// not the veto. One exclusive slot, one entry owning it — the one the current
+/// contract declares. But the plugin this entry restores still declares that slot's
+/// kind, so `plugins enable` on it re-runs OpenClaw's selection over the same key
+/// whichever entry owns it, and the receipt therefore keeps the key as a guard:
+/// [`review_same_slot_replacement_restore_keeps_an_operator_closed_slot`] and
+/// [`review_same_slot_replacement_restore_keeps_a_third_plugin_selection`] are the
+/// two choices that guard protects. The plugin id and the ownership of the
+/// transition are what a restore acts on, and both survive.
 #[test]
 fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
     let guard = OpenClawEnvGuard::acquire();
@@ -11224,7 +11261,7 @@ fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
     assert_eq!(
         entries
             .iter()
-            .map(|(plugin_id, _, _)| plugin_id.as_str())
+            .map(|(plugin_id, _, _, _)| plugin_id.as_str())
             .collect::<Vec<_>>(),
         vec!["memory-lancedb", "memory-core"],
         "the replacement receipt keeps both responsibilities instead of letting the \
@@ -11232,25 +11269,36 @@ fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
     );
     let lancedb = entries
         .iter()
-        .find(|(id, _, _)| id == "memory-lancedb")
+        .find(|(id, _, _, _)| id == "memory-lancedb")
         .unwrap();
     assert_eq!(
         lancedb.1.as_deref(),
         Some("memory"),
         "the declared plugin keeps the slot the current contract names: {entries:?}"
     );
-    assert!(lancedb.2, "and the hand-off it performed: {entries:?}");
+    assert_eq!(
+        lancedb.2, None,
+        "an entry that owns its slot consults that one and records no separate \
+         guard: {entries:?}"
+    );
+    assert!(lancedb.3, "and the hand-off it performed: {entries:?}");
     let core = entries
         .iter()
-        .find(|(id, _, _)| id == "memory-core")
+        .find(|(id, _, _, _)| id == "memory-core")
         .unwrap();
     assert_eq!(
         core.1, None,
         "a dropped plugin the contract no longer declares has no contract slot, and \
          the receipt cannot give one exclusive slot to two entries: {entries:?}"
     );
+    assert_eq!(
+        core.2.as_deref(),
+        Some("memory"),
+        "but it still competes for that slot, so the receipt keeps the key its \
+         restore has to consult: {entries:?}"
+    );
     assert!(
-        core.2,
+        core.3,
         "the dropped plugin's hand-off is still owned, which is the whole point of \
          keeping the entry: {entries:?}"
     );
@@ -11276,6 +11324,305 @@ fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
         Some("true"),
         "and the host ends with a backend behind the slot, not with every plugin of \
          that kind switched off"
+    );
+}
+
+/// Stage the world the two operator-choice tests below start from: one receipt whose
+/// declared displacement took the memory slot from an older one, so the older plugin's
+/// entry survives in that receipt without owning the slot it still competes for.
+///
+/// The fixture half of
+/// [`review_same_slot_replacement_keeps_old_recovery_responsibility`], which asserts the
+/// receipt shape this leaves behind; the two tests below assert what a `disable` does
+/// with that shape once an operator has chosen something else for the slot.
+fn stage_same_slot_replacement(guard: &OpenClawEnvGuard) -> (World, AdapterManager) {
+    let (world, manager) = stage_with_unmarked_handoff(guard);
+    // Same kind as the bundle and as the plugin being dropped, so the host really does
+    // write the slot all three of them compete for.
+    seed_bundled_plugin_with_kind(&world, "memory-lancedb", "memory");
+    redeclare_displacement(
+        &world,
+        &plugin_adapter_block_with_displacement("memory-lancedb", Some("memory")),
+    );
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable under a contract that moved the slot to another plugin");
+
+    assert_eq!(
+        persisted_displacements(&world)
+            .iter()
+            .map(|(id, slot, guard_slot, applied)| (
+                id.as_str(),
+                slot.as_deref(),
+                guard_slot.as_deref(),
+                *applied
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("memory-lancedb", Some("memory"), None, true),
+            ("memory-core", None, Some("memory"), true),
+        ],
+        "fixture must leave both responsibilities in one receipt, the older one guarding \
+         the slot the newer one owns"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "and must leave the slot on this adapter's own plugin, so whatever it names \
+         afterwards is an operator's choice and not the enable's"
+    );
+    (world, manager)
+}
+
+/// An operator who closed the memory slot after the displacement still has it closed
+/// once the cleanup is done.
+///
+/// The half of a same-slot replacement the receipt shape cannot show. Both entries name
+/// `plugins.slots.memory`: the declared one owns it, the older one guards on it. A
+/// `disable` that read only the ownership vetoed the declared entry, correctly, and then
+/// restored the older one *unguarded* — `plugins enable memory-core` re-runs OpenClaw's
+/// slot selection, which wrote the slot back to `memory-core` over the operator's
+/// explicit `none`, and the report called that a complete cleanup. Dropping the slot
+/// metadata had not dropped the side effect, and the guard the declared entry carries
+/// does not cover a restore of a different plugin.
+#[test]
+fn review_same_slot_replacement_restore_keeps_an_operator_closed_slot() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_same_slot_replacement(&guard);
+
+    // The operator closes the slot: no memory backend at all, chosen on purpose.
+    set_config_answer(&world, "plugins.slots.memory", "none");
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    for forbidden in [
+        "plugins enable memory-core",
+        "plugins enable memory-lancedb",
+    ] {
+        assert!(
+            !argv_contains(&appended, forbidden),
+            "neither entry may re-open a slot the operator closed: {appended:?}"
+        );
+    }
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("plugins.slots.memory is explicitly 'none'")),
+        "and the report must name the choice the retained entry stepped aside for \
+         rather than stay quiet about it: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "a veto is a release, so the cleanup is still complete: {:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some("none"),
+        "the operator's choice is what the host still says"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "and the cleanup left the operator the plugin it declined to re-enable, \
+         instead of re-opening it behind them"
+    );
+}
+
+/// The same replacement with a third plugin behind the slot: that selection survives the
+/// cleanup too.
+///
+/// The other half of the reproduction, and the reason the veto cannot be a special case
+/// for an explicitly closed slot. `plugins enable memory-core` does not choose between
+/// "closed" and "open" — it re-runs OpenClaw's selection, which writes the slot to the
+/// plugin being enabled over whoever holds it, so a selection made *for* somebody else is
+/// overwritten exactly as a selection made against everybody is.
+#[test]
+fn review_same_slot_replacement_restore_keeps_a_third_plugin_selection() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_same_slot_replacement(&guard);
+
+    // The operator moved the slot to a plugin this receipt has never claimed.
+    seed_bundled_plugin_with_kind(&world, "memory-third", "memory");
+    set_config_answer(&world, "plugins.slots.memory", "memory-third");
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    for forbidden in [
+        "plugins enable memory-core",
+        "plugins enable memory-lancedb",
+    ] {
+        assert!(
+            !argv_contains(&appended, forbidden),
+            "neither entry may take the slot back from its current owner: {appended:?}"
+        );
+    }
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("now belongs to 'memory-third'")),
+        "and the report must name the owner the retained entry stepped aside for: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some("memory-third"),
+        "the operator's selection is what the host still says"
+    );
+}
+
+/// A guard is not a one-replacement memory: the responsibility it belongs to outlives
+/// the contract change that first took the slot away from it.
+///
+/// The staging pass reads the prior entry's slot to decide what the replacement can
+/// hold, and a prior entry that already gave its slot up has none to read. Carrying only
+/// the ownership through [`DroppedPriorDisplacement`] would therefore stage the second
+/// replacement's entry slotless *and* guardless, silently restoring the unguarded
+/// restore one contract change later than the one that removed it — no fault, no
+/// operator, nothing in the report to say the veto went anywhere.
+#[test]
+fn a_second_replacement_keeps_the_guard_the_first_one_recorded() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_same_slot_replacement(&guard);
+
+    // A third contract, declaring no displacement at all: both entries are dropped, and
+    // the older of them has already given its slot up once.
+    redeclare_displacement(&world, &plugin_adapter_block(None));
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable under a contract that declares no displacement");
+
+    assert_eq!(
+        persisted_displacements(&world)
+            .iter()
+            .map(|(id, slot, guard_slot, applied)| (
+                id.as_str(),
+                slot.as_deref(),
+                guard_slot.as_deref(),
+                *applied
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("memory-lancedb", Some("memory"), None, true),
+            ("memory-core", None, Some("memory"), true),
+        ],
+        "the second replacement owes the same two responsibilities, and the older one \
+         still names the key it competes for"
+    );
+
+    // And the key it kept is still a veto rather than decoration.
+    set_config_answer(&world, "plugins.slots.memory", "none");
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        !argv_contains(&appended, "plugins enable memory-core"),
+        "a guard carried through a second replacement must still guard: {appended:?}"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some("none"),
+        "and the operator's choice is still what the host says"
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+}
+
+/// An entry that gave its slot up is still recoverable from a `disable`'s own capture.
+///
+/// The recovery the receipt shape above makes possible on the disable side, and the one
+/// shape an earlier version of this driver documented as terminal: an unapplied entry
+/// with no slot of its own had no key for the pre-uninstall capture to be read against,
+/// so the attribution answered "the contract declared no slot", the restore concluded
+/// this adapter never disabled the plugin, and the report said so over a plugin this
+/// adapter's own selection really had turned off. Recovering it needed a receipt that
+/// could hold a key alongside another entry's ownership of that key, which is what a
+/// guard slot is.
+///
+/// Forged rather than fault-injected: the receipt is the state under test, and an enable
+/// that cannot read the slot fails before it can stage anything.
+#[test]
+fn disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns() {
+    let guard = OpenClawEnvGuard::acquire();
+    let (world, manager) = stage_same_slot_replacement(&guard);
+    // The mark is what a real enable could not write: the host performed the hand-off,
+    // the slot read that would have shown it did not answer.
+    forge_displaced_references(&world, |entries| {
+        let core = entries
+            .iter_mut()
+            .find(|entry| entry.slot.is_none() && entry.guard_slot.as_deref() == Some("memory"))
+            .expect("fixture must leave the dropped entry guarding the memory slot");
+        core.applied = false;
+    });
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "and the host must still show this adapter's own selection, which is the \
+         corroborating half of the attribution"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("false"),
+        "over a plugin that is off"
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-core"),
+        "the capture must have recovered the hand-off the mark missed: {appended:?}"
+    );
+    assert!(
+        !outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("never disabled it")),
+        "and must not disown it in the same breath: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        Some("true"),
+        "the bundled backend must really be back on"
     );
 }
 
