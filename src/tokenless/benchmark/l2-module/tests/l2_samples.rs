@@ -102,6 +102,34 @@ fn retention_text_falls_back_to_the_wire_form_without_a_content_key() {
 }
 
 #[test]
+fn json_sample_with_a_string_top_level_is_rejected_on_both_sides() {
+    // The engine unwraps an input whose top level is a string carrying an object,
+    // so its output would be counted against that inner value while the
+    // before-count still reports the quoted form — a rate computed over two
+    // different bases. Both entry points must refuse the sample instead, so a
+    // future addition fails loudly rather than reporting distorted numbers.
+    use tokenless_l2_bench::l2::{Category, tokenless_side};
+
+    let string_top_level = r#""{\"alpha\":1,\"beta\":2}""#;
+    let refusals = [
+        tokenless_side::compress(Category::Json, string_top_level)
+            .expect_err("compress must refuse a string top level")
+            .to_string(),
+        tokenless_side::wire_before(Category::Json, string_top_level)
+            .expect_err("wire_before must refuse a string top level")
+            .to_string(),
+    ];
+    for message in refusals {
+        assert!(message.contains("top level"), "got: {message}");
+    }
+
+    // The guard must not reject the shape every committed json sample uses.
+    let object_top_level = r#"{"alpha":1,"beta":2}"#;
+    tokenless_side::compress(Category::Json, object_top_level).expect("object sample compresses");
+    tokenless_side::wire_before(Category::Json, object_top_level).expect("object sample counts");
+}
+
+#[test]
 fn retention_text_is_unescaped_for_wrapped_text() {
     // Guards the escaping fix: a code ground-truth item containing a quote must
     // match against retention_text. The wrapped envelope serializes content as

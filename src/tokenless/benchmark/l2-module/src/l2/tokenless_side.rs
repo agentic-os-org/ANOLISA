@@ -43,6 +43,31 @@ pub struct TokenlessOutput {
     pub latency_s: f64,
 }
 
+/// Parses a `json`-category sample, rejecting a top-level JSON string.
+///
+/// `JsonCompressor` unwraps an input whose top level is a string carrying a
+/// parseable object or array and compresses the inner value. Its output would
+/// then be counted against that inner value while [`wire_before`] still reports
+/// the quoted form, putting the two sides of the compression rate on different
+/// bases and shifting what retention asserts against. No committed sample is
+/// shaped that way, and the engine only unwraps when the inner text parses as
+/// an object or array; this rejects every top-level string rather than
+/// restating that condition, so the guard cannot drift out of step with the
+/// engine — and a `json` sample that is a bare string measures string escaping
+/// rather than JSON compression in any case.
+fn parse_json_sample(content: &str) -> Result<Value, L2Error> {
+    let value: Value = serde_json::from_str(content)
+        .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?;
+    if value.is_string() {
+        return Err(L2Error::InvalidSample(
+            "json sample has a string at its top level: the compressor may unwrap it and \
+             be measured against a different value than the before-count reports"
+                .to_string(),
+        ));
+    }
+    Ok(value)
+}
+
 /// Compresses `content` with the tokenless `JsonCompressor`.
 ///
 /// JSON samples are parsed and compressed as-is. Non-JSON text (source code,
@@ -54,12 +79,12 @@ pub struct TokenlessOutput {
 /// # Errors
 ///
 /// Returns [`L2Error::InvalidSample`] when a `json`-category sample fails to
-/// parse or the compressor rejects the input, and [`L2Error::Json`] if the
-/// sample cannot be serialized into the payload handed to the engine.
+/// parse, carries a string at its top level, or the compressor rejects the
+/// input, and [`L2Error::Json`] if the sample cannot be serialized into the
+/// payload handed to the engine.
 pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2Error> {
     let value: Value = if category == Category::Json {
-        serde_json::from_str(content)
-            .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?
+        parse_json_sample(content)?
     } else {
         json!({ "content": content })
     };
@@ -122,12 +147,11 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
 ///
 /// # Errors
 ///
-/// Same failure modes as [`compress`].
+/// Same failure modes as [`compress`]: both sides must agree on the value they
+/// count, so the top-level-string rejection applies here too.
 pub fn wire_before(category: Category, content: &str) -> Result<String, L2Error> {
     if category == Category::Json {
-        let value: Value = serde_json::from_str(content)
-            .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?;
-        Ok(serde_json::to_string(&value)?)
+        Ok(serde_json::to_string(&parse_json_sample(content)?)?)
     } else {
         Ok(serde_json::to_string(&json!({ "content": content }))?)
     }
