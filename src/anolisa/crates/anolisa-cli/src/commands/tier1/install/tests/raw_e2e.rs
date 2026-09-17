@@ -17,6 +17,7 @@ use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
 
 const JSON_REASON_ENV: &str = "ANOLISA_TEST_MISSING_INDEX_REASON";
+const PLATFORM_JSON_REASON_ENV: &str = "ANOLISA_TEST_PLATFORM_MISMATCH_REASON";
 const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
 const JSON_END: &str = "ANOLISA_TEST_JSON_END";
 
@@ -40,6 +41,32 @@ fn render_missing_index_error_json_child() {
     crate::output::write_stdout(format_args!("{JSON_END}"), true);
     crate::output::flush_stdout();
     assert_eq!(exit_code, std::process::ExitCode::from(1));
+}
+
+/// Isolated child for the platform-mismatch regression: renders the reason the
+/// real resolver produced through the production `--json` path, so the parent
+/// asserts the multi-line platform list survives the envelope instead of
+/// assuming a string escapes correctly.
+#[test]
+#[ignore = "invoked as an isolated child by the platform-mismatch regression"]
+fn render_platform_mismatch_error_json_child() {
+    let reason = std::env::var(PLATFORM_JSON_REASON_ENV)
+        .expect("platform-mismatch JSON child must be invoked by its parent regression test");
+    let tmp = tempdir().expect("tmpdir");
+    let err = crate::response::CliError::InvalidArgument {
+        command: "install agentsight".to_string(),
+        reason,
+    };
+
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_BEGIN}"), true);
+    crate::output::flush_stdout();
+    let exit_code =
+        crate::response::render_error(&ctx_with_prefix(true, Some(tmp.path().join("sys"))), &err);
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_END}"), true);
+    crate::output::flush_stdout();
+    assert_eq!(exit_code, std::process::ExitCode::from(2));
 }
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
@@ -1522,6 +1549,233 @@ sha256 = "{sha}"
         err.reason().contains("installable versions: 0.2.0"),
         "refusal must still list installable versions: {}",
         err.reason()
+    );
+}
+
+/// Overwrite the fixture repo's `v1/index.toml` with exactly these rows,
+/// leaving the published component index as the fixture wrote it: identity
+/// resolution keeps accepting the component while the distribution resolver
+/// sees only what this wrote. Rows are
+/// `(component, version, os, arch, pkg_base)`, where a `None` `pkg_base` omits
+/// the selector. Artifact bytes and checksums stay placeholders — every caller
+/// fails resolution, so nothing is fetched.
+fn rewrite_index_rows(repo_root: &Path, rows: &[(&str, &str, &str, &str, Option<&str>)]) {
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for (component, version, os, arch, pkg_base) in rows {
+        let pkg_base_line = match pkg_base {
+            Some(base) => format!("pkg_base = \"{base}\"\n"),
+            None => String::new(),
+        };
+        index.push_str(&format!(
+            "\n[[entries]]\ncomponent = \"{component}\"\nversion = \"{version}\"\nchannel = \"stable\"\nartifact_type = \"tar_gz\"\nbackend = \"raw\"\nurl = \"{component}-{version}-{os}-{arch}.tar.gz\"\nos = \"{os}\"\narch = \"{arch}\"\n{pkg_base_line}install_modes = [\"system\"]\nsha256 = \"{sha}\"\n",
+            sha = "0".repeat(64),
+        ));
+    }
+    std::fs::write(repo_root.join("v1/index.toml"), index).expect("write index");
+}
+
+/// A component the repository publishes but not for this host is a platform
+/// gap, not an unknown name. The refusal must name the requested platform and
+/// list every platform the repository does carry — deduplicated, in a stable
+/// order, and identical through the `--json` envelope.
+#[test]
+fn install_platform_mismatch_lists_published_platforms() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    // Neither architecture is one ANOLISA runs on, so the rows stay foreign on
+    // every supported host. ppc64le is published twice (one row per version) to
+    // pin the dedup, and s390x is listed first to pin the sort.
+    rewrite_index_rows(
+        &repo_root,
+        &[
+            ("agentsight", "0.3.0", "linux", "s390x", None),
+            ("agentsight", "0.2.0", "linux", "ppc64le", None),
+            ("agentsight", "0.1.0", "linux", "ppc64le", None),
+        ],
+    );
+    let env = anolisa_env::EnvService::detect();
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("a host the repository publishes nothing for must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert_eq!(err.exit_code(), 2);
+    assert!(
+        reason.contains(&format!("is not available for {}/{}", env.os, env.arch)),
+        "mismatch must name the requested platform: {reason}"
+    );
+    assert!(
+        reason.contains("available platforms:\n  - linux/ppc64le\n  - linux/s390x"),
+        "mismatch must list every published platform, deduplicated and sorted: {reason}"
+    );
+    assert_eq!(
+        reason.matches("linux/ppc64le").count(),
+        1,
+        "one line per platform, not one per published version: {reason}"
+    );
+    assert!(
+        !reason.contains("no distribution entry matches the query"),
+        "mismatch must replace the generic resolver rendering: {reason}"
+    );
+
+    // Run this test executable as an isolated child so the production
+    // renderer's stdout can be asserted without replacing process-global
+    // output in-process.
+    let child_module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child_test = format!("{child_module}::render_platform_mismatch_error_json_child");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([child_test.as_str(), "--exact", "--ignored", "--nocapture"])
+        .env(PLATFORM_JSON_REASON_ENV, &reason)
+        .output()
+        .expect("run isolated JSON renderer child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "JSON renderer child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let (_, after_begin) = stdout
+        .split_once(JSON_BEGIN)
+        .expect("child stdout must contain the JSON start marker");
+    let (json, _) = after_begin
+        .split_once(JSON_END)
+        .expect("child stdout must contain the JSON end marker");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.trim()).expect("rendered error must be valid JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["command"], "install agentsight");
+    assert_eq!(parsed["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(parsed["error"]["reason"], reason);
+}
+
+/// An unknown package keeps the generic not-found rendering: reporting a
+/// platform gap for a name the index never carried would send the operator to
+/// a different build host instead of a different component name.
+#[test]
+fn install_unknown_package_keeps_generic_not_found_diagnostic() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    let env = anolisa_env::EnvService::detect();
+    // The repository is not empty — it publishes this host, for another
+    // package — so the refusal has to come from the name and not the platform.
+    rewrite_index_rows(
+        &repo_root,
+        &[(
+            "tokenless",
+            "0.2.0",
+            env.os.as_str(),
+            env.arch.as_str(),
+            None,
+        )],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("an unpublished package must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains("cannot resolve package 'agentsight'"),
+        "unknown package must keep the generic rendering: {reason}"
+    );
+    assert!(
+        reason.contains("no distribution entry matches the query"),
+        "unknown package must keep the resolver's own wording: {reason}"
+    );
+    assert!(
+        !reason.contains("available platforms"),
+        "unknown package must not be reported as a platform gap: {reason}"
+    );
+}
+
+/// A platform the repository does publish for is not a platform gap. Here a
+/// selector the resolver applies after os/arch (`pkg_base`) causes the
+/// refusal, and it must keep the generic rendering rather than be
+/// misattributed to the build host.
+#[test]
+fn install_host_platform_published_keeps_generic_not_found_diagnostic() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    let env = anolisa_env::EnvService::detect();
+    rewrite_index_rows(
+        &repo_root,
+        &[(
+            "agentsight",
+            "0.2.0",
+            env.os.as_str(),
+            env.arch.as_str(),
+            Some("zzz-no-such-package-base"),
+        )],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("an unsatisfiable package base must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains("cannot resolve package 'agentsight'"),
+        "a later-filter refusal must keep the generic rendering: {reason}"
+    );
+    assert!(
+        !reason.contains("available platforms"),
+        "a published platform must not be reported as a platform gap: {reason}"
+    );
+}
+
+/// A version pin does not outrank the platform gap. With no row for this host
+/// at all, the pin-specific wording would report the version as unpublished
+/// for this platform and hide that the repository publishes nothing here.
+#[test]
+fn install_pinned_version_on_unpublished_platform_lists_platforms() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    rewrite_index_rows(
+        &repo_root,
+        &[
+            ("agentsight", "0.2.0", "linux", "s390x", None),
+            ("agentsight", "0.1.0", "linux", "ppc64le", None),
+        ],
+    );
+    let env = anolisa_env::EnvService::detect();
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.2.0".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("a pinned version on an unpublished platform must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains(&format!("is not available for {}/{}", env.os, env.arch)),
+        "the platform gap must win over the pin wording: {reason}"
+    );
+    assert!(
+        reason.contains("available platforms:\n  - linux/ppc64le\n  - linux/s390x"),
+        "the pin refusal must still list the published platforms: {reason}"
+    );
+    assert!(
+        !reason.contains("not published"),
+        "the pin wording would hide the platform gap: {reason}"
     );
 }
 

@@ -214,6 +214,38 @@ pub(crate) fn resolve_raw(
                 };
             }
         }
+        // A component the installable index *does* publish, just not for this
+        // host, is a platform gap rather than an unknown name — the generic
+        // rendering below reports both identically, which sends an operator
+        // hunting a nonexistent component instead of a wrong build host. Only
+        // reached when no row matches the requested os/arch (`arch = "any"`
+        // counts as a match, exactly as `resolve` reads it), so a failure a
+        // later filter caused — version, install mode, libc, package base —
+        // keeps its existing diagnostic instead of being misreported as a
+        // platform gap. The list comes from the installable view, so platforms
+        // published only with artifact types this backend cannot place are not
+        // offered as alternatives.
+        if matches!(err, ResolveError::NotFound) {
+            let platforms = index.published_platforms(&query);
+            let host_published = platforms
+                .iter()
+                .any(|(os, arch)| os == query.os && (arch == query.arch || arch == "any"));
+            if !platforms.is_empty() && !host_published {
+                let available = platforms
+                    .iter()
+                    .map(|(os, arch)| format!("  - {os}/{arch}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return CliError::InvalidArgument {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "component '{component}' (package '{package}') is not available for {}/{} from {index_url}; nothing was changed\n\navailable platforms:\n{available}",
+                        query.os,
+                        query.arch,
+                    ),
+                };
+            }
+        }
         CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(

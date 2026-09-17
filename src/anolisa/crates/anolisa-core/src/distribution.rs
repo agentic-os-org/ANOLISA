@@ -522,6 +522,37 @@ impl DistributionIndex {
         versions.dedup();
         versions
     }
+
+    /// Distinct `os`/`arch` pairs this index publishes for the query's
+    /// component and channel, sorted and deduplicated.
+    ///
+    /// Ignores every other selector — including `q.os` and `q.arch` — so it
+    /// answers "where is this component published at all" rather than
+    /// [`matching_versions`]' "what could this query resolve to". Callers use
+    /// the difference to tell a host the index carries no artifact for apart
+    /// from a component the index never carried.
+    ///
+    /// An `arch = "any"` row is reported verbatim instead of being expanded
+    /// per architecture; match it against a requested arch with the same rule
+    /// [`resolve`](Self::resolve) applies.
+    ///
+    /// [`matching_versions`]: Self::matching_versions
+    pub fn published_platforms(&self, q: &ResolveQuery<'_>) -> Vec<(String, String)> {
+        let want_channel = q.channel.unwrap_or("stable");
+        let mut platforms: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter(|e| e.component == q.component)
+            .filter(|e| e.channel == want_channel)
+            .map(|e| (e.os.clone(), e.arch.clone()))
+            .collect();
+        // Sorted so a rendered list does not depend on how the published index
+        // happens to order its rows; sorting is also what groups the repeats
+        // `dedup` then removes (one row per version of the same target).
+        platforms.sort_unstable();
+        platforms.dedup();
+        platforms
+    }
 }
 
 /// Optional selector match: entry None => wildcard accept; entry Some =>
@@ -1071,6 +1102,152 @@ mod tests {
     #[test]
     fn lenient_parse_still_rejects_file_level_damage() {
         assert!(DistributionIndex::from_toml_str_lenient("schema_version = [broken").is_err());
+    }
+
+    /// The platform list renders what the index publishes, so it must not
+    /// depend on row order, must collapse the one row per version that a
+    /// target accumulates, and must not be narrowed by the selectors
+    /// [`resolve`](DistributionIndex::resolve) only applies later (install
+    /// mode, libc, package base): a platform the index publishes for is an
+    /// alternative worth naming even when this query's other selectors would
+    /// have rejected its rows.
+    #[test]
+    fn published_platforms_dedup_sort_and_ignore_narrowing_selectors() {
+        let index = DistributionIndex::from_toml_str(
+            r#"
+            schema_version = 1
+            [[entries]]
+            component = "agentsight"
+            version = "0.3.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "s390x"
+            install_modes = ["user"]
+            [[entries]]
+            component = "agentsight"
+            version = "0.2.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "ppc64le"
+            libc = "musl"
+            pkg_base = "anolis8"
+            install_modes = ["system"]
+            [[entries]]
+            component = "agentsight"
+            version = "0.1.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "ppc64le"
+            install_modes = ["system"]
+            "#,
+        )
+        .expect("parse");
+
+        let q = linux_x86_query("agentsight", "system");
+        assert_eq!(
+            index.published_platforms(&q),
+            vec![
+                ("linux".to_string(), "ppc64le".to_string()),
+                ("linux".to_string(), "s390x".to_string()),
+            ]
+        );
+    }
+
+    /// Only the queried component's rows in the queried channel are published
+    /// *for that query*. Offering another component's target, or another
+    /// channel's, would name an alternative that cannot answer the request.
+    #[test]
+    fn published_platforms_scope_to_component_and_channel() {
+        let index = DistributionIndex::from_toml_str(
+            r#"
+            schema_version = 1
+            [[entries]]
+            component = "agentsight"
+            version = "0.1.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "x86_64"
+            install_modes = ["system"]
+            [[entries]]
+            component = "agentsight"
+            version = "0.1.0"
+            channel = "beta"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "riscv64"
+            install_modes = ["system"]
+            [[entries]]
+            component = "cosh"
+            version = "0.1.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "ppc64le"
+            install_modes = ["system"]
+            "#,
+        )
+        .expect("parse");
+
+        let stable = linux_x86_query("agentsight", "system");
+        assert_eq!(
+            index.published_platforms(&stable),
+            vec![("linux".to_string(), "x86_64".to_string())]
+        );
+
+        let beta = ResolveQuery {
+            channel: Some("beta"),
+            ..linux_x86_query("agentsight", "system")
+        };
+        assert_eq!(
+            index.published_platforms(&beta),
+            vec![("linux".to_string(), "riscv64".to_string())]
+        );
+
+        // A component the index never carried publishes no platform at all,
+        // which is how the caller tells this from a platform gap.
+        assert!(
+            index
+                .published_platforms(&linux_x86_query("tokenless", "system"))
+                .is_empty()
+        );
+    }
+
+    /// `arch = "any"` stays a published target in its own right instead of
+    /// being expanded per architecture; the caller matches it against the
+    /// requested arch with the same rule `resolve` applies.
+    #[test]
+    fn published_platforms_report_any_arch_verbatim() {
+        let index = DistributionIndex::from_toml_str(
+            r#"
+            schema_version = 1
+            [[entries]]
+            component = "agentsight"
+            version = "0.1.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "any"
+            install_modes = ["system"]
+            "#,
+        )
+        .expect("parse");
+
+        let q = linux_x86_query("agentsight", "system");
+        assert_eq!(
+            index.published_platforms(&q),
+            vec![("linux".to_string(), "any".to_string())]
+        );
     }
 
     #[test]
