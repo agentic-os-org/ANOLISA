@@ -12,6 +12,7 @@ use crate::detectors::multi_turn_intent::MultiTurnIntentDetector;
 use crate::detectors::rule_engine::RuleEngine;
 use crate::detectors::{Conversation, DetectInput, DetectionLayer};
 use crate::error::ScannerError;
+use crate::models::Classifier;
 use crate::models::multi_turn_intent::Turn;
 use crate::preprocessor::Preprocessor;
 use crate::result::{LayerResult, ScanResult, ThreatType, Verdict};
@@ -87,13 +88,54 @@ impl PromptScanner {
     /// - [`ScannerError::LayerNotAvailable`] when a mandatory layer's
     ///   dependencies are missing.
     pub fn new(config: ScanConfig) -> Result<Self, ScannerError> {
+        Self::build(config, None)
+    }
+
+    /// Build a scanner from an explicit config with an injected L2 classifier.
+    ///
+    /// [`PromptScanner::new`] constructs the L2 classifier from the
+    /// model-service environment, which is right for production but makes the
+    /// service endpoint uncontrollable for callers that need to pin it (for
+    /// example a daemon integration test driving the model service at a known
+    /// address). The injected classifier replaces the `ml_classifier` layer,
+    /// so the config must enable that layer; every other layer is built
+    /// exactly as in [`PromptScanner::new`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ScannerError::Config`] when the config does not enable
+    ///   `ml_classifier`, for an unknown detector name, an unsupported L2
+    ///   model, or unloadable built-in rules.
+    /// - [`ScannerError::LayerNotAvailable`] when a mandatory layer's
+    ///   dependencies are missing.
+    pub fn with_classifier(
+        config: ScanConfig,
+        classifier: Box<dyn Classifier>,
+    ) -> Result<Self, ScannerError> {
+        if !config.layers.iter().any(|layer| layer == "ml_classifier") {
+            return Err(ScannerError::Config(
+                "with_classifier requires a config that enables ml_classifier".to_owned(),
+            ));
+        }
+        Self::build(config, Some(classifier))
+    }
+
+    /// Shared construction: every layer is built from `config`, with the
+    /// `ml_classifier` layer supplied by `injected` when present.
+    fn build(
+        config: ScanConfig,
+        mut injected: Option<Box<dyn Classifier>>,
+    ) -> Result<Self, ScannerError> {
         let t_init = Instant::now();
         let preprocessor = Preprocessor::new(config.detect_encoding);
         let mut detectors: Vec<Box<dyn DetectionLayer>> = Vec::new();
         for name in &config.layers {
             let detector: Box<dyn DetectionLayer> = match name.as_str() {
                 "rule_engine" => Box::new(RuleEngine::new()?),
-                "ml_classifier" => Box::new(MlClassifier::new(&config.model_name)?),
+                "ml_classifier" => match injected.take() {
+                    Some(classifier) => Box::new(MlClassifier::with_classifier(classifier)),
+                    None => Box::new(MlClassifier::new(&config.model_name)?),
+                },
                 "multi_turn_intent" => {
                     Box::new(MultiTurnIntentDetector::new(config.multi_turn_threshold)?)
                 }
@@ -123,6 +165,26 @@ impl PromptScanner {
     /// See [`PromptScanner::new`].
     pub fn with_mode(mode: ScanMode) -> Result<Self, ScannerError> {
         PromptScanner::new(ScanConfig::preset(mode))
+    }
+
+    /// Build a scanner from a preset mode with an optional L2 backend override.
+    ///
+    /// Mirrors the V1 native `scan_config`: a blank `model` means "not set"
+    /// and falls back to the preset's built-in backend, and the override only
+    /// matters for modes that enable `ml_classifier` — `multi_turn_intent`
+    /// runs its own fixed model.
+    ///
+    /// # Errors
+    ///
+    /// - [`ScannerError::Config`] when `model` names a backend no detector
+    ///   claims (see [`crate::detectors::ml_classifier`]).
+    /// - All errors of [`PromptScanner::new`].
+    pub fn with_mode_and_model(mode: ScanMode, model: Option<&str>) -> Result<Self, ScannerError> {
+        let mut config = ScanConfig::preset(mode);
+        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+            model.clone_into(&mut config.model_name);
+        }
+        PromptScanner::new(config)
     }
 
     /// Check every layer's prerequisites before the first scan.
@@ -428,6 +490,37 @@ mod tests {
             second["elapsed_ms"].as_f64().unwrap(),
             second["scan_ms"].as_f64().unwrap()
         );
+    }
+
+    #[test]
+    fn with_classifier_builds_a_standard_scanner_using_the_injected_classifier() {
+        let classifier = Box::new(Qwen3GuardClassifier::with_client(
+            MODEL_QWEN3_GUARD,
+            Box::new(FakeClient::default()),
+        ));
+        let scanner =
+            PromptScanner::with_classifier(ScanConfig::preset(ScanMode::Standard), classifier)
+                .expect("injected classifier builds");
+        let result = scanner.scan("hello there", None).unwrap();
+        assert_eq!(result.verdict, Verdict::Pass);
+        let names: Vec<&str> = result
+            .layer_results
+            .iter()
+            .map(|layer| layer.layer_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["rule_engine", "ml_classifier"]);
+    }
+
+    #[test]
+    fn with_classifier_rejects_a_config_without_the_ml_layer() {
+        let classifier = Box::new(Qwen3GuardClassifier::with_client(
+            MODEL_QWEN3_GUARD,
+            Box::new(FakeClient::default()),
+        ));
+        let error = PromptScanner::with_classifier(ScanConfig::preset(ScanMode::Fast), classifier)
+            .err()
+            .expect("a fast config has no ml_classifier layer to replace");
+        assert!(matches!(error, ScannerError::Config(_)));
     }
 
     /// Client serving canned chat (L2) and generate (L4) replies.

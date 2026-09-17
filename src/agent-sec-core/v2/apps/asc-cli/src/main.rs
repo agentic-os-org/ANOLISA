@@ -4,7 +4,10 @@ use std::process::ExitCode;
 use asc_cli::{
     Cli, InputError, Plan,
     capabilities::process_environment,
-    output::{render_binding_mutation, render_policy, render_scan_code},
+    output::{
+        render_binding_mutation, render_policy, render_prompt_warmup, render_scan_code,
+        render_scan_prompt, warn_multi_turn_incomplete,
+    },
 };
 
 fn main() -> ExitCode {
@@ -69,8 +72,10 @@ fn main() -> ExitCode {
     runtime.shutdown(std::time::Duration::from_millis(50));
     match result {
         Ok(code) => ExitCode::from(code),
-        Err(error @ RunError::Input(InputError::EmptyCode)) => {
-            eprintln!("{error}");
+        // Scan commands own their usage hints, so those errors render
+        // verbatim instead of behind the generic prefix.
+        Err(RunError::Input(input)) if input.is_usage_hint() => {
+            eprintln!("{input}");
             ExitCode::FAILURE
         }
         Err(error) => {
@@ -95,6 +100,51 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         }
         Plan::Daemon { socket } => socket,
     };
+    // Scan-prompt resolves its own request batch (one per input line or
+    // conversation payload) and prints diagnostics around them, so it owns
+    // its transport loop instead of sharing the single-request path.
+    if cli.is_scan_prompt() {
+        let run = cli.prompt_scan_run().map_err(RunError::Input)?;
+        for warning in &run.warnings {
+            eprintln!("{warning}");
+        }
+        // A warmup is one readiness probe whose fixed-text message contract
+        // replaces the per-result rendering and multi-turn diagnostics of
+        // scans, so it dispatches before the scan loop.
+        if run.is_warmup
+            && let Some(request) = run.requests.first()
+        {
+            let response = asc_daemon_client::call(socket, request, cli.timeout())
+                .map_err(RunError::Client)?;
+            return render_prompt_warmup(
+                &response,
+                &run.mode,
+                &mut io::stdout().lock(),
+                &mut io::stderr().lock(),
+            )
+            .map_err(RunError::Output);
+        }
+        // An empty batch means the caller passed a blank --text: nothing to
+        // scan, success, matching the V1 silent exit.
+        let mut exit_code = 0;
+        for request in &run.requests {
+            let response = asc_daemon_client::call(socket, request, cli.timeout())
+                .map_err(RunError::Client)?;
+            let code = render_scan_prompt(
+                &response,
+                run.format,
+                &mut io::stdout().lock(),
+                &mut io::stderr().lock(),
+            )
+            .map_err(RunError::Output)?;
+            if run.is_multi_turn {
+                warn_multi_turn_incomplete(&response, &mut io::stderr().lock())
+                    .map_err(RunError::Output)?;
+            }
+            exit_code = exit_code.max(code);
+        }
+        return Ok(exit_code);
+    }
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;

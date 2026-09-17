@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 asc-action-types.workspace = true
 asc-capability-code-scan.workspace = true
+asc-capability-prompt-scan.workspace = true
 asc-telemetry.workspace = true
 serde_json.workspace = true
 asc-policy-runtime.workspace = true

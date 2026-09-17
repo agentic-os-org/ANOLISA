@@ -162,6 +162,7 @@ fn config() -> ServiceConfig {
         rejection_encode_timeout: Duration::from_millis(100),
         request_read_timeout: Duration::from_millis(250),
         dispatch_timeout: Duration::from_millis(250),
+        method_dispatch_timeouts: Vec::new(),
         response_write_timeout: Duration::from_millis(250),
         drain_timeout: Duration::from_millis(500),
         accept_error_backoff: Duration::from_millis(10),

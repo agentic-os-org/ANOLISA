@@ -139,6 +139,8 @@ dependencies = [
 name = "asc-capability-prompt-scan"
 version = "0.13.0"
 dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
  "asc-model-client",
  "base64",
  "log",
@@ -187,6 +189,7 @@ dependencies = [
  "asc-action-types",
  "asc-agentsight-client",
  "asc-capability-code-scan",
+ "asc-capability-prompt-scan",
  "asc-daemon-core",
  "asc-daemon-handler",
  "asc-daemon-protocol",
@@ -253,6 +256,7 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-code-scan",
+ "asc-capability-prompt-scan",
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
@@ -278,6 +282,8 @@ dependencies = [
 name = "asc-daemon-service"
 version = "0.13.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

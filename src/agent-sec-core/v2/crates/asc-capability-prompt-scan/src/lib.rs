@@ -17,9 +17,11 @@
 /// consumer instead of drifting across hand-written literals.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod audit;
 pub mod config;
 pub mod detectors;
 pub mod error;
+pub mod executor;
 pub mod models;
 pub mod preprocessor;
 pub mod result;
@@ -28,9 +30,11 @@ pub mod scanner;
 pub mod verdict;
 
 pub use asc_model_client::{ModelClient, OllamaClient};
+pub use audit::PromptScanAuditProjector;
 pub use config::{ScanConfig, ScanMode};
 pub use detectors::{Conversation, DetectInput, DetectionLayer};
 pub use error::ScannerError;
+pub use executor::{CachingScannerProvider, PromptScanExecutor, PromptScanWarmup, ScannerProvider};
 pub use models::multi_turn_intent::Turn;
 pub use models::qwen3_guard::MODEL_QWEN3_GUARD;
 pub use models::warden_gen::MODEL_WARDEN_GEN;
