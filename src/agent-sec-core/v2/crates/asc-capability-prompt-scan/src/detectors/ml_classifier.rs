@@ -1,10 +1,10 @@
 //! L2 ML classifier detector — model-backed classification.
 //!
 //! The concrete model is pluggable: [`MlClassifier`] holds a boxed
-//! [`Classifier`] chosen by [`build_classifier`] from the configured model
+//! [`Classifier`] chosen by `build_classifier` from the configured model
 //! name.  Two Ollama-served backends exist today:
 //!
-//! - Qwen3Guard (default): prompt-domain moderation, nine categories.
+//! - `Qwen3Guard` (default): prompt-domain moderation, nine categories.
 //! - Warden-Gen: adds nine categories and also covers the code domain.
 //!
 //! Adding another model means writing a wrapper and extending the factory —
@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use crate::detectors::{DetectInput, DetectionLayer};
 use crate::error::ScannerError;
-use crate::models::qwen3_guard::{is_qwen3_guard_model, Qwen3GuardClassifier, MODEL_QWEN3_GUARD};
-use crate::models::warden_gen::{is_warden_gen_model, WardenGenClassifier, MODEL_WARDEN_GEN};
+use crate::models::qwen3_guard::{MODEL_QWEN3_GUARD, Qwen3GuardClassifier, is_qwen3_guard_model};
+use crate::models::warden_gen::{MODEL_WARDEN_GEN, WardenGenClassifier, is_warden_gen_model};
 use crate::models::{Classifier, ClassifierResult};
 use crate::result::{LayerResult, ThreatDetail};
 
@@ -139,10 +139,10 @@ impl DetectionLayer for MlClassifier {
 /// otherwise synthesizes one from severity, the native category and the
 /// confidence.
 fn finding_description(result: &ClassifierResult) -> String {
-    if let Some(reason) = result.reason.as_deref() {
-        if !reason.trim().is_empty() {
-            return reason.to_string();
-        }
+    if let Some(reason) = result.reason.as_deref()
+        && !reason.trim().is_empty()
+    {
+        return reason.to_string();
     }
     // "content" (not the finding's "unsafe" fallback) reads naturally in the
     // synthesized sentence when the model gives no category.
@@ -164,8 +164,9 @@ fn finding_description(result: &ClassifierResult) -> String {
 mod tests {
     use super::*;
     use crate::models::qwen3_guard::Qwen3GuardClassifier;
-    use model_service::{GenerateRequest, ModelClient, ModelOptions};
-    use serde_json::{json, Value};
+    use asc_model_client::{GenerateRequest, ModelClient, ModelOptions};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
 
     struct FakeClient {
         content: String,
@@ -180,7 +181,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!("L2 uses the chat endpoint only")
         }
 
@@ -191,7 +192,7 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             Ok(json!({"message": {"role": "assistant", "content": self.content}}))
         }
     }
@@ -206,7 +207,7 @@ mod tests {
         fn generate(
             &self,
             _request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!()
         }
 
@@ -217,8 +218,8 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
-            Err(model_service::ModelServiceError::Inference(
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
+            Err(asc_model_client::ModelServiceError::Inference(
                 "connection refused".into(),
             ))
         }
@@ -232,7 +233,7 @@ mod tests {
     }
 
     impl Classifier for FakeVerdictReasonClassifier {
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "fake-verdict-reason"
         }
 
@@ -247,7 +248,7 @@ mod tests {
                 confidence: None,
                 category: None,
                 reason: Some(self.reason.clone()),
-                probabilities: Default::default(),
+                probabilities: BTreeMap::default(),
             })
         }
     }
@@ -412,7 +413,7 @@ mod tests {
             confidence: Some(0.8734),
             category: Some("violent".to_string()),
             reason: None,
-            probabilities: Default::default(),
+            probabilities: BTreeMap::default(),
         };
         assert_eq!(
             finding_description(&result),

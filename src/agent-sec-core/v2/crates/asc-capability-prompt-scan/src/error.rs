@@ -29,8 +29,8 @@ pub enum ScannerError {
     #[error("model inference failed: {0}")]
     ModelInference(String),
 
-    /// Wraps an upstream [`model_service::ModelServiceError`]; produced by
+    /// Wraps an upstream [`asc_model_client::ModelServiceError`]; produced by
     /// `?` propagation from the shared model service client.
     #[error("model service error: {0}")]
-    ModelService(#[from] model_service::ModelServiceError),
+    ModelService(#[from] asc_model_client::ModelServiceError),
 }

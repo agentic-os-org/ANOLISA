@@ -1,14 +1,17 @@
 [package]
-name = "prompt-scanner"
-version = "0.1.0"
-edition = "2021"
+name = "asc-capability-prompt-scan"
 description = "Prompt injection / jailbreak scanner: rule engine, model-backed classification, and multi-turn intent detection"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 base64 = { workspace = true }
 log = { workspace = true }
-model-service = { path = "../model-service" }
+asc-model-client = { workspace = true }
 percent-encoding = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
@@ -17,3 +20,6 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-properties = { workspace = true }
+
+[lints]
+workspace = true

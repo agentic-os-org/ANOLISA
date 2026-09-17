@@ -22,16 +22,16 @@ const CATEGORIES: &[(&str, &str)] = &[
     ("context-exfiltration", "context_exfiltration"),
 ];
 
-/// Top-level scan_target whitelist, from the ATR v3.5.12 corpus as
+/// Top-level `scan_target` whitelist, from the ATR v3.5.12 corpus as
 /// measured (not the schema): the schema enum is mcp/skill/both/runtime,
 /// but stable rules universally omit the top-level field — serde defaults
 /// it to the empty string, hence "" is whitelisted. Observed input-surface
-/// values (mcp/both/llm_io/llm) stay; skill/runtime/tool_* surfaces are
+/// values (`mcp/both/llm_io/llm`) stay; skill/runtime/tool_* surfaces are
 /// excluded. Re-verify on every upstream bump.
 const SCAN_TARGETS: &[&str] = &["", "mcp", "both", "llm_io", "llm"];
 
 /// Pattern-level condition fields carrying user prompt input. Conditions
-/// on other fields (tool_response, agent_output, tool_args, ...) address
+/// on other fields (`tool_response`, `agent_output`, `tool_args`, ...) address
 /// non-input surfaces and are skipped with a reported reason.
 const CONTENT_FIELDS: &[&str] = &["user_input", "content"];
 
@@ -98,7 +98,7 @@ struct AtrTestCases {
 #[derive(Debug, Deserialize)]
 struct AtrTestCase {
     /// Sample text for input-surface test cases. Upstream keys a few
-    /// cases on tool_response/agent_output/... instead; those carry no
+    /// cases on `tool_response/agent_output`/... instead; those carry no
     /// `input` and are dropped — they exercise surfaces we do not scan.
     #[serde(default)]
     input: Option<String>,
@@ -212,7 +212,7 @@ fn compiles(pattern: &str) -> bool {
         .is_ok()
 }
 
-/// Flatten ATR's references map ({owasp_llm: [...], ...}) into strings.
+/// Flatten ATR's references map ({`owasp_llm`: [...], ...}) into strings.
 fn flatten_references(value: &serde_yaml::Value) -> Vec<String> {
     let mut out = Vec::new();
     if let serde_yaml::Value::Mapping(map) = value {
@@ -276,15 +276,12 @@ fn convert_rule(
         });
         return None;
     }
-    let severity = match map_severity(&rule.severity) {
-        Some(s) => s,
-        None => {
-            skips.push(Skip {
-                id: rule.id,
-                reason: format!("severity {}", rule.severity),
-            });
-            return None;
-        }
+    let Some(severity) = map_severity(&rule.severity) else {
+        skips.push(Skip {
+            id: rule.id,
+            reason: format!("severity {}", rule.severity),
+        });
+        return None;
     };
     let mut patterns = Vec::new();
     for cond in &rule.detection.conditions {
@@ -374,6 +371,9 @@ fn git_head(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
+// V1 structure preserved: an offline packaging tool's entry point that
+// parses argv then orchestrates, not maintained library surface.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut atr_dir: Option<PathBuf> = None;
     let mut tag: Option<String> = None;
@@ -601,9 +601,11 @@ mod tests {
         let (out, skips) = convert(rule);
         let out = out.expect("kept with remaining pattern");
         assert_eq!(out.patterns.len(), 1);
-        assert!(skips
-            .iter()
-            .any(|s| s.reason.contains("not regex-crate compatible")));
+        assert!(
+            skips
+                .iter()
+                .any(|s| s.reason.contains("not regex-crate compatible"))
+        );
     }
 
     #[test]
@@ -639,9 +641,11 @@ mod tests {
         });
         let (out, skips) = convert(rule);
         assert_eq!(out.expect("kept with remaining pattern").patterns.len(), 1);
-        assert!(skips
-            .iter()
-            .any(|s| s.reason.contains("not regex-crate compatible")));
+        assert!(
+            skips
+                .iter()
+                .any(|s| s.reason.contains("not regex-crate compatible"))
+        );
     }
 
     #[test]

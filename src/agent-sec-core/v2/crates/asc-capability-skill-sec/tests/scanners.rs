@@ -74,6 +74,16 @@ fn normalize(value: &mut Value) {
                 metadata.remove("error");
             }
             map.values_mut().for_each(normalize);
+            // The workspace builds serde_json with `preserve_order` (the
+            // prompt-scan output contract relies on insertion order), so actual
+            // findings serialize in construction order while fixtures keep their
+            // document order. Canonicalize both to key-sorted order so the
+            // `to_string`-keyed array sort in `sorted` stays comparison-stable.
+            let canonical: BTreeMap<String, Value> = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            *map = canonical.into_iter().collect();
         }
         _ => {}
     }

@@ -11,12 +11,12 @@
 //! Scanned prompts can carry credentials and PII, and the URL comes from the
 //! environment, so anything but loopback is treated as exfiltration.
 //!
-//! Consumers (prompt-scanner, future code/pii scanners) inject a
+//! Consumers (asc-capability-prompt-scan, future code/pii scanners) inject a
 //! [`ModelClient`] so their transport stays decoupled from this crate.
 
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -192,7 +192,7 @@ impl ModelClient for OllamaClient {
         if !request.options.is_empty() {
             payload.insert("options".into(), Value::Object(request.options.clone()));
         }
-        self.post("/api/generate", Value::Object(payload))
+        self.post("/api/generate", &Value::Object(payload))
     }
 
     fn chat(
@@ -218,7 +218,7 @@ impl ModelClient for OllamaClient {
         if !options.is_empty() {
             payload.insert("options".into(), Value::Object(options.clone()));
         }
-        self.post("/api/chat", Value::Object(payload))
+        self.post("/api/chat", &Value::Object(payload))
     }
 }
 
@@ -228,13 +228,13 @@ impl OllamaClient {
     /// Transient failures (see [`is_transient`]) are retried once after
     /// [`RETRY_BACKOFF`], since middleware callers issue a request per scan
     /// and a lone hiccup would otherwise fail the whole hook.
-    fn post(&self, path: &str, payload: Value) -> Result<Value, ModelServiceError> {
+    fn post(&self, path: &str, payload: &Value) -> Result<Value, ModelServiceError> {
         let url = format!("{}{path}", self.base_url);
-        let response = match self.send(&url, &payload) {
+        let response = match self.send(&url, payload) {
             Err(err) if is_transient(&err) => {
                 log::warn!("Ollama request failed (url={url}): {err}; retrying once");
                 std::thread::sleep(RETRY_BACKOFF);
-                self.send(&url, &payload)
+                self.send(&url, payload)
             }
             attempt => attempt,
         }
@@ -398,8 +398,8 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Spawn a minimal keep-alive HTTP/1.1 server that answers `expected`
     /// GET requests, returning its port and the accepted-connection counter.
@@ -563,6 +563,20 @@ mod tests {
         }
     }
 
+    /// Environment wiring of `create_client`: with no overrides set the
+    /// default loopback base URL must be accepted out of the box. The hijack
+    /// scenarios of the former integration test are covered by the
+    /// `validate_base_url` unit tests below. Setting the env vars here would
+    /// require `std::env::set_var`, which is unsafe under this workspace's
+    /// `unsafe_code = "forbid"` lint.
+    #[test]
+    fn create_client_defaults_to_loopback_without_env() {
+        assert!(
+            create_client().is_ok(),
+            "the default loopback base_url must work out of the box"
+        );
+    }
+
     #[test]
     fn base_url_without_http_scheme_is_rejected() {
         for bad in [
@@ -706,34 +720,42 @@ mod tests {
 
     #[test]
     fn transient_5xx_is_retried_once_and_succeeds() {
-        let (port, served, server) = spawn_scripted_server(&[500, 200]);
+        let (port, served_count, server) = spawn_scripted_server(&[500, 200]);
         let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
         let result = client.generate(&generate_request("hi"));
         server.join().expect("server thread");
 
         assert!(result.is_ok(), "retry after a 500 must succeed: {result:?}");
-        assert_eq!(served.load(Ordering::SeqCst), 2, "exactly one retry");
+        assert_eq!(served_count.load(Ordering::SeqCst), 2, "exactly one retry");
     }
 
     #[test]
     fn persistent_5xx_fails_after_single_retry() {
-        let (port, served, server) = spawn_scripted_server(&[500, 500]);
+        let (port, served_count, server) = spawn_scripted_server(&[500, 500]);
         let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
         let result = client.generate(&generate_request("hi"));
         server.join().expect("server thread");
 
         assert!(matches!(result, Err(ModelServiceError::Inference(_))));
-        assert_eq!(served.load(Ordering::SeqCst), 2, "one retry, then give up");
+        assert_eq!(
+            served_count.load(Ordering::SeqCst),
+            2,
+            "one retry, then give up"
+        );
     }
 
     #[test]
     fn client_error_is_not_retried() {
-        let (port, served, server) = spawn_scripted_server(&[400]);
+        let (port, served_count, server) = spawn_scripted_server(&[400]);
         let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
         let result = client.generate(&generate_request("hi"));
         server.join().expect("server thread");
 
         assert!(matches!(result, Err(ModelServiceError::Inference(_))));
-        assert_eq!(served.load(Ordering::SeqCst), 1, "4xx must not be retried");
+        assert_eq!(
+            served_count.load(Ordering::SeqCst),
+            1,
+            "4xx must not be retried"
+        );
     }
 }

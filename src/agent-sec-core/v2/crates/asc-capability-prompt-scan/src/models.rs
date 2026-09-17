@@ -17,7 +17,7 @@ use crate::error::ScannerError;
 /// the verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassifierResult {
-    /// Raw model label, e.g. "UNSAFE_VIOLENT", "SAFE".
+    /// Raw model label, e.g. "`UNSAFE_VIOLENT`", "SAFE".
     pub label: String,
     /// Whether the wrapper judged this output a threat.  The only field that
     /// influences the verdict.
@@ -36,7 +36,7 @@ pub struct ClassifierResult {
 
 /// A model-backed classifier for the L2 detection layer.
 ///
-/// Each backend (Qwen3Guard and Warden-Gen today; future verdict+reason
+/// Each backend (`Qwen3Guard` and Warden-Gen today; future verdict+reason
 /// models) implements this trait so
 /// [`MlClassifier`](crate::detectors::ml_classifier::MlClassifier)
 /// stays decoupled from any single model's label schema. Adding a model means

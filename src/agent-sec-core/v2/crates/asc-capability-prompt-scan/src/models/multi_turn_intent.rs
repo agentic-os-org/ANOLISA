@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::ScannerError;
-use model_service::{create_client, GenerateRequest, ModelClient, ModelOptions};
+use asc_model_client::{GenerateRequest, ModelClient, ModelOptions, create_client};
 
 const MODEL_NAME_ENV: &str = "AGENT_SEC_OLLAMA_MODEL";
 const DEFAULT_MODEL_NAME: &str = "warden";
@@ -309,33 +309,30 @@ impl MultiTurnIntentClassifier {
             .to_string();
 
         let mut low_confidence = false;
-        let p_harmful = match (logprob_0, logprob_1) {
-            (Some(lp0), Some(lp1)) => {
-                // The model assigns probability across the whole
-                // vocabulary; when P("0")+P("1") is low, a 2-token softmax
-                // renormalises mass the model actually spent elsewhere and
-                // p_harmful becomes noise.
-                let total_prob = lp0.exp() + lp1.exp();
-                if total_prob < MIN_TOTAL_PROB {
-                    log::warn!(
-                        "Low total prob mass on 0/1 tokens: {total_prob:.4} (model={}); \
-                         degrading to fallback",
-                        self.model
-                    );
-                    low_confidence = true;
-                    fallback_p(&raw_text)
-                } else {
-                    let max_lp = lp0.max(lp1);
-                    let exp_0 = (lp0 - max_lp).exp();
-                    let exp_1 = (lp1 - max_lp).exp();
-                    exp_0 / (exp_0 + exp_1)
-                }
-            }
-            _ => {
-                // Fallback: parse generated text when logprobs are absent.
+        let p_harmful = if let (Some(lp0), Some(lp1)) = (logprob_0, logprob_1) {
+            // The model assigns probability across the whole
+            // vocabulary; when P("0")+P("1") is low, a 2-token softmax
+            // renormalises mass the model actually spent elsewhere and
+            // p_harmful becomes noise.
+            let total_prob = lp0.exp() + lp1.exp();
+            if total_prob < MIN_TOTAL_PROB {
+                log::warn!(
+                    "Low total prob mass on 0/1 tokens: {total_prob:.4} (model={}); \
+                     degrading to fallback",
+                    self.model
+                );
                 low_confidence = true;
                 fallback_p(&raw_text)
+            } else {
+                let max_lp = lp0.max(lp1);
+                let exp_0 = (lp0 - max_lp).exp();
+                let exp_1 = (lp1 - max_lp).exp();
+                exp_0 / (exp_0 + exp_1)
             }
+        } else {
+            // Fallback: parse generated text when logprobs are absent.
+            low_confidence = true;
+            fallback_p(&raw_text)
         };
 
         Ok(MultiTurnResult {
@@ -445,7 +442,7 @@ mod tests {
         fn generate(
             &self,
             request: &GenerateRequest<'_>,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             *self.seen_prompt.lock().expect("lock") = Some(request.prompt.to_string());
             assert!(request.raw, "L4 must send a pre-templated raw prompt");
             assert!(request.logprobs, "L4 relies on logprobs");
@@ -462,7 +459,7 @@ mod tests {
             _options: &ModelOptions,
             _logprobs: bool,
             _top_logprobs: u32,
-        ) -> Result<Value, model_service::ModelServiceError> {
+        ) -> Result<Value, asc_model_client::ModelServiceError> {
             unreachable!("L4 uses the generate endpoint only")
         }
     }
@@ -531,6 +528,8 @@ mod tests {
     }
 
     #[test]
+    // The text fallback yields an exact constant.
+    #[allow(clippy::float_cmp)]
     fn low_probability_mass_degrades_to_text_fallback() {
         // Total mass 0.2 < 0.5 -> renormalised softmax would be noise.
         let body = logprob_body(0.1f64.ln(), 0.1f64.ln(), "1");
@@ -541,6 +540,8 @@ mod tests {
     }
 
     #[test]
+    // The text fallback yields an exact constant.
+    #[allow(clippy::float_cmp)]
     fn missing_logprobs_uses_text_fallback() {
         let result = classify_with(json!({"response": "0"}), DEFAULT_HARMFUL_THRESHOLD);
         assert!(result.low_confidence);
@@ -549,6 +550,8 @@ mod tests {
     }
 
     #[test]
+    // The text fallback yields an exact constant.
+    #[allow(clippy::float_cmp)]
     fn partial_logprobs_uses_text_fallback() {
         // Only the "1" token is present: the 2-token softmax is impossible.
         let body = json!({
@@ -561,6 +564,8 @@ mod tests {
     }
 
     #[test]
+    // The text fallback yields an exact constant.
+    #[allow(clippy::float_cmp)]
     fn unexpected_text_without_logprobs_is_neutral() {
         let result = classify_with(json!({"response": "maybe?"}), DEFAULT_HARMFUL_THRESHOLD);
         assert!(result.low_confidence);

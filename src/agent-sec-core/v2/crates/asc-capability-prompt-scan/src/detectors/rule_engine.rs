@@ -14,7 +14,7 @@ use regex::{Regex, RegexBuilder};
 use crate::detectors::{DetectInput, DetectionLayer};
 use crate::error::ScannerError;
 use crate::result::{LayerResult, Severity, ThreatDetail};
-use crate::rules::{builtin_rules, Rule};
+use crate::rules::{Rule, builtin_rules};
 
 /// Max characters of a match kept as evidence.
 const MAX_EVIDENCE_CHARS: usize = 200;
