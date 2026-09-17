@@ -64,7 +64,7 @@ use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::PackageTransaction;
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
-use anolisa_platform::rpm_repo::DnfRepoSource;
+use anolisa_platform::rpm_repo::RpmRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{
@@ -108,9 +108,8 @@ pub struct UpdateArgs {
     pub command: Option<UpdateCommands>,
     /// Report which RPM-backed components can be upgraded, read-only.
     ///
-    /// `--check` only runs read-only rpm/dnf queries (it does run `dnf
-    /// repoquery` for candidates, but no mutating `dnf` transaction), never
-    /// writes ANOLISA state, and never persists repo/adapter configuration. It
+    /// `--check` only reads installed packages and repository candidates,
+    /// never writes ANOLISA state, and never persists repo/adapter configuration. It
     /// is mutually exclusive with a component
     /// argument and with the `self` / `all` subcommands (the latter is enforced
     /// by `args_conflicts_with_subcommands`). `--motd`, `--refresh`, and
@@ -195,7 +194,7 @@ pub(crate) fn rpm_repo_source_for_update(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
     command: &str,
-) -> Result<Option<DnfRepoSource>, CliError> {
+) -> Result<Option<RpmRepoSource>, CliError> {
     let Some(backend) = repo_config.backends.get("rpm") else {
         return Ok(None);
     };
@@ -209,7 +208,7 @@ pub(crate) fn rpm_repo_source_for_update(
             command: command.to_string(),
             reason: err.to_string(),
         })?;
-    Ok(Some(DnfRepoSource::new(
+    Ok(Some(RpmRepoSource::new(
         ANOLISA_RPM_REPO_ID,
         base_url,
         backend.gpgcheck,
@@ -444,12 +443,9 @@ pub(crate) fn update_backends(
                 reason: "repo.toml has no [backends.rpm] table; cannot update an RPM-backed component from the configured ANOLISA repository".to_string(),
             }
         })?;
-        return Ok((
-            RpmPackageQuery::system_with_repo(repo.clone()),
-            RpmTransaction::system_with_repo(repo),
-        ));
+        return Ok(super::rpm_backends::system(Some(repo)));
     }
-    Ok((RpmPackageQuery::system(), RpmTransaction::system()))
+    Ok(super::rpm_backends::system(None))
 }
 
 /// What a component update left behind, for batch summaries: a transaction
@@ -966,7 +962,11 @@ fn step_label(step: &Step) -> String {
     match step {
         Step::NativeTransaction {
             action, packages, ..
-        } => format!("dnf {} {}", action.verb(), packages.join(" ")),
+        } => format!(
+            "RPM package manager: {} {}",
+            action.verb(),
+            packages.join(" ")
+        ),
         Step::Observe { packages } => format!("observe {}", packages.join(" ")),
         Step::WriteRecord(write) => format!("record: {}", write.label()),
         Step::DropRecord => "record: drop".to_string(),
@@ -986,7 +986,7 @@ fn tooling_missing_err(command: &str, bin: &str, target: &str) -> CliError {
     CliError::Runtime {
         command: command.to_string(),
         reason: format!(
-            "cannot update '{target}': {bin} not found on PATH — install rpm/dnf and retry"
+            "cannot update '{target}': {bin} not found on PATH — install the required RPM tooling and retry"
         ),
     }
 }
@@ -2669,6 +2669,7 @@ pub(crate) mod tests {
     /// pre-update query and the post-update refresh return different EVRs.
     pub(super) struct FakeRpm {
         package: String,
+        repository: Option<&'static str>,
         installed: RefCell<Option<PackageInfo>>,
         /// PackageInfo the rpmdb holds after a successful update; `None` keeps
         /// the same version (a no-op "already latest").
@@ -2692,6 +2693,7 @@ pub(crate) mod tests {
         pub(super) fn new(package: &str, installed: Option<PackageInfo>) -> Self {
             Self {
                 package: package.to_string(),
+                repository: None,
                 installed: RefCell::new(installed),
                 upgrade_to: None,
                 update_succeeds: true,
@@ -2755,6 +2757,9 @@ pub(crate) mod tests {
     }
 
     impl PackageTransaction for FakeRpm {
+        fn repository_source(&self) -> Option<&str> {
+            self.repository
+        }
         fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("this path must not preflight an install")
         }
@@ -3019,6 +3024,44 @@ pub(crate) mod tests {
         );
         assert_eq!(record.status, LifecycleStatus::Installed);
         assert_ne!(record.last_operation_id.as_deref(), Some("op-prior"));
+    }
+
+    #[test]
+    fn update_records_source_only_when_native_identity_changes() {
+        for (version, arch, source) in [
+            ("1.0.0", "x86_64", "@System"),
+            ("1.1.0", "x86_64", "configured"),
+            ("1.0.0", "aarch64", "configured"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+            seed(
+                &c,
+                rpm_object(
+                    "copilot-shell",
+                    "copilot-shell",
+                    "1.0.0-1.al8",
+                    Ownership::RpmManaged,
+                    ObjectStatus::Installed,
+                ),
+            );
+            let mut rpm = FakeRpm::new(
+                "copilot-shell",
+                Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+            )
+            .upgrading_to(pkg_info("copilot-shell", version, Some("1.al8"), arch));
+            rpm.repository = Some("configured");
+            update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).unwrap();
+            let record = find_component(&c, "copilot-shell");
+            let ProviderBinding::Delegated {
+                last_observed: Some(observation),
+                ..
+            } = record.binding
+            else {
+                panic!("missing observation")
+            };
+            assert_eq!(observation.source_repo.as_deref(), Some(source));
+        }
     }
 
     /// rpm-managed component updates the same way (different relation).

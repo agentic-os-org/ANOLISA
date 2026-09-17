@@ -54,6 +54,8 @@ pub struct DelegatedExecutionTarget<'a> {
     /// Arch the pinned candidate resolved to; checked together with
     /// `expected_evr`.
     expected_arch: Option<&'a str>,
+    confirmed_source: Option<&'a str>,
+    update_from: Option<&'a Observation>,
 }
 
 impl<'a> DelegatedExecutionTarget<'a> {
@@ -66,7 +68,26 @@ impl<'a> DelegatedExecutionTarget<'a> {
             transaction_spec: None,
             expected_evr: None,
             expected_arch: None,
+            confirmed_source: None,
+            update_from: None,
         }
+    }
+
+    /// Record the source of an install completed by the current batch before
+    /// entering the executor. Historical journal completion is not proof of
+    /// the repository used and must not set this value.
+    pub fn with_confirmed_source(mut self, source: Option<&'a str>) -> Self {
+        self.confirmed_source = source;
+        self
+    }
+
+    /// Carry the native observation taken before the current update transaction.
+    /// A changed EVR or architecture confirms its source; a no-op does not.
+    pub fn with_update_from(mut self, before: &'a NativeProbe) -> Self {
+        if let NativeProbe::Present { observation, .. } = before {
+            self.update_from = Some(observation);
+        }
+        self
     }
 
     /// Pin the target to an exact resolved artifact: `spec` (a NEVRA) becomes
@@ -223,6 +244,8 @@ pub fn execute_delegated_steps_resumed(
     prepare_delegated_recovery(journal, target, steps)?;
 
     let mut observation: Option<Observation> = None;
+    let mut installed_from_repository = false;
+    let mut update_committed = native_txn_committed && target.update_from.is_some();
     let mut native_effect_may_exist = native_txn_committed;
     // Journal status once side effects may exist: before the native
     // transaction commits a failure is clean (`Failed`), after it the record
@@ -242,6 +265,12 @@ pub fn execute_delegated_steps_resumed(
                 action, packages, ..
             } => match provider.transact(*action, packages) {
                 Ok(()) => {
+                    installed_from_repository = matches!(
+                        action,
+                        crate::planner::NativeAction::Install
+                            | crate::planner::NativeAction::Reinstall
+                    );
+                    update_committed = matches!(action, crate::planner::NativeAction::Update);
                     journal.mark_done(idx)?;
                     native_effect_may_exist = true;
                 }
@@ -271,7 +300,8 @@ pub fn execute_delegated_steps_resumed(
                 for package in packages {
                     match provider.observe(package, observed_at) {
                         Ok(NativeProbe::Present {
-                            observation: fresh, ..
+                            observation: mut fresh,
+                            ..
                         }) => {
                             // A version pin must install exactly the resolved
                             // artifact. If the native manager landed a
@@ -307,6 +337,19 @@ pub fn execute_delegated_steps_resumed(
                                         observed,
                                     });
                                 }
+                            }
+                            let updated = update_committed
+                                && target.update_from.is_some_and(|before| {
+                                    before.evr.is_some()
+                                        && fresh.evr.is_some()
+                                        && (before.evr != fresh.evr || before.arch != fresh.arch)
+                                });
+                            if let Some(source) = target.confirmed_source.or_else(|| {
+                                (installed_from_repository || updated)
+                                    .then(|| provider.repository_source())
+                                    .flatten()
+                            }) {
+                                fresh.source_repo = Some(source.to_string());
                             }
                             observation = Some(fresh);
                         }
@@ -635,6 +678,46 @@ mod tests {
             },
             Step::WriteRecord(RecordWrite::DelegatedManaged),
         ]
+    }
+
+    #[test]
+    fn repository_source_requires_a_successful_install_not_just_observation() {
+        for (execute_install, confirmed_source) in
+            [(false, None), (true, None), (false, Some("batch-source"))]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let query = query_present("cosh", "2.7.0");
+            let txn = FakeTxn {
+                repository: Some("configured"),
+                ..FakeTxn::default()
+            };
+            let provider = DelegatedProvider::new(&query, &txn);
+            let mut sink = MemSink::default();
+            let mut journal = journal(tmp.path());
+            let mut steps = install_steps("cosh");
+            if !execute_install {
+                steps.remove(0);
+            }
+            execute_delegated_steps(
+                &steps,
+                DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh"))
+                    .with_confirmed_source(confirmed_source),
+                &provider,
+                &mut sink,
+                &mut journal,
+                NOW,
+            )
+            .unwrap();
+            let origin = sink.writes[0].1.as_ref().unwrap().source_repo.as_deref();
+            assert_eq!(
+                origin,
+                confirmed_source.or(if execute_install {
+                    Some("configured")
+                } else {
+                    None
+                })
+            );
+        }
     }
 
     #[test]

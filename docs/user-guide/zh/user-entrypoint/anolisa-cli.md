@@ -55,16 +55,18 @@ anolisa install --all
 另一个 scope 中已有安装，不会让当前 scope 变成“already installed”。已有
 记录的重装或变更由 lifecycle planner 处理，不会被静默覆盖。
 
-RPM 安装（包括 `--dry-run` 和合并的 `--all` 计划）会在创建 recovery
-journal 前，让 DNF 求解依赖和包冲突。预检使用与安装相同的仓库和版本约束，
-可能刷新仓库 metadata，但不会下载包或修改 rpmdb。DNF 4 的预检也要求 root：
+RPM 安装支持 Yum 3 和 DNF 4。ANOLISA 优先使用 yum，不存在时使用 dnf。
+安装前可使用 `sudo` 检查依赖和冲突：
 
 ```bash
 sudo anolisa --install-mode system --dry-run install cosh --backend rpm
 ```
 
-存在冲突时命令失败，不留下 pending operation；解决报告的冲突后再重试。
-预检成功不保证后续下载、scriptlet 或 transaction 一定成功。
+此检查不会安装或更改软件包。请先解决报告的冲突再重试；检查通过不保证
+后续安装一定成功。指定版本与系统版本锁等限制冲突时，命令会失败，不会
+替换为其他版本。
+
+如果 ANOLISA 无法识别系统包管理器，请按提示手工安装缺失依赖后重试。
 
 ### uninstall
 
@@ -279,6 +281,11 @@ base_url = "https://repo.example.com/anolisa/v1/"
 
 raw backend 每次执行都会重新拉取 distribution index。当前不会使用缓存的 index 作为回退，因此仓库不可达时命令会直接失败。
 旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常解析以保持向后兼容，但当前 raw backend 不会使用这些值。
+
+RPM 仓库需要代理或私有 CA 时，可在 `/etc/yum.conf` 的 `[main]` 段直接配置
+`proxy`、`proxy_username`、`proxy_password` 或 `sslcacert`；该文件不存在时
+使用 `/etc/dnf/dnf.conf`。未明确配置时，ANOLISA 使用环境代理（`http_proxy`、
+`https_proxy`、`all_proxy`、`no_proxy`）和系统信任的证书。
 
 CLI 参数只影响当前执行的操作，不存在 `[install] mode` 配置。
 

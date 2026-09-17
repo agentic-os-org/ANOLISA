@@ -60,19 +60,20 @@ An installation in the other scope does not make the selected scope
 "already installed." Reinstalling or changing an existing record is handled
 by lifecycle planning rather than silently overwriting it.
 
-RPM installs, including `--dry-run` and merged `--all` plans, ask DNF to
-resolve dependencies and package conflicts before creating recovery journals.
-The check uses the same repositories and version pins as the install. It may
-refresh repository metadata but does not download packages or change rpmdb.
-DNF 4 requires root for this check:
+RPM installs support Yum 3 and DNF 4. ANOLISA prefers yum and uses dnf when
+yum is absent. Use `sudo` to check dependencies and conflicts before installing:
 
 ```bash
 sudo anolisa --install-mode system --dry-run install cosh --backend rpm
 ```
 
-A conflict fails the command without leaving a pending operation. Resolve the
-reported conflict before retrying. A successful check does not guarantee that
-a later download, scriptlet, or transaction will succeed.
+This check does not install or change packages. Resolve any reported conflicts
+before retrying; a successful check does not guarantee the later installation
+will succeed. If a requested version conflicts with system restrictions such
+as a version lock, the command fails without substituting another version.
+
+If ANOLISA cannot identify the system's package manager, follow the reported
+instructions to install missing dependencies manually, then retry.
 
 ### uninstall
 
@@ -305,6 +306,12 @@ index cache and no stale-index fallback, so an unreachable repository fails the
 command instead of resolving against older data. `cache_ttl_secs` and
 `offline_fallback` were never wired up; configs that still set them keep
 parsing, but the values are ignored.
+
+For RPM repositories that require a proxy or a private CA, set `proxy`,
+`proxy_username`, `proxy_password`, or `sslcacert` directly in `[main]` of
+`/etc/yum.conf` (or `/etc/dnf/dnf.conf` when the former is absent).
+Without explicit settings, ANOLISA uses environment proxies (`http_proxy`,
+`https_proxy`, `all_proxy`, `no_proxy`) and the system's trusted certificates.
 
 CLI flags override the operation being run; there is no `[install] mode`
 setting.

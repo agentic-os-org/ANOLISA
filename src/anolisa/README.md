@@ -87,8 +87,8 @@ installation even when the same component is already installed system-wide.
 See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
 
-RPM install plans run DNF conflict checks before creating a recovery journal.
-DNF 4 requires root even for this check; use `sudo` with RPM `--dry-run`.
+RPM installs support Yum 3 and DNF 4. Use `sudo` with RPM `--dry-run`
+to check dependencies and conflicts before installing.
 
 ## Architecture
 
@@ -100,9 +100,9 @@ Five-crate Cargo workspace:
 | `anolisa-core` | Component resolution, adapter management, osbase install logic |
 | `anolisa-env` | Environment detection (distro, arch, capabilities) |
 | `anolisa-build` | Build-time codegen and asset embedding |
-| `anolisa-platform` | Filesystem layout, systemd integration, IPC, privilege helpers |
+| `anolisa-platform` | Filesystem layout, native package queries/transactions, systemd, IPC, privilege helpers |
 
-Supports dual backends: **raw** (OSS tar.gz) and **RPM** (dnf repository).
+Supports dual backends: **raw** (OSS tar.gz) and **RPM** (yum/dnf transactions).
 The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.

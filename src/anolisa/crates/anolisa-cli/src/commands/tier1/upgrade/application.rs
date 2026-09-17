@@ -91,8 +91,7 @@ pub(super) fn run(
             command: COMMAND.to_string(),
             reason: "repo.toml has no [backends.rpm] table; `anolisa upgrade` needs the configured ANOLISA RPM repository".to_string(),
         })?;
-    let query = anolisa_platform::rpm_query::RpmPackageQuery::system_with_repo(repo.clone());
-    let txn = anolisa_platform::rpm_transaction::RpmTransaction::system_with_repo(repo);
+    let (query, txn) = crate::commands::tier1::rpm_backends::system(Some(repo));
     let plan = build_plan(report.target.clone(), &report.cli, &report.components);
 
     run_with_dependencies(

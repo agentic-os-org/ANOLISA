@@ -114,8 +114,13 @@ impl ProvisionPlan {
 
                     match resolution.kind {
                         DependencyKind::SystemPackage => {
-                            let package_name =
-                                resolve_package_name(dep, env).unwrap_or(resolution.name.clone());
+                            let Some(package_name) = resolve_package_name(dep, env) else {
+                                result.unresolvable.push(UnresolvableDependency {
+                                    name: resolution.name.clone(),
+                                    reason: "cannot select a system package for an unknown package family".into(),
+                                });
+                                continue;
+                            };
                             result.installable.push(ProvisionablePackage {
                                 name: resolution.name.clone(),
                                 package_name,
@@ -252,24 +257,7 @@ fn resolve_package_name(dep: Option<&RuntimeDependency>, env: &ResolverEnv) -> O
                 dep.packages.deb.clone()
             }
         }
-        _ => {
-            // Unknown package base: system packages fall back to dep name,
-            // language runtimes require an explicit mapping.
-            if dep.kind == DependencyKind::SystemPackage {
-                Some(
-                    dep.packages
-                        .rpm
-                        .clone()
-                        .or_else(|| dep.packages.deb.clone())
-                        .unwrap_or_else(|| dep.name.clone()),
-                )
-            } else {
-                dep.packages
-                    .rpm
-                    .clone()
-                    .or_else(|| dep.packages.deb.clone())
-            }
-        }
+        _ => None,
     }
 }
 

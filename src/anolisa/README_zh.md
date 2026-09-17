@@ -86,8 +86,8 @@ scope。因此，即使 system scope 已安装同名组件，
 完整的命令形式、scope 行为与恢复流程见
 [CLI 用户指南](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md)。
 
-RPM 安装计划会先通过 DNF 检查冲突，再创建 recovery journal。
-DNF 4 的预检也要求 root，因此 RPM `--dry-run` 需要使用 `sudo`。
+RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
+可在安装前检查依赖和冲突。
 
 ## 架构
 
@@ -99,9 +99,9 @@ DNF 4 的预检也要求 root，因此 RPM `--dry-run` 需要使用 `sudo`。
 | `anolisa-core` | 组件解析、适配器管理、osbase 安装逻辑 |
 | `anolisa-env` | 环境检测（发行版、架构、能力） |
 | `anolisa-build` | 构建时代码生成与资源嵌入 |
-| `anolisa-platform` | 文件系统布局、systemd 集成、IPC、权限辅助 |
+| `anolisa-platform` | 文件系统布局、原生包查询与事务、systemd、IPC、权限辅助 |
 
-支持双后端：**raw**（OSS tar.gz）和 **RPM**（dnf 仓库）。生命周期
+支持双后端：**raw**（OSS tar.gz）和 **RPM**（yum/dnf 事务）。生命周期
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
 记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
 

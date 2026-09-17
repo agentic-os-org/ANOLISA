@@ -226,6 +226,9 @@ pub struct PackageInfo {
 /// Errors raised by [`PackageQuery`] backends.
 #[derive(Debug, Error)]
 pub enum PackageQueryError {
+    /// Explicit repository could not be fetched, verified, or parsed.
+    #[error(transparent)]
+    Repository(#[from] crate::rpm_metadata::RpmMetadataError),
     /// The backend binary could not be found (spawn `NotFound`).
     #[error("command not found: {command}")]
     CommandMissing {

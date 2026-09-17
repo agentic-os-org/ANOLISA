@@ -91,6 +91,11 @@ pub enum DependencyProbeError {
 impl From<PackageQueryError> for DependencyProbeError {
     fn from(error: PackageQueryError) -> Self {
         match error {
+            PackageQueryError::Repository(error) => Self::QueryFailed {
+                command: "RPM repository query".into(),
+                code: None,
+                stderr: error.to_string(),
+            },
             PackageQueryError::CommandMissing { command } => Self::CommandMissing { command },
             PackageQueryError::PermissionDenied { command } => Self::PermissionDenied { command },
             PackageQueryError::QueryFailed {
@@ -288,6 +293,17 @@ impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R,
         };
         if present {
             return (DependencyStatus::Resolved, None);
+        }
+        if !matches!(env.pkg_base.as_deref(), Some("rpm" | "deb")) {
+            return (
+                DependencyStatus::Unresolvable {
+                    reason: format!(
+                        "cannot determine system package '{}' on an unknown package family",
+                        dep.name
+                    ),
+                },
+                None,
+            );
         }
         (
             DependencyStatus::Unresolved {
@@ -630,11 +646,11 @@ fn resolve_platform_capability(
 fn system_package_remediation(dep: &RuntimeDependency, env: &ResolverEnv) -> String {
     match env.pkg_base.as_deref() {
         Some("rpm") => format!(
-            "sudo dnf install {}",
+            "install RPM package {} with the host package manager",
             dep.packages.rpm.as_deref().unwrap_or(&dep.name)
         ),
         Some("deb") => format!(
-            "sudo apt install {}",
+            "sudo apt-get install {}",
             dep.packages.deb.as_deref().unwrap_or(&dep.name)
         ),
         _ => format!(
@@ -956,7 +972,7 @@ mod tests {
                         assert_eq!(
                             result,
                             DependencyStatus::Unresolved {
-                                remediation: "sudo apt install foo:amd64".into()
+                                remediation: "sudo apt-get install foo:amd64".into()
                             }
                         );
                     } else {
@@ -1695,7 +1711,8 @@ mod tests {
         assert_eq!(
             r.status,
             DependencyStatus::Unresolved {
-                remediation: "sudo dnf install btrfs-progs".to_string()
+                remediation: "install RPM package btrfs-progs with the host package manager"
+                    .to_string()
             }
         );
     }
@@ -1713,26 +1730,34 @@ mod tests {
         assert_eq!(
             r.status,
             DependencyStatus::Unresolved {
-                remediation: "sudo apt install btrfs-progs".to_string()
+                remediation: "sudo apt-get install btrfs-progs".to_string()
             }
         );
     }
 
     #[test]
-    fn system_package_unknown_pkg_base_manual_hint() {
+    fn system_package_unknown_family_requires_manual_recovery() {
         let mut d = dep("btrfs-progs", DependencyKind::SystemPackage);
-        d.probe = Some("btrfs version".to_string());
-        let env = ResolverEnv::default(); // pkg_base = None
-        let r = resolve_one(FakeRunner::default().missing("btrfs"), d, &env);
-        match r.status {
-            DependencyStatus::Unresolved { remediation } => {
-                assert!(
-                    remediation.contains("unsupported package manager"),
-                    "{remediation}"
-                );
-            }
-            other => panic!("expected unresolved, got {other:?}"),
+        d.packages.rpm = Some("rpm-name".into());
+        d.packages.deb = Some("deb-name".into());
+        for probe in [None, Some("btrfs version".to_string())] {
+            d.probe = probe;
+            let r = resolve_one(
+                FakeRunner::default().missing("btrfs"),
+                d.clone(),
+                &ResolverEnv::default(),
+            );
+            assert!(
+                matches!(r.status, DependencyStatus::Unresolvable { ref reason } if reason.contains("unknown package family"))
+            );
         }
+        d.probe = Some("btrfs version".into());
+        let r = resolve_one(
+            FakeRunner::default().ok("btrfs", 0, "present"),
+            d,
+            &ResolverEnv::default(),
+        );
+        assert_eq!(r.status, DependencyStatus::Resolved);
     }
 
     #[test]

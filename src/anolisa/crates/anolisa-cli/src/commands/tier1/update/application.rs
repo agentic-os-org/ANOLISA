@@ -448,7 +448,8 @@ fn apply_delegated(
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
         execute_delegated_steps(
             &steps,
-            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&package)),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&package))
+                .with_update_from(&locked_facts.native),
             &provider,
             &mut sink,
             &mut journal,

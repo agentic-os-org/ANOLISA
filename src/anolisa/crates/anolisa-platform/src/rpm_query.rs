@@ -1,11 +1,7 @@
-//! RPM/DNF backend for [`PackageQuery`].
+//! Local RPM queries and validated repository-metadata candidate queries.
 //!
-//! Uses `rpm -q` for installed packages and `dnf repoquery` for available
-//! candidates. Output is parsed from a stable `--qf` pipe-delimited format
-//! rather than the locale-sensitive default `nevra` string, so field
-//! extraction does not depend on the host locale. A normal miss requires exit
-//! 1, blank stderr, and the complete English response for the queried argument,
-//! pinned by [`SystemCommandRunner`]'s `LC_ALL=C`.
+//! Local queries use `rpm`; remote queries read only the explicitly configured
+//! repository. Metadata is fetched lazily and reused by this query instance.
 
 use crate::command::{CommandOutput, CommandRunner, SystemCommandRunner};
 use crate::pkg_files::{
@@ -13,26 +9,9 @@ use crate::pkg_files::{
     PackageFileQuery,
 };
 use crate::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
-use crate::rpm_repo::DnfRepoSource;
-
-/// Pipe-delimited query format for `rpm -q` (installed packages).
-///
-/// Field order: NAME | EPOCH | VERSION | RELEASE | ARCH. `rpm -q` cannot
-/// report a reponame, so installed queries leave [`PackageInfo::origin`] as
-/// `None`; populating `source_repo` for observed packages is #958's job.
-const INSTALLED_QF: &str = "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n";
-
-/// Pipe-delimited query format for `dnf repoquery` (available candidates).
-///
-/// Adds `%{REPONAME}` over the installed format so available candidates carry
-/// their source repo.
-const AVAILABLE_QF: &str = "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}|%{REPONAME}\n";
-
-/// Query format for the *installed* source repo (`dnf repoquery --installed`).
-///
-/// `rpm -q` cannot report a reponame, so `source_repo` for observed packages
-/// must come from the dnf side; this yields just the bare reponame per line.
-const REPONAME_QF: &str = "%{reponame}\n";
+use crate::rpm_metadata::{RpmMetadataError, RpmSnapshot};
+use crate::rpm_repo::RpmRepoSource;
+use std::sync::OnceLock;
 
 /// Query format for the provides reverse-lookup (`rpm -q --whatprovides`).
 ///
@@ -51,32 +30,35 @@ const PROVIDES_NAME_QF: &str = "%{NAME}\n";
 const FILE_INVENTORY_QF: &str = "%{FILEDIGESTALGO}\n[%{FILENAMES:shescape}\t%{FILEMODES}\t%{FILEDIGESTS:shescape}\t%{FILELINKTOS:shescape}\n]";
 
 const RPM: &str = "rpm";
-const DNF: &str = "dnf";
+const INSTALLED_QF: &str = "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n";
 
-/// RPM/DNF implementation of [`PackageQuery`].
+/// RPM implementation of [`PackageQuery`].
 ///
 /// Generic over the [`CommandRunner`] so tests can inject a fake; production
 /// code uses [`RpmPackageQuery::system`]. The default type parameter keeps
 /// call sites in production code parameter-free while staying zero-cost.
 pub struct RpmPackageQuery<R: CommandRunner = SystemCommandRunner> {
     runner: R,
-    repo: Option<DnfRepoSource>,
+    repo: Option<RpmRepoSource>,
+    snapshot: OnceLock<RpmSnapshot>,
 }
 
 impl RpmPackageQuery<SystemCommandRunner> {
-    /// Build a query that runs real `rpm`/`dnf` on the host.
+    /// Build a query that runs real `rpm` and repository metadata on the host.
     pub fn system() -> Self {
         Self {
             runner: SystemCommandRunner,
             repo: None,
+            snapshot: OnceLock::new(),
         }
     }
 
-    /// Build a query that runs real `rpm`/`dnf` against an explicit repo.
-    pub fn system_with_repo(repo: DnfRepoSource) -> Self {
+    /// Build a query that runs real `rpm` and repository metadata against an explicit repo.
+    pub fn system_with_repo(repo: RpmRepoSource) -> Self {
         Self {
             runner: SystemCommandRunner,
             repo: Some(repo),
+            snapshot: OnceLock::new(),
         }
     }
 }
@@ -84,14 +66,19 @@ impl RpmPackageQuery<SystemCommandRunner> {
 impl<R: CommandRunner> RpmPackageQuery<R> {
     /// Build a query backed by a custom runner (primarily for tests).
     pub fn with_runner(runner: R) -> Self {
-        Self { runner, repo: None }
+        Self {
+            runner,
+            repo: None,
+            snapshot: OnceLock::new(),
+        }
     }
 
     /// Build a query backed by a custom runner and explicit repo.
-    pub fn with_runner_and_repo(runner: R, repo: DnfRepoSource) -> Self {
+    pub fn with_runner_and_repo(runner: R, repo: RpmRepoSource) -> Self {
         Self {
             runner,
             repo: Some(repo),
+            snapshot: OnceLock::new(),
         }
     }
 
@@ -141,19 +128,19 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
             .collect())
     }
 
-    fn run_dnf(&self, args: &[&str]) -> std::io::Result<CommandOutput> {
-        let args = self.dnf_args(args);
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner.run(DNF, &arg_refs)
-    }
-
-    fn dnf_args(&self, command_args: &[&str]) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(repo) = &self.repo {
-            repo.append_dnf_options(&mut args);
+    fn snapshot(&self) -> Result<&RpmSnapshot, PackageQueryError> {
+        if let Some(snapshot) = self.snapshot.get() {
+            return Ok(snapshot);
         }
-        args.extend(command_args.iter().map(|arg| (*arg).to_string()));
-        args
+        let repo = self
+            .repo
+            .as_ref()
+            .ok_or_else(|| RpmMetadataError::Invalid {
+                url: "<unconfigured>".into(),
+                reason: "RPM repository queries require an explicit repository source".into(),
+            })?;
+        let snapshot = RpmSnapshot::load(repo)?;
+        Ok(self.snapshot.get_or_init(|| snapshot))
     }
 }
 
@@ -341,48 +328,12 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
     }
 
     fn query_available(&self, package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
-        let out = self
-            .run_dnf(&["repoquery", "--quiet", "--qf", AVAILABLE_QF, package])
-            .map_err(|e| map_spawn_error(e, DNF))?;
-
-        if out.code != Some(0) {
-            return Err(PackageQueryError::QueryFailed {
-                command: DNF.to_string(),
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-
-        out.stdout
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(parse_available_line)
-            .collect()
+        Ok(self.snapshot()?.candidates(package))
     }
 
     fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
-        let out = self
-            .run_dnf(&["repoquery", "--installed", "--qf", REPONAME_QF, package])
-            .map_err(|e| map_spawn_error(e, DNF))?;
-
-        if out.code != Some(0) {
-            return Err(PackageQueryError::QueryFailed {
-                command: DNF.to_string(),
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-
-        // First non-empty reponame line is the source repo (`@System`,
-        // `anolisa-release`, ...); no line means the origin is unknown, which
-        // is a non-fatal `None` rather than an error (it is supplementary
-        // metadata for the adopt record).
-        Ok(out
-            .stdout
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .map(str::to_string))
+        let _ = package;
+        Ok(None)
     }
 
     fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
@@ -424,26 +375,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
     }
 
     fn what_provides_available(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
-        let out = self
-            .run_dnf(&[
-                "repoquery",
-                "--quiet",
-                "--qf",
-                PROVIDES_NAME_QF,
-                "--whatprovides",
-                capability,
-            ])
-            .map_err(|e| map_spawn_error(e, DNF))?;
-
-        if out.code != Some(0) {
-            return Err(PackageQueryError::QueryFailed {
-                command: DNF.to_string(),
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-
-        Ok(dedup_nonempty_lines(&out.stdout))
+        Ok(self.snapshot()?.providers(capability))
     }
 
     fn provided_capabilities_installed(
@@ -474,19 +406,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
         &self,
         package: &str,
     ) -> Result<Vec<String>, PackageQueryError> {
-        let out = self
-            .run_dnf(&["repoquery", "--quiet", "--provides", package])
-            .map_err(|e| map_spawn_error(e, DNF))?;
-
-        if out.code != Some(0) {
-            return Err(PackageQueryError::QueryFailed {
-                command: DNF.to_string(),
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-
-        Ok(dedup_nonempty_lines(&out.stdout))
+        Ok(self.snapshot()?.capabilities(package))
     }
 }
 
@@ -562,23 +482,6 @@ fn parse_installed_line(line: &str) -> Result<PackageInfo, PackageQueryError> {
     })
 }
 
-/// Parse a single available-candidate `--qf` line (6 pipe-delimited fields).
-fn parse_available_line(line: &str) -> Result<PackageInfo, PackageQueryError> {
-    let parts: Vec<&str> = line.split('|').collect();
-    if parts.len() != 6 {
-        return Err(PackageQueryError::UnexpectedOutput {
-            command: DNF.to_string(),
-            detail: format!("expected 6 fields, got {}", parts.len()),
-        });
-    }
-    Ok(PackageInfo {
-        name: parts[0].to_string(),
-        version: parse_version(parts[1], parts[2], parts[3]),
-        arch: parts[4].to_string(),
-        origin: Some(parts[5].to_string()),
-    })
-}
-
 /// Build a [`PackageVersion`] from raw `--qf` epoch/version/release fields.
 fn parse_version(epoch: &str, version: &str, release: &str) -> PackageVersion {
     PackageVersion {
@@ -631,7 +534,6 @@ mod tests {
     #[derive(Default)]
     struct FakeCommandRunner {
         rpm: Option<FakeOutcome>,
-        dnf: Option<FakeOutcome>,
         expected_package: String,
         expected_args: Option<Vec<String>>,
     }
@@ -648,7 +550,7 @@ mod tests {
             }
             let outcome = match program {
                 RPM => self.rpm.as_ref(),
-                DNF => self.dnf.as_ref(),
+
                 _ => None,
             };
             match outcome {
@@ -734,78 +636,6 @@ mod tests {
                     "rpm package argument must be last: {args:?}"
                 );
             }
-            // `dnf repoquery --installed --qf <fmt> <pkg>` (installed_origin)
-            DNF if args.get(1) == Some(&"--installed") => {
-                assert_eq!(
-                    args.len(),
-                    5,
-                    "dnf installed-origin needs [repoquery, --installed, --qf, <fmt>, <pkg>]: {args:?}"
-                );
-                assert_eq!(args[0], "repoquery");
-                assert_eq!(args[2], "--qf");
-                assert_eq!(
-                    args[3], REPONAME_QF,
-                    "dnf installed --qf drifted from REPONAME_QF: {args:?}"
-                );
-                assert_eq!(
-                    args[4], expected_package,
-                    "dnf package argument must be last: {args:?}"
-                );
-            }
-            // `dnf repoquery --quiet --qf <fmt> --whatprovides <cap>`
-            // (what_provides_available)
-            DNF if args.get(4) == Some(&"--whatprovides") => {
-                assert_eq!(
-                    args.len(),
-                    6,
-                    "dnf available-whatprovides needs [repoquery, --quiet, --qf, <fmt>, --whatprovides, <cap>]: {args:?}"
-                );
-                assert_eq!(args[0], "repoquery");
-                assert_eq!(args[1], "--quiet");
-                assert_eq!(args[2], "--qf");
-                assert_eq!(
-                    args[3], PROVIDES_NAME_QF,
-                    "dnf whatprovides --qf drifted from PROVIDES_NAME_QF: {args:?}"
-                );
-                assert_eq!(
-                    args[5], expected_package,
-                    "dnf capability argument must be last: {args:?}"
-                );
-            }
-            // `dnf repoquery --quiet --provides <pkg>`
-            // (provided_capabilities_available)
-            DNF if args.get(2) == Some(&"--provides") => {
-                assert_eq!(
-                    args.len(),
-                    4,
-                    "dnf available-provides needs [repoquery, --quiet, --provides, <pkg>]: {args:?}"
-                );
-                assert_eq!(args[0], "repoquery");
-                assert_eq!(args[1], "--quiet");
-                assert_eq!(
-                    args[3], expected_package,
-                    "dnf package argument must be last: {args:?}"
-                );
-            }
-            // `dnf repoquery --quiet --qf <fmt> <pkg>` (query_available)
-            DNF => {
-                assert_eq!(
-                    args.len(),
-                    5,
-                    "dnf needs [repoquery, --quiet, --qf, <fmt>, <pkg>]: {args:?}"
-                );
-                assert_eq!(args[0], "repoquery");
-                assert_eq!(args[1], "--quiet");
-                assert_eq!(args[2], "--qf");
-                assert_eq!(
-                    args[3], AVAILABLE_QF,
-                    "dnf --qf format string drifted from AVAILABLE_QF: {args:?}"
-                );
-                assert_eq!(
-                    args[4], expected_package,
-                    "dnf package argument must be last: {args:?}"
-                );
-            }
             _ => {}
         }
     }
@@ -818,65 +648,13 @@ mod tests {
         })
     }
 
-    #[test]
-    fn available_query_with_repo_uses_configured_repo_only() {
-        let q = RpmPackageQuery::with_runner_and_repo(
-            FakeCommandRunner {
-                rpm: None,
-                dnf: Some(ok_out(
-                    Some(0),
-                    "copilot-shell|0|2.3.0|1.al8|x86_64|anolisa-configured\n",
-                    "",
-                )),
-                expected_package: "copilot-shell".to_string(),
-                expected_args: Some(
-                    [
-                        "--disablerepo=*",
-                        "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
-                        "--enablerepo=anolisa-configured",
-                        "--setopt=anolisa-configured.gpgcheck=1",
-                        "repoquery",
-                        "--quiet",
-                        "--qf",
-                        AVAILABLE_QF,
-                        "copilot-shell",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                ),
-            },
-            DnfRepoSource::new(
-                "anolisa-configured",
-                "http://repo.example/alinux/4/agentic-os/x86_64/os",
-                Some(true),
-            ),
-        );
-        let infos = q
-            .query_available("copilot-shell")
-            .expect("available query ok");
-        assert_eq!(infos[0].origin.as_deref(), Some("anolisa-configured"));
-    }
-
     fn query_with_rpm(
         expected_package: &str,
         outcome: FakeOutcome,
     ) -> RpmPackageQuery<FakeCommandRunner> {
         RpmPackageQuery::with_runner(FakeCommandRunner {
             rpm: Some(outcome),
-            dnf: None,
-            expected_package: expected_package.to_string(),
-            expected_args: None,
-        })
-    }
 
-    fn query_with_dnf(
-        expected_package: &str,
-        outcome: FakeOutcome,
-    ) -> RpmPackageQuery<FakeCommandRunner> {
-        RpmPackageQuery::with_runner(FakeCommandRunner {
-            rpm: None,
-            dnf: Some(outcome),
             expected_package: expected_package.to_string(),
             expected_args: None,
         })
@@ -1169,7 +947,7 @@ mod tests {
     ) -> RpmPackageQuery<FakeCommandRunner> {
         RpmPackageQuery::with_runner(FakeCommandRunner {
             rpm: Some(ok_out(code, stdout, stderr)),
-            dnf: None,
+
             expected_package: "adapter-pkg".to_string(),
             expected_args: Some(
                 ["-q", "--qf", FILE_INVENTORY_QF, "adapter-pkg"]
@@ -1285,92 +1063,6 @@ mod tests {
     }
 
     #[test]
-    fn available_returns_candidates() {
-        let out = "tokenless|(none)|2.0.1|1.al8|x86_64|anolisa\n\
-                   tokenless|(none)|2.0.1|1.al8|aarch64|baseos\n";
-        let q = query_with_dnf("tokenless", ok_out(Some(0), out, ""));
-        let candidates = q.query_available("tokenless").unwrap();
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].origin.as_deref(), Some("anolisa"));
-        assert_eq!(candidates[0].arch, "x86_64");
-        assert_eq!(candidates[1].origin.as_deref(), Some("baseos"));
-        assert_eq!(candidates[1].arch, "aarch64");
-        assert_eq!(candidates[0].version.to_string(), "2.0.1-1.al8");
-    }
-
-    #[test]
-    fn available_epoch_zero_normalizes() {
-        // dnf repoquery reports epoch "0" for no-epoch packages; it must
-        // normalize to None, matching the rpm -q "(none)" representation.
-        let q = query_with_dnf("pkg", ok_out(Some(0), "pkg|0|2.3|4|x86_64|anolisa\n", ""));
-        let candidates = q.query_available("pkg").unwrap();
-        let info = candidates.first().unwrap();
-        assert_eq!(info.version.epoch, None);
-        assert_eq!(info.version.to_string(), "2.3-4");
-    }
-
-    #[test]
-    fn available_empty_returns_empty_vec() {
-        let q = query_with_dnf("nothing", ok_out(Some(0), "", ""));
-        let candidates = q.query_available("nothing").unwrap();
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn available_failure_maps_to_error() {
-        let q = query_with_dnf("x", ok_out(Some(1), "", "error: repo not found"));
-        let err = q.query_available("x").unwrap_err();
-        assert!(matches!(
-            err,
-            PackageQueryError::QueryFailed { command, .. } if command == DNF
-        ));
-    }
-
-    #[test]
-    fn available_bad_fields_maps_to_error() {
-        let q = query_with_dnf("pkg", ok_out(Some(0), "pkg|2.0.1\n", ""));
-        let err = q.query_available("pkg").unwrap_err();
-        assert!(matches!(err, PackageQueryError::UnexpectedOutput { .. }));
-    }
-
-    #[test]
-    fn installed_origin_returns_reponame() {
-        let q = query_with_dnf("tokenless", ok_out(Some(0), "@System\n", ""));
-        assert_eq!(
-            q.installed_origin("tokenless").unwrap().as_deref(),
-            Some("@System")
-        );
-    }
-
-    #[test]
-    fn installed_origin_empty_is_none() {
-        // A package with no reported reponame yields an empty repoquery result;
-        // origin is supplementary, so absence is a non-fatal `None`.
-        let q = query_with_dnf("tokenless", ok_out(Some(0), "", ""));
-        assert_eq!(q.installed_origin("tokenless").unwrap(), None);
-    }
-
-    #[test]
-    fn installed_origin_failure_maps_to_error() {
-        let q = query_with_dnf("x", ok_out(Some(1), "", "error: rpmdb open failed"));
-        let err = q.installed_origin("x").unwrap_err();
-        assert!(matches!(
-            err,
-            PackageQueryError::QueryFailed { command, .. } if command == DNF
-        ));
-    }
-
-    #[test]
-    fn installed_origin_command_missing_maps_to_error() {
-        let q = query_with_dnf("x", FakeOutcome::Err(io::ErrorKind::NotFound));
-        let err = q.installed_origin("x").unwrap_err();
-        assert!(matches!(
-            err,
-            PackageQueryError::CommandMissing { command } if command == DNF
-        ));
-    }
-
-    #[test]
     fn what_provides_returns_single_name() {
         let q = query_with_rpm(
             "anolisa-component(tokenless)",
@@ -1480,40 +1172,6 @@ mod tests {
     }
 
     #[test]
-    fn available_what_provides_returns_package_names() {
-        let q = query_with_dnf(
-            "anolisa-component(tokenless)",
-            ok_out(Some(0), "tokenless\nvendor-tokenless\n", ""),
-        );
-        let names = q
-            .what_provides_available("anolisa-component(tokenless)")
-            .unwrap();
-        assert_eq!(
-            names,
-            vec!["tokenless".to_string(), "vendor-tokenless".to_string()]
-        );
-    }
-
-    #[test]
-    fn available_what_provides_empty_is_empty_vec() {
-        let q = query_with_dnf("anolisa-component(absent)", ok_out(Some(0), "", ""));
-        let names = q
-            .what_provides_available("anolisa-component(absent)")
-            .unwrap();
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn available_what_provides_failure_maps_to_error() {
-        let q = query_with_dnf("x", ok_out(Some(1), "", "error: repo not found"));
-        let err = q.what_provides_available("x").unwrap_err();
-        assert!(matches!(
-            err,
-            PackageQueryError::QueryFailed { command, .. } if command == DNF
-        ));
-    }
-
-    #[test]
     fn installed_package_provides_returns_capabilities() {
         let q = query_with_rpm(
             "tokenless",
@@ -1541,32 +1199,6 @@ mod tests {
         );
         let capabilities = q.provided_capabilities_installed("ghost").unwrap();
         assert!(capabilities.is_empty());
-    }
-
-    #[test]
-    fn available_package_provides_returns_capabilities() {
-        let q = query_with_dnf(
-            "tokenless",
-            ok_out(Some(0), "tokenless = 2.0.1\nanolisa-component(cosh)\n", ""),
-        );
-        let capabilities = q.provided_capabilities_available("tokenless").unwrap();
-        assert_eq!(
-            capabilities,
-            vec![
-                "tokenless = 2.0.1".to_string(),
-                "anolisa-component(cosh)".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn available_package_provides_failure_maps_to_error() {
-        let q = query_with_dnf("x", ok_out(Some(1), "", "error: repo not found"));
-        let err = q.provided_capabilities_available("x").unwrap_err();
-        assert!(matches!(
-            err,
-            PackageQueryError::QueryFailed { command, .. } if command == DNF
-        ));
     }
 
     #[test]

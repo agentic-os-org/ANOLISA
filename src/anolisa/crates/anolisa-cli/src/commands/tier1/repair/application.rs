@@ -227,8 +227,7 @@ pub(super) fn run(
     {
         let env = anolisa_env::EnvService::detect();
         if let Ok(Some(repo)) = rpm_repo_source_for_update(&repo_config, &env, &command) {
-            let query = RpmPackageQuery::system_with_repo(repo.clone());
-            let transaction = RpmTransaction::system_with_repo(repo);
+            let (query, transaction) = crate::commands::tier1::rpm_backends::system(Some(repo));
             return run_with_dependencies(
                 request,
                 ctx,

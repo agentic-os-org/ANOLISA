@@ -2026,10 +2026,7 @@ fn resolve_component_manifest(
 fn resolver_env_from_facts(facts: &anolisa_env::EnvFacts) -> ResolverEnv {
     ResolverEnv {
         kernel: facts.kernel.clone(),
-        pkg_base: facts
-            .os_id
-            .as_deref()
-            .and_then(anolisa_env::pkg_base_from_id),
+        pkg_base: anolisa_env::package_family(facts.os_id.as_deref(), facts.os_id_like.as_deref()),
         btf: facts.btf,
         cap_bpf: facts.cap_bpf,
     }
@@ -4850,7 +4847,7 @@ mod tests {
                         if scenario == "config-files" {
                             assert_eq!(
                                 component["fix_plan"][0]["command"],
-                                "sudo apt install libfoo"
+                                "sudo apt-get install libfoo"
                             );
                         } else {
                             assert!(component["fix_plan"][0]["command"].is_null());
@@ -4867,14 +4864,14 @@ mod tests {
                     }
                 }
                 match scenario {
-                    "config-files" => assert!(rendered.contains("sudo apt install libfoo")),
+                    "config-files" => assert!(rendered.contains("sudo apt-get install libfoo")),
                     "unpacked" => {
                         assert!(rendered.contains("install ok unpacked"));
-                        assert!(!rendered.contains("sudo apt install"));
+                        assert!(!rendered.contains("sudo apt-get install"));
                     }
                     "failure" => {
                         assert!(rendered.contains("database unavailable"));
-                        assert!(!rendered.contains("sudo apt install"));
+                        assert!(!rendered.contains("sudo apt-get install"));
                     }
                     _ => {}
                 }
@@ -5170,6 +5167,72 @@ mod tests {
     }
 
     #[test]
+    fn doctor_derivative_distros_keep_actionable_system_package_diagnostics() {
+        for (id, id_like, probe, family) in [
+            ("openeuler", "rhel fedora", "rpm -q libfoo", "rpm"),
+            (
+                "zorin",
+                "ubuntu debian",
+                "dpkg-query --show --showformat=${Package}\t${Architecture}\t${Status}\n -- libfoo",
+                "deb",
+            ),
+        ] {
+            let facts: anolisa_env::EnvFacts = serde_json::from_value(serde_json::json!({
+                "os":"linux", "arch":"x86_64", "os_id":id, "os_id_like":id_like,
+                "user":"tester", "uid":1000, "home":"/tmp/tester"
+            }))
+            .unwrap();
+            let env = resolver_env_from_facts(&facts);
+            assert_eq!(env.pkg_base.as_deref(), Some(family));
+            let temp = tempfile::tempdir().unwrap();
+            let layout = FsLayout::system(Some(temp.path().to_path_buf()));
+            let runner = RuntimeRunner::new(vec![Ok(anolisa_platform::command::CommandOutput {
+                code: Some(1),
+                stdout: if family == "rpm" {
+                    "package libfoo is not installed\n".into()
+                } else {
+                    String::new()
+                },
+                stderr: if family == "deb" {
+                    "dpkg-query: no packages found matching libfoo\n".into()
+                } else {
+                    String::new()
+                },
+            })]);
+            let resolver =
+                DependencyResolver::with_probes(&runner, || panic!("no filesystem probe"));
+            let payload = diagnose_runtime_fixture_with_env(
+                &layout,
+                Some(owned_object("runtime-tool", LifecycleStatus::Installed)),
+                Some("[[component.dependencies]]\nname = \"libfoo\"\nkind = \"system-package\""),
+                false,
+                &|deps, env| resolver.resolve(deps, env),
+                &env,
+            );
+            assert_eq!(*runner.calls.borrow(), [probe]);
+            let component = &payload.components[0];
+            assert_eq!(
+                component.dependencies[0].status,
+                DoctorDependencyStatus::Unresolved
+            );
+            let fix = component
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "install_package")
+                .unwrap();
+            if family == "rpm" {
+                assert_eq!(
+                    component.dependencies[0].note.as_deref(),
+                    Some("install RPM package libfoo with the host package manager")
+                );
+                assert_eq!(fix.command, None);
+            } else {
+                assert_eq!(fix.command.as_deref(), Some("sudo apt-get install libfoo"));
+            }
+        }
+    }
+
+    #[test]
     fn doctor_runtime_dependencies_use_real_resolver_exactly_once() {
         for healthy in [true, false] {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -5257,10 +5320,7 @@ mod tests {
                     ]
                 );
                 assert_eq!(component.fix_plan.len(), 3);
-                assert_eq!(
-                    component.fix_plan[0].command.as_deref(),
-                    Some("sudo dnf install libfoo")
-                );
+                assert_eq!(component.fix_plan[0].command.as_deref(), None);
                 assert_eq!(component.fix_plan[2].action, "satisfy_platform_requirement");
                 assert_eq!(payload.summary.failed, 1);
                 assert_eq!(
@@ -5503,7 +5563,7 @@ mod tests {
                         if !healthy {
                             assert_eq!(
                                 component["fix_plan"][0]["command"],
-                                "sudo dnf install libfoo"
+                                serde_json::Value::Null
                             );
                             assert_eq!(component["findings"][2]["code"], "dependency_unresolvable");
                         }
@@ -5523,7 +5583,11 @@ mod tests {
                         let platform = rendered.find("[dependency_unresolvable]").unwrap();
                         let fix = rendered.find("Recommended:").unwrap();
                         assert!(package < detail && detail < platform && platform < fix);
-                        assert!(rendered.contains("sudo dnf install libfoo"));
+                        assert!(
+                            rendered.contains(
+                                "install RPM package libfoo with the host package manager"
+                            )
+                        );
                         assert!(rendered.contains("satisfy_platform_requirement"));
                     }
                     "quiet" => assert!(rendered.is_empty()),

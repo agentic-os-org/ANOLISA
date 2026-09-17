@@ -2858,6 +2858,33 @@ mod tests {
     }
 
     #[test]
+    fn repair_after_external_update_drops_the_previous_repository() {
+        for (version, arch, expected) in [
+            ("2.6.0", "x86_64", Some("prior-repo")),
+            ("2.7.0", "x86_64", None),
+            ("2.6.0", "aarch64", None),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+            let mut obj = rpm_object("cosh", "cosh", "2.6.0-1.al4", Ownership::RpmObserved, false);
+            obj.rpm_metadata.as_mut().unwrap().source_repo = Some("prior-repo".into());
+            seed(&ctx, vec![obj]);
+            let fake = FakeRpm::new("cosh", Some(pkg_info("cosh", version, Some("1.al4"), arch)));
+            repair_with_deps("cosh", &ctx, &fake, &fake, false).unwrap();
+            let record = find_component(&ctx, "cosh");
+            let ProviderBinding::Delegated {
+                last_observed: Some(observed),
+                ..
+            } = record.binding
+            else {
+                panic!("missing observation")
+            };
+            assert_eq!(observed.source_repo.as_deref(), expected);
+            assert_eq!(fake.install_calls.get(), 0);
+        }
+    }
+
+    #[test]
     fn observed_component_refreshes_without_adoption() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);

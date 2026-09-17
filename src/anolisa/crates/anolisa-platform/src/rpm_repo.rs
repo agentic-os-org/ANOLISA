@@ -1,19 +1,19 @@
-//! DNF command-line options for an explicit RPM repository source.
+//! Explicit RPM repository source shared by metadata queries and native transactions.
 
-/// DNF repository supplied by ANOLISA configuration for one command run.
+/// RPM repository supplied by ANOLISA configuration for one command run.
 ///
-/// The repo is injected with `--repofrompath` instead of writing a repo file,
+/// Native transactions inject the repo temporarily,
 /// keeping `repo.toml` authoritative for ANOLISA-managed RPM operations while
 /// leaving the host's persistent package-manager configuration untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnfRepoSource {
+pub struct RpmRepoSource {
     id: String,
     base_url: String,
     gpgcheck: Option<bool>,
 }
 
-impl DnfRepoSource {
-    /// Builds a temporary DNF repository descriptor.
+impl RpmRepoSource {
+    /// Builds an explicit RPM repository descriptor.
     pub fn new(id: impl Into<String>, base_url: impl Into<String>, gpgcheck: Option<bool>) -> Self {
         Self {
             id: id.into(),
@@ -37,27 +37,9 @@ impl DnfRepoSource {
         self.gpgcheck
     }
 
-    /// DNF options for **read-only queries** (e.g. `repoquery`).
-    ///
-    /// Disables all host repos (`--disablerepo=*`) so availability probes only
-    /// report packages from the ANOLISA-configured repo, never silently falling
-    /// back to a system repo that happens to carry a same-named package.
-    pub(crate) fn append_dnf_options(&self, args: &mut Vec<String>) {
-        args.push("--disablerepo=*".to_string());
-        args.push(format!("--repofrompath={},{}", self.id, self.base_url));
-        args.push(format!("--enablerepo={}", self.id));
-        if let Some(gpgcheck) = self.gpgcheck {
-            args.push(format!(
-                "--setopt={}.gpgcheck={}",
-                self.id,
-                if gpgcheck { "1" } else { "0" }
-            ));
-        }
-    }
-
     /// DNF options for **write transactions** (`install`/`update`/`remove`).
     ///
-    /// Unlike [`append_dnf_options`](Self::append_dnf_options), this does **not**
+    /// This does **not**
     /// emit `--disablerepo=*`. RPM packages declare their own `Requires:` and dnf
     /// resolves the entire dependency graph in one transaction. If all system
     /// repos are disabled, dnf cannot satisfy cross-repo dependencies that live

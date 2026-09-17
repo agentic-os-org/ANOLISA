@@ -452,7 +452,7 @@ fn txn_err(err: PackageTransactionError, command: &str) -> CliError {
     match err {
         PackageTransactionError::CommandMissing { .. } => CliError::Runtime {
             command: command.to_string(),
-            reason: "rpm/dnf not found: cannot update an RPM-owned package without the package manager. Install rpm/dnf and retry".to_string(),
+            reason: "RPM transaction tool not found: cannot update an RPM-owned package. Install yum or dnf and retry".to_string(),
         },
         PackageTransactionError::PermissionDenied { command: bin } => {
             common::package_permission_error(command, &bin, "update")

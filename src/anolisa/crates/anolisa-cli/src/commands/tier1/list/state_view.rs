@@ -226,7 +226,8 @@ fn rpm_drift_state(
         Err(PackageQueryError::CommandMissing { .. })
         | Err(PackageQueryError::PermissionDenied { .. })
         | Err(PackageQueryError::QueryFailed { .. })
-        | Err(PackageQueryError::UnexpectedOutput { .. }) => None,
+        | Err(PackageQueryError::UnexpectedOutput { .. })
+        | Err(PackageQueryError::Repository(_)) => None,
     }
 }
 

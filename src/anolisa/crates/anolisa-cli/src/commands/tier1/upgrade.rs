@@ -718,7 +718,7 @@ fn authorize_plan<'a>(store: &StateStore, plan: &'a UpgradePlan) -> AuthorizedPl
             Some(installation) => authorized.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "component '{}' is now {} in ANOLISA state; refusing to run dnf update for '{}'",
+                    "component '{}' is now {} in ANOLISA state; refusing to run an RPM update for '{}'",
                     update.name,
                     provenance_label(installation),
                     update.package
@@ -728,7 +728,7 @@ fn authorize_plan<'a>(store: &StateStore, plan: &'a UpgradePlan) -> AuthorizedPl
             None => authorized.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "component '{}' is no longer present in ANOLISA state; refusing to run dnf update for '{}'",
+                    "component '{}' is no longer present in ANOLISA state; refusing to run an RPM update for '{}'",
                     update.name, update.package
                 ),
             }),
@@ -741,7 +741,7 @@ fn authorize_plan<'a>(store: &StateStore, plan: &'a UpgradePlan) -> AuthorizedPl
             InstallSlot::Conflict(existing_ownership) => authorized.errors.push(ErrorResult {
                 name: install.name.clone(),
                 reason: format!(
-                    "component '{}' already exists as {existing_ownership} in ANOLISA state; refusing to run dnf install for '{}'",
+                    "component '{}' already exists as {existing_ownership} in ANOLISA state; refusing to run an RPM install for '{}'",
                     install.name, install.package
                 ),
             }),
@@ -943,12 +943,15 @@ fn execute_upgrade_plan(
                 .iter()
                 .map(|update| update.package.as_str())
                 .collect();
+            let before = observe_transaction_packages(query, &packages, &mut warnings);
             match txn.update(&packages) {
                 Ok(()) => {
-                    for update in &authorized.updates {
+                    for (update, before) in authorized.updates.iter().zip(&before) {
                         stage_refreshed_update(
                             update,
                             query,
+                            before,
+                            txn.repository_source(),
                             &mut pending_updates,
                             &mut errors,
                             &mut warnings,
@@ -997,12 +1000,15 @@ fn execute_upgrade_plan(
                 .iter()
                 .map(|install| install.package.as_str())
                 .collect();
+            let before = observe_transaction_packages(query, &packages, &mut warnings);
             match txn.install(&packages) {
                 Ok(()) => {
-                    for install in &authorized.installs {
+                    for (install, before) in authorized.installs.iter().zip(&before) {
                         stage_refreshed_install(
                             install,
                             query,
+                            before,
+                            txn.repository_source(),
                             &mut pending_installs,
                             &mut errors,
                             &mut warnings,
@@ -1145,35 +1151,62 @@ fn run_upgrade_with_deps(
     .map(project_outcome)
 }
 
+// A lock protects ANOLISA state, not external package-manager activity since planning.
+fn observe_transaction_packages(
+    query: &dyn PackageQuery,
+    packages: &[&str],
+    warnings: &mut Vec<String>,
+) -> Vec<Result<Option<PackageInfo>, PackageQueryError>> {
+    packages.iter().map(|package| {
+        let before = query.query_installed(package);
+        if let Err(error) = &before {
+            warnings.push(format!("could not observe '{package}' before the transaction ({error}); its repository source cannot be confirmed"));
+        }
+        before
+    }).collect()
+}
+
+fn transaction_changed_package(
+    before: &Result<Option<PackageInfo>, PackageQueryError>,
+    after: &PackageInfo,
+) -> bool {
+    match before {
+        Ok(None) => true,
+        Ok(Some(before)) => before.version != after.version || before.arch != after.arch,
+        Err(_) => false,
+    }
+}
+
 /// Re-read one upgraded package from rpmdb and stage its state refresh. A
 /// package the transaction covered but rpmdb cannot confirm becomes an error
 /// that routes to repair — never a silent record.
 fn stage_refreshed_update(
     update: &PlannedUpdate,
     query: &dyn PackageQuery,
+    before: &Result<Option<PackageInfo>, PackageQueryError>,
+    confirmed_source: Option<&str>,
     pending_updates: &mut Vec<PendingUpdate>,
     errors: &mut Vec<ErrorResult>,
     warnings: &mut Vec<String>,
 ) {
     match query.query_installed(&update.package) {
-        Ok(Some(info)) => stage_update_observation(
-            update,
-            info,
-            query,
-            pending_updates,
-            warnings,
-        ),
+        Ok(Some(mut info)) => {
+            if transaction_changed_package(before, &info) {
+                info.origin = confirmed_source.map(str::to_string).or(info.origin);
+            }
+            stage_update_observation(update, info, query, pending_updates, warnings);
+        }
         Ok(None) => errors.push(ErrorResult {
             name: update.name.clone(),
             reason: format!(
-                "dnf upgraded '{}' but it is no longer in rpmdb under that name; run `sudo anolisa --install-mode system repair {}`",
+                "the RPM package manager upgraded '{}' but it is no longer in rpmdb under that name; run `sudo anolisa --install-mode system repair {}`",
                 update.package, update.name
             ),
         }),
         Err(err) => errors.push(ErrorResult {
             name: update.name.clone(),
             reason: format!(
-                "dnf upgraded '{}' but reading the new version failed ({err}); run `sudo anolisa --install-mode system repair {}`",
+                "the RPM package manager upgraded '{}' but reading the new version failed ({err}); run `sudo anolisa --install-mode system repair {}`",
                 update.package, update.name
             ),
         }),
@@ -1204,25 +1237,30 @@ fn stage_update_observation(
 fn stage_refreshed_install(
     install: &PlannedInstall,
     query: &dyn PackageQuery,
+    before: &Result<Option<PackageInfo>, PackageQueryError>,
+    confirmed_source: Option<&str>,
     pending_installs: &mut Vec<PendingInstall>,
     errors: &mut Vec<ErrorResult>,
     warnings: &mut Vec<String>,
 ) {
     match query.query_installed(&install.package) {
-        Ok(Some(info)) => {
+        Ok(Some(mut info)) => {
+            if transaction_changed_package(before, &info) {
+                info.origin = confirmed_source.map(str::to_string).or(info.origin);
+            }
             stage_install_observation(install, info, query, pending_installs, warnings)
         }
         Ok(None) => errors.push(ErrorResult {
             name: install.name.clone(),
             reason: format!(
-                "dnf installed '{}' but it is not present in rpmdb; state was not recorded",
+                "the RPM package manager installed '{}' but it is not present in rpmdb; state was not recorded",
                 install.package
             ),
         }),
         Err(err) => errors.push(ErrorResult {
             name: install.name.clone(),
             reason: format!(
-                "dnf installed '{}' but reading its version failed ({err}); state was not recorded",
+                "the RPM package manager installed '{}' but reading its version failed ({err}); state was not recorded",
                 install.package
             ),
         }),
@@ -1330,7 +1368,7 @@ fn degrade_merged_updates(
     warnings: &mut Vec<String>,
 ) {
     warnings.push(format!(
-        "merged dnf update failed ({merged_reason}); checking members for safe individual retry"
+        "merged RPM update failed ({merged_reason}); checking members for safe individual retry"
     ));
     for update in updates {
         match query.query_installed(&update.package) {
@@ -1341,11 +1379,11 @@ fn degrade_merged_updates(
                 ));
                 stage_update_observation(update, info, query, pending_updates, warnings);
             }
-            Ok(Some(_)) => {
+            Ok(Some(info)) => {
                 reporter.report(&format!("Retrying {} individually...", update.name));
                 match txn.update(&[update.package.as_str()]) {
                     Ok(()) => {
-                        stage_refreshed_update(update, query, pending_updates, errors, warnings);
+                        stage_refreshed_update(update, query, &Ok(Some(info)), txn.repository_source(), pending_updates, errors, warnings);
                     }
                     Err(err) => reconcile_failed_update(
                         update,
@@ -1361,14 +1399,14 @@ fn degrade_merged_updates(
             Ok(None) => errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "merged dnf update failed ({merged_reason}) and '{}' is now absent from rpmdb; run `sudo anolisa --install-mode system repair {}`",
+                    "merged RPM update failed ({merged_reason}) and '{}' is now absent from rpmdb; run `sudo anolisa --install-mode system repair {}`",
                     update.package, update.name
                 ),
             }),
             Err(err) => errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "merged dnf update failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); run `sudo anolisa --install-mode system repair {}`",
+                    "merged RPM update failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); run `sudo anolisa --install-mode system repair {}`",
                     update.package, update.name
                 ),
             }),
@@ -1391,7 +1429,7 @@ fn degrade_merged_installs(
     warnings: &mut Vec<String>,
 ) {
     warnings.push(format!(
-        "merged dnf install failed ({merged_reason}); retrying its members individually"
+        "merged RPM install failed ({merged_reason}); retrying its members individually"
     ));
     for install in installs {
         match query.query_installed(&install.package) {
@@ -1406,7 +1444,7 @@ fn degrade_merged_installs(
                 reporter.report(&format!("Retrying {} individually...", install.name));
                 match txn.install(&[install.package.as_str()]) {
                     Ok(()) => {
-                        stage_refreshed_install(install, query, pending_installs, errors, warnings);
+                        stage_refreshed_install(install, query, &Ok(None), txn.repository_source(), pending_installs, errors, warnings);
                     }
                     Err(err) => reconcile_failed_install(
                         install,
@@ -1422,7 +1460,7 @@ fn degrade_merged_installs(
             Err(err) => errors.push(ErrorResult {
                 name: install.name.clone(),
                 reason: format!(
-                    "merged dnf install failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); state was not recorded",
+                    "merged RPM install failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); state was not recorded",
                     install.package
                 ),
             }),
@@ -1497,10 +1535,10 @@ fn refresh_evr(query: &dyn PackageQuery, package: &str) -> Result<String, String
     match query.query_installed(package) {
         Ok(Some(info)) => Ok(info.version.to_string()),
         Ok(None) => Err(format!(
-            "dnf upgraded '{package}' but it is no longer in rpmdb under that name"
+            "the RPM package manager upgraded '{package}' but it is no longer in rpmdb under that name"
         )),
         Err(err) => Err(format!(
-            "dnf upgraded '{package}' but reading the new version failed: {err}"
+            "the RPM package manager upgraded '{package}' but reading the new version failed: {err}"
         )),
     }
 }
@@ -1670,7 +1708,7 @@ fn reconciliation_requires_manifest_refresh(item: &ReconciledItem) -> bool {
     )
 }
 
-/// Human-readable reason for a failed `dnf` transaction.
+/// Human-readable reason naming the package manager that failed.
 fn txn_error_reason(err: PackageTransactionError) -> String {
     match err {
         PackageTransactionError::CommandMissing { command } => {
@@ -1680,12 +1718,12 @@ fn txn_error_reason(err: PackageTransactionError) -> String {
             format!("permission denied running {command}; re-run with sudo")
         }
         PackageTransactionError::TransactionFailed {
+            command,
             operation,
             code,
             stderr,
-            ..
         } => format!(
-            "dnf {operation} failed (exit {}): {}",
+            "{command} {operation} failed (exit {}): {}",
             code.map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".to_string()),
             stderr.trim(),
@@ -1763,7 +1801,7 @@ fn render_plan_preview(
         } else {
             // DNF requires root even with --assumeno; keep unprivileged previews usable.
             warnings.push(
-                "RPM install conflicts have not been checked: DNF preflight requires root; rerun with sudo (preserving any --target option), e.g. `sudo anolisa --install-mode system upgrade --dry-run`".to_string(),
+                "RPM install conflicts have not been checked: RPM package-manager preflight requires root; rerun with sudo (preserving any --target option), e.g. `sudo anolisa --install-mode system upgrade --dry-run`".to_string(),
             );
         }
     }
@@ -1941,7 +1979,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "dnf upgraded '{}' but component '{}' vanished from ANOLISA state during the upgrade; run `sudo anolisa --install-mode system repair {}` to refresh it",
+                    "the RPM package manager upgraded '{}' but component '{}' vanished from ANOLISA state during the upgrade; run `sudo anolisa --install-mode system repair {}` to refresh it",
                     update.package, update.name, update.name
                 ),
             });
@@ -1958,7 +1996,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "dnf upgraded '{}' but component '{}' changed ownership/package in ANOLISA state during the upgrade; state was not refreshed — run `sudo anolisa --install-mode system repair {}`",
+                    "the RPM package manager upgraded '{}' but component '{}' changed ownership/package in ANOLISA state during the upgrade; state was not refreshed — run `sudo anolisa --install-mode system repair {}`",
                     update.package, update.name, update.name
                 ),
             });
@@ -2031,7 +2069,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
                 outcome.errors.push(ErrorResult {
                     name: install.name.clone(),
                     reason: format!(
-                        "dnf installed '{}' but a {existing_ownership} component named '{}' already exists in ANOLISA state; refusing to overwrite it with an rpm-managed record — run `anolisa status {}`",
+                        "the RPM package manager installed '{}' but a {existing_ownership} component named '{}' already exists in ANOLISA state; refusing to overwrite it with an rpm-managed record — run `anolisa status {}`",
                         install.package, install.name, install.name
                     ),
                 });
@@ -2396,10 +2434,16 @@ fn refresh_delegated_observation(
             name: package.to_string(),
         };
         let mut observation = observation_from(refreshed, source_repo, observed_at);
-        // A failed origin lookup must not erase a previously known source repo.
+        // An unchanged artifact may retain its previously confirmed origin.
         if observation.source_repo.is_none() {
             observation.source_repo = last_observed
                 .as_ref()
+                .filter(|prior| {
+                    prior.evr.is_some()
+                        && prior.arch.is_some()
+                        && prior.evr == observation.evr
+                        && prior.arch == observation.arch
+                })
                 .and_then(|prior| prior.source_repo.clone());
         }
         *last_observed = Some(observation);

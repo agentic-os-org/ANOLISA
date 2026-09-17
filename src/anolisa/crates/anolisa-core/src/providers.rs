@@ -71,6 +71,11 @@ impl<'a> DelegatedProvider<'a> {
         }
     }
 
+    /// Configured transaction source; this does not establish an existing package's origin.
+    pub fn repository_source(&self) -> Option<&str> {
+        self.txn.repository_source()
+    }
+
     /// Check an install without applying the native transaction.
     ///
     /// # Errors
@@ -190,6 +195,7 @@ pub(crate) mod test_fakes {
     pub struct FakeTxn {
         pub calls: RefCell<Vec<(String, String)>>,
         pub fail: Vec<&'static str>,
+        pub repository: Option<&'static str>,
     }
 
     impl FakeTxn {
@@ -210,6 +216,9 @@ pub(crate) mod test_fakes {
     }
 
     impl PackageTransaction for FakeTxn {
+        fn repository_source(&self) -> Option<&str> {
+            self.repository
+        }
         fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("this path must not preflight an install")
         }

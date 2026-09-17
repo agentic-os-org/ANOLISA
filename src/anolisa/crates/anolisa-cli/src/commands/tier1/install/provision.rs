@@ -18,12 +18,7 @@ use crate::response::CliError;
 pub(crate) fn resolver_env_from_facts(facts: &anolisa_env::EnvFacts) -> ResolverEnv {
     ResolverEnv {
         kernel: facts.kernel.clone(),
-        // `os_id` (raw `/etc/os-release` ID) maps to the coarse rpm/deb family;
-        // the legacy `EnvFacts::pkg_base` is Anolis-specific and unsuitable here.
-        pkg_base: facts
-            .os_id
-            .as_deref()
-            .and_then(anolisa_env::pkg_base_from_id),
+        pkg_base: anolisa_env::package_family(facts.os_id.as_deref(), facts.os_id_like.as_deref()),
         btf: facts.btf,
         cap_bpf: facts.cap_bpf,
     }
@@ -210,21 +205,23 @@ where
                 lines.push(format!("  {} (manual): {}", dep.name, dep.hint));
             }
 
-            let remediation_cmds: Vec<&str> = provision
-                .installable
-                .iter()
-                .map(|p| p.remediation.as_str())
-                .collect();
+            let remediation = if provision.has_installable() {
+                match detect_manager(resolver_env.pkg_base.as_deref()) {
+                    Ok(manager) => manager.install_hint(&provision.installable_package_names()),
+                    Err(error) => format!("{error}; install the listed packages manually"),
+                }
+            } else {
+                String::new()
+            };
 
             let mut reason = format!(
                 "missing system dependencies in user mode; no files were changed:\n{}",
                 lines.join("\n")
             );
-            if !remediation_cmds.is_empty() {
+            if !remediation.is_empty() {
                 reason.push_str(&format!(
                     "\n\nInstall them with:\n  {}\n\nThen retry:\n  anolisa install {}",
-                    remediation_cmds.join("\n  "),
-                    manifest.component.name
+                    remediation, manifest.component.name
                 ));
             }
 
@@ -1109,6 +1106,10 @@ mod tests {
     }
 
     impl PackageManager for FakePackageManager {
+        fn install_hint(&self, packages: &[&str]) -> String {
+            format!("sudo yum install {}", packages.join(" "))
+        }
+
         fn install(&self, packages: &[&str]) -> Result<(), PkgError> {
             self.installs
                 .borrow_mut()
@@ -1143,6 +1144,30 @@ mod tests {
             pkg_base: Some("rpm".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn dependency_family_uses_id_like_and_never_legacy_pkg_base() {
+        let mut env = rpm_host_env();
+        env.os_id = Some("derived-os".into());
+        env.os_id_like = Some("custom rhel fedora".into());
+        assert_eq!(
+            resolver_env_from_facts(&env).pkg_base.as_deref(),
+            Some("rpm")
+        );
+        env.os_id_like = Some("debian".into());
+        assert_eq!(
+            resolver_env_from_facts(&env).pkg_base.as_deref(),
+            Some("deb")
+        );
+        env.os_id = Some("alinux".into());
+        assert_eq!(
+            resolver_env_from_facts(&env).pkg_base.as_deref(),
+            Some("rpm")
+        );
+        env.os_id = None;
+        env.os_id_like = None;
+        assert_eq!(resolver_env_from_facts(&env).pkg_base, None);
     }
 
     fn rpm_host_env() -> anolisa_env::EnvFacts {
@@ -1475,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_reports_missing_dependency_without_detecting_manager() {
+    fn user_mode_reports_selected_tool_without_installing() {
         let sandbox = TestSandbox::new();
         let ctx = sandbox.context(InstallMode::User);
         let layout = ctx.layout();
@@ -1494,7 +1519,7 @@ mod tests {
             layout,
             &resolver,
             |_| -> Result<Box<dyn PackageManager>, PkgError> {
-                panic!("user mode must not detect a package manager")
+                Ok(Box::new(FakePackageManager::default()))
             },
         )
         .expect_err("user mode must report the missing package");
@@ -1503,7 +1528,7 @@ mod tests {
             err.reason()
                 .contains("missing system dependencies in user mode")
         );
-        assert!(err.reason().contains("sudo dnf install libfoo"));
+        assert!(err.reason().contains("sudo yum install libfoo"));
     }
 
     #[test]
@@ -1580,7 +1605,10 @@ mod tests {
 
         assert!(err.reason().contains("cannot auto-install dependencies"));
         assert!(err.reason().contains("unsupported package base: rpm"));
-        assert!(err.reason().contains("sudo dnf install libfoo"));
+        assert!(
+            err.reason()
+                .contains("install RPM package libfoo with the host package manager")
+        );
     }
 
     #[test]
