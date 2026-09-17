@@ -13,9 +13,12 @@ set -uo pipefail
 
 PASS=0
 FAIL=0
+SKIP=0
+SKIP_REASON=""
 
 pass() { echo "[PASS] $1"; PASS=$((PASS + 1)); }
 fail() { echo "[FAIL] $1" >&2; FAIL=$((FAIL + 1)); }
+skip() { echo "[SKIP] $1"; SKIP=$((SKIP + 1)); SKIP_REASON="$1"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ADAPTER_DIR="$SCRIPT_DIR/../adapters/tokenless"
@@ -242,6 +245,82 @@ else
     fail "install created settings.json with mode $mode"
 fi
 
+# --- Test 5d: a rewrite that cannot keep the owner is refused, not adopted ---
+# mkstemp stages the replacement inode with the installer's UID/GID, so both
+# scripts chown it back to the existing owner before os.replace. When that
+# restore is not permitted, replacing anyway would move a credential-bearing
+# settings.json — with the original, typically 0600, mode restored — to the
+# installer account and can lock the real owner out of their own config. Both
+# scripts must refuse and leave the original inode untouched.
+#
+# Forcing the failure needs two distinct owners, which an unprivileged caller
+# cannot create directly. A user namespace with a single-ID mapping provides
+# one without root: a file whose group is not the caller's effective gid is
+# unmapped inside the namespace, so it is seen as nogroup while the staged
+# temp file carries the mapped gid, and restoring it fails with EINVAL exactly
+# as a cross-account run fails with EPERM.
+foreign_gid=""
+for gid in $(id -G); do
+    if [ "$gid" != "$(id -g)" ]; then foreign_gid="$gid"; break; fi
+done
+stat_identity() { stat -c '%i %u:%g %a' "$1" 2>/dev/null || stat -f '%i %u:%g %Lp' "$1"; }
+if [ -n "$foreign_gid" ] && command -v unshare >/dev/null 2>&1 \
+    && unshare --user --map-root-user true >/dev/null 2>&1; then
+    export HOME="$SANDBOX/home-ownership"
+    mkdir -p "$HOME/.codebuddy"
+    settings="$HOME/.codebuddy/settings.json"
+    echo '{"model": "default-model"}' > "$settings"
+    chmod 0600 "$settings"
+
+    # install: the config is owned by a group the rewrite cannot restore.
+    chgrp "$foreign_gid" "$settings"
+    identity_before="$(stat_identity "$settings")"
+    content_before="$(cat "$settings")"
+    install_out="$(unshare --user --map-root-user env \
+        HOME="$HOME" ANOLISA_TARGET=workbuddy ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        bash "$ADAPTER_DIR/workbuddy/scripts/install.sh" 2>&1)"
+    install_rc=$?
+    if [ "$install_rc" -ne 0 ] \
+        && printf '%s' "$install_out" | grep -qi "ownership" \
+        && [ "$(stat_identity "$settings")" = "$identity_before" ] \
+        && [ "$(cat "$settings")" = "$content_before" ] \
+        && [ "$(count_tokenless_entries "$settings")" = "0" ]; then
+        pass "install refuses a rewrite that cannot preserve owner/group"
+    else
+        fail "install did not refuse the un-preserveable owner/group (rc=$install_rc): $install_out"
+    fi
+
+    # uninstall: install first (same-account, so it succeeds), then hand the
+    # file to the unmapped group and require the same refusal.
+    ANOLISA_TARGET=workbuddy ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        bash "$ADAPTER_DIR/workbuddy/scripts/install.sh" >/dev/null 2>&1
+    chgrp "$foreign_gid" "$settings"
+    identity_before="$(stat_identity "$settings")"
+    content_before="$(cat "$settings")"
+    uninstall_out="$(unshare --user --map-root-user env \
+        HOME="$HOME" ANOLISA_TARGET=workbuddy \
+        bash "$ADAPTER_DIR/workbuddy/scripts/uninstall.sh" 2>&1)"
+    uninstall_rc=$?
+    if [ "$uninstall_rc" -ne 0 ] \
+        && printf '%s' "$uninstall_out" | grep -qi "ownership" \
+        && [ "$(stat_identity "$settings")" = "$identity_before" ] \
+        && [ "$(cat "$settings")" = "$content_before" ] \
+        && [ "$(count_tokenless_entries "$settings")" = "3" ]; then
+        pass "uninstall refuses a rewrite that cannot preserve owner/group"
+    else
+        fail "uninstall did not refuse the un-preserveable owner/group (rc=$uninstall_rc): $uninstall_out"
+    fi
+
+    leftovers="$(find "$HOME/.codebuddy" -maxdepth 1 -name '*.tmp' -print -quit 2>/dev/null)"
+    if [ -z "$leftovers" ]; then
+        pass "a refused rewrite leaves no staged temp file behind"
+    else
+        fail "refused rewrite left a temp file: $leftovers"
+    fi
+else
+    skip "cross-owner rewrite refusal needs a secondary gid plus an unprivileged user namespace (unshare --user)"
+fi
+
 # --- Test 6: uninstall removes only tokenless entries -----------------------
 export HOME="$SANDBOX/home-wb"
 if ANOLISA_TARGET=workbuddy bash "$ADAPTER_DIR/workbuddy/scripts/uninstall.sh" >"$SANDBOX/out6" 2>&1; then
@@ -293,6 +372,7 @@ fi
 
 # --- Test 10: no stray temp files are left behind -----------------------------
 leftovers="$(find "$SANDBOX/home-perms/.codebuddy" "$SANDBOX/home-perms-fresh/.codebuddy" \
+    "$SANDBOX/home-ownership/.codebuddy" \
     -maxdepth 1 -name '*.tmp' -print -quit 2>/dev/null)"
 if [ -z "$leftovers" ]; then
     pass "no temp files left behind in .codebuddy"
@@ -301,5 +381,9 @@ else
 fi
 
 echo ""
-echo "Results: $PASS passed, $FAIL failed"
+if [ "$SKIP" -gt 0 ]; then
+    echo "Results: $PASS passed, $FAIL failed, $SKIP skipped ($SKIP_REASON)"
+else
+    echo "Results: $PASS passed, $FAIL failed"
+fi
 [ "$FAIL" -eq 0 ]
