@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index e38c6cf..f0d2742 100644
+index fa05581..4112e90 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -108,7 +108,7 @@ checksum = "e8b5778837666541195063243828c5b6139221b47dc4ec3ba81738e532469ab1"
@@ -20,7 +20,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -331,7 +331,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+@@ -339,7 +339,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -29,7 +29,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -800,7 +800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -838,7 +838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
  dependencies = [
   "proc-macro2",
@@ -38,7 +38,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -844,7 +844,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+@@ -882,7 +882,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
  dependencies = [
   "getrandom 0.2.17",
   "libredox",
@@ -47,15 +47,15 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -912,6 +912,7 @@ dependencies = [
+@@ -952,6 +952,7 @@ dependencies = [
   "serde_json",
   "sha2",
   "tempfile",
 + "thiserror 2.0.20",
   "toml",
+  "toml_edit",
   "ureq",
-  "walkdir",
-@@ -1028,7 +1029,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+@@ -1070,7 +1071,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -64,15 +64,15 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1112,6 +1113,17 @@ dependencies = [
+@@ -1160,6 +1161,17 @@ dependencies = [
   "unicode-ident",
  ]
 
 +[[package]]
 +name = "syn"
-+version = "3.0.3"
++version = "3.0.5"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
++checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 +dependencies = [
 + "proc-macro2",
 + "quote",
@@ -82,7 +82,7 @@ index e38c6cf..f0d2742 100644
  [[package]]
  name = "synstructure"
  version = "0.13.2"
-@@ -1120,7 +1132,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+@@ -1168,7 +1180,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -91,7 +91,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1142,7 +1154,16 @@ version = "1.0.69"
+@@ -1190,7 +1202,16 @@ version = "1.0.69"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
  dependencies = [
@@ -109,7 +109,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1153,7 +1174,18 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+@@ -1201,7 +1222,18 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -125,11 +125,11 @@ index e38c6cf..f0d2742 100644
 +dependencies = [
 + "proc-macro2",
 + "quote",
-+ "syn 3.0.3",
++ "syn 3.0.5",
  ]
 
  [[package]]
-@@ -1349,7 +1381,7 @@ dependencies = [
+@@ -1397,7 +1429,7 @@ dependencies = [
   "bumpalo",
   "proc-macro2",
   "quote",
@@ -138,7 +138,7 @@ index e38c6cf..f0d2742 100644
   "wasm-bindgen-shared",
  ]
 
-@@ -1455,7 +1487,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+@@ -1503,7 +1535,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -147,7 +147,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1466,7 +1498,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+@@ -1514,7 +1546,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -156,7 +156,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1695,7 +1727,7 @@ dependencies = [
+@@ -1743,7 +1775,7 @@ dependencies = [
   "heck",
   "indexmap",
   "prettyplease",
@@ -165,7 +165,7 @@ index e38c6cf..f0d2742 100644
   "wasm-metadata",
   "wit-bindgen-core",
   "wit-component",
-@@ -1711,7 +1743,7 @@ dependencies = [
+@@ -1759,7 +1791,7 @@ dependencies = [
   "prettyplease",
   "proc-macro2",
   "quote",
@@ -174,7 +174,7 @@ index e38c6cf..f0d2742 100644
   "wit-bindgen-core",
   "wit-bindgen-rust",
  ]
-@@ -1778,7 +1810,7 @@ checksum = "b659052874eb698efe5b9e8cf382204678a0086ebf46982b79d6ca3182927e5d"
+@@ -1826,7 +1858,7 @@ checksum = "b659052874eb698efe5b9e8cf382204678a0086ebf46982b79d6ca3182927e5d"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -183,7 +183,7 @@ index e38c6cf..f0d2742 100644
   "synstructure",
  ]
 
-@@ -1799,7 +1831,7 @@ checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+@@ -1847,7 +1879,7 @@ checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -192,7 +192,7 @@ index e38c6cf..f0d2742 100644
  ]
 
  [[package]]
-@@ -1819,7 +1851,7 @@ checksum = "d71e5d6e06ab090c67b5e44993ec16b72dcbaabc526db883a360057678b48502"
+@@ -1867,7 +1899,7 @@ checksum = "d71e5d6e06ab090c67b5e44993ec16b72dcbaabc526db883a360057678b48502"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -201,7 +201,7 @@ index e38c6cf..f0d2742 100644
   "synstructure",
  ]
 
-@@ -1859,7 +1891,7 @@ checksum = "eadce39539ca5cb3985590102671f2567e659fca9666581ad3411d59207951f3"
+@@ -1907,7 +1939,7 @@ checksum = "eadce39539ca5cb3985590102671f2567e659fca9666581ad3411d59207951f3"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -211,32 +211,31 @@ index e38c6cf..f0d2742 100644
 
  [[package]]
 diff --git a/Cargo.toml b/Cargo.toml
-index a881be9..7e8cfb7 100644
+index 89376bf..de9c222 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -24,6 +24,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
- colored = "2"
- dirs = "5"
- rusqlite = { version = "0.31", features = ["bundled"] }
+@@ -13,6 +13,7 @@ keywords = ["cli", "llm", "token", "filter", "productivity"]
+ categories = ["command-line-utilities", "development-tools"]
+
+ [dependencies]
 +thiserror = "2"
- toml = "0.8"
- chrono = "0.4"
- tempfile = "3"
+ clap = { version = "4", features = ["derive"] }
+ anyhow = "1.0"
+ # Console code page decoding for child-process output. Kept off the
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 359e4f6..934d48c 100644
+index f5d1a39..f4f332c 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
-@@ -1358,6 +1358,9 @@ impl TimedExecution {
+@@ -1731,6 +1731,8 @@ impl TimedExecution {
          let input_tokens = estimate_tokens(input);
          let output_tokens = estimate_tokens(output);
 
-+        // Also record to tokenless stats database (fail-silent)
 +        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
 +
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1419,10 +1422,269 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1792,6 +1794,206 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
 
@@ -443,6 +442,9 @@ index 359e4f6..934d48c 100644
  #[cfg(test)]
  mod tests {
      use super::*;
+@@ -1804,6 +2006,65 @@ mod tests {
+     /// and can race on the same global env var under parallel `cargo test`.
+     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 +    #[test]
 +    fn tokenless_data_dir_accepts_nonexistent_descendant() {
@@ -506,14 +508,3 @@ index 359e4f6..934d48c 100644
      // 1. estimate_tokens — verify ~4 chars/token ratio
      #[test]
      fn test_estimate_tokens() {
-diff --git a/src/hooks/hook_check.rs b/src/hooks/hook_check.rs
-index ca6faf5..7f12ced 100644
---- a/src/hooks/hook_check.rs
-+++ b/src/hooks/hook_check.rs
-@@ -1,5 +1,6 @@
- //! Detects whether RTK hooks are installed and warns if they are outdated.
-
-+#[allow(unused_imports)]
- use super::constants::{
-     CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
- };

@@ -26,16 +26,15 @@
       "userId": {
         "type": "string",
         "maxLength": 128,
-        "description": "Namespace user_id for the memory mount. Default: auto-detect from OS uid. Must not contain '..', '/', '\\' or control characters (validated against the Rust side)."
+        "description": "Namespace user_id for the memory mount. Default: auto-detect from OS uid. At most 128 UTF-8 bytes; must not contain '..', '/', '\\' or control characters (validated against the Rust side)."
       },
       "profile": {
         "type": "string",
         "enum": [
           "basic",
-          "advanced",
-          "expert"
+          "advanced"
         ],
-        "description": "Memory profile controlling which tools are visible to the agent."
+        "description": "Memory profile forwarded as MEMORY_PROFILE: basic (structured API preferred) or advanced (file tools preferred, default). 'expert' is not offered: it hides the Tier B tools this plugin's memory contract is built on (memory_search, memory_observe, memory_get_context), so the adapter rejects it at load. It is meant for direct MCP clients that drive the Tier A file tools themselves."
       },
       "maxReadBytes": {
         "type": "integer",
@@ -48,6 +47,15 @@
         "minimum": 1,
         "maximum": 4294967296,
         "description": "Maximum bytes for a single mem_write call. Default: 16777216 (16 MiB). Hard cap: 4 GiB."
+      },
+      "sessionId": {
+        "type": "string",
+        "maxLength": 128,
+        "description": "Session id pinned for this plugin's lifetime and forwarded as MEMORY_SESSION_ID on every spawn, so respawns reuse the same session directory and mem_promote finds prior scratch. Default: env MEMORY_SESSION_ID, else a generated ses_<random>. Validated with the same rules as userId: at most 128 UTF-8 bytes, no '..', path separator or control character."
+      },
+      "sessionDir": {
+        "type": "string",
+        "description": "Base directory for per-session scratch and log, forwarded as MEMORY_SESSION_DIR. Default: env MEMORY_SESSION_DIR, else /run/anolisa/sessions (created 0700 by the shipped tmpfiles.d snippet)."
       }
     }
   },
@@ -63,7 +71,7 @@
     },
     "profile": {
       "label": "Memory Profile",
-      "help": "Controls which tools are advertised: basic (structured API only), advanced (file + search), expert (file tools only)."
+      "help": "Controls which tools the agent-memory child advertises: basic (structured API preferred) or advanced (file tools preferred, default). expert is unavailable here — it hides the Tier B tools this adapter registers, so the plugin refuses to load with it."
     },
     "maxReadBytes": {
       "label": "Max Read Bytes",
@@ -73,6 +81,16 @@
     "maxWriteBytes": {
       "label": "Max Write Bytes",
       "help": "Maximum bytes accepted by a single write call. Caps disk and buffer growth.",
+      "advanced": true
+    },
+    "sessionId": {
+      "label": "Session ID",
+      "help": "Pin one session id so plugin respawns reuse the same session scratch. Leave empty to use MEMORY_SESSION_ID or a generated ses_<random>.",
+      "advanced": true
+    },
+    "sessionDir": {
+      "label": "Session Directory",
+      "help": "Root for per-session scratch and log files. Defaults to /run/anolisa/sessions.",
       "advanced": true
     }
   }

@@ -1,0 +1,569 @@
+{
+  "boundary-descriptor-v1": {
+    "adapter_id": "fixture-adapter",
+    "adapter_version": "1",
+    "boundary_id": "result-slot",
+    "revision": 1,
+    "boundary": "post_tool",
+    "invocation_mode": "awaitable",
+    "can_replace_text": true,
+    "can_deny_dispatch": false,
+    "has_final_input_guard": false,
+    "proof_boundaries": [
+      "final_tool_result"
+    ],
+    "ledger_policy": "required_before_delivery",
+    "media_types": [
+      "text/plain"
+    ],
+    "reversibility": [
+      "lossless",
+      "retrievable"
+    ],
+    "composition": {
+      "input_finality": "uncontrolled",
+      "gate": "none",
+      "result_finality": "final"
+    }
+  },
+  "runtime-binding-v1": {
+    "runtime_id": "runtime-1",
+    "generation": 1,
+    "binding_revision": 1,
+    "environment_id": "env-1",
+    "process_ref": "process-1",
+    "observation_source": "owned_child",
+    "owner_id": "launcher-1",
+    "state": "running",
+    "sequence": 1,
+    "session_id": "session-1"
+  },
+  "execution-intent-v1": {
+    "intent_id": "intent-1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "tool_name": "shell",
+    "tool_definition_digest": "9f01eca5066201e8f4a63e34d4ac596ce82712ee13270cc72f532a087e896baa",
+    "executor_revision": "1",
+    "arguments": {
+      "content": "{\"command\":\"echo ok\"}",
+      "media_type": "application/json",
+      "digest": "7c6595364c6f3bae3a0fd84d4f51b83ab4aeef71664bf4cac28d82872801a43a"
+    },
+    "target_id": "target-1",
+    "target_generation": "1",
+    "working_directory_ref": "cwd-1",
+    "environment_revision": "1",
+    "expires_at_ms": 2000,
+    "protection_policy_digest": "bd44acb86f2ff048f897ee4b673b15f9184c97c4e903684a8003ed390881d752"
+  },
+  "context-projection-prepare-input-v2": {
+    "artifact": {
+      "id": "artifact-1",
+      "digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+      "content": "alpha alpha alpha\n",
+      "media_type": "text/plain",
+      "origin": "command_output"
+    },
+    "boundary": "post_tool",
+    "constraints": {
+      "allow_text_reencoding": false,
+      "accepted_reversibility": [
+        "lossless",
+        "retrievable"
+      ]
+    }
+  },
+  "context-projection-prepare-output-v2": {
+    "candidate": {
+      "source_artifact_id": "artifact-1",
+      "source_digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+      "content": "alpha*3",
+      "media_type": "text/plain",
+      "transform_chain": [
+        "test-rle/v1"
+      ],
+      "reversibility": "lossless",
+      "recovery": {
+        "mode": "self_contained",
+        "decoder_id": "test-rle/v1"
+      }
+    }
+  },
+  "security-command-inspect-input-v2": {
+    "command": {
+      "content": "echo ok",
+      "digest": "7d10fced96b38c84f90db07708f266e83da48ca763189eaed7fe1a00348385eb",
+      "language": "auto"
+    },
+    "boundary": "pre_tool",
+    "execution_intent_digest": "8b91b5ef20fd32c991dbe335b8755ce46bb2a479448c7c076a1b77ede1da128a"
+  },
+  "security-content-inspect-input-v2": {
+    "artifact": {
+      "id": "artifact-1",
+      "digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+      "content": "alpha alpha alpha\n",
+      "media_type": "text/plain",
+      "origin": "command_output"
+    },
+    "boundary": "post_tool",
+    "constraints": {
+      "include_low_confidence": false
+    }
+  },
+  "security-content-inspect-output-v2": {
+    "inspection": {
+      "verdict": "clean",
+      "findings": [],
+      "coverage": {
+        "input_digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+        "input_bytes": 18,
+        "scanned_bytes": 18,
+        "complete": true,
+        "ruleset_ids": [
+          "fixture-rules/v1"
+        ],
+        "languages": []
+      }
+    }
+  },
+  "security-code-inspect-input-v2": {
+    "artifact": {
+      "id": "artifact-1",
+      "digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+      "content": "alpha alpha alpha\n",
+      "media_type": "text/plain",
+      "origin": "command_output"
+    },
+    "boundary": "post_tool",
+    "constraints": {
+      "language": "auto"
+    }
+  },
+  "security-code-inspect-output-v2": {
+    "inspection": {
+      "verdict": "clean",
+      "findings": [],
+      "coverage": {
+        "input_digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+        "input_bytes": 18,
+        "scanned_bytes": 18,
+        "complete": true,
+        "ruleset_ids": [
+          "fixture-rules/v1"
+        ],
+        "languages": [
+          "bash",
+          "python"
+        ]
+      }
+    }
+  },
+  "security-command-inspect-output-v2": {
+    "decision": {
+      "verdict": "allow",
+      "findings": [],
+      "coverage": {
+        "input_digest": "7d10fced96b38c84f90db07708f266e83da48ca763189eaed7fe1a00348385eb",
+        "input_bytes": 7,
+        "scanned_bytes": 7,
+        "complete": true,
+        "ruleset_ids": [
+          "fixture-rules/v1"
+        ],
+        "languages": [
+          "bash",
+          "python"
+        ]
+      },
+      "reasons": [],
+      "execution_intent_digest": "8b91b5ef20fd32c991dbe335b8755ce46bb2a479448c7c076a1b77ede1da128a"
+    }
+  },
+  "provider-descriptor-v1": {
+    "provider_id": "fixture-provider",
+    "provider_version": "1",
+    "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397",
+    "driver": "test/in-process/v1",
+    "lifecycle": "test/per-call/v1",
+    "guarantee": "declared",
+    "capabilities": [
+      {
+        "capability": "context.projection.prepare/v2",
+        "authority": "mediate",
+        "input_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-input/v2",
+          "digest": "8551f69a19b040127ca821b781bcc3efc5bd812f955fadcd40e5b747c7dd60ea"
+        },
+        "output_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-output/v2",
+          "digest": "a474c30c1c408e03751f5e1ebe1c78266af0331d225c0763bd1c92b52d4b8239"
+        },
+        "boundaries": [
+          "post_tool"
+        ]
+      },
+      {
+        "capability": "security.content.inspect/v2",
+        "authority": "advise",
+        "input_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-content-inspect-input/v2",
+          "digest": "7473fc456012aa107e056614c16112b8627a8cc1cad056e7022179aa7d5229c6"
+        },
+        "output_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-content-inspect-output/v2",
+          "digest": "0ecdf27216e03fc66070897ef8b3963dc6d2a7d2d27bd48fc83403c880ba0023"
+        },
+        "boundaries": [
+          "post_tool"
+        ]
+      },
+      {
+        "capability": "security.code.inspect/v2",
+        "authority": "advise",
+        "input_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-code-inspect-input/v2",
+          "digest": "9295334f0571d77cad4ebbf809a331da1d360aa84162ecff38503146515c8602"
+        },
+        "output_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-code-inspect-output/v2",
+          "digest": "815ce2df5efdb4891f41d0adb9f77c5a2846bd873bab583574ebbfc6cdd684d4"
+        },
+        "boundaries": [
+          "post_tool"
+        ]
+      },
+      {
+        "capability": "security.command.inspect/v2",
+        "authority": "advise",
+        "input_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-input/v2",
+          "digest": "8cf82737eecde901e0499c3467ba58c7b9c46df08146e766f6096c2eac810d2e"
+        },
+        "output_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-output/v2",
+          "digest": "fc31061a277f3a3b7a983f4744f3e8f89b775cb2fe5bc6bafae932fc06f450a7"
+        },
+        "boundaries": [
+          "pre_tool"
+        ]
+      }
+    ]
+  },
+  "capability-invocation-v1": {
+    "invocation_id": "call-1",
+    "provider_id": "fixture-provider",
+    "provider_version": "1",
+    "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397",
+    "capability": "context.projection.prepare/v2",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "boundary_id": "result-slot",
+    "boundary_revision": 1,
+    "idempotency_key": "request-1",
+    "policy_revision": 1,
+    "deadline_at_ms": 2000,
+    "budget": {
+      "input_bytes": 4096,
+      "output_bytes": 4096,
+      "wall_time_ms": 1000
+    },
+    "input_schema": {
+      "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-input/v2",
+      "digest": "8551f69a19b040127ca821b781bcc3efc5bd812f955fadcd40e5b747c7dd60ea"
+    },
+    "output_schema": {
+      "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-output/v2",
+      "digest": "a474c30c1c408e03751f5e1ebe1c78266af0331d225c0763bd1c92b52d4b8239"
+    },
+    "input_digest": "2df83b0a9470e31e127ed95a0ac930235faebde6c731399b57c922982aaa119a",
+    "input": {
+      "artifact": {
+        "id": "artifact-1",
+        "digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+        "content": "alpha alpha alpha\n",
+        "media_type": "text/plain",
+        "origin": "command_output"
+      },
+      "boundary": "post_tool",
+      "constraints": {
+        "allow_text_reencoding": false,
+        "accepted_reversibility": [
+          "lossless",
+          "retrievable"
+        ]
+      }
+    },
+    "plan_ref": {
+      "plan_id": "plan-1",
+      "revision": 1,
+      "digest": "388c983166b91ecc1262e8913552e27cdec50c8858c2d96696b3037c4bbffb6c",
+      "step_id": "project-1"
+    }
+  },
+  "provider-receipt-v1": {
+    "invocation_id": "call-1",
+    "provider_id": "fixture-provider",
+    "provider_version": "1",
+    "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397",
+    "capability": "context.projection.prepare/v2",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "input_schema": {
+      "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-input/v2",
+      "digest": "8551f69a19b040127ca821b781bcc3efc5bd812f955fadcd40e5b747c7dd60ea"
+    },
+    "input_digest": "2df83b0a9470e31e127ed95a0ac930235faebde6c731399b57c922982aaa119a",
+    "disposition": "produced",
+    "meters": [],
+    "evidence": [
+      {
+        "source_id": "test-journal",
+        "record_id": "entry-1",
+        "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
+      }
+    ],
+    "started_at_ms": 1100,
+    "completed_at_ms": 1200,
+    "output": {
+      "schema": {
+        "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-output/v2",
+        "digest": "a474c30c1c408e03751f5e1ebe1c78266af0331d225c0763bd1c92b52d4b8239"
+      },
+      "digest": "f8cb597bf5ee0c9845862470f6a609f5b431c6569f7dcfaf86e87bbf090a12f4",
+      "bytes": 303
+    },
+    "plan_ref": {
+      "plan_id": "plan-1",
+      "revision": 1,
+      "digest": "388c983166b91ecc1262e8913552e27cdec50c8858c2d96696b3037c4bbffb6c",
+      "step_id": "project-1"
+    }
+  },
+  "context-adoption-v1": {
+    "invocation_id": "call-1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "boundary_id": "result-slot",
+    "boundary_revision": 1,
+    "receipt_digest": "1a39ae5754fc402f7c37267ca4dec1232a86e11eda9cdeedd2ad877dd21e1bee",
+    "source_digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+    "candidate_digest": "f8cb597bf5ee0c9845862470f6a609f5b431c6569f7dcfaf86e87bbf090a12f4",
+    "decision": "adopted",
+    "reason": "candidate_selected",
+    "ledger_status": "committed",
+    "ledger_evidence": {
+      "source_id": "test-journal",
+      "record_id": "append-1",
+      "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
+    },
+    "effective_digest": "a3212f0c762a9d3ddac85a0bf5f7943cb256542e4c8d44f3eabfdc879cae177a",
+    "effective_bytes": 7,
+    "proof": {
+      "boundary": "final_tool_result",
+      "representation_id": "native-result-1",
+      "revision": 1,
+      "evidence": {
+        "source_id": "test-journal",
+        "record_id": "entry-1",
+        "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
+      },
+      "observed_at_ms": 1300
+    }
+  },
+  "control-grant-v1": {
+    "grant_id": "grant-1",
+    "issuer_id": "launcher-1",
+    "holder_id": "controller-1",
+    "runtime_id": "runtime-1",
+    "runtime_generation": 1,
+    "binding_revision": 1,
+    "actions": [
+      "stop",
+      "resume"
+    ],
+    "expires_at_ms": 2000
+  },
+  "operation-record-v1": {
+    "operation_id": "operation-1",
+    "capability": "example.state.restore/v1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "resource_id": "resource-1",
+    "resource_generation": "1",
+    "expected_revision": "1",
+    "input_digest": "5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114",
+    "idempotency_key": "operation-request-1",
+    "state": "prepared",
+    "sequence": 1,
+    "evidence": []
+  },
+  "capability-plan-v1": {
+    "plan_id": "plan-1",
+    "revision": 1,
+    "event_id": "event-1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "boundary_id": "result-slot",
+    "boundary_revision": 1,
+    "boundary": "post_tool",
+    "policy_revision": 1,
+    "source_digest": "614a13319e92f11c51e2a9445f237909d9067bdeb9d2c5bd2b5e680267d4743d",
+    "steps": [
+      {
+        "step_id": "project-1",
+        "capability": "context.projection.prepare/v2",
+        "input_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-input/v2",
+          "digest": "8551f69a19b040127ca821b781bcc3efc5bd812f955fadcd40e5b747c7dd60ea"
+        },
+        "output_schema": {
+          "id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-output/v2",
+          "digest": "a474c30c1c408e03751f5e1ebe1c78266af0331d225c0763bd1c92b52d4b8239"
+        },
+        "selection": "exactly_one",
+        "providers": [
+          {
+            "provider_id": "fixture-provider",
+            "provider_version": "1",
+            "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397"
+          }
+        ],
+        "required": true,
+        "on_failure": "reject_plan",
+        "input_source": "boundary_source"
+      }
+    ]
+  },
+  "plan-execution-v1": {
+    "plan_id": "plan-1",
+    "revision": 1,
+    "plan_digest": "388c983166b91ecc1262e8913552e27cdec50c8858c2d96696b3037c4bbffb6c",
+    "event_id": "event-1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "boundary_id": "result-slot",
+    "boundary_revision": 1,
+    "steps": [
+      {
+        "step_id": "project-1",
+        "outcome": "completed",
+        "started_sequence": 1,
+        "settled_sequence": 2,
+        "invocations": [
+          {
+            "invocation_id": "call-1",
+            "receipt_digest": "1a39ae5754fc402f7c37267ca4dec1232a86e11eda9cdeedd2ad877dd21e1bee"
+          }
+        ]
+      }
+    ],
+    "decision": "proceed",
+    "evidence": [
+      {
+        "source_id": "test-journal",
+        "record_id": "append-1",
+        "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
+      }
+    ]
+  },
+  "os-protection-binding-v1": {
+    "binding_id": "protection-1",
+    "scope": {
+      "environment_id": "env-1",
+      "execution_context_id": "ctx-1",
+      "actor_id": "actor-1",
+      "runtime_id": "runtime-1",
+      "runtime_generation": 1,
+      "binding_revision": 1,
+      "session_id": "session-1",
+      "turn_id": "turn-1",
+      "tool_use_id": "tool-1"
+    },
+    "target_id": "target-1",
+    "target_generation": "1",
+    "policy_digest": "bd44acb86f2ff048f897ee4b673b15f9184c97c4e903684a8003ed390881d752",
+    "authority_id": "fixture-os-authority",
+    "state": "active",
+    "controls": [
+      {
+        "control_id": "filesystem.access/v1",
+        "mechanism": "fixture-kernel/v1",
+        "coverage": "enforced"
+      }
+    ],
+    "observed_at_ms": 900,
+    "expires_at_ms": 2000,
+    "evidence": [
+      {
+        "source_id": "test-journal",
+        "record_id": "append-1",
+        "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
+      }
+    ]
+  }
+}

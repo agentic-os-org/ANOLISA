@@ -19,7 +19,7 @@
 # Component paths
 # ---------------------------------------------------------------------------
 /src/copilot-shell/                     @kongche-jbw @samchu-zsl    # auto-label: component:cosh
-/src/agentsight/                        @chengshuyi @jfeng18        # auto-label: component:sight
+/src/agentsight/                        @chengshuyi @jfeng18 @viron-xiao # auto-label: component:sight
 /src/agent-sec-core/                    @edonyzpc @kid9             # auto-label: component:sec-core
 /src/agent-sec-core/agent-sec-cli/      @RemindD @edonyzpc          # auto-label: component:sec-core
 /src/agent-sec-core/cosh-extension/     @yangdao479                 # auto-label: component:sec-core

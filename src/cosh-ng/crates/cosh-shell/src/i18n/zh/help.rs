@@ -14,11 +14,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Enter 发送 · Shift+Enter 换行 · Esc 取消"
         }
         MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
+        MessageId::PromptDraftFooterControlSubmitted => "命令已提交",
         MessageId::PromptDraftFooterCancelled => "草稿已取消",
         MessageId::AgentComposerTitle => "Agent Composer",
         MessageId::PromptDraftRuntimeLabel => "Runtime",
         MessageId::AgentComposerFooterEditing => {
-            "Enter 发送 · Shift+Enter 换行 · Tab 补全 · @路径 · /skill:名称 · Esc 取消"
+            "/ 命令 · ↑↓ 选择 · Tab 补全 · Enter 提交 · Shift+Enter 换行 · Esc 取消"
         }
         MessageId::AgentComposerRejectedTitle => "已跳过引用",
         MessageId::AgentComposerRejectedInvalidPathLine => {

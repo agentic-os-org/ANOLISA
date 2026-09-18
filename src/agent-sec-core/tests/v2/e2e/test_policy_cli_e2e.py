@@ -5,8 +5,8 @@ Each command is issued by the real ``agent-sec-cli`` process against a real
 scenario the Rust suite exercises in-process
 (``asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json``): create, then update
 policy/scope/binding to a second revision, read them back, list them, and
-finally delete. The daemon keeps process-local state and has no reconciler, so
-a deleted binding reports ``PENDING_DELETE`` rather than a terminal state.
+finally delete. The daemon keeps process-local state and reconciles asynchronously.
+Mutation responses describe admission; GET/LIST may already show a later phase.
 """
 
 import json
@@ -58,7 +58,7 @@ def test_full_pap_crud_across_all_fifteen_commands(daemon, tmp_path):
         "1",
     )
     binding_id = binding["spec"]["bindingId"]
-    assert binding["status"] == "PENDING_APPLY"
+    assert binding["status"] == {"phase": "PENDING_APPLY"}
     # The three resources are distinct identifiers, never aliased.
     assert len({policy_id, scope_id, binding_id}) == 3
 
@@ -119,8 +119,8 @@ def test_full_pap_crud_across_all_fifteen_commands(daemon, tmp_path):
 
     # --- delete ---
     deleted_binding = daemon.request("binding", "delete", "--binding-id", binding_id)
-    # No reconciler yet: deletion is requested, not enforced.
-    assert deleted_binding["status"] == "PENDING_DELETE"
+    # The admission snapshot confirms the request, not completed target cleanup.
+    assert deleted_binding["status"] == {"phase": "PENDING_DELETE"}
 
     deleted_policy = daemon.request(
         "policy", "delete", "--policy-id", policy_id, "--revision", str(policy_revision)

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/capabilities/security.code.inspect/input/v1",
+  "title": "security.code.inspect/v1 input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "boundary", "constraints"],
+  "properties": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "digest", "content", "media_type", "origin"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "content": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
+        },
+        "origin": {
+          "enum": [
+            "unspecified",
+            "command_output",
+            "file_content",
+            "api_response"
+          ]
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
+        }
+      }
+    },
+    "boundary": {
+      "enum": ["pre_tool", "post_tool"]
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language"],
+      "properties": {
+        "language": {
+          "enum": ["auto", "bash", "python"]
+        }
+      }
+    }
+  }
+}

@@ -15,14 +15,37 @@ belongs to the actual AgentSight/ActPlane deployment.
 | `ureq / Client -> url -> idna / ICU` | URL and domain-name handling. Keep input bounds and evaluate advisories for the resolved graph. |
 | `tokio -> libc / mio / socket2` | Existing OS/socket boundary, also outside workspace-local `unsafe_code = "forbid"`. |
 | `Client -> uuid (v5) -> sha1_smol` | Deterministic target identity, not an authentication or signature algorithm. The v5 feature is requested only by the Client. Workspace builds can still unify features. |
+| `asc-capability-code-scan -> fancy-regex` | Backtracking regex engine for the code-scan rule set, needed because the rules use look-around that `regex` does not support. The crate itself contains no `unsafe`; its `regex-automata` dependency does. |
+| `asc-capability-code-scan -> yaml-rust2` | Parses the embedded code-scan rule documents. Pure Rust with no `unsafe` in the crate itself; pulls `encoding_rs`, `simdutf8`, `hashlink` and `arraydeque`, which do contain `unsafe`. |
+| `asc-sqlite-kernel -> rusqlite -> libsqlite3-sys` | Event persistence. The `bundled` feature compiles the amalgamated SQLite C sources, so the resolved SQLite version is pinned by the crate rather than by the host. The FFI layer contains unsafe/native code outside the workspace-local `unsafe_code = "forbid"` boundary, same class as `tokio -> libc`. Requires a C toolchain at build time. `agent-sec-core.spec.v2.in` already lists gcc/clang among the required build tools, but as a comment (lines 39-46) stating they are supplied by the CI image rather than declared as `BuildRequires`; this change does not alter that arrangement. Builds outside CI must install a C compiler. |
+| `asc-sqlite-kernel -> rustix` | Only the `fs` and `process` feature subsets, for `flock()` advisory locking and `getuid()`. Chosen over raw `libc` because it wraps the syscalls safely and therefore keeps `unsafe_code = "forbid"` intact; `File::lock()` is unavailable at MSRV 1.88. |
+| `asc-daemon -> asc-event-sink -> asc-persistence-sqlite` | The daemon now persists code-scan audit events through explicit JSONL and SQLite paths. This brings the bundled SQLite C dependency into the daemon normal graph; each configured write path remains independently fail-open, matching v1 bookkeeping. |
 
-The removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml` chain is no
-longer in this workspace lockfile. No HTTP/TLS library or crypto-provider switch
-is part of this change. In particular, replacing ring with aws-lc-rs would add
-an FFI-based crypto implementation, not prove that unsafe exposure decreased.
+YAML parsing is back in this workspace, so the earlier statement that no YAML
+parser remains no longer holds. What still holds is the narrower property that
+mattered: the removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml`
+chain is not reintroduced. `yaml-rust2` is a Rust parser rather than a
+transliterated C one, so it avoids that specific unsafe surface — it does not
+make the code-scan dependency subtree unsafe-free, as the table above records.
+No HTTP/TLS library or crypto-provider switch is part of this change. In
+particular, replacing ring with aws-lc-rs would add an FFI-based crypto
+implementation, not prove that unsafe exposure decreased.
 
-The daemon's normal/build dependency graph does not currently include the Client,
-Adapter, ureq or ring. Verify that boundary separately from workspace tests:
+The code-scan capability is wired into `asc-daemon` through the handler crate,
+so `fancy-regex` and `yaml-rust2` are now in the daemon's normal dependency
+graph. This is a deliberate consequence of scanning inside the daemon rather
+than in the CLI. Verify the resolved subgraph rather than assuming it:
+
+```sh
+cargo tree -p asc-capability-code-scan --edges normal --locked
+cargo tree -p asc-daemon --edges normal,build --locked
+```
+
+The daemon's normal/build graph includes Policy Runtime, the AgentSight Adapter
+and Client, and the Client's ureq/rustls/ring dependencies. Runtime itself depends
+only on generic policy ports and std threads. Reconciliation adds local path
+crates to the daemon graph without adding registry packages to Cargo.lock. Verify
+the executable dependency boundary separately from workspace tests:
 
 ```sh
 cargo tree -p asc-daemon --edges normal,build --locked --offline

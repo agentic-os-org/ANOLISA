@@ -1,0 +1,27 @@
+[package]
+name = "asc-daemon-handler"
+description = "Daemon protocol adapters for AgentSecCore application use cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-action-runtime = { workspace = true }
+asc-action-types = { workspace = true }
+asc-daemon-core = { workspace = true }
+asc-daemon-protocol = { workspace = true }
+asc-daemon-service = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+asc-capability-code-scan.workspace = true
+asc-security-events.workspace = true
+asc-action-runtime = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

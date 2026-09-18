@@ -1,5 +1,7 @@
 # ktuner — deterministic kernel-tuning engine
 
+[中文版](README_zh.md)
+
 Agent-facing kernel parameter tuning engine for ANOLISA. Evaluates 207 rules against the running system and outputs structured JSON recommendations. Designed to be called by cosh/agent via `ktuner <command> [options]`.
 
 ## Usage

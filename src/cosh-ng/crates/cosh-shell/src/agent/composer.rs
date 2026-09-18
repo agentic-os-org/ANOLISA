@@ -2,6 +2,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::input::composer::{slash_completions, token_prefix_at_cursor};
+
 use crate::types::composer::{
     replace_composer_submission, ComposerReference, ComposerReferenceKind, ComposerSubmission,
 };
@@ -86,29 +88,13 @@ pub(crate) fn completions(
             })
             .collect();
     }
-    Vec::new()
-}
-
-fn token_prefix_at_cursor(
-    input: &str,
-    cursor_row: usize,
-    cursor_col: usize,
-) -> Option<(String, bool)> {
-    let line = input.split('\n').nth(cursor_row)?;
-    let chars = line.chars().collect::<Vec<_>>();
-    let cursor_col = cursor_col.min(chars.len());
-    let start = chars[..cursor_col]
-        .iter()
-        .rposition(|ch| ch.is_whitespace())
-        .map_or(0, |index| index + 1);
-    let prefix = chars[start..cursor_col].iter().collect::<String>();
-    let prior_lines_are_empty = input
-        .split('\n')
-        .take(cursor_row)
-        .all(|prior| prior.trim().is_empty());
-    let first_token =
-        prior_lines_are_empty && chars[..start].iter().collect::<String>().trim().is_empty();
-    Some((prefix, first_token))
+    slash_completions(input, cursor_row, cursor_col)
+        .into_iter()
+        .map(|name| ComposerCompletion {
+            display: name.to_string(),
+            replacement: format!("{name} "),
+        })
+        .collect()
 }
 
 fn path_completions(prefix: &str, workspace_cwd: Option<&str>) -> Vec<ComposerCompletion> {

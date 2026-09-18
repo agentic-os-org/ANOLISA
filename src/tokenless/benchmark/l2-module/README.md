@@ -89,8 +89,17 @@ degradation in the report:
 
 ## Security note
 
-> The remote scripts use `sshpass -p "$L2_SSH_PASS"` for non-interactive
-> SSH/rsync against short-lived benchmark hosts. Never hard-code passwords
-> or keys anywhere in the repository (see AGENTS.md §10 sensitive-data
-> gate); prefer key-based auth when wiring these scripts into any
-> longer-lived pipeline.
+> The remote scripts authenticate non-interactive SSH/rsync with
+> `SSHPASS="$L2_SSH_PASS" sshpass -e`. `-e` reads the password from the
+> environment rather than argv: with `-p` the password appears in the process
+> table and any local user can read it out of `ps`. Never hard-code passwords
+> or keys anywhere in the repository (see AGENTS.md §10 sensitive-data gate);
+> prefer key-based auth when wiring these scripts into any longer-lived
+> pipeline.
+>
+> `-e` narrows the exposure but does not remove it. The password still lives in
+> the process environment, so anything running as the same user (or as root) can
+> read it from `/proc/<pid>/environ` for as long as the process exists. On a
+> shared or multi-tenant runner, treat that as unacceptable and use key-based
+> auth instead: `-e` is a fix for the `ps`-visible-to-everyone case, not a way to
+> make password auth safe on a host you do not control.

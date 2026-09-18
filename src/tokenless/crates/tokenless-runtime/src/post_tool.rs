@@ -2,6 +2,7 @@
 
 mod arbitration;
 mod content;
+mod diff;
 mod pipeline;
 mod stash_ledger;
 

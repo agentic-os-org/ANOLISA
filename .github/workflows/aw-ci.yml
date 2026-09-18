@@ -1,0 +1,102 @@
+name: CI / AW
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  scope:
+    name: AW / scope
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    outputs:
+      selected: ${{ steps.scope.outputs.selected }}
+      candidate_sha: ${{ steps.scope.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - name: Check the gate and select AW changes
+        id: scope
+        run: python3 src/aw/scripts/check.py scope
+
+  checks:
+    name: AW / contracts
+    needs: scope
+    if: needs.scope.outputs.selected == 'true'
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    timeout-minutes: 25
+    outputs:
+      tested_sha: ${{ steps.checks.outputs.tested_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - name: Prepare the pinned Rust toolchain
+        working-directory: src/aw
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/aw
+      - name: Run AW checks
+        id: checks
+        run: python3 src/aw/scripts/check.py
+
+  required:
+    name: AW / required
+    needs: [scope, checks]
+    if: always()
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - name: Require the expected result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          SELECTED: ${{ needs.scope.outputs.selected }}
+          CANDIDATE_SHA: ${{ needs.scope.outputs.candidate_sha }}
+          TESTED_SHA: ${{ needs.checks.outputs.tested_sha }}
+        run: python3 src/aw/scripts/check.py required

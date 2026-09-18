@@ -119,6 +119,9 @@ source = "scripts/openclaw"
 dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
 detect = { binary = "openclaw" }
 
+[adapters.compat]
+framework_version = ">=2026.2.13"
+
 [adapters.bundle]
 schema = 1
 entry = "openclaw.plugin.json"

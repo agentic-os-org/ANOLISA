@@ -4,12 +4,14 @@
 //! final arbitration, and Stash commit or rollback.
 
 mod build_log;
+mod html;
 mod json;
 mod search_results;
 mod tabular;
 mod terminal_cleanup;
 
 pub use build_log::{BuildLogCompressor, BuildLogMetrics, BuildLogOperation, BuildLogOutcome};
+pub use html::{HtmlExtractor, HtmlView};
 pub use json::{
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonMetrics,
     JsonOperation, JsonOutcome, Recoverability,

@@ -41,7 +41,11 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 |------|--------------------|
 | JSON | 无损结构清理；文本替换槽还会考虑 TOON |
 | 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
-| 构建/测试/包管理日志、长纯文本、Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
+| 来自命令输出的构建/测试/包管理日志 | 终端输出清理与常规进度缩减；每段省略都带有就地取回标记 |
+| 宿主支持文本替换时的 CSV/TSV 表格 | 整表压紧；数据行超过 32 行的表格在 Stash 支持的恢复可用时可做行缩减 |
+| 路径共享开启且宿主支持文本替换时的 API 搜索结果列表 | 无损搜索路径共享；保留全部已收到命中 |
+| 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 长纯文本、Stack Trace、HTML、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
 Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
@@ -135,6 +139,8 @@ Plugin 把 DSH 内置的读取/搜索工具映射为 `file_content`，命令工�
 Core 决定。即使压缩关闭，DSH 原始失败和结构化命令失败仍会交给 Core 做环境诊断。
 后续 Waterfall Listener 替换 Canonical `value` 后，Tokenless 只检查该替换值，且不会对其
 应用内容压缩。
+
+完整触发条件（压缩开关、最小响应长度、受支持的压缩域、严格变小保护）与阈值含义见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 
 ## 通过 anolisa 管理（推荐）
 

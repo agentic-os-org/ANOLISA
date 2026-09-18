@@ -19,7 +19,7 @@ AI Agent 修改代码、配置或数据文件时，误操作代价高昂。ws-ck
 
 - Linux（x86_64 或 aarch64）
 - 工作区所在卷使用 btrfs 文件系统（用于原生 COW 快照），或任意文件系统（ws-ckpt 会自动创建 btrfs loop image）
-- Agent 运行时：OpenClaw 或 Hermes（Plugin 模式）
+- Agent 运行时：OpenClaw（>= 2026.2.13）或 Hermes（Plugin 模式）
 
 ---
 
@@ -61,6 +61,8 @@ ws-ckpt plugin uninstall --runtime openclaw
 ```
 
 `plugin install` 会先执行 detect 脚本检查前置条件（exit 2 = 缺前置依赖，中止；exit 1 = 未安装但可安装，继续），通过后再执行 install 脚本。脚本位于 `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`。
+
+OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次避免固化 runtime defaults，并在写盘前恢复未修改 `${VAR}` 引用的版本。OpenClaw >= 2026.9.1 使用条件配置写入；2026.2.13 到 <2026.9.1 的版本仅在根配置不含 `$include` 时使用普通 JSON 写入，否则安装会在安装插件前中止，并要求升级 OpenClaw。版本无法解析、缺少写入能力或 allowlist 更新失败时，安装同样会中止，避免留下不完整的集成。卸载仍采用 best-effort：本地插件文件会被删除；若不存在安全的配置写入路径，则跳过 plugin unregister 和 allowlist 清理并输出告警。
 
 ---
 
@@ -197,6 +199,135 @@ fusermount3 -u /path/to/workspace    # 其他 FUSE 挂载
 你想要的：挂载会留在 `init` 改名移走的备份目录上，新工作区里只有挂载内容的普通副本 ——
 后续写入落在副本上而不是挂载的文件系统里，两边会静默分叉。初始化前先卸载嵌套挂载，
 或让挂载点保持在工作区目录树之外。
+
+### 回滚 OpenClaw 工作区可能触发安全阻断
+
+OpenClaw 会把工作区 setup 状态记录在工作区之外。恢复较旧快照后，工作区内容可能与
+OpenClaw 近期状态不一致，此时 OpenClaw 会停止运行，而不是重新种入文件：
+
+```
+WorkspaceVanishedError: OpenClaw workspace appears to have disappeared ...
+Refusing to reseed BOOTSTRAP.md over a recently attested workspace.
+```
+
+一次 agent 对话成功后，建议立即创建并记录一个基线 checkpoint：
+
+```bash
+ws-ckpt checkpoint -w /path/to/workspace
+```
+
+相比首次成功对话之前的快照，恢复时应优先选择这个 checkpoint，或之后已经用 agent 验证过的
+checkpoint。OpenClaw 会把工作区内容与版本相关的 setup 状态组合判断。任何单个文件
+（包括 BOOTSTRAP.md）的存在都不能单独证明快照一定会被接受。恢复后，运行使用该工作区的
+OpenClaw agent，确认不再出现 `WorkspaceVanishedError` 即可；后续 provider、凭据或 runtime
+错误应单独处理。
+
+以下恢复步骤只适用于已经复现的版本。其他 OpenClaw 版本应使用该版本自带的恢复说明，不要
+根据相邻版本推断。
+
+- OpenClaw 2026.7.1（使用文件存储 attestation）：删除该工作区的
+  attestation 文件。首先从 agent 的启动命令、service 或部署配置中取得该 agent 进程实际
+  使用的 effective home 与状态目录。不要根据恢复 shell 的 `$HOME` 猜测，也不要通过扫描
+  `.openclaw*` 目录推断。例如，以
+  `OPENCLAW_HOME=/srv/oc openclaw --profile team ...` 启动的 agent 通常使用 `/srv/oc` 和
+  `/srv/oc/.openclaw-team`；显式配置的 `OPENCLAW_STATE_DIR` 优先级更高。
+
+  以下命令会提示输入这三个准确的绝对路径，只检查已验证版本使用的三个位置，并仅删除带有
+  OpenClaw attestation marker 的文件；如果没有删除任何有效记录，命令会失败退出：
+
+  ```bash
+  IFS= read -r -p 'Workspace path used by the agent: ' WS
+  IFS= read -r -p 'Effective OpenClaw home: ' OC_HOME
+  IFS= read -r -p 'Effective OpenClaw state directory: ' OC_STATE_DIR
+  node - "$WS" "$OC_HOME" "$OC_STATE_DIR" <<'NODE'
+  const crypto = require("crypto");
+  const fs = require("fs");
+  const path = require("path");
+
+  const HEADER = "openclaw-workspace-attestation:v1\n";
+  const MAX_BYTES = 2048;
+  const [workspaceInput, homeInput, stateDirInput] = process.argv.slice(2);
+  const inputs = [workspaceInput, homeInput, stateDirInput];
+  if (inputs.some((value) => !value || !path.isAbsolute(value))) {
+    console.error("Workspace, effective home, and state directory must be absolute paths.");
+    process.exit(1);
+  }
+
+  const workspace = path.resolve(workspaceInput);
+  const home = path.resolve(homeInput);
+  const stateDir = path.resolve(stateDirInput);
+  const hash = crypto.createHash("sha256").update(workspace).digest("hex");
+  const targets = [...new Set([
+    path.join(stateDir, "workspace-attestations", `${hash}.attested`),
+    path.join(home, ".clawdbot", "workspace-attestations", `${hash}.attested`),
+    `${workspace}.attested`,
+  ])];
+
+  let removed = 0;
+  let failed = false;
+  for (const target of targets) {
+    let stat;
+    try {
+      stat = fs.lstatSync(target);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        console.log(`not present: ${target}`);
+      } else {
+        failed = true;
+        console.error(`FAILED: ${target} (${error.message})`);
+      }
+      continue;
+    }
+
+    if (!stat.isFile() || stat.size > MAX_BYTES) {
+      console.log(`skipped: ${target} (not an OpenClaw attestation file)`);
+      continue;
+    }
+
+    let content;
+    try {
+      content = fs.readFileSync(target, "utf8");
+    } catch (error) {
+      failed = true;
+      console.error(`FAILED: ${target} (${error.message})`);
+      continue;
+    }
+    if (!content.startsWith(HEADER)) {
+      console.log(`skipped: ${target} (not an OpenClaw attestation file)`);
+      continue;
+    }
+
+    try {
+      fs.unlinkSync(target);
+      removed += 1;
+      console.log(`removed: ${target}`);
+    } catch (error) {
+      failed = true;
+      console.error(`FAILED: ${target} (${error.message})`);
+    }
+  }
+  if (failed || removed === 0) {
+    if (removed === 0) {
+      console.error("No valid attestation record was removed; verify all three input paths.");
+    }
+    process.exit(1);
+  }
+  NODE
+  ```
+
+  删除后，运行使用该工作区的 OpenClaw agent。如果仍被阻断，应核对三个输入值，而不是继续
+  删除其他状态目录。
+
+- OpenClaw 2026.8.1（使用 SQLite 存储 attestation）：不要修改 SQLite 数据库，也不要依赖
+  其私有 schema。回滚到一次成功 agent 对话后创建的 checkpoint，然后重试 agent：
+
+  ```bash
+  ws-ckpt rollback -w /path/to/workspace -s <known-good-snapshot-id>
+  ```
+
+  如果没有已知可用的 checkpoint，目前没有能够立即、无破坏地只解除这个工作区阻断的命令。
+  错误信息还会提到 `openclaw reset --scope full`，但该命令会删除所有 agent workspace 和
+  整个 OpenClaw 状态目录，包括凭据、会话及已安装的 plugin，因此不建议用于本场景。
 
 ---
 

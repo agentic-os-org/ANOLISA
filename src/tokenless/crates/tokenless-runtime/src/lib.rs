@@ -66,6 +66,10 @@ pub struct RuntimeConfig {
     pub compression_enabled: bool,
     /// Whether API search results share consecutive file paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
+    /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
+    pub diff_compression_enabled: bool,
+    /// Whether complete HTML documents are rendered as Markdown with original recovery. Disabled by default.
+    pub html_extraction_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -76,6 +80,8 @@ impl Default for RuntimeConfig {
             sls_enabled: false,
             compression_enabled: true,
             search_path_sharing_enabled: true,
+            diff_compression_enabled: false,
+            html_extraction_enabled: false,
         }
     }
 }
@@ -411,6 +417,8 @@ impl TokenlessRuntime {
         let options = EntryOptions {
             compression_enabled: self.config.compression_enabled,
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
+            diff_compression_enabled: self.config.diff_compression_enabled,
+            html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: None,
@@ -457,6 +465,8 @@ impl TokenlessRuntime {
         let options = EntryOptions {
             compression_enabled: self.config.compression_enabled,
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
+            diff_compression_enabled: self.config.diff_compression_enabled,
+            html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: None,
@@ -817,6 +827,8 @@ pub fn compress_response_with_store(
             min_input_chars: 0,
             compression_enabled,
             search_path_sharing_enabled: false,
+            diff_compression_enabled: false,
+            html_extraction_enabled: false,
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,
             force_json: true,

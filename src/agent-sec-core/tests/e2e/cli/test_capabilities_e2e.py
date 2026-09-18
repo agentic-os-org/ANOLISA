@@ -29,6 +29,7 @@ _CAPABILITY_ENV_NAMES = (
     "SKILL_LEDGER_HOOK_ENABLED",
     "SKILL_LEDGER_MODE",
     "SKILL_LEDGER_TIMEOUT",
+    "XDG_DATA_HOME",
 )
 _AGENTS = ("qoder", "qwen", "codex", "cosh", "openclaw", "hermes")
 _CAPABILITIES = (
@@ -468,3 +469,230 @@ def test_capabilities_help_documents_filters_and_environment_scope() -> None:
     assert "--capability" in help_text
     assert "--output" in help_text
     assert "current CLI environment" in help_text
+
+
+@pytest.mark.parametrize(
+    ("data_home", "expected", "diagnosed"),
+    [
+        ("/srv/anolisa", "/srv/anolisa", False),
+        ("/srv/../anolisa", "~/.local/share", True),
+        ("/srv/./anolisa", "~/.local/share", True),
+        ("relative/share", "~/.local/share", True),
+        ("", "~/.local/share", False),
+    ],
+)
+def test_capabilities_cosh_ledger_reports_anolisa_data_home_syntax(
+    data_home: str, expected: str, diagnosed: bool
+) -> None:
+    with _EnvPatch(XDG_DATA_HOME=data_home):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "cosh",
+            "--capability",
+            "skill-ledger",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)[0]
+    assert record["env"]["XDG_DATA_HOME"] == {
+        "effective": expected,
+        "default": "~/.local/share",
+    }
+    assert any("XDG_DATA_HOME" in item for item in record["diagnostics"]) is diagnosed
+
+
+@pytest.mark.parametrize("capability", ["pii-check", "skill-ledger"])
+@pytest.mark.parametrize("raw_mode", ["ask", "warn"])
+def test_capabilities_hermes_rejects_modes_its_native_hook_cannot_deliver(
+    capability: str, raw_mode: str
+) -> None:
+    variable = "PII_CHECKER_MODE" if capability == "pii-check" else "SKILL_LEDGER_MODE"
+    with _EnvPatch(**{variable: raw_mode}):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "hermes",
+            "--capability",
+            capability,
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)[0]
+    assert record["mode"] == "observe"
+    assert record["diagnostics"] == [
+        f"{variable} has an invalid value; using 'observe'"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_enabled", "diagnosed"),
+    [
+        ("1", "enabled", False),
+        ("yes", "enabled", False),
+        ("on", "enabled", False),
+        ("0", "disabled", False),
+        ("no", "disabled", False),
+        ("off", "disabled", False),
+        ("maybe", "enabled", True),
+    ],
+)
+def test_capabilities_legacy_pii_switch_accepts_the_broad_vocabulary(
+    raw: str, expected_enabled: str, diagnosed: bool
+) -> None:
+    with _EnvPatch(PII_CHECKER_ENABLED=raw):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "qwen",
+            "--capability",
+            "pii-check",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)[0]
+    assert record["enabled"] == expected_enabled
+    assert (
+        any("PII_CHECKER_ENABLED" in item for item in record["diagnostics"])
+        is diagnosed
+    )
+
+
+def test_capabilities_normalizes_surrounding_whitespace_and_case() -> None:
+    with _EnvPatch(
+        CODE_SCANNER_HOOK_ENABLED=" TRUE ",
+        CODE_SCANNER_MODE=" Block ",
+        CODE_SCANNER_TIMEOUT=" 7 ",
+    ):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "code-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)[0]
+    assert record["enabled"] == "enabled"
+    assert record["mode"] == "block"
+    assert record["timeout"] == "7"
+    assert record["diagnostics"] == []
+
+
+def test_capabilities_escapes_control_characters_in_the_l2_model() -> None:
+    with _EnvPatch(PROMPT_SCANNER_L2_MODEL="model\x01name\x7f"):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "prompt-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert "\x01" not in result.stdout
+    assert "\x7f" not in result.stdout
+    record = json.loads(result.stdout)[0]
+    assert (
+        record["env"]["PROMPT_SCANNER_L2_MODEL"]["effective"] == "model\\x01name\\x7f"
+    )
+
+
+def test_capabilities_caps_the_reported_l2_model_length() -> None:
+    with _EnvPatch(PROMPT_SCANNER_L2_MODEL="m" * 120):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "prompt-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    reported = json.loads(result.stdout)[0]["env"]["PROMPT_SCANNER_L2_MODEL"][
+        "effective"
+    ]
+    assert len(reported) == 80
+    assert reported.endswith("\u2026")
+
+
+# Hooks without a timeout variable still time out, so the view reports the
+# runtime constant compiled into each integration.
+_STATIC_DEFAULT_TIMEOUTS = {
+    ("qwen", "skill-ledger"): "5",
+    ("cosh", "code-scan"): "10",
+    ("cosh", "prompt-scan"): "10",
+    ("cosh", "pii-check"): "10",
+    ("cosh", "skill-ledger"): "5",
+    ("openclaw", "code-scan"): "10",
+    ("openclaw", "prompt-scan"): "10",
+    ("openclaw", "pii-check"): "10",
+    ("openclaw", "skill-ledger"): "5",
+    ("hermes", "code-scan"): "10",
+    ("hermes", "prompt-scan"): "15",
+    ("hermes", "pii-check"): "10",
+    ("hermes", "skill-ledger"): "5",
+}
+_DEFAULT_TIMEOUTS = {
+    **{(agent, "observability"): "5" for agent in _AGENTS},
+    **{(agent, "code-scan"): "10" for agent in ("qoder", "qwen", "codex")},
+    **{(agent, "prompt-scan"): "10" for agent in ("qoder", "qwen", "codex")},
+    **{(agent, "pii-check"): "5" for agent in ("qoder", "qwen", "codex")},
+    **{(agent, "skill-ledger"): "5" for agent in ("qoder", "codex")},
+    **_STATIC_DEFAULT_TIMEOUTS,
+}
+
+
+def test_capabilities_default_timeouts_match_every_hook_runtime() -> None:
+    with _EnvPatch():
+        result = run_cli("capabilities", "--output", "json")
+
+    assert result.returncode == 0, result.stderr
+    reported = {
+        (record["agent"], record["capability"]): record["timeout"]
+        for record in json.loads(result.stdout)
+    }
+    assert reported == _DEFAULT_TIMEOUTS
+
+
+def test_capabilities_table_keeps_the_documented_column_order() -> None:
+    with _EnvPatch(NO_COLOR="1", COLUMNS="200"):
+        result = run_cli("capabilities", "--agent", "cosh")
+
+    assert result.returncode == 0, result.stderr
+    lines = _ANSI_ESCAPE.sub("", result.stdout).splitlines()
+    assert lines[0] == "[cosh]"
+    assert lines[1].split() == [
+        "CAPABILITY",
+        "ENABLED",
+        "MODE",
+        "SCAN_MODE",
+        "TIMEOUT(s)",
+        "DIAGNOSTICS",
+    ]
+    assert set(lines[2]) == {"-", " "}
+    assert len(lines) == 3 + len(_CAPABILITIES)
+
+
+@pytest.mark.parametrize("socket", [None, "relative.sock", "/nonexistent/daemon.sock"])
+def test_capabilities_never_depends_on_a_daemon_endpoint(socket: str | None) -> None:
+    # The view answers a question about the local environment, so it must work
+    # on hosts that never deploy a daemon and must not fail on a bad endpoint.
+    with _EnvPatch(AGENT_SEC_DAEMON_SOCKET=socket):
+        result = run_cli("capabilities", "--agent", "qoder", "--output", "json")
+
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(result.stdout)) == len(_CAPABILITIES)

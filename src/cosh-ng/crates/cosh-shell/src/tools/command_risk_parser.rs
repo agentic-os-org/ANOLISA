@@ -19,6 +19,28 @@ use super::command_risk::CommandShape;
 /// in `command_risk_tests.rs`.
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
 
+/// Output suppression plus routing that cannot be reproduced by a stderr-null spawn.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct NullRedirections {
+    count: usize,
+    other_routing: bool,
+}
+
+impl NullRedirections {
+    pub(super) fn is_empty(self) -> bool {
+        self.count == 0
+    }
+
+    pub(super) fn is_stderr_only(self) -> bool {
+        !self.is_empty() && !self.other_routing
+    }
+
+    fn record_sink(&mut self, stderr: bool) {
+        self.count += 1;
+        self.other_routing |= !stderr;
+    }
+}
+
 /// Segment separator kind recorded at each `&&`/`||`/`;`/newline break.
 /// A single `&` also records a mark (background list separator) but the
 /// shape escalates to Complex, so its connector is never consumed by the
@@ -34,7 +56,9 @@ pub(crate) enum SegmentConnector {
 pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
     pub(super) stages: Vec<Vec<String>>,
-    pub(super) null_redirections: usize,
+    /// Quote-aware expansion markers that a direct argv spawn cannot reproduce.
+    pub(super) requires_shell_expansion: bool,
+    pub(super) null_redirections: NullRedirections,
     /// Command segments split at `&&`, `||`, `;`, and newlines; each
     /// segment holds its own pipeline stages. Only populated when the
     /// command contains segment separators (used by the stripped-compound
@@ -53,7 +77,8 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Empty,
             stages: Vec::new(),
-            null_redirections: 0,
+            requires_shell_expansion: false,
+            null_redirections: NullRedirections::default(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };
@@ -62,7 +87,8 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            requires_shell_expansion: false,
+            null_redirections: NullRedirections::default(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };
@@ -73,7 +99,9 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     let mut stages: Vec<Vec<String>> = Vec::new();
     let mut shape = CommandShape::Simple;
     let mut quote: Option<char> = None;
-    let mut null_redirections = 0usize;
+    let mut dangling_escape = false;
+    let mut requires_shell_expansion = false;
+    let mut null_redirections = NullRedirections::default();
     let mut amp_redirect_guard = false;
     // Segment breaks recorded as (stage index, token offset, connector)
     // at each `&&`/`||`/`;`/newline, resolved into `segments` after
@@ -89,6 +117,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             if ch == quote_ch {
                 quote = None;
             } else {
+                requires_shell_expansion |= quote_ch == '"' && ch == '!';
                 token.push(ch);
             }
             continue;
@@ -219,6 +248,9 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                         )
                     });
                     if (has_digit || has_dash) && boundary_ok {
+                        // Descriptor operations depend on ordering and bindings;
+                        // a stderr-null argv execution must never erase them.
+                        null_redirections.other_routing = true;
                         for _ in 0..dup_consumed {
                             chars.next();
                         }
@@ -241,7 +273,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                         // null-sink channel (`output-suppressed` reason +
                         // auto-allow fallback).
                         if closes_output_stream {
-                            null_redirections += 1;
+                            null_redirections.record_sink(false);
                         }
                         continue;
                     }
@@ -322,6 +354,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                                     )
                                 });
                             if word_ends && SAFE_OUTPUT_SINKS.contains(&quoted_target.as_str()) {
+                                null_redirections.record_sink(fd_candidate && token == "2");
                                 if fd_candidate {
                                     token.clear();
                                     token_quoted = false;
@@ -329,7 +362,6 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                                 for _ in 0..consumed + quoted_consumed {
                                     chars.next();
                                 }
-                                null_redirections += 1;
                                 continue;
                             }
                         }
@@ -353,6 +385,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     consumed += 1;
                 }
                 if !guarded && literal && SAFE_OUTPUT_SINKS.contains(&target.as_str()) {
+                    null_redirections.record_sink(fd_candidate && token == "2");
                     if fd_candidate {
                         token.clear();
                         token_quoted = false;
@@ -360,7 +393,6 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     for _ in 0..consumed {
                         chars.next();
                     }
-                    null_redirections += 1;
                 } else {
                     if fd_candidate {
                         push_token(&mut tokens, &mut token, &mut token_quoted);
@@ -392,17 +424,26 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 if let Some(next) = chars.next() {
                     token.push(next);
                     token_quoted = true;
+                } else {
+                    // Bash and zsh disagree at EOF; never execute a truncated argv.
+                    dangling_escape = true;
                 }
+            }
+            '*' | '?' | '[' | '~' | '!' | '=' | '^' => {
+                // ponytail: leave expansion to the shell until its context is modeled.
+                requires_shell_expansion = true;
+                token.push(ch);
             }
             _ => token.push(ch),
         }
     }
 
-    if quote.is_some() {
+    if quote.is_some() || dangling_escape {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            requires_shell_expansion: false,
+            null_redirections: NullRedirections::default(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };
@@ -431,6 +472,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             .map(|&(_, _, connector)| connector)
             .collect(),
         stages,
+        requires_shell_expansion,
         null_redirections,
     }
 }

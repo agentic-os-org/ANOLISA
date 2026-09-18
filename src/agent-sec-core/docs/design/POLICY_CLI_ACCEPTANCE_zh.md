@@ -64,7 +64,7 @@ transport/输出边界验收，不用尚未实现的 V1 stub 或假设的通用�
 | ID | 变更 | 影响 |
 | --- | --- | --- |
 | CCLI-CR-001 | 增加 `asc-cli` 与独立 `asc-daemon-client` | CLI 参数解析采用 clap，版本统一写在 workspace，更新 Cargo.lock；无新增服务端 RPC |
-| CCLI-CR-002 | 固定当前 Policy 输出/退出码 | success result JSON/stdout/0；daemon error envelope JSON/stderr/1；本地执行失败 1；用法错误 2 |
+| CCLI-CR-002 | 固定当前 Policy 输出/退出码 | result JSON/stdout/0；Binding CREATE/UPDATE/DELETE 返回 APPLY_FAILED/DELETE_FAILED 时保持完整 result JSON/stdout，但退出 1；GET/LIST 查询 Failed 记录仍退出 0；daemon error envelope JSON/stderr/1；本地执行失败 1；用法错误 2 |
 | CCLI-CR-003 | 一次调用 deadline、LF/EOF、4 MiB wire bounds | 不重试未知结果、不增加 wire timeout 字段；默认 5000 ms，可用正 u32 覆盖 |
 | CCLI-CR-004 | 输入文件读取与完整模板解码属于 CLI | 文件相对 CLI cwd 解析；保留空格和 OS-native 路径；重复键在 Value 之前拒绝；领域编译仍在 PAP |
 | CCLI-CR-005 | daemon 增加可重复 `--policy-admin-uid <UID>` 启动配置 | 默认 root-only 保持；内核 peer UID 匹配部署配置，不跳过授权；运行时委派仍需 root；每次启动重新配置 |
@@ -84,11 +84,11 @@ transport/输出边界验收，不用尚未实现的 V1 stub 或假设的通用�
 | CCLI-004 | 真实 CLI 子进程执行完整 15 步 CRUD，与 frozen 完整结果及 socket 请求比较 | `apps/asc-cli/tests/pap_process.rs::real_cli_processes_execute_the_complete_frozen_pap_crud_scenario` | PASS；测试服务端 PrincipalPolicy，真实 UDS，process-local Repository |
 | CCLI-005 | 15 method 均经服务端授权拒绝 | `pap_process.rs::unauthorized_cli_cannot_read_or_modify_any_pap_resource` | PASS |
 | CCLI-006 | 领域错误不被 CLI 改写、total 与单页、不隐式读取 | `pap_process.rs::domain_validation_and_pagination_are_owned_by_the_daemon` | PASS |
-| CCLI-007 | 分段 LF、不等待 EOF、EOF frame、typed daemon error、空/非法响应 | `crates/daemon/asc-daemon-client/tests/transport.rs` | PASS |
+| CCLI-007 | 分段 LF、不等待 EOF、EOF frame、typed daemon error、空/非法响应 | `crates/asc-daemon-client/tests/transport.rs` | PASS |
 | CCLI-008 | 总 deadline 覆盖 blocked write/分段 read、精确 LF-inclusive 边界、不自动重试 | `transport.rs` 的 deadline、frame limit、no replay assertions | PASS |
 | CCLI-009 | 真实 CLI＋daemon 非 root 授权与配置生命周期 | 暂无自动化入口 | DEFERRED：双进程 E2E 暂缓 |
 | CCLI-010 | 真实 CLI＋daemon 非 root 完整 CRUD | 暂无自动化入口 | DEFERRED：双进程 E2E 暂缓 |
-| CCLI-012 | 常规 Cargo 的真实 daemon binary 非 root CRUD | `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_runs_full_crud_without_root` | PASS |
+| CCLI-012 | 真实 daemon binary 启动和非 root 只读授权 | `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root` | 默认 Client 凭据不参与启动；验证查询及退出；完整 CRUD 进程 E2E 单独验收 |
 | CCLI-013 | startup UID 校验及管理员不可继续委派 | daemon CLI `administrator_uids_are_explicit_repeatable_and_bounded`、core `startup_administrators_are_explicit_and_cannot_delegate` | PASS |
 | CCLI-011 | workspace test、Clippy、fmt、Rustdoc、lockfile 和 diff | 以下命令 | PASS |
 | CCLI-014 | 无 runtime 的同步 UDS 与共享 deadline | `transport.rs` 普通 `#[test]`：LF/EOF、精确 frame 边界、分段读、阻塞写、写后读取共享预算、连接前超时、Linux 满连接队列、不重放；`cargo tree -p asc-cli --edges normal` | PASS：13 个同步 transport 测试；普通依赖树无 Tokio |

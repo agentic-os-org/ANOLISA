@@ -62,6 +62,76 @@ tokenless stats disable
 
 执行这些命令后，环境变量覆盖仍然优先。例如 `TOKENLESS_STATS_ENABLED=0 tokenless stats enable` 会把文件保存为 `true`，但带有该环境变量的进程仍会关闭统计。
 
+## 可选 Git Diff 上下文裁剪
+
+Git Diff 裁剪默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 启用；取消变量或设为 `0` 关闭。
+`1`、`true`、`yes`（不区分大小写）表示启用。此开关独立于总压缩开关，
+不是 `config.json` 字段。启用裁剪后，设置 `TOKENLESS_COMPRESSION_ENABLED=0`
+会测量候选，但仍返回原文。
+
+Rust 使用 `RuntimeConfig.diff_compression_enabled`；Python 使用
+`TokenlessConfig(diff_compression_enabled=True)` 或原生 `TokenlessRuntime`
+的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
+
+压缩器处理成功命令输出中收到的完整普通 Git Diff，需要文本替换能力、可用的
+Stash 和支持的恢复方式。保留全部增删行、元信息，以及修改附近两行可用上下文。
+在每个 hunk 内，如果拆分增加的头部开销更大，可以多留上下文。仅在字符数减少、
+且计入说明和恢复指令后至少节省 16 个估算 token 时采用。此估算不调用运行时
+ tokenizer，不能保证对所有模型 tokenizer 都减少 token。
+
+采用后的操作名为 `diff_reduction`，恢复等级是 `retrievable`，而非 `lossless`：
+可见输出省略了部分未修改上下文。原文仍在 Stash 时，可按输出中的 shell 或工具
+指令取回收到的原始内容；恢复需要额外工具调用。文件读取和已标记由 RTK 优化的
+结果直接透传；启用此功能不改变 RTK 命令重写。不支持或不完整的 Diff 透传。
+重命名、二进制摘要等特殊文件段保留收到的字节；编码二进制补丁整份透传。
+Tokenless 不读取宿主持久化输出文件以补全被截断的 Diff，也不改变宿主截断上限。
+
+有限样本已验证局部压缩及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
+因此该功能保持可选启用。
+
+## 可选 HTML 页面转写
+
+HTML 页面转写默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_HTML_EXTRACTION_ENABLED=1` 启用；取消变量或设为 `0` 关闭。
+`1`、`true`、`yes`（不区分大小写）表示启用。此开关独立于总压缩开关，
+不是 `config.json` 字段。启用转写后，设置 `TOKENLESS_COMPRESSION_ENABLED=0`
+会测量候选，但仍返回原文。
+
+Rust 使用 `RuntimeConfig.html_extraction_enabled`；Python 使用
+`TokenlessConfig(html_extraction_enabled=True)` 或原生 `TokenlessRuntime`
+的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
+
+压缩器处理成功命令输出或 API 响应中收到的完整 HTML 文档（以 `<!doctype html`
+或 `<html>` 开头），例如 `curl` 抓取的页面或 MCP 工具返回的页面，需要文本替换
+能力、可用的 Stash 和支持的恢复方式。页面转写为 Markdown 子集：标题、段落、
+列表、表格、带语言的围栏代码、带目标的链接、图片 alt、引用和提示框。MathML 公式
+输出其 TeX 注解或 `alttext`，两侧加 `$`；跨行或跨列的单元格用空单元格补齐表格网格；
+段落行首形似 Markdown 标题、列表项、引用、分隔线或代码围栏时加转义。正文根为
+`<main>`、`role=main` 元素或唯一的最外层 `<article>`（其内部嵌套的 article，如评论，
+不计入），否则为整个 body。移除脚本、样式、`noscript`、模板、SVG、iframe、注释、
+`nav`、`aside`、页面级 `header`/`footer`、role 为 navigation、banner、contentinfo、
+complementary 的元素、表单控件（`button`、`input`、`select`、`textarea`、`datalist`、
+`progress`、`meter`）、媒体嵌入（`audio`、`video`、`canvas`、`object`、`embed`、`map`）、
+`dialog` 和 `menu`；`label`、`legend`、`fieldset` 保留，因为内容标签页的标题写在其中。
+视图首行写明根元素、根之外省略的节点数和每一类的移除计数。转写后正文少于 64 个字符的页面
+（例如应用空壳）透传；标记嵌套超过 512 层的页面也透传，因为 HTML 解析耗时随
+嵌套深度二次方增长，这类页面不做解析。仅在字符数减少、且计入说明和恢复指令后至少节省 16 个
+估算 token 时采用。
+
+采用后的操作名为 `html_extraction`，恢复等级是 `retrievable`，而非 `lossless`：
+标记和被移除的元素不在可见输出中。原文仍在 Stash 时，可按输出中的 shell 或工具
+指令取回收到的原始内容。页面通过脚本加载的内容在视图中不可见。内容来源由
+adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 Hermes 插件还把只打印本地
+文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、`bat`，以及 `-n` 模式下只含
+打印范围的 `sed`，可带 `cd … &&` 前缀）报告为 `file_read`。这类输出里的 JSON、CSV、构建
+日志和 diff 照常压缩，但打印出的 HTML 页面是 Agent 可能要编辑的源码，保持原样。带管道、
+重定向或其他命令的读取，以及 MCP 文件工具返回的页面，仍与抓取的页面一样被转写，需要取回
+才能看到源码。
+
+有限样本已验证局部转写及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
+因此该功能保持可选启用。
+
 ## 环境变量
 
 ### 用户常用变量
@@ -75,6 +145,8 @@ tokenless stats disable
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
+| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | 启用 HTML 页面转写 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 

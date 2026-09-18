@@ -63,10 +63,7 @@ pub(crate) fn record_cosh_requests_from_active_run(
         card_ids: Vec::new(),
         notices: Vec::new(),
     };
-    let parsed_requests = active_run
-        .pending_cosh_requests
-        .drain(..)
-        .collect::<Vec<_>>();
+    let parsed_requests = std::mem::take(&mut active_run.pending_cosh_requests);
     let first_parsed_audit_id = record_cosh_request_audits(
         state,
         &active_run.request.id,

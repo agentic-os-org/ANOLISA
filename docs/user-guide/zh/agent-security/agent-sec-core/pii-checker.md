@@ -5,6 +5,16 @@
 PII Checker 用于检测 Agent 输入和输出中的个人数据与凭据。它返回结构化 verdict，生成安全的
 evidence 和可选脱敏文本，并记录经过清理的 Security Event，供审计和 Observability 关联使用。
 
+## 使用随包 Skill
+
+安装 V1 `agent-sec-cli` 且 Agent 能发现 `pii-checker` Skill 后，可以要求它检查指定文件中的
+个人信息或凭证，或生成脱敏副本。Skill 报告脱敏证据，仅在用户要求时改写输入文件。
+扫描完成且没有命中，不代表内容一定不含敏感信息。
+
+RPM 安装通过 `agent-sec-skills` 分发此 Skill，ANOLISA raw 包将其放入共享 Skill 目录。
+Cosh-NG 会发现该目录；OpenClaw 和 Hermes adapter 声明了 `pii-checker`，用于分发到各自的
+Skill 目录。其他 Agent 安装需通过其自身的发现路径提供此 Skill。
+
 ## 扫描文本
 
 必须且只能提供一种输入来源：内联文本、标准输入或 UTF-8 文件。

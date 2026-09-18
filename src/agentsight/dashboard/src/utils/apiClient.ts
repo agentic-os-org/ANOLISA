@@ -42,7 +42,6 @@ export interface SessionSummary {
 }
 
 export interface TraceSummary {
-  trace_id: string;
   conversation_id: string;
   call_count: number;
   total_input_tokens: number;
@@ -427,15 +426,6 @@ export async function fetchSessionResources(
   if (endNs != null) params.set('end_ns', String(endNs));
   return apiFetch<SessionResourceTimeline>(
     `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resources?${params.toString()}`,
-  );
-}
-
-/**
- * Fetch detailed LLM call events for a single trace.
- */
-export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetail[]> {
-  return apiFetch<TraceEventDetail[]>(
-    `${API_BASE}/api/traces/${encodeURIComponent(traceId)}`
   );
 }
 

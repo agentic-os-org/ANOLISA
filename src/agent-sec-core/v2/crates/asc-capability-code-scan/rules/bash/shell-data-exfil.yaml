@@ -1,0 +1,14 @@
+rule_id: shell-data-exfil
+cwe_id: CWE-200
+desc_en: >-
+  Command uploads local file content to a remote destination,
+  potentially exfiltrating sensitive data.
+desc_zh: >-
+  命令将本地文件内容上传到远程目标，可能导致敏感数据外泄。
+regex: |-
+  \bcurl\b[^;\n&]*(\s-d\s*@|--data(-binary)?\s+@|(\s-F\s|--form\s+)[^;\n&]*=@|--upload-file\s|\s-T\s)
+  |\bwget\b[^;\n&]*--post-file[= ]
+  |\b(nc|ncat|netcat)\b[^;\n&]*<
+  |\bscp\b[^;\n&]*\s\w+@\S+:\S*\s*(?=[;\n&]|$)
+  |\brsync\b[^;\n&]*\s\w+@\S+:\S*\s*(?=[;\n&]|$)
+severity: warn

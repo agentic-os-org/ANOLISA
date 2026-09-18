@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 /// Client for querying Alibaba Cloud instance metadata and cloud-init datasource.
 ///
-/// Once the metadata API is found unreachable (curl fails), subsequent
+/// Once a metadata transfer fails, subsequent
 /// `query_metadata` calls short-circuit to `None` without spawning curl again,
 /// so a non-ECS host pays the timeout cost only once instead of once per key.
 ///
@@ -20,8 +20,8 @@ use std::sync::{Arc, OnceLock};
 pub struct MetadataClient {
     metadata_url_base: String,
     cloud_init_all: Arc<OnceLock<Option<serde_json::Value>>>,
-    /// Set to `true` after the first curl failure; all further `query_metadata`
-    /// calls skip curl entirely.
+    /// Set after a curl transfer failure, not an HTTP error or empty value.
+    /// All further `query_metadata` calls skip curl entirely.
     metadata_unreachable: AtomicBool,
 }
 
@@ -67,7 +67,8 @@ impl MetadataClient {
     ///
     /// Uses `--connect-timeout 1` (connect phase) and `--max-time 2` (total)
     /// so an unreachable metadata endpoint fails fast without blocking the
-    /// caller. Returns `None` on curl failure, HTTP error, or empty response.
+    /// caller. Returns `None` on curl failure, non-200 status, or empty response.
+    /// Only curl transfer failures disable subsequent metadata queries.
     pub fn query_metadata(&self, key: &str) -> Option<String> {
         // Short-circuit: once the metadata endpoint is known unreachable,
         // skip curl for all subsequent keys.
@@ -77,20 +78,29 @@ impl MetadataClient {
 
         let url = format!("{}/{}", self.metadata_url_base, key);
         let output = Command::new("curl")
-            .args(["-sf", "--connect-timeout", "1", "--max-time", "2", &url])
+            .args([
+                "-s",
+                "--connect-timeout",
+                "1",
+                "--max-time",
+                "2",
+                "-w",
+                "\n%{http_code}",
+                &url,
+            ])
             .output()
             .ok()?;
 
-        if output.status.success() {
-            let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
+        if !output.status.success() {
+            self.metadata_unreachable.store(true, Ordering::Relaxed);
+            return None;
         }
 
-        // Mark unreachable so later calls skip curl entirely.
-        self.metadata_unreachable.store(true, Ordering::Relaxed);
-        None
+        // A missing key does not make the other metadata keys unreachable.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (body, status) = stdout.rsplit_once('\n')?;
+        let value = body.trim();
+        (status == "200" && !value.is_empty()).then(|| value.to_string())
     }
 
     /// Query cloud-init datasource via `cloud-init query ds`.
@@ -310,6 +320,59 @@ where
 
 // ── Unit tests ───────────────────────────────────────────────────────
 
+/// Serve an ordered metadata response sequence on a temporary loopback port.
+#[cfg(test)]
+pub(crate) fn with_metadata_responses<T>(
+    responses: &[(&str, u16, &str)],
+    f: impl FnOnce(&str) -> T,
+) -> T {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            for (path, status, body) in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing request for {path}");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("metadata server accept failed: {e}"),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line, format!("GET /{path} HTTP/1.1\r\n"));
+                loop {
+                    assert!(Instant::now() < deadline, "metadata request headers timed out");
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        f(&base)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +407,34 @@ mod tests {
     fn test_query_metadata_unreachable_returns_none() {
         let client = MetadataClient::new("http://127.0.0.1:19999/no-such-endpoint");
         assert!(client.query_metadata("instance-id").is_none());
+        assert!(client.metadata_unreachable.load(Ordering::Relaxed));
+        assert!(client.query_metadata("image-id").is_none());
+    }
+
+    #[test]
+    fn test_http_responses_do_not_disable_later_metadata_queries() {
+        for (status, body) in [
+            (404, "missing"),
+            (500, "failed"),
+            (302, "redirect"),
+            (200, ""),
+            (200, " \n"),
+        ] {
+            with_metadata_responses(
+                &[
+                    ("desktop-id", status, body),
+                    ("image-id", 200, " img-test\n"),
+                ],
+                |base| {
+                    let client = MetadataClient::new(base);
+                    assert_eq!(client.query_metadata("desktop-id"), None);
+                    assert_eq!(
+                        client.query_metadata("image-id").as_deref(),
+                        Some("img-test")
+                    );
+                },
+            );
+        }
     }
 
     #[test]

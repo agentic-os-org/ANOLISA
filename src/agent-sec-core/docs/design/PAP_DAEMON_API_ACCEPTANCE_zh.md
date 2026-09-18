@@ -149,3 +149,15 @@ fixtures；不能只恢复 enum 而让旧 selector 通过 authored 请求。当�
 fixtures；不能单独恢复模板输入而忽略其中的约束。此精简不涉及 Policy 模板/摘要。
 PAP-CR-009 为后续独立清理；回退时需一起恢复 Policy 摘要字段与 PAP 生成逻辑、依赖和
 fixtures，以及 Binding 旧字段读取实现。不能只恢复必填字段而使 PAP 返回值缺失它。
+
+## Binding 调度拒绝契约补充（V2）
+
+PendingApply/PendingDelete 允许因入队拒绝直接进入 ApplyFailed/DeleteFailed；PAP 通过
+专用 Repository 原子条件写同步记录原因。worker 只认领最新 Pending，已 Failed 的旧唤醒
+跳过。GET/LIST 的 status.error 随 status.phase 一起保存，不改变 spec revision 或部署身份。
+范围、并发限制、wire fixtures 与可执行 BQA-001～010 验收见
+[Binding 队列拒绝验收](BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。
+
+当前 V2 契约修订：移除 Repository RuntimeState，重试次数和 deadline 仅由 WorkQueue
+持有，重建队列时重置。fixture 的 initialSchedule 是测试调用方的内存进度输入，
+不属于 initial/expected Repository 记录；旧跨重启预算保持要求已被 CR-020 取代。

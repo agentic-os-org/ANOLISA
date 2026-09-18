@@ -14,6 +14,7 @@ mod observation_conformance;
 pub(crate) mod recovery;
 pub mod repair;
 pub mod restart;
+mod rpm_backends;
 pub(crate) mod rpm_install;
 pub mod status;
 pub mod uninstall;

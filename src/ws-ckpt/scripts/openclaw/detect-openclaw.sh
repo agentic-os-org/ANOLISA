@@ -9,6 +9,8 @@ set -euo pipefail
 
 # shellcheck source=lib-discover.sh
 source "$(dirname "$0")/lib-discover.sh"
+# shellcheck source=lib-openclaw.sh
+source "$(dirname "$0")/lib-openclaw.sh"
 
 COMPONENT="${ANOLISA_COMPONENT:-ws-ckpt}"
 AGENT="${ANOLISA_TARGET:-openclaw}"
@@ -35,8 +37,16 @@ if [ -z "$OPENCLAW_BIN" ]; then
 fi
 
 line "${AGENT} detect"
+openclaw_compat_ok=0
 if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
     field "openclaw CLI" "present (${OPENCLAW_BIN})"
+    if probe_openclaw_compat "$OPENCLAW_BIN" "$OPENCLAW_STATE_DIR"; then
+        openclaw_compat_ok=1
+        field "openclaw version" "$OPENCLAW_VERSION ($OPENCLAW_COMPAT_MODE)"
+    else
+        field "openclaw version" "unsupported ($OPENCLAW_COMPAT_ERROR)"
+        note_prereq_missing "OpenClaw >=$OPENCLAW_MIN_VERSION"
+    fi
 else
     field "openclaw CLI" "missing"
     note_prereq_missing "openclaw CLI"
@@ -44,13 +54,17 @@ fi
 
 plugin_state="missing"
 plugin_detail="$PLUGIN_ID"
-if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
+if [ "$openclaw_compat_ok" = "1" ]; then
     plugins_json="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins list --json 2>/dev/null || true)"
-    plugins_txt="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
-    if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${PLUGIN_ID}\"" <<<"$plugins_json" \
-       || grep -qE "(^|[[:space:]])${PLUGIN_ID}([[:space:]]|$)" <<<"$plugins_txt"; then
+    if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${PLUGIN_ID}\"" <<<"$plugins_json"; then
         plugin_state="listed"
-        plugin_detail="$PLUGIN_ID (openclaw plugins list)"
+        plugin_detail="$PLUGIN_ID (openclaw plugins list --json)"
+    else
+        plugins_txt="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
+        if grep -qE "(^|[[:space:]])${PLUGIN_ID}([[:space:]]|$)" <<<"$plugins_txt"; then
+            plugin_state="listed"
+            plugin_detail="$PLUGIN_ID (openclaw plugins list)"
+        fi
     fi
 fi
 if [ "$plugin_state" = "missing" ] && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then

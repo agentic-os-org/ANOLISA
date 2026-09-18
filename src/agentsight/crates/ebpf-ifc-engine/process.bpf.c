@@ -174,6 +174,60 @@ struct {
 	__type(value, __u32);
 } te_protected_pids SEC(".maps");
 
+/* Inode-level guard map for file protection on kernels lacking bpf_d_path.
+ * Keyed by (ino, dev) identity; value carries flags + the owning domain_id
+ * so the guard only applies to processes in that specific domain.
+ * Managed exclusively by userspace; no LRU eviction. */
+struct inode_guard_val {
+	__u32 flags;
+	__u32 domain_id;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct file_id);
+	__type(value, struct inode_guard_val);
+} te_inode_guard SEC(".maps");
+
+#define INODE_GUARD_UNLINK  1
+#define INODE_GUARD_RENAME  2
+#define INODE_GUARD_WRITE   4
+
+static __always_inline int te_inode_guarded(
+	const void *a, const void *b, __u32 ref_kind, __u32 guard_flag,
+	pid_t pid)
+{
+	struct inode *inode = NULL;
+	struct file_id fid = {};
+
+	switch (ref_kind) {
+	case TE_REF_PATH_DENTRY:
+		inode = BPF_CORE_READ((struct dentry *)b, d_inode);
+		break;
+	case TE_REF_PATH:
+		inode = BPF_CORE_READ((const struct path *)a, dentry, d_inode);
+		break;
+	case TE_REF_FILE:
+		inode = BPF_CORE_READ((struct file *)a, f_inode);
+		break;
+	default:
+		return 0;
+	}
+	if (!inode)
+		return 0;
+
+	fid.ino = BPF_CORE_READ(inode, i_ino);
+	fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
+
+	struct inode_guard_val *val = bpf_map_lookup_elem(&te_inode_guard, &fid);
+	if (!val || !(val->flags & guard_flag))
+		return 0;
+	/* Verify the guard belongs to the caller's domain so bindings
+	 * from different agents do not cross-block each other. */
+	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
+	return domain && *domain == val->domain_id;
+}
+
 static __always_inline int te_pid_protected(pid_t pid)
 {
 	__u32 *v = bpf_map_lookup_elem(&te_protected_pids, &pid);
@@ -1083,6 +1137,14 @@ static __always_inline void emit_violation(pid_t pid, unsigned int rule_id,
 
 static __always_inline int file_path(struct file *file, char *path, int path_sz)
 {
+#ifdef INODE_GUARD_ONLY
+	/* No bpf_d_path available; use dentry basename only. */
+	struct dentry *de = BPF_CORE_READ(file, f_path.dentry);
+	const unsigned char *name = BPF_CORE_READ(de, d_name.name);
+	if (name && bpf_probe_read_kernel_str(path, path_sz, name) > 0)
+		return 0;
+	return -1;
+#else
 	if (bpf_d_path(&file->f_path, path, path_sz) > 0)
 		return 0;
 
@@ -1091,6 +1153,7 @@ static __always_inline int file_path(struct file *file, char *path, int path_sz)
 	if (name && bpf_probe_read_kernel_str(path, path_sz, name) > 0)
 		return 0;
 	return -1;
+#endif
 }
 
 static __always_inline int file_basename(struct file *file, char *path,
@@ -1106,10 +1169,15 @@ static __always_inline int file_basename(struct file *file, char *path,
 static __always_inline int path_to_str(const struct path *src, char *path,
 				       int path_sz)
 {
+#ifdef INODE_GUARD_ONLY
+	/* No bpf_d_path; callers handle -1 gracefully (silent pass-through). */
+	return -1;
+#else
 	int n = bpf_d_path((struct path *)src, path, path_sz);
 	if (n > 0)
 		return n;
 	return -1;
+#endif
 }
 
 static __always_inline int copy_dentry_name_at(char *path, __u32 dst_off,
@@ -2345,9 +2413,13 @@ int BPF_PROG(enforce_bprm_check_security, struct linux_binprm *bprm)
 SEC("lsm/file_open")
 int BPF_PROG(enforce_file_open, struct file *file)
 {
+#ifdef INODE_GUARD_ONLY
+	return 0; /* No path resolution available; file-open not guarded in inode mode */
+#else
 	return te_handle_file(TE_REF_FILE, file, 0,
 			      te_access_from_open_flags(BPF_CORE_READ(file, f_flags)),
 			      TE_MODE_BLOCK);
+#endif
 }
 
 SEC("lsm/file_permission")
@@ -2398,15 +2470,60 @@ int BPF_PROG(enforce_file_mprotect, struct vm_area_struct *vma,
 SEC("lsm/path_truncate")
 int BPF_PROG(enforce_path_truncate, const struct path *path_arg)
 {
+#ifdef INODE_GUARD_ONLY
+	return 0; /* No path resolution; truncate not guarded in inode mode */
+#else
 	return te_handle_file(TE_REF_PATH, path_arg, 0, TE_ACCESS_WRITE,
 			      TE_MODE_BLOCK);
+#endif
+}
+
+/* Emit a violation event for an inode-guard block so the audit chain
+ * sees the denied operation even when the fast path short-circuits
+ * the full taint evaluation. */
+static __always_inline void te_inode_guard_violation(
+	pid_t pid, const void *a, const void *b, __u32 ref_kind, __u32 op)
+{
+	struct file_id fid = {};
+	struct inode *inode = NULL;
+	switch (ref_kind) {
+	case TE_REF_PATH_DENTRY:
+		inode = BPF_CORE_READ((struct dentry *)b, d_inode);
+		break;
+	default:
+		break;
+	}
+	if (inode) {
+		fid.ino = BPF_CORE_READ(inode, i_ino);
+		fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
+	}
+	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
+	__u32 dom_id = domain ? *domain : 0;
+	emit_violation(pid, /*rule_id=*/0, /*target=*/NULL, /*conn_ip=*/0,
+		      TE_OBJ_FILE, &fid, dom_id, /*matched_labels=*/0,
+		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
 }
 
 SEC("lsm/path_unlink")
 int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 {
+	/* Inode guard fast path: O(1) hash lookup, no bpf_d_path needed */
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (enforce_mode && te_pid_active(pid) &&
+	    te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY,
+			     INODE_GUARD_UNLINK, pid)) {
+		te_inode_guard_violation(pid, dir, dentry, TE_REF_PATH_DENTRY,
+					TOP_WRITE);
+		return -EPERM;
+	}
+
+	/* Existing path-based rule evaluation (fallthrough on 7.1.x) */
+#ifndef INODE_GUARD_ONLY
 	return te_handle_file(TE_REF_PATH_DENTRY, dir, dentry, TE_ACCESS_WRITE,
 			      TE_MODE_BLOCK);
+#else
+	return 0;
+#endif
 }
 
 SEC("lsm/path_rename")
@@ -2415,12 +2532,28 @@ int BPF_PROG(enforce_path_rename, const struct path *old_dir,
 	     struct dentry *new_dentry, unsigned int flags)
 {
 	(void)flags;
+
+	/* Inode guard fast path for the source (renamed-from) file */
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (enforce_mode && te_pid_active(pid) &&
+	    te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
+			     INODE_GUARD_RENAME, pid)) {
+		te_inode_guard_violation(pid, old_dir, old_dentry,
+					TE_REF_PATH_DENTRY, TOP_WRITE);
+		return -EPERM;
+	}
+
+	/* Existing path-based rule evaluation */
+#ifndef INODE_GUARD_ONLY
 	int rc = te_handle_file(TE_REF_PATH_DENTRY, old_dir, old_dentry,
 				TE_ACCESS_WRITE, TE_MODE_BLOCK);
 	if (rc)
 		return rc;
 	return te_handle_file(TE_REF_PATH_DENTRY, new_dir, new_dentry,
 			      TE_ACCESS_WRITE, TE_MODE_BLOCK);
+#else
+	return 0;
+#endif
 }
 
 SEC("lsm/socket_connect")

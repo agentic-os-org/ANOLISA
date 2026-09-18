@@ -297,8 +297,10 @@ mod tests {
     fn prompt_draft_cancel_releases_the_capture_mode() {
         let capture = RawInputCapture::PromptDraft {
             id: "draft-1".to_string(),
-            initial_text: String::new(),
+            initial_text: "".into(),
             completion: None,
+            agent_composer: false,
+            workspace_cwd: None,
         };
         let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
             capture: capture.clone(),
@@ -333,8 +335,10 @@ mod tests {
     fn prompt_draft_submit_releases_the_capture_mode() {
         let capture = RawInputCapture::PromptDraft {
             id: "draft-1".to_string(),
-            initial_text: "hello".to_string(),
+            initial_text: "hello".into(),
             completion: None,
+            agent_composer: false,
+            workspace_cwd: None,
         };
         let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
             capture: capture.clone(),

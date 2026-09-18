@@ -143,7 +143,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Sep 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Sep 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Preflight upgrade RPM installs and restore explicit OpenClaw plugin activation.
+- Distinguish package, runtime dependency, and service probe failures from absence.
+- Require manual recovery for incomplete dpkg states and honor DNF failures.
+- Require OpenClaw 2026.2.13 or newer for the bundled ws-ckpt adapter.
+
+* Wed Sep 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.11-1
 - Allow editable raw configs and record post-hook file digests.
 - Accept OpenClaw capability consent and recover verified plugin cleanup.
 - Preflight RPM conflicts and align installed package observations with the catalog.

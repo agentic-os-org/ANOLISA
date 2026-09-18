@@ -568,10 +568,16 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
     assert!(delete.reasons.contains(&"filesystem-delete"));
     assert!(delete.reasons.contains(&"output-suppressed"));
 
-    // V-M10: the execution boundary is never widened.
+    // Stderr-only suppression has an argv execution plan; stdout suppression does not.
     let auto_policy = auto("ps aux 2>/dev/null");
-    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
-    assert!(auto_policy.auto_allow.is_none());
+    assert_eq!(auto_policy.execution, ExecutionDecision::AutoAllow);
+    assert_eq!(
+        auto_policy.auto_allow,
+        Some(AutoAllowEvidence::StderrSuppressedReadonly)
+    );
+    let stdout_policy = auto("ps aux >/dev/null");
+    assert_eq!(stdout_policy.execution, ExecutionDecision::AskUser);
+    assert!(stdout_policy.auto_allow.is_none());
 }
 
 #[test]
@@ -942,6 +948,11 @@ fn adjacent_words_before_null_redirection_use_default_fd() {
     // and the null redirection stripped.
     for (command, expected_stage) in [
         ("ls>/dev/null", vec!["ls"]),
+        ("ls>\"/dev/null\"", vec!["ls"]),
+        ("echo \"2\">'/dev/null'", vec!["echo", "2"]),
+        ("ps aux 2>\"/dev/null\"", vec!["ps", "aux"]),
+        ("2>'/dev/null' ps aux", vec!["ps", "aux"]),
+        ("ps 2>\"/dev/null\" aux", vec!["ps", "aux"]),
         ("echo foo>/dev/null", vec!["echo", "foo"]),
         ("echo \"2\">/dev/null", vec!["echo", "2"]),
         ("echo '2'>/dev/null", vec!["echo", "2"]),

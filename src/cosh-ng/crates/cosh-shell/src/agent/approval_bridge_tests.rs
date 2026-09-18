@@ -56,7 +56,7 @@ fn compound_tool_call_event(command: &str) -> GovernedEvent {
             run_id: "run-1".to_string(),
             tool_id: None,
             name: "run_shell_command".to_string(),
-            input: format!(r#"{{"command":"{command}"}}"#),
+            input: serde_json::json!({"command": command}).to_string(),
         },
         reason: "visible streamed tool call".to_string(),
         display_text: "visible streamed tool call".to_string(),
@@ -66,95 +66,104 @@ fn compound_tool_call_event(command: &str) -> GovernedEvent {
 
 #[test]
 fn auto_mode_runs_fully_readonly_compound_through_executor() {
-    // Issue #1882: a compound whose every segment carries direct-
-    // readonly evidence is auto-approved and executed by the
-    // dedicated argv executor; without a provider result channel
-    // the completion falls back to shell evidence continuation,
-    // and no shell handoff is ever queued.
-    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
-    let mut state = InlineState {
-        approval_mode: CoshApprovalMode::Auto,
-        ..InlineState::default()
-    };
-    let run_request = compound_run_request();
-    let mut output = Vec::new();
+    let dir = tempfile::tempdir().expect("isolated execution cwd");
+    std::fs::write(dir.path().join("cosh-fixture"), "fixture").expect("write fixture");
+    let cwd = dir.path().display().to_string();
+    for command in [
+        "pwd && df -h",
+        "find . -maxdepth 1 -name '*cosh*' 2>\"/dev/null\"",
+    ] {
+        // Both grants must execute and produce completion evidence without
+        // queuing a shell handoff or leaving a pending approval card.
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Auto,
+            ..InlineState::default()
+        };
+        let mut run_request = compound_run_request();
+        run_request.command_block.cwd = cwd.clone();
+        run_request.command_block.end_cwd = cwd.clone();
+        let mut output = Vec::new();
 
-    let handled = render_auto_approved_tool(
-        &mut state,
-        &[compound_tool_call_event("pwd && df -h")],
-        Some(&run_request),
-        AgentRunOrigin::Standard,
-        &mut output,
-        &adapter,
-    )
-    .expect("render auto approval");
+        let handled = render_auto_approved_tool(
+            &mut state,
+            &[compound_tool_call_event(command)],
+            Some(&run_request),
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render auto approval");
 
-    assert!(handled);
-    assert!(state.control.shell_handoff().approved_is_empty());
-    let evidence = state
-        .evidence
-        .latest_shell_command_completed()
-        .expect("executor completion evidence");
-    assert_eq!(evidence.command, "pwd && df -h");
-    assert_eq!(evidence.exit_code, 0, "compound must really execute");
-    assert_eq!(evidence.status, "completed");
-    // R5: the executor runs in — and the evidence reports — the
-    // requesting shell's directory, not this process's cwd.
-    assert_eq!(evidence.cwd, "/tmp");
-    assert_eq!(evidence.end_cwd, "/tmp");
-    assert!(!evidence.provider_result_delivered);
-    assert_eq!(
-        evidence.provider_result_delivery_status,
-        "not_provider_tool_request"
-    );
-    assert_eq!(state.approvals.requests.len(), 1);
-    assert_eq!(
-        state.approvals.requests[0].status,
-        ApprovalRequestStatus::Approved
-    );
+        assert!(handled);
+        assert!(state.control.shell_handoff().approved_is_empty());
+        let evidence = state
+            .evidence
+            .latest_shell_command_completed()
+            .expect("executor completion evidence");
+        assert_eq!(evidence.command, command);
+        assert_eq!(evidence.exit_code, 0, "readonly plan must really execute");
+        assert_eq!(evidence.status, "completed");
+        // R5: the executor runs in — and the evidence reports — the
+        // requesting shell's directory, not this process's cwd.
+        assert_eq!(evidence.cwd, cwd);
+        assert_eq!(evidence.end_cwd, cwd);
+        assert!(!evidence.provider_result_delivered);
+        assert_eq!(
+            evidence.provider_result_delivery_status,
+            "not_provider_tool_request"
+        );
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Approved
+        );
+    }
 }
 
 #[test]
 fn audit_required_failure_blocks_compound_executor() {
-    // R5 P1 regression: when the required audit writer is
-    // unavailable, record_auto_approved_request marks the request
-    // Blocked; the executor route must honor that terminal state —
-    // nothing executes and no completion evidence is recorded.
-    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
-    let mut state = InlineState {
-        approval_mode: CoshApprovalMode::Auto,
-        audit: Some(
-            crate::journal::audit::ShellAuditRecorder::test_required_unavailable("session-1"),
-        ),
-        ..InlineState::default()
-    };
-    let run_request = compound_run_request();
-    let mut output = Vec::new();
+    for command in ["pwd && df -h", "ls 2>/dev/null"] {
+        // R5 P1 regression: when the required audit writer is
+        // unavailable, record_auto_approved_request marks the request
+        // Blocked; the executor route must honor that terminal state —
+        // nothing executes and no completion evidence is recorded.
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Auto,
+            audit: Some(
+                crate::journal::audit::ShellAuditRecorder::test_required_unavailable("session-1"),
+            ),
+            ..InlineState::default()
+        };
+        let run_request = compound_run_request();
+        let mut output = Vec::new();
 
-    let handled = render_auto_approved_tool(
-        &mut state,
-        &[compound_tool_call_event("pwd && df -h")],
-        Some(&run_request),
-        AgentRunOrigin::Standard,
-        &mut output,
-        &adapter,
-    )
-    .expect("render auto approval");
+        let handled = render_auto_approved_tool(
+            &mut state,
+            &[compound_tool_call_event(command)],
+            Some(&run_request),
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render auto approval");
 
-    assert!(handled);
-    assert!(
-        state.evidence.latest_shell_command_completed().is_none(),
-        "blocked request must never reach the executor"
-    );
-    assert_eq!(state.approvals.requests.len(), 1);
-    assert_eq!(
-        state.approvals.requests[0].status,
-        ApprovalRequestStatus::Blocked
-    );
-    assert_eq!(
-        state.approvals.requests[0].execution_path,
-        Some("blocked_audit_required")
-    );
+        assert!(handled);
+        assert!(
+            state.evidence.latest_shell_command_completed().is_none(),
+            "blocked request must never reach the executor"
+        );
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Blocked
+        );
+        assert_eq!(
+            state.approvals.requests[0].execution_path,
+            Some("blocked_audit_required")
+        );
+    }
 }
 
 #[test]

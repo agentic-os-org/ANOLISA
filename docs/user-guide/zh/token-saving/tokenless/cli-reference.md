@@ -142,6 +142,56 @@ BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增�
 `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
 请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
+## 随包提供的 RTK 命令
+
+Tokenless 随包提供 RTK 0.49.0。以下行为适用于该二进制；如果 `PATH` 中更靠前的
+位置存在兼容的 `rtk`，实际使用的版本可能不同。直接使用这些命令时，可通过
+`rtk --version` 检查版本。
+
+### 搜索 Flag
+
+`rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
+文件的匹配数量。它们不再表示 RTK 的行长度或显示数量限制。要控制 RTK 的显示限制，
+请在 Pattern 前使用长选项 `--max-len` 和 `--max`。原先 RTK 提供的 `-t` /
+`--file-type` 选项已移除；按文件类型过滤时，使用 `rtk rg -t rust` 调用 ripgrep
+的原生功能。向 `rtk grep` 传入 `-t` 现在会显示底层 grep 不支持该选项的错误。
+
+```bash
+rtk grep -l 'TODO' src/*.rs
+rtk grep -m 3 'TODO' src/*.rs
+rtk grep --max 20 --max-len 120 'TODO' src/*.rs
+rtk rg -t rust 'TODO' src/
+```
+
+### Shell 重写
+
+RTK 支持跨多行处理已支持的命令，并对 Pipeline 应用保守规则。它可以重写受支持的
+最后一级；当下游全部是 `head`、`tail` 或 `cat` 等允许的显示命令时，也可以重写
+受支持的输出生产者。统计或解析原始输出的 Pipeline 可能保持原样，不能保证每个
+Shell 表达式都会被重写。`sudo` 命令保持原样透传，自动重写不会将 RTK 插入特权命令。
+
+使用 `rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
+Tokenless 仍按上文规则让已识别的构建/测试命令保持原生形式，交给 PostTool 压缩。
+
+### 输出恢复
+
+在默认 RTK 配置下，受支持的 Filter 会将至少 500 字节的失败输出及明确截断的输出
+保存到本地 SQLite 恢复存储。出现恢复提示时，使用提示中的 Hash 执行
+`rtk recall HASH`；`rtk recall --full HASH` 请求全部已保存的输出，`--from`、
+`--lines` 和 `--grep` 可缩小返回范围。`rtk recall --list` 列出保留的条目。
+存储受容量及过期策略限制，因此 Recall 不是永久归档。已有的旧版 tee 配置继续
+使用基于文件的恢复模式。
+
+RTK 恢复状态以宿主 OS 用户为作用域，不按 Tokenless 租户或 Session 隔离。
+Linux 默认存储是 `$XDG_DATA_HOME/rtk/recall.db`；未设置 `XDG_DATA_HOME` 时使用
+`~/.local/share/rtk/recall.db`。`TOKENLESS_DATA_DIR` 不会改变此位置。共用同一
+OS 用户及 RTK 存储的 Session 可以列出并恢复彼此保留的输出。在命令执行环境中
+设置 `RTK_RECALL_DB` 可以选择独立存储，设置 `RTK_RECALL=0` 可以禁用恢复。
+独立路径不构成同一用户下的 OS 权限边界。
+
+RTK Recall Hash 属于 RTK 的存储。Tokenless Stash Marker 应使用
+`tokenless retrieve HASH`；这两个恢复命令不能互换。
+
 ## `compress-schema`
 
 压缩单个 OpenAI Function Calling Schema：
@@ -249,7 +299,7 @@ debug, trace, traces, stack, stacktrace, logs, logging
 
 Stash 会保存 Record Reduction 使用的完整原始数组、被截断的字符串、其他截断数组中被丢弃的中间段和深层子树。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
 
-大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)和[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 
 ## `compress-toon` 与 `decompress-toon`
 
@@ -372,6 +422,8 @@ tokenless stats summary --compare <baseline-session> <active-session>
 ```
 
 Session ID 不存在时以非零退出码失败，而不是输出 0% 对比，行为与 `stats diff --session` 一致。`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝，行为与 `stats diff --limit` 一致。
+
+`stats summary --json` 的百分比字段（`chars_saved_percent`、`tokens_saved_percent`）与 `--compare --json` 的 `saved_percent` 都按节省量除以原始未压缩量计算；summary 与 compare 字段会把节省量钳制为 0，而 `stats diff --json` 保留负值。详见[效果度量 → 节省率字段定义](measuring-savings.md#节省率字段定义)。
 
 查看单条记录，或一次工具调用中可确认衔接的阶段：
 

@@ -1,0 +1,20 @@
+[package]
+name = "asc-sqlite-kernel"
+description = "Domain-neutral SQLite store, schema convergence and write pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+rustix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

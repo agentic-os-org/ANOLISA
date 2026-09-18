@@ -1,0 +1,11 @@
+rule_id: py-reverse-shell
+cwe_id: CWE-506
+desc_en: >-
+  Code uses pty.spawn() or os.dup2() which are core primitives
+  for establishing a reverse shell connection.
+desc_zh: >-
+  代码使用 pty.spawn() 或 os.dup2()，这些是建立反弹 Shell 连接的核心操作。
+regex: |-
+  \bpty\.spawn\s*\(
+  |\bos\.dup2\s*\(
+severity: warn

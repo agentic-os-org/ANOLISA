@@ -106,7 +106,7 @@ fn raw_cli_agent_composer_completes_a_registry_skill_before_submit() {
     let (output, request) = run_agent_composer_steps(
         "cosh-core-agent-composer-skill-completion",
         &[
-            ("Agent Composer", b"/skill:repo"),
+            ("Agent Composer", b"/skill"),
             ("› /skill:repo-review", b"\tinspect this workspace\r"),
             ("COSH CORE COMPOSER FINAL", b"exit\n"),
         ],

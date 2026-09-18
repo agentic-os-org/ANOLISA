@@ -301,6 +301,23 @@ daemon.request
 - asc-daemon 即使未配置 exporter，也必须有有效 OTel SDK context，不能退化回 V1 自定义
   trace ID。
 
+### 5.6 **[TARGET V2]** 已实现的共享 scan lifecycle 切片
+
+`asc-action-runtime` 统一执行与 finalization；daemon composition root 一次装配 audit、
+telemetry 和 diagnostic outputs，handler 只通过 daemon-core Action application 调用。
+正常结果与受控 execution failure 均由同一 owner 尝试终态记录。audit 与 telemetry
+投影/写入失败相互隔离，不改变业务结果；投影失败只生成最小安全审计详情。
+
+输出在请求 blocking worker 同步尝试后再返回，transport timeout/断连不自动取消已运行的
+blocking work；进程退出不保证尚未完成的记录。whole-invocation `duration_ms` 属于诊断，
+scanner `elapsed_ms` 保持原始业务语义。生产 sink 不允许隐式 no-op 默认值。
+
+本切片仅包含 code-scan 的 identity、真实能力、telemetry 投影及 fixture；其它扫描能力
+随各自后续提交加入共享机制，不预留未实现 identity 或 RPC。受控异常使用固定 `InternalExecutionError` 和空 request，明确替代
+Python 原始 exception 审计文本。现有正常 audit schema 不变，OTel 与 metadata ingress
+仍待后续工作，不能把本切片当作 SMC-017–023 完成。
+实现、fixture 对应表与回滚见 [共享生命周期验收记录](RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)。
+
 ## 6. SecurityEvent 契约
 
 ### 6.1 **[CURRENT][PRESERVE V1]** Envelope

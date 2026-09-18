@@ -65,10 +65,23 @@ for (const htmlFile of htmlFiles) {
   }
 }
 
+for (const cssFile of await walkFiles(buildDir, (file) => file.endsWith('.css'))) {
+  const css = await readFile(cssFile, 'utf8');
+  const relativePath = path.relative(buildDir, cssFile).split(path.sep).join('/');
+  const cssUrl = new URL(`${basePath ? `${basePath}/` : ''}${relativePath}`, `${siteUrl}/`);
+  for (const match of css.matchAll(/url\(["']?([^"')]+)["']?\)/g)) {
+    const asset = new URL(match[1], cssUrl);
+    if (asset.origin !== cssUrl.origin) continue;
+    if (!(await exists(await targetFile(asset.pathname)))) {
+      errors.push(`${relativePath}: broken CSS asset ${match[1]}`);
+    }
+  }
+}
+
 if (errors.length > 0) {
   console.error(`Static link validation failed with ${errors.length} error(s):`);
   for (const error of errors.slice(0, 100)) console.error(`- ${error}`);
   process.exit(1);
 }
 
-console.log(`Static link and duplicate-ID validation passed for ${htmlFiles.length} HTML files.`);
+console.log(`Static link, CSS asset, and duplicate-ID validation passed for ${htmlFiles.length} HTML files.`);

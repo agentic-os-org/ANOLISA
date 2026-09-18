@@ -25,10 +25,12 @@ class KeyNotFoundError(SkillLedgerError):
 
 
 class KeyAlreadyExistsError(SkillLedgerError):
-    """Signing key already exists and ``--force`` was not supplied."""
+    """Signing key already exists and ``--force-keys`` was not supplied."""
 
     def __init__(self, path: str) -> None:
-        super().__init__(f"Key already exists: {path}. Use --force to overwrite.")
+        super().__init__(
+            f"Key already exists: {path}. Use init --force-keys to overwrite."
+        )
         self.path = path
 
 

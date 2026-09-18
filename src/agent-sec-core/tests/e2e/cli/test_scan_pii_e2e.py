@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +92,42 @@ def test_scan_pii_text_json(mode: str, tmp_path: Path) -> None:
     assert any(finding["type"] == "email" for finding in data["findings"])
     assert "redacted_text" not in data
     assert all("raw_evidence" not in finding for finding in data["findings"])
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_bundled_pii_skill_commands(mode: str, tmp_path: Path) -> None:
+    skill = Path(__file__).resolve().parents[3] / "skills/pii-checker/SKILL.md"
+    commands = re.findall(r"```bash\n(.*?)\n```", skill.read_text(), flags=re.DOTALL)
+    assert commands, "the bundled skill must provide executable CLI examples"
+    text = "Contact alice@securecorp.cn; token=secret-value-1234567890"
+    input_path = tmp_path / "report's input.txt"
+    input_path.write_text(text, encoding="utf-8")
+
+    for index, command in enumerate(commands):
+        argv = shlex.split(command)
+        assert argv[0] == "agent-sec-cli"
+        args = [
+            str(input_path) if arg == "/absolute/path/to/input.txt" else arg
+            for arg in argv[1:]
+        ]
+        result = _run_cli(
+            mode,
+            *args,
+            data_dir=tmp_path / mode / str(index),
+            input_text=text if "--stdin" in args else None,
+        )
+        data = _load_json(result)
+        assert data["ok"] is True
+        assert data["verdict"] == "deny"
+        assert data["summary"]["source"] == "manual"
+        assert data["summary"]["truncated"] is False
+        assert "secret-value-1234567890" not in result.stdout
+        assert all("raw_evidence" not in finding for finding in data["findings"])
+        if "--redact-output" in args:
+            assert data["redacted_text"] != text
+        else:
+            assert "redacted_text" not in data
+        assert input_path.read_text(encoding="utf-8") == text
 
 
 @pytest.mark.parametrize("mode", _MODES)

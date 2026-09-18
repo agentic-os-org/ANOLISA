@@ -18,8 +18,6 @@ from unittest.mock import patch
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
-    ACTIVATION_POLICY_LATEST_SCANNED,
-    ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
@@ -28,6 +26,7 @@ from agent_sec_cli.skill_ledger.config import (
     effective_skill_dir_entries,
     is_covered,
     is_default_system_skill_dir,
+    is_default_user_skill_dir,
     is_managed_covered,
     load_config,
     remember_skill_dir,
@@ -99,25 +98,6 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(scanners["static-scanner"]["type"], "builtin")
         self.assertTrue(scanners["code-scanner"]["enabled"])
         self.assertTrue(scanners["static-scanner"]["enabled"])
-
-    def test_legacy_scanner_config_names_merge_into_canonical_defaults(self):
-        merged = _deep_merge_config(
-            _DEFAULT_CONFIG,
-            {
-                "scanners": [
-                    {
-                        "name": "cisco-static-scanner",
-                        "type": "builtin",
-                        "parser": "findings-array",
-                        "enabled": False,
-                    }
-                ]
-            },
-        )
-        scanners = {entry["name"]: entry for entry in merged["scanners"]}
-        self.assertIn("static-scanner", scanners)
-        self.assertNotIn("cisco-static-scanner", scanners)
-        self.assertFalse(scanners["static-scanner"]["enabled"])
 
 
 class TestConfigMerge(unittest.TestCase):
@@ -239,13 +219,6 @@ class TestConfigMerge(unittest.TestCase):
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["otherList"], [3])
 
-    def test_resolve_activation_policy_normalizes_legacy_policies(self):
-        for policy in (ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED):
-            self.assertEqual(
-                resolve_activation_policy({"activationPolicy": policy}),
-                ACTIVATION_POLICY_PASS_WARN_ONLY,
-            )
-
     def test_resolve_activation_policy_accepts_pass_warn_only(self):
         self.assertEqual(
             resolve_activation_policy(
@@ -260,27 +233,29 @@ class TestConfigMerge(unittest.TestCase):
 
     def test_resolve_activation_policy_rejects_non_string_policy(self):
         with self.assertRaisesRegex(ConfigError, "activationPolicy"):
-            resolve_activation_policy({"activationPolicy": ["pass_only"]})
+            resolve_activation_policy({"activationPolicy": ["pass_warn_only"]})
 
-    def test_load_config_normalizes_legacy_activation_policy(self):
-        cfg_dir = Path(tempfile.mkdtemp())
-        try:
+    def test_load_config_rejects_invalid_policy_before_merging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg_dir = Path(directory)
             cfg_path = cfg_dir / "config.json"
             cfg_path.write_text(
-                json.dumps({"activationPolicy": ACTIVATION_POLICY_LATEST_SCANNED}),
-                encoding="utf-8",
+                json.dumps({"activationPolicy": "invalid"}), encoding="utf-8"
             )
-            with patch(
-                "agent_sec_cli.skill_ledger.config.get_config_dir",
-                return_value=cfg_dir,
+            before = cfg_path.read_bytes()
+            with patch.object(config_module, "get_config_dir", return_value=cfg_dir):
+                with patch.object(config_module, "_deep_merge_config") as merge:
+                    with self.assertRaises(ConfigError) as raised:
+                        load_config()
+                    merge.assert_not_called()
+            for expected in (
+                str(cfg_path),
+                "activationPolicy",
+                "invalid",
+                "pass_warn_only",
             ):
-                cfg = load_config()
-            self.assertEqual(
-                resolve_activation_policy(cfg),
-                ACTIVATION_POLICY_PASS_WARN_ONLY,
-            )
-        finally:
-            shutil.rmtree(cfg_dir)
+                self.assertIn(expected, str(raised.exception))
+            self.assertEqual(cfg_path.read_bytes(), before)
 
     def test_load_config_preserves_pass_warn_only_activation_policy(self):
         cfg_dir = Path(tempfile.mkdtemp())
@@ -567,6 +542,41 @@ class TestIsCovered(unittest.TestCase):
         self.assertTrue(is_managed_covered(hidden, config))
 
 
+def test_raw_user_remember_keeps_individual_paths(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for custom_xdg in (False, True):
+        data_root = tmp_path / "data" if custom_xdg else home / ".local/share"
+        if custom_xdg:
+            monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+        else:
+            monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(data_root / "config"))
+        root = data_root / "anolisa/skills"
+        first, sibling, later = [root / name for name in ("first", "sibling", "later")]
+        for skill in (first, sibling):
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: test\n---\n")
+        config_module.save_config({"managedSkillDirs": []})
+
+        assert remember_skill_dir(first) == str(first)
+        assert not is_managed_covered(sibling)
+        later.mkdir()
+        (later / "SKILL.md").write_text("---\nname: test\n---\n")
+        assert remember_skill_dir(later) == str(later)
+        assert load_config()["managedSkillDirs"] == [str(first), str(later)]
+        assert not is_managed_covered(sibling)
+        before = config_module.config_path().read_bytes()
+        assert remember_skill_dir(first) is None
+        assert config_module.config_path().read_bytes() == before
+
+        for entry in (str(first), str(root) + "/*", str(root) + "/**"):
+            config_module.save_config({"managedSkillDirs": [entry]})
+            before = config_module.config_path().read_bytes()
+            assert remember_skill_dir(first) is None
+            assert config_module.config_path().read_bytes() == before
+
+
 def test_raw_user_defaults_follow_xdg_and_default_opt_out(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -592,6 +602,11 @@ def test_raw_user_defaults_follow_xdg_and_default_opt_out(tmp_path, monkeypatch)
         (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
         assert skill in resolve_skill_dirs({"enableDefaultSkillDirs": True})
         assert not resolve_skill_dirs({"enableDefaultSkillDirs": False})
+        assert is_default_user_skill_dir(skill)
+        assert not is_default_user_skill_dir(skill.parent)
+        assert not is_default_user_skill_dir(skill / "nested")
+        assert not is_default_user_skill_dir(root / "anolisa/skills-evil/raw-probe")
+        assert not is_default_system_skill_dir(skill)
 
 
 def test_raw_user_defaults_normalize_leading_slashes(tmp_path, monkeypatch):
@@ -608,6 +623,7 @@ def test_raw_user_defaults_normalize_leading_slashes(tmp_path, monkeypatch):
         (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
         assert skill in resolve_skill_dirs(config)
         assert is_covered(skill, config)
+        assert is_default_user_skill_dir(skill)
 
 
 if __name__ == "__main__":

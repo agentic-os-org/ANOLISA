@@ -914,6 +914,11 @@ jobs:
       - name: Install RTK Rust toolchain
         run: rustup toolchain install 1.91.0 --profile minimal
 
+      - name: Test bundled RTK integration
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: make -C src/tokenless test-rtk-integration
+
       - name: Build and test Tokenless Python packages
         env:
           RUSTUP_TOOLCHAIN: '1.91.0'
@@ -925,8 +930,18 @@ jobs:
         with:
           node-version: '20'
 
+      # Adapter lifecycle tests (install / detect / uninstall for openclaw,
+      # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
+      # which no CI job ever called: a broken adapter installer only showed
+      # up on a developer machine. They need node (the openclaw plugin build
+      # plus two `node --test` suites) and python3 (installer probes), both
+      # already set up above.
+      - name: Test adapter installers
+        run: |
+          make -C src/tokenless test-adapters
+
       - name: npm packaging smoke test (native Linux)
-        # rtk v0.43.0 declares rust-version = "1.91", above the 1.89.0 pin
+        # rtk v0.49.0 declares rust-version = "1.91", above the 1.89.0 pin
         # used by the workspace MSRV checks earlier in this job. Packaging
         # runs on its own 1.91 toolchain while the MSRV pin stays intact.
         env:
@@ -991,9 +1006,13 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
-      - name: Run openclaw install script tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run OpenClaw script tests
         working-directory: src/ws-ckpt
-        run: make test-openclaw-install
+        run: make test-openclaw-scripts
 
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
@@ -1003,10 +1022,6 @@ jobs:
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
       # ── Plugin tests + coverage gates ───────────────────────────────────
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: OpenClaw plugin coverage gate (≥90%)
         working-directory: src/ws-ckpt/src/plugins/openclaw
         run: |
@@ -1257,15 +1272,22 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep zsh
 
       - name: Run process and PTY integration tests
         env:
+          # ZLE must decode the Unicode fixtures independently of runner locale.
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
           # Libtest still schedules 16 workers, while the harness gate bounds
           # live PTY sessions to avoid oversubscribing loaded CI runners.
           COSH_RAW_CLI_TEST_PARALLELISM: '8'
         run: |
           cd src/cosh-ng
+          bash --version
+          zsh --version
+          locale
+          test "$(locale charmap)" = UTF-8
           scripts/run-test-gates.sh integration
 
   test-cosh-ng-fast:

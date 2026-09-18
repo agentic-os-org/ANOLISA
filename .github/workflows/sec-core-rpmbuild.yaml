@@ -314,7 +314,12 @@ jobs:
           echo "=== Verify codex plugin ==="
           ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
           echo "=== Verify daemon systemd unit ==="
-          ls /usr/lib/systemd/user/agent-sec-core.service
+          test -f /usr/lib/systemd/system/agent-sec-core.service
+          test ! -e /usr/lib/systemd/user/agent-sec-core.service
+          test ! -e /usr/lib/sysusers.d/agent-sec-core.conf
+          grep -qx 'User=root' /usr/lib/systemd/system/agent-sec-core.service
+          grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
+          systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
           echo "=== Verify component manifest ==="
           test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
           echo "=== Assert no V1 Python site-packages ==="
@@ -364,6 +369,45 @@ jobs:
       - name: Uninstall skills package before E2E tests
         run: rpm -e agent-sec-skills --nodeps
 
+      - name: Start V2 daemon for CLI compatibility E2E
+        run: |
+          # Avoid runner-mounted ancestors with unrelated owners or writable modes.
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
+          daemon_log="$RUNNER_TEMP/agent-sec-daemon.log"
+          daemon_pid="$RUNNER_TEMP/agent-sec-daemon.pid"
+          socket="$runtime_dir/daemon.sock"
+          chmod 0700 "$runtime_dir"
+          agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
+          echo $! >"$daemon_pid"
+          echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
+              echo "agent-sec-daemon exited before accepting connections" >&2
+              cat "$daemon_log" >&2
+              exit 1
+            fi
+            if python3 - "$socket" <<'PY'
+          import socket
+          import sys
+          try:
+              connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              connection.settimeout(0.1)
+              connection.connect(sys.argv[1])
+              connection.close()
+          except OSError:
+              raise SystemExit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.05
+          done
+          echo "agent-sec-daemon did not accept connections" >&2
+          cat "$daemon_log" >&2
+          exit 1
+
       - name: Run V2 E2E tests on installed RPM
         run: |
           source_dir=src/agent-sec-core/agent-sec-cli
@@ -381,6 +425,19 @@ jobs:
             exit 1
           fi
           make -C src/agent-sec-core test-e2e-rpm-v2
+
+      - name: Show V2 daemon log after E2E failure
+        if: failure()
+        run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
+
+      - name: Stop V2 daemon after E2E tests
+        if: always()
+        run: |
+          if test -f "$AGENT_SEC_DAEMON_PID"; then
+            pid="$(cat "$AGENT_SEC_DAEMON_PID")"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          fi
 
       - name: Upload V2 RPM artifacts
         if: github.event_name != 'pull_request'

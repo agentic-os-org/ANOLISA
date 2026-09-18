@@ -185,22 +185,22 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 45
+            MessageId::AuthEcsChecking as usize - 46
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 36
+            MessageId::AuthEcsChecking as usize - 37
         );
         // The #2068 startup auth-hint segment remains ahead of the appended
         // session-picker footer, Agent Composer, Trust-catalog, and hook-action
         // segments.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
-            MessageId::ALL.len() - 35
+            MessageId::AuthEcsChecking as usize - 36
         );
         assert_eq!(
             MessageId::SessionPickerMarkedFooter as usize,
-            MessageId::ALL.len() - 34
+            MessageId::AuthEcsChecking as usize - 35
         );
         assert_eq!(
             MessageId::AgentComposerTitle as usize,
@@ -208,7 +208,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AgentComposerFooterEditing as usize,
-            MessageId::ALL.len() - 31
+            MessageId::AuthEcsChecking as usize - 32
         );
         assert_eq!(
             MessageId::AgentComposerRejectedTitle as usize,
@@ -220,53 +220,53 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalTrustUnknownToolReason as usize,
-            MessageId::ALL.len() - 23
+            MessageId::AuthEcsChecking as usize - 24
         );
         // The hook-action segment follows the Trust-catalog segment and remains
         // ahead of the appended Enhanced-routing segment.
         assert_eq!(
             MessageId::SlashHooksActionCancelledTitle as usize,
-            MessageId::ALL.len() - 22
+            MessageId::AuthEcsChecking as usize - 23
         );
         assert_eq!(
             MessageId::SlashHooksActionCancelledBody as usize,
-            MessageId::ALL.len() - 21
+            MessageId::AuthEcsChecking as usize - 22
         );
         assert_eq!(
             MessageId::SlashHooksActionVerbEnable as usize,
-            MessageId::ALL.len() - 20
+            MessageId::AuthEcsChecking as usize - 21
         );
         assert_eq!(
             MessageId::SlashHooksActionVerbDisable as usize,
-            MessageId::ALL.len() - 19
+            MessageId::AuthEcsChecking as usize - 20
         );
         assert_eq!(
             MessageId::SlashHooksActionQuestion as usize,
-            MessageId::ALL.len() - 18
+            MessageId::AuthEcsChecking as usize - 19
         );
         assert_eq!(
             MessageId::SlashHooksActionOptionShell as usize,
-            MessageId::ALL.len() - 17
+            MessageId::AuthEcsChecking as usize - 18
         );
         assert_eq!(
             MessageId::SlashHooksActionOptionAgent as usize,
-            MessageId::ALL.len() - 16
+            MessageId::AuthEcsChecking as usize - 17
         );
         assert_eq!(
             MessageId::SlashHooksActionOptionBoth as usize,
-            MessageId::ALL.len() - 15
+            MessageId::AuthEcsChecking as usize - 16
         );
         assert_eq!(
             MessageId::SlashHooksActionAgentEnabledBody as usize,
-            MessageId::ALL.len() - 14
+            MessageId::AuthEcsChecking as usize - 15
         );
         assert_eq!(
             MessageId::SlashHooksActionAgentDisabledBody as usize,
-            MessageId::ALL.len() - 13
+            MessageId::AuthEcsChecking as usize - 14
         );
         assert_eq!(
             MessageId::SlashHooksActionAgentErrorBody as usize,
-            MessageId::ALL.len() - 12
+            MessageId::AuthEcsChecking as usize - 13
         );
         assert_eq!(
             MessageId::HelpSummaryModeRouting as usize,
@@ -274,7 +274,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::RoutingModeShellOnlyFooter as usize,
-            MessageId::ALL.len() - 2
+            MessageId::AuthEcsChecking as usize - 3
         );
         assert_eq!(
             MessageId::HelpSummaryTask as usize,
@@ -282,7 +282,27 @@ mod tests {
         );
         assert_eq!(
             MessageId::HelpSummaryTask as usize,
-            MessageId::ALL.len() - 1
+            MessageId::AuthEcsChecking as usize - 2
+        );
+        assert_eq!(
+            MessageId::PromptDraftFooterControlSubmitted as usize,
+            MessageId::HelpSummaryTask as usize + 1
+        );
+        assert_eq!(
+            MessageId::PromptDraftFooterControlSubmitted as usize,
+            MessageId::AuthEcsChecking as usize - 1
+        );
+        assert_eq!(
+            MessageId::AuthEcsChecking as usize,
+            MessageId::ALL.len() - 12
+        );
+        assert_eq!(
+            MessageId::AuthEcsCancelHint as usize,
+            MessageId::AuthEcsChecking as usize + 10
+        );
+        assert_eq!(
+            MessageId::AuthEcsRefreshing as usize + 1,
+            MessageId::ALL.len()
         );
     }
 

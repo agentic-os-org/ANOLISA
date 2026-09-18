@@ -1,7 +1,7 @@
 //! Unit tests for `anolisa upgrade`. The apply path is driven entirely through
 //! an injected fake that implements both [`PackageQuery`] and
 //! [`PackageTransaction`], so no live rpmdb/dnf is required. The fake records
-//! transaction call order and refuses to be called on the dry-run path.
+//! transaction call order and supports read-only install preflight on dry-run.
 
 use super::application::UpgradeChange;
 use super::*;
@@ -38,11 +38,13 @@ use crate::progress::NoopReporter;
 /// for a named package.
 #[derive(Default)]
 struct FakeHost {
+    repository: Option<&'static str>,
+    program: Option<&'static str>,
     /// package -> version returned by `query_installed` (post-transaction).
     installed: HashMap<String, PackageInfo>,
     /// packages whose `update` transaction fails.
     fail_update: HashSet<String>,
-    /// packages whose `install` transaction fails.
+    /// packages whose install preflight or transaction fails.
     fail_install: HashSet<String>,
     /// packages whose `query_installed` returns `Ok(None)` (rpmdb miss).
     missing_after: HashSet<String>,
@@ -52,6 +54,7 @@ struct FakeHost {
     fail_query: HashSet<String>,
     /// packages whose next installed query fails once, then recovers.
     fail_query_once: RefCell<HashSet<String>>,
+    fail_post_query_once: RefCell<HashSet<String>>,
     query_sequence: RefCell<HashMap<String, VecDeque<Option<PackageInfo>>>>,
     /// package -> source repo returned by `installed_origin`.
     origins: HashMap<String, String>,
@@ -61,6 +64,7 @@ struct FakeHost {
     calls: RefCell<Vec<String>>,
     /// package names inspected through `query_installed`.
     query_calls: RefCell<Vec<String>>,
+    preflight_calls: RefCell<Vec<Vec<String>>>,
 }
 
 impl FakeHost {
@@ -99,7 +103,11 @@ impl PackageQuery for FakeHost {
                 detail: "2 installed versions".to_string(),
             });
         }
-        if self.fail_query.contains(package) || self.fail_query_once.borrow_mut().remove(package) {
+        if self.fail_query.contains(package)
+            || self.fail_query_once.borrow_mut().remove(package)
+            || (!self.calls.borrow().is_empty()
+                && self.fail_post_query_once.borrow_mut().remove(package))
+        {
             return Err(PackageQueryError::QueryFailed {
                 command: "rpm".to_string(),
                 code: Some(1),
@@ -124,7 +132,7 @@ impl PackageQuery for FakeHost {
     fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
         if self.fail_origin.contains(package) {
             return Err(PackageQueryError::QueryFailed {
-                command: "dnf".to_string(),
+                command: self.program.unwrap_or("dnf").to_string(),
                 code: Some(1),
                 stderr: "repo lookup failed".to_string(),
             });
@@ -134,8 +142,29 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
-    fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
-        panic!("this path must not preflight an install")
+    fn repository_source(&self) -> Option<&str> {
+        self.repository
+    }
+
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.preflight_calls.borrow_mut().push(
+            packages
+                .iter()
+                .map(|package| (*package).to_string())
+                .collect(),
+        );
+        if packages
+            .iter()
+            .any(|package| self.fail_install.contains(*package))
+        {
+            return Err(PackageTransactionError::TransactionFailed {
+                command: self.program.unwrap_or("dnf").to_string(),
+                operation: "install preflight".to_string(),
+                code: Some(1),
+                stderr: "cosh-ng conflicts with copilot-shell".to_string(),
+            });
+        }
+        Ok(())
     }
 
     // Calls record the full package set per invocation
@@ -149,7 +178,7 @@ impl PackageTransaction for FakeHost {
             .push(format!("install:{}", packages.join(",")));
         if packages.iter().any(|p| self.fail_install.contains(*p)) {
             return Err(PackageTransactionError::TransactionFailed {
-                command: "dnf".to_string(),
+                command: self.program.unwrap_or("dnf").to_string(),
                 operation: "install".to_string(),
                 code: Some(1),
                 stderr: "boom".to_string(),
@@ -164,7 +193,7 @@ impl PackageTransaction for FakeHost {
             .push(format!("update:{}", packages.join(",")));
         if packages.iter().any(|p| self.fail_update.contains(*p)) {
             return Err(PackageTransactionError::TransactionFailed {
-                command: "dnf".to_string(),
+                command: self.program.unwrap_or("dnf").to_string(),
                 operation: "update".to_string(),
                 code: Some(1),
                 stderr: "boom".to_string(),
@@ -740,6 +769,7 @@ fn typed_failed_apply_carries_reason_without_fabricating_changes() {
         "agent-sec-core",
         info("agent-sec-core", "1.0.0", Some("1.al4")),
     );
+    host.program = Some("yum");
     host.fail_update.insert("agent-sec-core".to_string());
     let plan = build_plan(
         None,
@@ -767,6 +797,7 @@ fn typed_failed_apply_carries_reason_without_fabricating_changes() {
         }
     );
     assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].reason, "yum update failed (exit 1): boom");
     assert!(outcome.changes().is_empty());
     assert!(outcome.warnings().is_empty());
     assert!(outcome.operation_id().is_some());
@@ -849,6 +880,8 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
     )
     .expect("dry-run is allowed without root");
     assert!(result.dry_run);
+    assert!(host.preflight_calls.borrow().is_empty());
+    assert!(result.warnings.is_empty());
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.updated.len(), 1);
     assert!(
@@ -859,6 +892,172 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
         !layout.state_dir.join("installed.toml").exists(),
         "dry-run must not write state"
     );
+}
+
+#[test]
+fn upgrade_dry_run_preflights_missing_defaults_as_one_transaction() {
+    for (packages, conflict) in [
+        (vec![], false),
+        (vec!["copilot-shell"], false),
+        (vec!["copilot-shell"], true),
+        (vec!["copilot-shell", "os-skills"], false),
+        (vec!["copilot-shell", "os-skills"], true),
+    ] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = system_ctx(tmp.path().to_path_buf());
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut host = FakeHost::default()
+            .with_installed("cosh-ng", info("cosh-ng", "0.24.1", Some("1.alnx4")));
+        host.program = Some("yum");
+        if conflict {
+            host.fail_install.insert("copilot-shell".to_string());
+        }
+        let components: Vec<_> = packages
+            .iter()
+            .map(|package| {
+                component_check(
+                    if *package == "copilot-shell" {
+                        "cosh"
+                    } else {
+                        package
+                    },
+                    Some(package),
+                    None,
+                    None,
+                    None,
+                    ACTION_INSTALL,
+                    None,
+                )
+            })
+            .collect();
+        let plan = build_plan(None, &cli_noop(), &components);
+        let result = run_upgrade_with_deps(
+            &ctx,
+            &layout,
+            &plan,
+            &host,
+            &host,
+            true,
+            true,
+            COMMAND,
+            &NoopReporter,
+        )
+        .expect("preview renders solver failures");
+
+        assert!(result.dry_run);
+        if conflict {
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .all(|error| error.reason.starts_with("yum install preflight failed"))
+            );
+            assert!(!result.errors.is_empty());
+        }
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result.status,
+            if conflict { STATUS_FAILED } else { STATUS_OK }
+        );
+        if conflict {
+            assert!(result.installed.is_empty());
+            assert_eq!(result.errors.len(), packages.len());
+            assert_eq!(result.errors[0].name, "cosh");
+            assert!(result.errors.iter().all(|error| {
+                error
+                    .reason
+                    .contains("cosh-ng conflicts with copilot-shell")
+            }));
+        } else {
+            assert_eq!(result.installed.len(), packages.len());
+            assert!(result.errors.is_empty());
+        }
+        let expected_calls = if packages.is_empty() {
+            vec![]
+        } else {
+            vec![packages]
+        };
+        assert_eq!(*host.preflight_calls.borrow(), expected_calls);
+        assert!(host.txn_calls().is_empty());
+        assert!(!layout.lock_file.exists());
+        assert!(!layout.state_dir.exists());
+        assert!(!rpm_install::journal_dir(&layout).exists());
+    }
+}
+
+#[test]
+fn upgrade_non_root_preview_warns_without_running_dnf() {
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
+    use anolisa_platform::rpm_repo::RpmRepoSource;
+    use anolisa_platform::rpm_transaction::RpmTransaction;
+    use std::cell::Cell;
+
+    struct PrivilegeDeniedRunner<'a>(&'a Cell<usize>);
+
+    impl CommandRunner for PrivilegeDeniedRunner<'_> {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            assert_eq!(program, "dnf");
+            assert!(args.contains(&"--assumeno"));
+            assert!(
+                args.windows(3).any(|args| {
+                    args == ["repository-packages", "anolisa-configured", "install"]
+                })
+            );
+            self.0.set(self.0.get() + 1);
+            Ok(CommandOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "This command has to be run with superuser privileges".to_string(),
+            })
+        }
+    }
+
+    let calls = Cell::new(0);
+    let txn = RpmTransaction::with_runner_and_repo(
+        PrivilegeDeniedRunner(&calls),
+        RpmRepoSource::new(
+            "anolisa-configured",
+            "file:///unused-repository",
+            Some(true),
+        ),
+    );
+    assert!(txn.check_install(&["copilot-shell"]).is_err());
+    calls.set(0);
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = UpgradePlan {
+        installs: vec![PlannedInstall {
+            name: "cosh".to_string(),
+            package: "copilot-shell".to_string(),
+        }],
+        ..UpgradePlan::default()
+    };
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &txn,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("non-root preview remains available");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].package, "copilot-shell");
+    assert!(result.errors.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("conflicts have not been checked"));
+    assert!(result.warnings[0].contains("sudo anolisa --install-mode system upgrade --dry-run"));
+    assert_eq!(calls.get(), 0);
+    assert!(!layout.lock_file.exists());
+    assert!(!layout.state_dir.exists());
+    assert!(!rpm_install::journal_dir(&layout).exists());
 }
 
 #[test]
@@ -1506,6 +1705,233 @@ fn transaction_order_is_cli_then_updates_then_installs() {
 // ── apply: state refresh for a new default ───────────────────────────────────
 
 #[test]
+fn stale_upgrade_plan_cannot_confirm_source_for_noop_transactions() {
+    for action in [ACTION_UPDATE, ACTION_INSTALL] {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = system_ctx(tmp.path().to_path_buf());
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut host = FakeHost::default().with_installed(
+            "copilot-shell",
+            info("copilot-shell", "2.0.0", Some("1.al4")),
+        );
+        host.repository = Some("configured");
+        if action == ACTION_UPDATE {
+            seed_state(
+                &layout,
+                vec![rpm_component(
+                    "cosh",
+                    "copilot-shell",
+                    "1.0.0-1.al4",
+                    Ownership::RpmManaged,
+                )],
+            );
+        }
+        let plan = build_plan(
+            None,
+            &cli_noop(),
+            &[component_check(
+                "cosh",
+                Some("copilot-shell"),
+                (action == ACTION_UPDATE).then_some("rpm-managed"),
+                (action == ACTION_UPDATE).then_some("1.0.0-1.al4"),
+                Some("2.0.0-1.al4"),
+                action,
+                None,
+            )],
+        );
+        let result = run_upgrade_with_deps(
+            &ctx,
+            &layout,
+            &plan,
+            &host,
+            &host,
+            true,
+            false,
+            COMMAND,
+            &NoopReporter,
+        )
+        .unwrap();
+        assert_eq!(result.status, STATUS_OK);
+        assert_eq!(host.txn_calls().len(), 1);
+        let store = load_store(&layout);
+        let (_, _, evr, _, source) = delegated_parts(find_component(&store, "cosh"));
+        assert_eq!(evr, Some("2.0.0-1.al4"));
+        assert_eq!(
+            source, None,
+            "{action}: a stale plan is not proof of transaction provenance"
+        );
+    }
+}
+
+#[test]
+fn upgrade_confirms_source_only_from_live_identity_or_proven_absence() {
+    for action in [ACTION_UPDATE, ACTION_INSTALL] {
+        for scenario in ["version", "architecture", "absent", "probe-error"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = system_ctx(tmp.path().to_path_buf());
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let post = info("copilot-shell", "2.0.0", Some("1.al4"));
+            let mut before = post.clone();
+            if scenario == "version" {
+                before.version.version = "1.0.0".into();
+            }
+            if scenario == "architecture" {
+                before.arch = "noarch".into();
+            }
+            let mut host = FakeHost::default().with_installed("copilot-shell", post);
+            host.repository = Some("configured");
+            if scenario == "probe-error" {
+                host.fail_query_once
+                    .borrow_mut()
+                    .insert("copilot-shell".into());
+            } else {
+                host = host.with_query_sequence(
+                    "copilot-shell",
+                    vec![(scenario != "absent").then_some(before)],
+                );
+            }
+            if action == ACTION_UPDATE {
+                seed_state(
+                    &layout,
+                    vec![rpm_component(
+                        "cosh",
+                        "copilot-shell",
+                        "1.0.0-1.al4",
+                        Ownership::RpmManaged,
+                    )],
+                );
+            }
+            let plan = build_plan(
+                None,
+                &cli_noop(),
+                &[component_check(
+                    "cosh",
+                    Some("copilot-shell"),
+                    (action == ACTION_UPDATE).then_some("rpm-managed"),
+                    (action == ACTION_UPDATE).then_some("1.0.0-1.al4"),
+                    Some("2.0.0-1.al4"),
+                    action,
+                    None,
+                )],
+            );
+            let result = run_upgrade_with_deps(
+                &ctx,
+                &layout,
+                &plan,
+                &host,
+                &host,
+                true,
+                false,
+                COMMAND,
+                &NoopReporter,
+            )
+            .unwrap();
+            assert_eq!(result.status, STATUS_OK, "{action}/{scenario}");
+            let store = load_store(&layout);
+            let (_, _, evr, _, source) = delegated_parts(find_component(&store, "cosh"));
+            assert_eq!(evr, Some("2.0.0-1.al4"));
+            assert_eq!(
+                source,
+                (scenario != "probe-error").then_some("configured"),
+                "{action}/{scenario}"
+            );
+            if scenario == "probe-error" {
+                assert!(
+                    result
+                        .warnings
+                        .iter()
+                        .any(|w| w.contains("before") && w.contains("copilot-shell"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn upgrade_batch_and_retry_confirm_each_members_own_transition() {
+    for action in [ACTION_UPDATE, ACTION_INSTALL] {
+        for retry in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = system_ctx(tmp.path().to_path_buf());
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let mut host = FakeHost {
+                repository: Some("configured"),
+                ..Default::default()
+            };
+            let mut checks = Vec::new();
+            let mut records = Vec::new();
+            for name in ["changed", "unchanged"] {
+                host = host.with_installed(name, info(name, "2", Some("1")));
+                let before = if action == ACTION_INSTALL {
+                    None
+                } else {
+                    Some(info(name, "1", Some("1")))
+                };
+                if name == "changed" {
+                    let snapshots = if retry {
+                        vec![before.clone(), before]
+                    } else {
+                        vec![before]
+                    };
+                    host = host.with_query_sequence(name, snapshots);
+                }
+                if retry && name == "unchanged" {
+                    if action == ACTION_INSTALL {
+                        host.fail_install.insert(name.into());
+                    } else {
+                        host.fail_update.insert(name.into());
+                    }
+                }
+                checks.push(component_check(
+                    name,
+                    Some(name),
+                    (action == ACTION_UPDATE).then_some("rpm-managed"),
+                    (action == ACTION_UPDATE).then_some("1-1"),
+                    Some("2-1"),
+                    action,
+                    None,
+                ));
+                if action == ACTION_UPDATE {
+                    records.push(rpm_component(name, name, "1-1", Ownership::RpmManaged));
+                }
+            }
+            if !records.is_empty() {
+                seed_state(&layout, records);
+            }
+            let plan = build_plan(None, &cli_noop(), &checks);
+            let result = run_upgrade_with_deps(
+                &ctx,
+                &layout,
+                &plan,
+                &host,
+                &host,
+                true,
+                false,
+                COMMAND,
+                &NoopReporter,
+            )
+            .unwrap();
+            assert_eq!(
+                result.status, STATUS_OK,
+                "{action}/{retry}: {:?}",
+                result.errors
+            );
+            assert_eq!(host.txn_calls().len(), if retry { 2 } else { 1 });
+            let store = load_store(&layout);
+            for name in ["changed", "unchanged"] {
+                let (_, _, evr, _, source) = delegated_parts(find_component(&store, name));
+                assert_eq!(evr, Some("2-1"));
+                assert_eq!(
+                    source,
+                    (name == "changed").then_some("configured"),
+                    "{action}/{retry}/{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn installed_default_is_recorded_as_rpm_managed_after_refresh() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
@@ -1597,7 +2023,7 @@ fn origin_lookup_failure_is_warning_not_apply_failure() {
 }
 
 #[test]
-fn origin_lookup_failure_preserves_existing_source_repo() {
+fn origin_lookup_failure_drops_source_after_external_update() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
@@ -1648,7 +2074,7 @@ fn origin_lookup_failure_preserves_existing_source_repo() {
     let (_package, _relation, evr, _arch, source_repo) =
         delegated_parts(find_component(&store, "cosh"));
     assert_eq!(evr, Some("1.1.0-1.al4"));
-    assert_eq!(source_repo, Some("@System"));
+    assert_eq!(source_repo, None);
 }
 
 // ── apply: partial failure ───────────────────────────────────────────────────
@@ -2829,7 +3255,10 @@ fn post_transaction_query_failure_is_not_double_counted() {
     .expect("post-transaction query failure");
 
     assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
-    assert_eq!(host.query_calls(), vec!["copilot-shell", "copilot-shell"]);
+    assert_eq!(
+        host.query_calls(),
+        vec!["copilot-shell", "copilot-shell", "copilot-shell"]
+    );
     assert_eq!(result.status, STATUS_FAILED);
     assert!(result.updated.is_empty());
     assert!(result.reconciled.is_empty());
@@ -2860,7 +3289,7 @@ fn post_transaction_query_retry_can_reconcile() {
         "copilot-shell",
         info("copilot-shell", "2.7.0", Some("1.alnx4")),
     );
-    host.fail_query_once
+    host.fail_post_query_once
         .borrow_mut()
         .insert("copilot-shell".to_string());
     let plan = build_plan(
@@ -2891,7 +3320,10 @@ fn post_transaction_query_retry_can_reconcile() {
     .expect("reconcile after query recovery");
 
     assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
-    assert_eq!(host.query_calls(), vec!["copilot-shell", "copilot-shell"]);
+    assert_eq!(
+        host.query_calls(),
+        vec!["copilot-shell", "copilot-shell", "copilot-shell"]
+    );
     assert_eq!(result.status, STATUS_PARTIAL);
     assert!(result.updated.is_empty());
     assert_eq!(result.reconciled.len(), 1);
@@ -3119,7 +3551,7 @@ fn reconcile_missing_or_ambiguous_rpm_is_not_written() {
 }
 
 #[test]
-fn reconcile_origin_failure_preserves_prior_source() {
+fn reconcile_origin_failure_drops_source_after_external_update() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
@@ -3160,7 +3592,7 @@ fn reconcile_origin_failure_preserves_prior_source() {
     let (_package, _relation, evr, _arch, source_repo) =
         delegated_parts(find_component(&store, "cosh"));
     assert_eq!(evr, Some("2.7.0-1.alnx4"));
-    assert_eq!(source_repo, Some("@System"));
+    assert_eq!(source_repo, None);
 }
 
 #[test]
@@ -3747,7 +4179,7 @@ fn single_install_failure_reports_repair_when_rpmdb_recheck_fails() {
             .reason
             .contains("sudo anolisa --install-mode system repair agentsight")
     );
-    assert_eq!(host.query_calls(), vec!["agentsight"]);
+    assert_eq!(host.query_calls(), vec!["agentsight", "agentsight"]);
 }
 
 /// A merged update failure isolates the offender: the member whose slot
@@ -3841,7 +4273,7 @@ fn merged_update_failure_retries_clean_members_individually() {
         result
             .warnings
             .iter()
-            .any(|w| w.contains("merged dnf update failed")),
+            .any(|w| w.contains("merged RPM update failed")),
         "the degrade must be announced as a warning: {:?}",
         result.warnings
     );
@@ -3947,6 +4379,7 @@ fn failed_isolated_update_retry_records_late_rpmdb_movement() {
         .with_query_sequence(
             "copilot-shell",
             vec![
+                Some(info("copilot-shell", "1.0.0", Some("1.al4"))),
                 Some(info("copilot-shell", "1.0.0", Some("1.al4"))),
                 Some(info("copilot-shell", "1.1.0", Some("1.al4"))),
             ],
@@ -4125,4 +4558,89 @@ fn blocked_plan_reports_no_apply_phase() {
         reporter.messages().is_empty(),
         "a blocked plan must not report an apply phase"
     );
+}
+
+#[test]
+fn confirmed_repository_is_recorded_only_for_successful_native_changes() {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let install = PlannedInstall {
+        name: "cosh".into(),
+        package: "copilot-shell".into(),
+    };
+    let host = FakeHost::default()
+        .with_installed("copilot-shell", info("copilot-shell", "2.0", Some("1")));
+    let mut installs = Vec::new();
+    stage_refreshed_install(
+        &install,
+        &host,
+        &Ok(None),
+        Some("configured"),
+        &mut installs,
+        &mut errors,
+        &mut warnings,
+    );
+    assert_eq!(
+        observation_from(
+            &installs[0].refreshed,
+            installs[0].source_repo.as_deref(),
+            "now"
+        )
+        .source_repo
+        .as_deref(),
+        Some("configured"),
+    );
+    reconcile_failed_install(
+        &install,
+        "partial failure",
+        "transaction",
+        &host,
+        &mut installs,
+        &mut errors,
+        &mut warnings,
+    );
+    assert_eq!(
+        observation_from(
+            &installs[1].refreshed,
+            installs[1].source_repo.as_deref(),
+            "now"
+        )
+        .source_repo,
+        None,
+    );
+    for (from, expected) in [("1.0-1", Some("configured")), ("2.0-1", None)] {
+        let update = PlannedUpdate {
+            name: "cosh".into(),
+            package: "copilot-shell".into(),
+            from: from.into(),
+            to: "2.0-1".into(),
+            adopt_if_missing: false,
+            backfill_rpm_metadata: false,
+        };
+        let mut updates = Vec::new();
+        stage_refreshed_update(
+            &update,
+            &host,
+            &Ok(Some(info(
+                "copilot-shell",
+                from.split_once('-').unwrap().0,
+                Some("1"),
+            ))),
+            Some("configured"),
+            &mut updates,
+            &mut errors,
+            &mut warnings,
+        );
+        assert_eq!(
+            observation_from(
+                &updates[0].refreshed,
+                updates[0].source_repo.as_deref(),
+                "now"
+            )
+            .source_repo
+            .as_deref(),
+            expected,
+        );
+    }
+    assert!(errors.is_empty());
 }

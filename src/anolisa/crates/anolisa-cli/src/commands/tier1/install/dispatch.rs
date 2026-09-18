@@ -33,7 +33,7 @@ use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::PackageTransaction;
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
-use anolisa_platform::rpm_repo::DnfRepoSource;
+use anolisa_platform::rpm_repo::RpmRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 use chrono::{SecondsFormat, Utc};
 
@@ -58,8 +58,8 @@ use super::application::{
     ApplicationFailure, InstallApplicationOutcome, InstallChange, InstallSubject,
 };
 use super::owned_ops::{
-    RawInstallOps, ValidatedInstall, installed_version_label, validate_component_conflict,
-    validate_owned_install,
+    RawEffectFactories, RawInstallOps, ValidatedInstall, installed_version_label,
+    validate_component_conflict, validate_owned_install,
 };
 use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
@@ -94,15 +94,7 @@ pub(crate) fn host_backends(
     } else {
         None
     };
-    let query = match rpm_repo.clone() {
-        Some(repo) => RpmPackageQuery::system_with_repo(repo),
-        None => RpmPackageQuery::system(),
-    };
-    let txn = match rpm_repo {
-        Some(repo) => RpmTransaction::system_with_repo(repo),
-        None => RpmTransaction::system(),
-    };
-    Ok((query, txn))
+    Ok(crate::commands::tier1::rpm_backends::system(rpm_repo))
 }
 
 /// Validated `--repo` base URL, when the caller supplied one. Normalization
@@ -646,6 +638,7 @@ pub(super) fn execute_planned(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let PlannedComponent {
         command,
@@ -806,6 +799,7 @@ pub(super) fn execute_planned(
                 native_package: native_package.as_deref(),
                 degraded_rpmdb: (!missing_rpm_tooling_is_fatal(env, rpmdb)).then_some(rpmdb),
             },
+            effects,
         );
     }
 
@@ -831,6 +825,7 @@ pub(super) fn execute_planned(
             index_base_override: index_base_override.as_deref(),
             is_root,
         },
+        effects,
     )
 }
 
@@ -1262,6 +1257,7 @@ fn install_applied(
     command: &str,
     reporter: &mut dyn ProgressReporter,
     apply: InstallApply<'_>,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     if let InstallApply::Delegated {
         repo_config,
@@ -1337,6 +1333,7 @@ fn install_applied(
             let (result, retained_note) = {
                 let mut ops = RawInstallOps::new(
                     ctx,
+                    effects,
                     layout,
                     target.to_string(),
                     scope,
@@ -1678,14 +1675,14 @@ pub(crate) fn rpm_repo_source_for_invocation(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
     index_base_override: Option<&str>,
-) -> Result<Option<DnfRepoSource>, CliError> {
+) -> Result<Option<RpmRepoSource>, CliError> {
     match index_base_override {
         Some(base_url) => {
             let gpgcheck = repo_config
                 .backends
                 .get("rpm")
                 .and_then(|backend| backend.gpgcheck);
-            Ok(Some(DnfRepoSource::new(
+            Ok(Some(RpmRepoSource::new(
                 ANOLISA_RPM_REPO_ID,
                 base_url.to_string(),
                 gpgcheck,
@@ -1698,7 +1695,7 @@ pub(crate) fn rpm_repo_source_for_invocation(
 pub(crate) fn configured_rpm_repo_source(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
-) -> Result<Option<DnfRepoSource>, CliError> {
+) -> Result<Option<RpmRepoSource>, CliError> {
     let Some(backend) = repo_config.backends.get("rpm") else {
         return Ok(None);
     };
@@ -1709,7 +1706,7 @@ pub(crate) fn configured_rpm_repo_source(
     let base_url = repo_config
         .resolved_base_url("rpm", backend, &host)
         .map_err(|err| repo_config_err(err, true))?;
-    Ok(Some(DnfRepoSource::new(
+    Ok(Some(RpmRepoSource::new(
         ANOLISA_RPM_REPO_ID,
         base_url,
         backend.gpgcheck,
@@ -1828,7 +1825,7 @@ fn rpm_tooling_missing_error(command: &str, bin: &str, target: &str) -> CliError
     CliError::Runtime {
         command: command.to_string(),
         reason: format!(
-            "cannot install '{target}': {bin} not found on PATH — the system-RPM presence check needs rpm/dnf; install rpm/dnf and retry"
+            "cannot install '{target}': {bin} not found on PATH — install the required RPM tooling and retry"
         ),
     }
 }
@@ -1911,7 +1908,11 @@ pub(crate) fn step_label(step: &Step) -> String {
     match step {
         Step::NativeTransaction {
             action, packages, ..
-        } => format!("dnf {} {}", action.verb(), packages.join(" ")),
+        } => format!(
+            "RPM package manager: {} {}",
+            action.verb(),
+            packages.join(" ")
+        ),
         Step::Observe { packages } => format!("observe {}", packages.join(" ")),
         Step::WriteRecord(write) => format!("record: {}", write.label()),
         Step::DropRecord => "record: drop".to_string(),
@@ -2166,6 +2167,7 @@ mod tests {
             true,
             &HashSet::new(),
             &mut reporter,
+            crate::test_support::raw_effects(),
         )
         .expect("delegated install");
 
@@ -2230,7 +2232,11 @@ mod tests {
             source_repo: None,
             artifact: None,
             dry_run: true,
-            plan: vec!["dnf install agentsight-0.6.2-1.alnx4.x86_64".to_string()],
+            plan: vec![step_label(&Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: anolisa_core::planner::NativeAction::Install,
+                packages: vec!["agentsight-0.6.2-1.alnx4.x86_64".to_string()],
+            })],
         }
         .with_pin(&pin);
 
@@ -2241,6 +2247,10 @@ mod tests {
         assert_eq!(json["resolved_version"], "0.6.2-1.alnx4");
         assert_eq!(json["source_repo"], "anolisa-configured");
         assert_eq!(json["artifact"], "agentsight-0.6.2-1.alnx4.x86_64");
+        assert_eq!(
+            json["plan"][0],
+            "RPM package manager: install agentsight-0.6.2-1.alnx4.x86_64"
+        );
         // `version` stays present as the upstream version (compatible field).
         assert_eq!(json["version"], "0.6.2");
     }

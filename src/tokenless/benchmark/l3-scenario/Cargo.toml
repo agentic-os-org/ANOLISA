@@ -1,0 +1,57 @@
+# Copyright 2026 Alibaba Cloud
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tokenless Benchmark Suite — L3 scenario layer (standalone Cargo workspace).
+#
+# Its own workspace for the same reason L1 and L2 are: the layer-specific deps
+# stay out of the other layers' `cargo test` cycle, and each layer can evolve
+# independently. Kept OUT of the main tokenless workspace (empty [workspace]
+# table below).
+#
+# Depends on the tokenless crates by path so it always benchmarks the exact
+# working-tree sources next to it.
+[workspace]
+
+[package]
+name = "tokenless-l3-bench"
+version = "0.7.1"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "L3 scenario-layer benchmark (tokenless vs headroom) over whole-conversation payloads"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokenless-schema = { path = "../../crates/tokenless-schema" }
+# Same headline token counter as L2, so L2 and L3 numbers are on one scale.
+tiktoken-rs = "0.11"
+# blocking + rustls keeps the probe client free of tokio and OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rand = "0.8"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "l3_compare"
+path = "src/bin/l3_compare.rs"

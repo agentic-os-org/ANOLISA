@@ -592,7 +592,8 @@ fn execute_merged_group_with_deps(
                     let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
                     execute_delegated_steps_resumed(
                         tail,
-                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
+                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package))
+                            .with_confirmed_source(provider.repository_source()),
                         &provider,
                         &mut sink,
                         &mut journal,
@@ -1047,6 +1048,7 @@ mod tests {
             true,
             &std::collections::HashSet::new(),
             &mut reporter,
+            crate::test_support::raw_effects(),
         );
         let member = member_application_outcome(result);
         let item =
@@ -1647,7 +1649,7 @@ mod tests {
             ),
         };
         let json = serde_json::to_value(&previewed).expect("serialize");
-        assert_eq!(json["plan"][0], "dnf install pkg-a");
+        assert_eq!(json["plan"][0], "RPM package manager: install pkg-a");
         assert_eq!(json["plan"][1], "observe pkg-a");
     }
 }

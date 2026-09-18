@@ -91,6 +91,40 @@ CLI-only 用法不需要 Adapter。
 anolisa adapter disable tokenless <framework>
 ```
 
+### 压缩的触发条件与阈值
+
+Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下条件全部满足，才会实际产出压缩内容：
+
+1. 压缩未被停用。`compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 时进入 dry-run，仍计算统计但返回原文（见上一节）。
+2. 工具不属于内容读取类。Read/Glob/Grep/LSP/NotebookRead 及别名会跳过响应压缩，保留完整内容。搜索路径共享引入了一个很窄的例外：Claude Code 原生 `Grep` 的无上下文 content 模式结果会改走该无损压缩器，同样保留全部已收到命中（见[控制搜索路径共享](#控制搜索路径共享)）。
+3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
+4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
+   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 搜索路径共享，以及需显式开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 视图可能不完整](#csvtsv-视图可能不完整)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。
+   - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
+   - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
+
+   共享响应 Hook 还会在启动压缩子进程前跳过带 YAML frontmatter、形似 Skill 的文本（这类文本在 Core 侧本来也会原样透传）。
+5. 压缩结果严格小于原文。响应压缩和 TOON 编码都没有让内容变小时，保留原文。
+
+通过上述检查后，截断强度由工具类别决定。分类和阈值定义在 Adapter 目录下的 `tool_categories.json`（各 Adapter 共享的单一事实来源）；文件缺失或无效时使用内置的安全回退值：
+
+| 类别 | 代表工具 | 字符串截断阈值 | 数组截断阈值 | 最大嵌套深度 |
+|------|----------|----------------|--------------|--------------|
+| 内容读取类 | Read、Glob、Grep、LSP、NotebookRead 及别名 | 跳过压缩 | — | — |
+| Shell/exec | Bash、Shell、exec、terminal 等 | 65,536 字符 | 128 项 | 8 |
+| 其他结构化工具 | 未列入前两类的工具 | 1,048,576 字符 | 65,536 项 | 32 |
+
+阈值含义：字符串超过阈值时从阈值处截断（启用 Stash 时可取回原文）。数组只有在长度超过「类别阈值 + 尾部窗口」时才会截断：前部保留至多阈值个元素，尾部默认保留 8 个元素（尾部窗口），被丢弃的中间段在启用 Stash 时可取回，两个窗口之间插入截断标记。至少包含 33 个 JSON Object 的数组不受这些阈值控制，改走记录缩减（Record Reduction）：按 32 条记录的基础预算选取（前 4 条、后 4 条、携带错误或异常信号的记录、数值异常记录，以及其余记录的稳定采样），并追加取回标记，完整原始数组写入 Stash；记录缩减依赖 Stash，没有 Stash 时保留全部记录。嵌套超过深度上限的子树折叠为截断标记。完整规则与参数见 [CLI 参考](cli-reference.md)。
+
+几点路径差异：
+
+- 独立运行 `tokenless compress-response` 时使用 CLI 自身默认值（字符串 4,096 字符、头部窗口 32 项 + 尾部窗口 8 项、深度 8），可用 `--truncate-strings-at`、`--truncate-arrays-at`、`--array-tail-preserve`、`--max-depth` 覆盖，详见 [CLI 参考](cli-reference.md)。
+- Codex 和 Qwen Code 在当前 PostToolUse 契约下无法替换模型可见的原始输出，因此不运行响应压缩和 TOON：Codex 保留原文，只对被归类的环境失败附加上下文；Qwen Code 原样透传。各集成的实际能力详见下方适配器表格。
+- OpenClaw Plugin 读取同一份 `tool_categories.json` 分类，把工具映射为内容来源（文件内容、命令输出或 API 响应），该文件缺失或无效时回退到内置列表，再由 Core 套用对应阈值；它原有的 `skip_tools`、`shell_tools` 覆盖项已删除，不再控制 Adapter。当前选项见[配置与数据隐私](configuration-and-privacy.md)。
+- TOON 编码是独立的触发判断：只对至少 500 字符的负载、且宿主槽位接受文本时运行，并且只有编码结果比当前内容更小时才会采用。
+- Git Diff 上下文裁剪是独立的可选判断，默认关闭：在 Agent 进程环境设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`（或 SDK 的 `diff_compression_enabled` 选项）后，槽位接受文本时 Core 才会裁剪命令输出中 Git Diff 的未变更上下文；每条变更行都保留，完整原始输出写入 Stash 并附取回提示，计入该包装文本后净节省不足 16 个估算 Token 的候选会被拒绝。
+- Python SDK 与 AgentScope 层不通过 Python 配置设置上述阈值：压缩阈值、内容检测和 TOON 选择都是 Core 行为；直接调用 `TokenlessRuntime.compress_response` 时仍可按次覆盖截断参数。详见 [Python SDK](sdk.md) 与 [AgentScope 集成](sdk/agentscope.md)文档。
+
 ### 控制搜索路径共享
 
 API 搜索路径共享默认开启。在 Agent 进程环境中设置 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`，
@@ -208,6 +242,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | 集成 AgentScope | [AgentScope SDK 集成](sdk/agentscope.md) |
 | 接入 Agent 产品 | [Agent 集成](framework-integration.md) |
 | 手动压缩或取回 | [CLI 参考](cli-reference.md) |
+| 了解压缩何时触发、阈值多大 | [本页 · 压缩的触发条件与阈值](#压缩的触发条件与阈值) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |
 | 修改配置或了解本地数据 | [配置与数据隐私](configuration-and-privacy.md) |
 | 解决无统计、Adapter 或 Stash 问题 | [故障排查](troubleshooting.md) |

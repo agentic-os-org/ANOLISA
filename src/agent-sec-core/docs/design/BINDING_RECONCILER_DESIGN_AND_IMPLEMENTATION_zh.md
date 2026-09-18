@@ -1,10 +1,22 @@
 # Binding Reconciler 设计与实现方案
 
-日期：2026-09-08。状态：`[TARGET V2]` 详细设计与实施计划；Reconciler 核心已在
-`asc-pcp` 实现，真实 AgentSight Client 已适配并通过本地 HTTP 组合测试；PAP/daemon
-接线尚未实施。
+文档类型：`[TARGET V2]` 详细设计与实施计划。实现进度和验证结果由对应 PR、CI 与
+验收报告记录，本文定义架构、行为约束和验收要求。
 
-## 1. 文档边界与源码基线
+[调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
+是后续 Runtime 集成的当前目标。其 CR-010～CR-015 替代本文中“整体聚合写入作为 SQL
+接口”“prepared 跨重启持久化”“队列去重/容量/补扫仅留 TODO”的旧提案：部署独立局部更新，
+每次 reconcile 重新读取 Binding 并从头执行，plan/prepared/返回结果仅在本次调用内使用，
+不跨调用缓存或落库；旧的 prepared 复用及跨调用结果补写机制均被替代。dirty 仅负责再次排队。
+调度实现归 `asc-policy-runtime`，daemon 负责装配。具体流程见新设计第 7 节。
+本文的已有源码说明与历史测试证据保留，不代表新设计已实现；spec-only revision、删除及
+目标清理责任等未被替代的语义继续有效。
+
+Runtime 接线 PR 的门禁为单元、组件与调度竞争测试；完整进程链路 E2E 单独开 PR；
+系统性 error injection、进程崩溃及恢复测试待 persistent Repository 就绪后交付。
+本文原全链路验收清单是跨 PR 索引，不得据此把上述后续测试重新作为 Runtime 集成 PR 的前置条件。
+
+## 1. 文档边界与关联文档
 
 本文将 [设计讨论记录](BINDING_RECONCILER_DECISIONS_zh.md) 收敛为可实施方案，覆盖
 PAP API contract 修正、Binding 状态、持久化、Adapter/Client、Reconciler、daemon
@@ -16,20 +28,14 @@ PAP API contract 修正、Binding 状态、持久化、Adapter/Client、Reconcil
 本文不是新增的 V1 行为契约。涉及公开协议、后台服务或进程生命周期的实施，必须在
 同一变更中更新相应语言无关契约及 executable fixtures。
 
-| 核对对象 | 固定源码基线 | 本次用途 |
-|---|---|---|
-| 设计核对基线 | `feat/v2-agentsight-client@bc1b6fa4133031b8f4c55076aa2ad65788255577` | rebase 后 PAP API、memory repository、Adapter、Client 的设计核对基线 |
-| 核心实现基线 | 实施前历史快照 `4ee8b399`；拆分后直接依赖 Client/共享契约 `b35e6c3a` | `asc-pcp`、内存原子操作及 47 个核心变体；详见执行报告 |
-| 已包含的本地 main | `oss/main@8bf150c2` | PAP API 已合入；这是本地 ref，不宣称远端最新状态 |
-| 设计讨论记录 | `BINDING_RECONCILER_DECISIONS_zh.md` | 已确认的 spec-only revision、不可撤销删除、清理成功移除记录与首阶段范围 |
+关联文档分别承担设计决定、验收标准和执行证据：
 
-PAP API、memory repository、protocol/core/handler 与 UDS fixture 现在均位于当前
-checkout，无需再从独立 API 分支移植。开始实现时仍记录工作包 HEAD 和直接依赖。
+- [设计讨论记录](BINDING_RECONCILER_DECISIONS_zh.md)：spec-only revision、删除与目标清理责任。
+- [调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)：Runtime 集成和分阶段 PR 边界。
+- [核心验收标准](../../v2/fixtures/reconciliation/ACCEPTANCE.md)：完整 fixtures 与判定规则。
+- [执行报告](../../v2/fixtures/reconciliation/RESULTS.md)：具体版本、运行命令和验证结果。
 
-核心实现与当前分层验证见 [执行报告](../../v2/fixtures/reconciliation/RESULTS.md)。
-PAP 请求语义、条件更新与同步核心的内存组合已按本文更新测试；真实 UDS 验证
-请求投影。后台通知/定时器、跨重启恢复和真实 PEP 生效仍未验收；核心竞争注入
-与 PAP 请求层测试分别承担状态隔离和准入验证。
+源码版本及直接依赖记录在工作包的验收报告中。
 
 ## 2. 已确认目标与首阶段范围
 
@@ -60,7 +66,7 @@ PAP 请求语义、条件更新与同步核心的内存组合已按本文更新�
 及部分结果、按 Binding 串行执行、内存意图与重试、基本事件交接、
 shutdown、必要的错误投影，以及对应 crate/内存 repository/UDS 验收。
 
-已确认 SQL repository 尚未就绪，首阶段使用 `ProcessLocalPapRepository`，SQL
+首阶段使用 `ProcessLocalPapRepository`，SQL
 适配及真实跨重启恢复不是功能实现的前置条件。进程退出会丢失 Binding、部署记录、
 请求快照和重试预算；PEP 对象可能仍存在，不能声明可自动恢复或自动清理这些遗留对象。
 本文后续的“持久化”“durable”“事务提交”描述目标存储契约：首阶段落实为内存
@@ -113,9 +119,9 @@ revision 到上限时，changed-spec UPDATE 失败；新 ID 的 CREATE 从 1 开
 | `DELETE_FAILED` | 拒绝 | 拒绝 | `PENDING_DELETE`，revision 不变 |
 
 CREATE 生成新的 ID、revision 1 和 `PENDING_APPLY`。删除意图不可撤销；所有目标
-确认 Absent 后，条件删除 Binding、runtime、prepared、deployments 及写回执。
-旧 ID 不允许 UPDATE 重建。`APPLY_FAILED` 同 spec UPDATE 沿用 revision 和 prepared
-字节，重置重试预算；改变 spec 才递增一次并清除当前 prepared，保留旧目标清理信息。
+确认 Absent 后，条件删除 Binding、runtime、deployments 及写回执。
+旧 ID 不允许 UPDATE 重建。`APPLY_FAILED` 同 spec UPDATE 沿用 revision 并重置重试预算，
+每次执行均重新读取并准备；改变 spec 才递增一次。两者都保留旧目标清理信息。
 
 新的 Apply/Delete 意图重置其重试控制并清除旧的当前操作错误；幂等 no-op 不重置。
 相同 spec 从 `READY` UPDATE 是 no-op，不是强制重新下发接口；本阶段不增加 force/retry
@@ -134,7 +140,7 @@ Kubernetes finalizer 在清理完成前保留待删除对象；本服务保留 `
 
 Kubernetes 使用 resourceVersion 检测更新冲突；本服务不把 bindingRevision 当作
 每次写入都变化的 resourceVersion，而使用 repository 内的 revision/status 原子
-条件更新及本地执行锁。首阶段保持已确认的 ING 准入规则，不因参考 Kubernetes
+条件更新及 Runtime 调度串行。首阶段保持已确认的 ING 准入规则，不因参考 Kubernetes
 而放开执行中的 changed-spec UPDATE，也不增加 informer 或队列优化前置条件。
 参见 [API 更新语义](https://kubernetes.io/docs/reference/using-api/api-concepts/#updates-to-existing-resources)。
 
@@ -195,7 +201,7 @@ mutation 返回准入事务取得的快照；worker 可能在响应发送前继�
 Delete 接受成功不表示目标已删除；删除完成后旧 ID 返回 NotFound，不保留 DELETED 行。
 
 例：`policy.bindings.delete` 作用于 revision 2 的 READY Binding 时，目标响应中的
-`result.spec` 与删除前完全相同，`result.status` 为 `PENDING_DELETE`。完整 CRUD fixture
+`result.spec` 与删除前完全相同，`result.status` 为 `{"phase":"PENDING_DELETE"}`。完整 CRUD fixture
 保留原 Policy/Scope、IR、digest，仅调整 status；`bindingPendingDelete` 固定同版响应。
 
 认证继续由 kernel peer credentials 构造 Principal，经 daemon-core 准入；handler
@@ -205,15 +211,17 @@ Delete 接受成功不表示目标已删除；删除完成后旧 ID 返回 NotFo
 现有类型/参数错误仍为 `invalid_request`，领域验证为 `invalid_argument`，资源或来源版本
 缺失为 `not_found`，真实并发冲突及受限 UPDATE 为 `conflict`。只有需要增版的操作可因
 revision 上限返回 `resource_exhausted`；新 ID CREATE 从 1 开始，Delete 不得
-继续触发 RevisionExhausted。
+继续触发 RevisionExhausted。提交后的队列容量拒绝确认写入 Failed 后，返回完整
+BindingView，通过 status.phase/status.error 表达失败。详见
+[队列拒绝契约](BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。
 
 ### 4.3 必须同步的文件与兼容记录
 
 | 范围 | 文件或入口 | 修正责任 |
 |---|---|---|
-| 领域定义 | `v2/crates/policy/asc-policy-types/src/binding.rs` 及 tests | binding revision 注释、request/worker 转移、公开投影 |
-| PAP | `v2/crates/policy/asc-pap/src/{service,repository,lib}.rs`、`tests/pap_service.rs` | 增版判断、请求 CAS、幂等、并发测试 |
-| 首阶段内存 adapter | `v2/crates/policy/asc-pap-repository-memory/src/lib.rs` | 实现新 repository contract，明确仅进程存活期间保存 |
+| 领域定义 | `v2/crates/asc-policy-types/src/binding.rs` 及 tests | binding revision 注释、request/worker 转移、公开投影 |
+| PAP | `v2/crates/asc-pap/src/{service,repository,lib}.rs`、`tests/pap_service.rs` | 增版判断、请求 CAS、幂等、并发测试 |
+| 首阶段内存 adapter | `v2/crates/asc-pap-repository-memory/src/lib.rs` | 实现新 repository contract，明确仅进程存活期间保存 |
 | daemon | `asc-daemon-protocol/src/pap.rs`、`asc-daemon-core/src/pap.rs`、`asc-daemon-handler/src/pap.rs` | 方法注释、直接领域类型、错误及 runtime 投影 |
 | wire fixtures | `asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json`、`pap-methods.json`、`pap-invalid-requests.json`、`tests/pap_contract.rs` | 完整结构、跨步骤引用、状态/error 场景 |
 | UDS | `v2/apps/asc-daemon/tests/pap_protocol.rs` | 完整 serialized scenario 与并发准入消费者测试 |
@@ -249,7 +257,7 @@ flowchart LR
 | Repository ports | 原子请求更新、worker 状态 CAS、目标记录、持久化扫描；不发 HTTP |
 | TargetBindingAdapter | 完整 PreparedBinding 到 TargetBindingPlan；不查询 PAP，不执行副作用 |
 | TargetDeploymentClient | 按 PEP 规则准备目标身份与请求、执行 create/update/delete 并解释部分结果；不读写 repository，不回调 repository |
-| daemon composition / worker | 注入具体实现，拥有通知、执行锁、定时唤醒、恢复、取消和 join |
+| daemon composition / worker | 注入具体实现，拥有通知、Running entry、定时唤醒、恢复、取消和 join |
 | memory adapter（首阶段）/ SQLite adapter（后续） | 相同逻辑原子接口；首阶段内存保存，后续增加 durable state 与跨重启恢复 |
 
 Reconciler 通过窄 repository/adapter/client ports 工作，不依赖 PapService、具体 HTTP、
@@ -269,44 +277,34 @@ Reconciler 只比较和保存 Client 提供的目标身份及来源 revision，�
 替换的语义由该 Client 保证。这里说明接口边界，不新增首阶段 PEP 支持范围。
 
 Adapter 负责把完整 Binding 翻译成目标策略与范围表达；Client 负责 PEP 所需身份、
-请求准备、传输、更新方式与响应解释；Reconciler 负责通用执行顺序、互斥、记录、
-状态 CAS 和重试。这些职责不因某个 PEP 恰好使用 HTTP、DSL 或 PID 而混合。
+请求准备、传输、更新方式与响应解释；Reconciler 负责通用执行顺序、记录、状态 CAS 和重试；
+Runtime/WorkQueue 负责同 Binding 串行。这些职责不因某个 PEP 恰好使用 HTTP、DSL 或 PID 而混合。
 
 ## 6. 数据模型与原子接口
 
-以下是实现提案：使用 current Binding 记录加关联部署记录，首阶段由内存 repository
-在同一临界区实现逻辑原子更新；SQLite 工作包后续映射为表及事务。不要求保存所有
-历史 Policy、Scope、Binding 或每次操作日志副本。
+读取采用 Binding 聚合视图，写入采用不含 spec 的字段补丁。首版由内存 Repository
+在短临界区内实现原子性；SQLite 表结构及耐久事务由后续存储工作包定义。
+不要求为 spec 和 deployment 分表，但两者必须有各自的局部更新方式。
 
-### 6.1 持久化模型
+### 6.1 存储模型
 
-| 记录 | 最小内容 | 保留与所有权 |
+| 记录 | 内容 | 所有权 |
 |---|---|---|
-| `binding_current` | binding ID、完整 spec、status、当前 retry control、安全 last_error、当前 prepared apply | PAP 修改 spec/请求意图；Reconciler 修改运行字段；按 ID 唯一 |
-| `binding_deployments` | binding ID、target 配置身份、pepBindingId、来源 bindingRevision、presence、清理定位信息、最近确认信息 | Reconciler 管理；唯一键为逻辑 Binding + target 身份 + pepBindingId |
-| 当前 prepared apply | 当前 binding revision、带格式版本的完整 TargetBindingPlan、准备后的请求、目标身份、进程身份及请求 digest | 保证同 spec 重试请求稳定；新 Binding 或 spec 变化重新准备；不保存 credential；SQL 阶段支持重启恢复 |
-| retry control | operation=Apply/Delete、attempts_started、attempt_started_at、max_attempts、base/max delay、request/attempt timeout、next_attempt_at、last safe error | 新意图重置；幂等 no-op 和重启不重置；参数按意图保存，避免配置修改重置预算 |
+| Binding | 当前 spec 与 status | PAP 修改 spec/意图；Reconciler 条件推进 status |
+| deployments | Client 提供的 target 引用、来源 revision、presence、last_confirmed | Reconciler 管理；PAP 修改 spec 时保留 |
+| runtime | attempts_started、next_attempt_at、retry_policy、last_error | 新意图重置；幂等通知和自动重试不重置预算 |
+| 本次临时数据 | Adapter plan、Client prepared、调用结果、待写回凭据 | 仅存活于单次 reconcile；不进入 Repository schema |
 
-prepared apply 的目标专有内容由 Client 定义和解释。通用存储可保存格式版本、
-不透明内容与 Client 提供的目标引用；表中进程身份和业务请求 body 属于 AgentSight
-产物的内部内容，不是所有 PEP 都必须具有的公共字段。Reconciler 可执行通用的大小、
-格式匹配或完整性检查，但不解析 DSL、HTTP 字段、PID/start time，也不重写请求内容。
-目标记录的清理定位信息同样由 Client 提供和消费，不能要求 Reconciler 从当前 spec
-重建 PEP 专有删除参数。
+Reconciler 不解析 Client 的 DSL、HTTP body 或进程身份。只有 Client 提供的 target 引用和
+cleanup 随 deployment 保存，用于在当前 spec/PID 不可用时清理旧目标。
+AgentSight cleanup 仅包含版本、Binding ID 和 revision，不保存请求摘要或进程身份。
 
-presence 为 `UNKNOWN`、`PRESENT`、`ABSENT`。`PRESENT` 是最近已确认事实，不是实时
-探针结果；即将执行可能改变目标状态的请求时先保守标记为 UNKNOWN，保留最近确认
-信息用于诊断。只有明确 absence 并持久化后，才可回收部署行。
+presence 为 UNKNOWN、PRESENT、ABSENT。PRESENT 表示最近确认的事实，目标修改前先登记
+UNKNOWN 并保留 last_confirmed；确认 Absent 后移除部署记录。route 必须仍解析到原目标，
+无法定位时保留清理责任，不能把配置缺失解释成目标不存在。
 
-target 配置身份必须可稳定解析原目标，不能因配置切换而把旧目标发到新 endpoint
-删除。配置及 credential 属于系统部署管理；请求快照只保存非秘密引用及业务 body。
-无法定位旧目标时保留记录并失败，不能把配置缺失解释成目标不存在。
-
-PAP 不覆盖 deployments 或 prepared apply 的内容。spec 改变后，旧 prepared apply
-仅在无本地 in-flight 操作、且清理定位信息已独立持久化后可回收；旧目标记录仍保留。
-当前部署的 prepared request 在失败后保留以支持同 revision 重试；删除后重新 CREATE
-使用新 Binding ID、revision 1 准备新请求，不能复用旧 Binding 的目标 ID。旧请求在无 in-flight 且清理依据完整
-时可回收；只保留当前必要请求和目标清理信息，不保存旧完整 spec 历史。
+每次重试重新翻译和准备；spec 更新保留旧 deployment，不保留旧 plan、prepared 或结果。
+删除后重新 CREATE 使用新 Binding ID、revision 1；不复用已删除 Binding 的目标身份。
 
 ### 6.2 请求准入事务
 
@@ -343,51 +341,51 @@ worker 刚写入的目标记录、错误或重试次数。
 | 存储接口 | 原子语义 |
 |---|---|
 | `get_binding_state(id)` | 一致读取完整 `BindingStateSnapshot { binding, runtime, deployments }`，缺失与存储故障分开返回 |
-| `compare_exchange_binding_state(expected, write)` | 完整快照 CAS；`write` 包含 write ID 及 `Option<BindingStateSnapshot>`；Some 替换，None 删除整个聚合；返回 Applied / AlreadyApplied / Conflict |
+| `compare_exchange_binding_state(expected, write)` | 局部条件写；`write` 包含 write ID 及 `Option<ReconciliationPatch>`，补丁只有 status/runtime/deployments；None 删除整个聚合；返回 Applied / AlreadyApplied / Conflict |
 
 共享记录及接口位于核心下层，memory adapter 与 Reconciler 都依赖它；memory 不再
 依赖 `asc-pcp`。PAP 和 aggregate CAS 使用同一份权威 Binding map；Reconciler 构造
-写入时保留 spec，PAP 的请求准入按第 6.2 节实现，存储没有 reconcile 专属业务方法。
+写入不包含 spec，PAP 的请求准入按第 6.2 节实现，存储没有 reconcile 专属业务方法。
 
 `asc-pcp` 内部负责三类决策，不再要求 repository 实现它们：
 
 | 内部操作 | 读取、判断与写入 |
 |---|---|
-| `claim` | 检查 pending、到期时间和预算；计算 running、attempts +1、固定 retry policy，整体 CAS |
-| `register` | 校验 prepared/目标身份，保存稳定请求、登记 UNKNOWN，整体 CAS 成功后才调用 Client |
-| `finish` | 验证并合并观察；原 revision/status 匹配才计算生命周期；删除成功构造 None，其它结果构造 Some，整体 CAS |
+| `claim` | 检查 pending、到期时间和预算；计算 running、attempts +1、固定 retry policy，条件写回运行状态 |
+| `register` | 校验本次 prepared/目标身份，仅写 deployments 登记 UNKNOWN，成功后才调用 Client |
+| `finish` | 验证并合并观察；原 revision/status 匹配才计算生命周期；删除成功构造 None，其它结果构造字段补丁；过期结果只更新 deployments |
 
-CAS 比较 runtime 和 deployments，不能只比较公开 revision/status。完成 CAS 冲突后，
+条件写比较 revision/status 及补丁实际修改的 runtime/deployments；删除比较全部协调字段。完成 CAS 冲突后，
 核心重读并重新合并；新意图保留，旧任务的有效观察仍可记账并返回 Superseded。
 登记和完成的 CAS 竞争最多在一次调用内重试 16 次，耗尽返回存储不可用，由调用方
-调度后续尝试；已完成的 Client 请求不重做。
+调度后续尝试；本次调用内只重试写回，调用退出后丢弃结果，下次从头执行。
 
 核心在调用完成 CAS 前缓存精确 write ID、expected 和 write。存储保存最近一次 CAS
 写回执，PAP 更新不清除它；提交后 unwind 的相同写入返回 AlreadyApplied，避免再次
-处理已经删除的 Absent 行。回执只保证最近写入的重放，调用方必须共享执行上下文，
-在确认模糊写结果前不启动同一 Binding 的下一次 CAS 写入。
+处理已经删除的 Absent 行。回执只保证最近写入的重放。调用方由同一个 WorkQueue 调度，前次调用及异常收尾
+实际退出后才能再次执行同一 Binding；跨调用不复用结果或写入对象。
 整个聚合删除时同时移除回执；缺失 ID 的删除重放返回 AlreadyApplied，替换返回 Conflict。
-此幂等性依赖 ID 永不复用，不引入无限保留的 tombstone。删除也比较完整快照，不能
+此幂等性依赖 ID 永不复用，不引入无限保留的 tombstone。删除也比较全部协调字段，不能
 因旧任务 revision/status 匹配就抹掉新 runtime 或 deployment。判定清理完成仍在核心。
 
 数据库负责一致读、原子条件写、身份校验和写回执；READY/DELETED 判定、观察归属、
-退避计算及 execution slot 不属于存储职责。SQLite 后续实现同一短事务契约，网络
+退避计算及本次调用的 slot 不属于存储职责。SQLite 后续实现同一短事务契约，网络
 调用始终在事务之外。补扫和 orphan 恢复仍属于后续调度/持久化工作包。
 
-### 6.4 执行锁与同 revision 的竞争
+### 6.4 调度串行与同 revision 的竞争
 
-执行锁覆盖“锁内重读 -> claim -> prepare/持久化 -> Client -> 结果事务 -> 收尾”。
-新 worker 必须先取得同一 Binding 锁，再 claim；旧 worker 的 I/O、blocking task、
-结果回调必须全部完成或 join 后才能释放，不能留下之后继续写库的 detached 工作。
-PAP 准入不拿这把长锁，只使用短 repository 事务。
+Runtime/WorkQueue 的 Running entry 覆盖“重读 -> claim -> prepare/登记目标 -> Client ->
+结果事务 -> 收尾”。同一 Repository 使用一个队列；旧调用及异常收尾实际退出前，重复通知
+只设置 dirty，不会让另一个 worker 领取同一 Binding。核心不再维护执行锁表。
+PAP 准入不受 Running 阻塞，只使用短 repository 事务。
 
 例：worker 认领 `(revision=2, APPLYING)`；PAP Delete 写入 `(2, PENDING_DELETE)`。
 旧 worker 即使成功创建目标，也只能保存目标事实，其 READY/重试/失败状态 CAS 必须
-失败。随后 Delete worker 获取锁，重读并清理包含该新目标在内的全部记录。
+失败。随后 Delete worker 从队列领取，重读并清理包含该新目标在内的全部记录。
 
 `APPLYING -> PENDING_DELETE` 后的所有 UPDATE 均拒绝，不存在转回 Apply 的路径。
 同 spec ApplyFailed 重试虽然 revision 不变，仍须等旧结果确认后再 claim，避免同一
-Binding 的新旧尝试重叠。“先锁后 claim、锁覆盖全部结果写回”由竞争测试保证。
+Binding 的新旧尝试重叠。“Running 覆盖全部结果写回”由 Runtime 竞争测试保证。
 
 本提案不新增公开 operation revision。同 revision/status CAS 的有效性依赖单 daemon、
 本地串行执行与完整 task ownership；未来多 worker 进程、租约抢占或异步晚到写入
@@ -397,13 +395,13 @@ Binding 的新旧尝试重叠。“先锁后 claim、锁覆盖全部结果写回
 
 ### 7.0 共享契约与依赖方向
 
-内部契约变更记录：Adapter 提交 `17efa1e8` 已替换 foundation 阶段未被外部消费者
+内部契约变更记录：Adapter 契约替换 foundation 阶段未被外部消费者
 采用的 target 草案。旧 `TargetDescriptor`、`TranslatorIdentity`、artifact metadata、
 diagnostics/capability 集合及 `TranslationOutcome` 的 `status/result` JSON envelope
 已退役；当前 `TargetBindingPlan` 序列化为 `format/content`，不再有
 `artifactContractId/mediaType` 字段。`TranslationOutcome` 与 `TranslationRejection`
-是进程内 Rust 返回值，不声明 wire/state 格式；真正保存的 plan、prepared 和
-deployment report 保留 serde。共享层抽取只调整 import 边界，不再次改变这些格式。
+是进程内 Rust 返回值，不声明 wire/state 格式；plan、prepared 和 deployment report
+保留 serde 用于完整契约 fixture，生产流程不把它们写入 Repository。共享层抽取只调整 import 边界，不再次改变这些格式。
 该内部变更不要求保留旧无消费者类型；未来跨进程传递 outcome 时须另定版本化契约。
 
 `asc-policy-target-contracts` 独立定义 `TargetBindingAdapter` 和
@@ -414,15 +412,22 @@ deployment report 保留 serde。共享层抽取只调整 import 边界，不再
 
 Reconciler 和具体 Client 均依赖共享契约，Client 不依赖 `asc-pcp`。
 `asc-pcp` 为既有消费者重导出接口和数据；共享存储记录及数据库端口定义在
-`asc-policy-repository`，执行锁、认领、部署记账和重试决策留在核心内部。
+`asc-policy-repository`；认领、部署记账和重试决策留在核心内部，串行执行由 Runtime/WorkQueue 保证。
 Adapter 可通过现有闭包实现接入共享端口。
 PEP 专有 DSL、UUID、HTTP 编码及不透明 prepared/cleanup 内容均不下沉。
 
 真实 Adapter/Core/Client/HTTP 组合测试放在 `asc-pcp` 的测试目标，Client 的独立
 测试不依赖核心或内存 Repository。共享层支持多个实现，但本次不新增多 PEP
 同时下发、跨路由迁移或分布式事务能力。数据序列化和现有目标操作语义均不改变。
+Apply 检测到旧目标与本次目标跨 route 时，以 `Rejected / RECONCILE_TARGET_UNAVAILABLE`
+结束本次尝试并进入 APPLY_FAILED，不自动重试；保留全部旧部署责任，不调用 create/update。
+这与 Delete 缺少某个旧 route Client 时的有界重试分类不同。
 
 ### 7.1 请求准备及稳定输入
+
+每次调用重新读取、翻译和准备，无论 dirty 或 revision 是否变化。本次准备结果原样
+交给本次 Client；退出后释放。目标记录用于清理和决定 create/update，不作为步骤断点。
+
 
 Adapter 负责支持范围内的语义转换和 DSL 编码检查，不依赖单独固定版本的
 ActPlane compiler。目标 DSL 是否被接受，以实际部署的 AgentSight/ActPlane 为准。
@@ -434,11 +439,11 @@ validate-only 调用；编译拒绝由 Apply 响应报告。因此 update 仍可
 计划格式及 frozen DSL 输出不变，现有语义拒绝测试继续作为 Adapter 验收依据。
 此变更的验收类型为内部 Adapter 契约调整：Adapter、Client、PCP 三个 crate 的
 `cargo test -p asc-policy-adapter-agentsight -p asc-agentsight-client -p asc-pcp --locked --offline`
-全部通过，包含完整 Adapter golden、直接消费者及 loopback HTTP mock 组合测试；
-不代表真实部署版本的编译兼容性。回退须一起恢复编译器调用、依赖、lockfile 和
+应覆盖完整 Adapter golden、直接消费者及 loopback HTTP mock 组合测试；
+具体结果见验收报告，不代表真实部署版本的编译兼容性。回退须一起恢复编译器调用、依赖、lockfile 和
 编译断言，无 wire/state 格式迁移；不得恢复仅凭本地编译成功宣称目标兼容的结论。
 
-当前 [AgentSight Client](../../v2/crates/integrations/asc-agentsight-client/README.md)
+当前 [AgentSight Client](../../v2/crates/asc-agentsight-client/README.md)
 实现 `asc-policy-target-contracts::TargetDeploymentClient`，只保留下列稳定准备/重放
 路径。旧 `apply(plan)` 和 `delete(binding_id, revision)` 入口已移除，避免同一 UUID
 下每次重新读取进程 start time；自定义 resolver 必须实现 boot identity：
@@ -452,22 +457,18 @@ delete(targets) -> DeploymentReport
 
 - `prepare_apply` 只做本地验证、身份解析和序列化，不发改变目标状态的请求。
   输出包含 target 身份、完整稳定 request body、格式版本与 digest；随后由 Reconciler
-  保存，再调用 Client。credential 从运行配置取得，不进请求持久化内容。
+  登记 target 引用，再调用 Client；prepared 仅保留在本次调用内。credential 由 Client 管理。
 - `create(prepared)` 就是创建操作，执行目标请求并返回结果，不是创建前的逻辑。
   此前讨论中的 `apply_prepared` 指同一能力，不保留同义方法。trait delete 委托
   `delete_targets` 批量清理；每批只解析一次目标引用，并在首个修改请求前验证全量
   引用。update 的旧目标清理复用该验证结果。
 - `prepare_apply` 不重复 Adapter 翻译，也不写 repository；AgentSight 的 UUIDv5、
-  进程身份解析和请求编码都在 Client 内。Reconciler 保存返回的 prepared 产物，
-  重试时原样交回匹配的 Client，不理解或重新构造其目标专有内容。
+  进程身份解析和请求编码都在 Client 内。Reconciler 将本次 prepared
+  原样交给匹配的 Client，不理解或重新构造其目标专有内容。
 - `update` 封装具体 PEP 的更新机制；AgentSight 当前按先清理旧目标、再创建新目标
   实现。其他 PEP 可支持原地更新，不把先删后建固化成 Reconciler 的通用步骤。
-- AgentSight 的准备结果固定 root PID、process start time，并保存本机 boot identity
-  作为本地重放校验条件。重试先确认仍为原进程；PID 复用、进程退出或主机重启导致
-  身份不匹配时拒绝新的 Apply，不能读取新 start time 后偷偷改 body。
-- 同一 revision 的重试复用保留的 prepared request；若准备尚未成功、也从未发过
-  创建请求，可以重新准备。删除后重新部署使用新 Binding ID、revision 1 和新目标 UUID，重新准备
-  并登记请求；同 revision 的重试不能偷偷绑定新进程。
+- AgentSight 本次准备固定 PID、start time、boot identity 和请求摘要，发送前再次校验。
+  下一次调用重新解析当前进程身份，不保留跨次比对依据，也不保证跨次仍为同一进程。
 - `previous_targets` 含实际部署记录，必须按 target 身份去重并排除本次新目标身份。
   即使新目标已以 UNKNOWN 登记，也不能把它放入“先删除的旧目标”集合。
 - 旧 revision 记录只需可定位/可清理输入，不要求重新运行旧 Adapter 或保存旧完整 IR。
@@ -478,7 +479,7 @@ delete(targets) -> DeploymentReport
 ```text
 Adapter.translate(完整 Binding)
   → Client.prepare_apply(plan)：生成目标身份与不透明 prepared
-  → Reconciler：原子保存 prepared 和 UNKNOWN 目标记录
+  → Reconciler：原子登记 UNKNOWN 目标记录；prepared 留在本次调用内
   → Client.create(prepared) 或 Client.update(previous_targets, prepared)
   → Reconciler：保存结果并按 expected revision/status 推进状态
 ```
@@ -494,27 +495,28 @@ repository，也不通过回调更新它。上述请求前保存首阶段为内�
 
 ### 7.2 Apply/Update 单次流程
 
-1. 获取执行锁并重读 current；终态、未到期或已被其它执行拥有时跳过。
+1. Runtime 领取并标记 Running 后重读 current；终态或未到期时跳过。
 2. 原子 claim 当前 Apply，保存 running 与消耗的一次预算。
-3. 复用当前 prepared request，或 Adapter 翻译完整 spec 后由 Client 准备。
+3. Adapter 重新翻译完整 spec 后由 Client 准备本次请求。
    deterministic rejection 直接产生永久失败；准备失败也不得调用目标修改接口。
-4. 原子保存新目标 UNKNOWN、稳定请求，保留旧目标；提交失败则不发请求。
-5. 发请求前再次检查当前意图；已被覆盖则停止新调用，保留已登记的清理责任。
-   检查后仍可能与新 Delete 竞争，因此该检查不能替代目标记账和最终状态 CAS。
+4. 原子登记新目标 UNKNOWN，保留旧目标；提交失败则不发请求。
+5. 目标登记的条件写检查当前意图；若已被覆盖则停止调用。登记后仍可能与新 Delete
+   竞争，需保留目标记账和最终状态 CAS。
 6. 无关联目标需要更新时调用 create；有关联部署时调用 update，包括 PEP 复用同一
    目标 ID 原地更新的情况。Reconciler 用 Client 提供的身份区分本次目标与其它旧目标，
-   不能把本次目标误作待删除对象；prepared 重试也不能因预登记 UNKNOWN 而重建目标。
+   不能把本次目标误作待删除对象；预登记的 UNKNOWN 不属于断点缓存。
    部署记录与 prepared 由 Reconciler 提供，PEP 内部步骤由 Client 封装。
 7. Client 返回全部可确认结果；Reconciler 提交结果事务。只有新目标明确 Present、
    需要替换的旧目标全部明确 Absent，且 current 仍匹配该 claim，才写 READY。
-8. 若被新意图覆盖，返回 Superseded，只保存目标事实；调度器接着检查最新意图。
+8. 若被新意图覆盖，返回 Superseded，只保存目标事实；有新通知时调度器立即检查最新意图，
+   否则经过有次数上限的延迟重试。
 
 Client 的 update 可以有策略短暂未生效窗口，本阶段不承诺原子替换。失败不自动回滚 A。
 若一个旧目标删除失败，Client 不应继续创建 B 并把整体报告为成功；已完成部分仍返回。
 
 ### 7.3 Delete 单次流程
 
-1. 获取执行锁后重读当前 `PENDING_DELETE`，原子 claim 到 `DELETING`。
+1. Runtime 领取并标记 Running 后重读当前 `PENDING_DELETE`，原子 claim 到 `DELETING`。
 2. 枚举该 Binding 全部尚未确认不存在的目标；保留其原 target 和来源 revision。
 3. 若没有目标，只有在前置登记不变量成立、且旧本地 worker 已完整退出的前提下，
    才能直接条件删除整个聚合。不能对旧格式、记录丢失或配置不可读的状态使用此捷径。
@@ -549,38 +551,42 @@ Apply 仍可能晚完成；本阶段没有远端操作查询/fencing/order 协�
 
 ## 8. 通知、重试、恢复与 daemon 生命周期
 
-### 8.1 意图与基本调度（交互块；补扫为后续 TODO）
+本节保留旧核心阶段的范围与提案。后续 Runtime 集成以
+[新设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)第 4～9 节为准：实现 dirty 合并、
+WaitingRetry、容量及补偿；重启不恢复 prepared。跨重启只保留 Binding 状态/错误和目标责任；次数与 deadline 重置。
 
-current 行中的 pending status、operation 与 next_attempt_at 是执行事实来源，
+### 8.1 意图与 Runtime 调度
+
+Repository 中的 Binding spec、status/error 与 deployments 是持久状态边界；
+当前实现仍为内存 Repository。次数与 next_attempt_at 由 WorkQueue 的 AttemptSchedule 持有，
 内存通知只携带 Binding ID。PAP 成功提交后尝试唤醒；worker 获取执行权后重读。
 重复或乱序通知不能直接调用旧命令，不能增加重试次数，也不能重置退避时间。
 
-首阶段使用简单事件分发和到期 timer，接入已有 shutdown；无需固定间隔补扫。
-后续 `TODO(reconcile-rescan)` 可按 `next_attempt_at, binding_id` 稳定排序分页扫描，
-补偿丢失通知，不实现通用调度器。核心验收直接触发调用，不要求实现此调度优化。
-
-基本事件交接应让已接受的 Delete 在旧执行结束后得到处理，可通过保留通知或
-结束时检查 current 实现，不依赖补扫或 dedup。通知通道失效时显式报告调度错误，
-不能宣称目标已完成；交互块验证实际交接路径。自动补扫补偿留为后续 TODO；进程
-退出后恢复已提交意图另依赖 SQL 阶段，首阶段内存无此保证。
+Runtime 已实现有界 WorkQueue、dirty 合并、到期 timer 与按稳定 Binding ID 的分页补扫。
+队列拒绝后 PAP 条件写入 Failed 和原因并返回完整 BindingView；若 worker 已认领则返回当前状态。
+补扫只重新发现 pending/running，不自动恢复 Failed。Running 条目直到调用实际退出
+才结束。同一 Repository 使用一个 Runtime。跨进程恢复仍需后续持久化 Repository。
 
 ### 8.2 重试参数与计数提案
 
-以下默认值是本次实现提案，尚未发布为现有配置；工作包需同步配置、帮助和 fixture。
+当前 daemon 采用以下内部默认值，不暴露额外 CLI 配置：
 
-| 参数 | 提议默认值 | 验证与语义 |
+| 参数 | 默认值 | 语义 |
 |---|---|---|
-| max_attempts | 5 | 正整数，包含首次；零次不允许 |
-| base_delay | 1 秒 | 正数 |
-| max_delay | 30 秒 | 不小于 base_delay |
-| request_timeout | 10 秒 | 单次目标请求的本地期限，非远端取消保证 |
-| attempt_timeout | 30 秒 | 一次 reconcile 的本地执行期限，含多个目标调用 |
-| recovery_scan_interval（后续 TODO） | 5 秒 | 不作为首阶段配置或验收要求；启用补扫时再固定 |
-| shutdown_grace | 35 秒 | 停止准入后的本地排空窗口，配置时覆盖 attempt_timeout 及有界收尾 |
+| max_attempts | 5 | 包含首次，在 claim 时消耗 |
+| base_delay / max_delay | 1 秒 / 30 秒 | 指数退避 |
+| request_timeout | 10 秒 | Client 单次 HTTP 请求期限，不证明远端取消 |
+| workers / queue capacity | 4 / 65,536 | 容量包含排队、执行、等待和耗尽条目，按实际条目分配内存 |
+| scan page / tick interval | 128 / 100ms | 按稳定 ID 分页补扫与检查到期 |
+| storage retry | 1 秒 | 存储失败后的调度等待 |
+| shutdown drain | 30 秒 | 等待 Runtime join；外层 Tokio 再有 1 秒停机上限 |
+
+首版没有独立的整个 reconcile attempt timeout；一次调用可能包含多个目标请求。
+停机超时由进程退出结束等待，不能视为远端请求已取消。
 
 第 n 次失败后，若仍可重试：`delay = min(max_delay, base_delay * 2^(n-1))`，
 使用饱和计算。首阶段可不加 jitter；测试使用可控时钟，不以真实 sleep 验证退避。
-等待退避时释放执行锁与 worker 资源。
+等待退避时 entry 转为 WaitingRetry，释放 worker 资源。
 
 attempts_started 在 claim 事务中、任何外部副作用前递增。daemon 在 claim 后崩溃，
 该次仍计入预算。相同 pending UPDATE、重复 DELETE、重复通知及进程重启均不重置。
@@ -589,13 +595,13 @@ attempts_started 在 claim 事务中、任何外部副作用前递增。daemon �
 
 Adapter 语义拒绝、Client 明确拒绝不重试；暂时不可用或结果不明按安全分类重试。
 错误是否可重试与目标是否存在分别保存：不可重试也不能删除 UNKNOWN 记录。
-持久化失败由服务 health 报告，不能因为无法写结果而伪造 READY/DELETED 或直接重发 HTTP。
+持久化失败由服务 health 报告，不能因为无法写结果而伪造 READY/DELETED；后续调用先恢复存储状态，再按当前意图重新执行。
 
 ### 8.3 崩溃窗口与恢复处理（跨重启部分为后续 SQL 阶段）
 
 首阶段验证进程内原子更新、请求失败和任务收尾；本表涉及进程退出后恢复已有记录
 的场景，依赖 SQL repository，仅作为后续契约。内存重建不能通过这些验收，也不阻碍
-首阶段功能交付。进程内基本任务交接归交互块；定期补扫同样延期，不阻碍核心验收。
+首阶段功能交付。进程内基本任务交接、定期补扫由 Runtime 的组件测试验收。
 
 | 崩溃/故障窗口 | 恢复依据与动作 |
 |---|---|
@@ -613,7 +619,7 @@ Adapter 语义拒绝、Client 明确拒绝不重试；暂时不可用或结果�
 启动恢复在获取 host singleton 后运行，拒绝不兼容 schema，并建立 worker 所有权。
 将上一进程遗留的 APPLYING/DELETING 当作未知结果的已开始尝试：保留所有记录和预算；
 预算耗尽时记失败，否则恢复对应 pending 并安排退避，不能直接标记成功。
-本进程运行中的 task 不能被补扫误作 orphan；只能在其已退出/完整 join 后在执行锁内恢复。
+本进程运行中的 task 不能被补扫误作 orphan；只能在其已退出/完整 join 后由队列重新领取后恢复。
 
 重启后的退避沿用持久化时间；识别时钟异常时使用不超过 max_delay 的保守重新等待，
 不重置 attempts。此项需 fake-clock 的前跳/后跳 fixture，避免重启无限等待或无限重试。
@@ -632,86 +638,69 @@ degraded，具体映射在 DJOB/DPROC fixture 固定，不能把 systemd active 
 shutdown 顺序：停止新的 mutation 准入和通知触发，停止新 claim，等待已拥有执行
 有界收尾并保存可保存的观察；时间耗尽时保留 UNKNOWN/running 与已消耗预算供恢复。
 blocking 调用必须有超时并受 ownership 管理；不能取消外层 future 后丢弃仍在后台
-运行的调用，然后释放锁给新 worker。进程退出后的远端晚完成仍受第 7.4 节限制。
+运行的调用，然后把同一 ID 交给新 worker。进程退出后的远端晚完成仍受第 7.4 节限制。
 
 health 使用 running/degraded/stopped 与最近 outcome 分开表达。一次策略被目标拒绝
-只改变该操作 outcome，不把长期服务永久设成失败。存储持续失败、worker panic/退出
-必须反映到服务 health；恢复前停止新的目标副作用。
+只改变该操作 outcome，不把长期服务永久设成失败。补扫持续失败、timer/scanner 或调度线程异常退出
+反映到服务 health。单 Binding 存储/数据错误输出安全诊断并安排重试，
+CAS 耗尽独立返回 Contended；自动重调度必须等待且默认最多 4 次。耗尽后保持 Running，
+条件写入 Failed/RECONCILE_RETRY_EXHAUSTED，确认后释放 slot；仅终止未确认时保留 Exhausted。
+失败不表示目标不存在，不修改部署责任。队列预算仅在当前 Runtime 有效。
+新通知仍立即触发并重置队列预算，核心已提交的业务预算不变。这些错误及补扫降级不关闭写准入。
+单次 reconcile panic 在 worker 调用边界隔离，worker 继续服务其它 Binding。
+timer/scanner 或 worker 队列内部维护代码 panic 则停止新领取并关闭 Binding 写准入，daemon 保留其它服务。
+Policy/Scope 写操作只依赖自身校验、编译及 Repository；具体写失败由 Repository 返回。
 
-当前同步核心的 panic 收尾契约：在执行锁保持拥有期间捕获 unwind；有实际完成
+当前同步核心的 panic 收尾契约：在 WorkQueue 仍保持 Running 期间捕获 unwind；有实际完成
 结果则优先提交，否则以 `RECONCILE_WORKER_PANICKED` 对原 claim 做失败 CAS。
-失败不代表目标不存在，prepared、UNKNOWN 与清理责任均保留；新意图不能被覆盖。
-收尾存储失败则缓存结果，下次先重试记账。完成事务允许相同结果的安全重放，内存
-adapter 为现存记录保留最近一次 CAS 回执；核心缓存精确写入。整个聚合删除后的
-重放以缺失 ID 确认，覆盖删除提交后才发生的 panic 或响应错误，不重复 Client 调用。
-随后释放健康执行锁并恢复原 panic，让任务拥有者观察失败并更新 health；不能把
+失败不代表目标不存在，UNKNOWN 与清理责任均保留，prepared 随本次调用退出丢弃；新意图不能被覆盖。
+本次收尾存储失败则丢弃临时结果；Runtime 尝试对原意图条件写 Failed，
+仅终止仍无法确认时保留 Exhausted 阻止自动重放；
+后续显式新通知触发时按 Repository 事实处理最新意图。
+同一次调用内，内存 adapter 的最近 CAS 回执支持提交后 unwind 的精确写入重放；
+整个聚合删除后的重放以缺失 ID 确认，不在 panic 收尾中重复 Client 调用。
+完成本次收尾后恢复原 panic，由 worker 捕获并记录本次失败，不直接关闭服务；不能把
 panic payload 投影为公开错误。此机制不捕获 abort，不修复已中毒的 backend，不替代
 后续 daemon failed-join/DJOB/DPROC fixtures 或 durable startup recovery。
 
-execution slot 由 `asc-pcp::ReconcileExecution` 持有，构造多个 worker 时必须传入
-同一 Arc 上下文。未知 ID 先读库，确认缺失时不分配；已有 Binding 首次分配后仍在
-锁内重读，防止等待期间使用旧意图。Binding 存在期间（含终态）保留同一槽位，
-物理删除成功且待提交结果已确认后，从 registry 移除同一个 Arc 槽位；等待者保留
-其旧 Arc，重读缺失后返回，不再调用 Client。ID 不复用，因此不会拆分活跃 Binding
-的执行锁；晚到的分配也必须锁内重读并回收空槽位。删除确认失败时保留槽位先重试记账。
+核心仅保留每次调用新建的 `ExecutionSlot`，保存待提交结果和本次写入凭据；没有共享锁表、
+槽位分配或回收。未知 ID 读取缺失后直接返回。slot 随调用退出而丢弃，不能在进程崩溃后写回。
+Runtime 在同步调用及 unwind 收尾、结果查询结束前保持 Running。结果已终结或记录缺失时
+移除条目；原意图仍 pending/running 时条件写 Failed，确认成功后移除；查询/写入失败或 panic
+导致终止无法确认时保留 Exhausted。Skipped 调度查询同样纳入单 Binding panic 隔离。dirty 优先于旧结果，
+转为 Queued；新调用不得在前次收尾结束前进入。
 
 ## 9. API 运行结果与诊断提案
 
-内部 deployments/prepared request 不直接加入公开 API。建议扩展复用的 BindingView
-为 `spec + status + runtime`，runtime 是领域定义的有界公开投影，不在 handler 再定义
-一套领域 CRUD 类型。下表字段尚待 CR-009 的序列化契约和消费者验证后冻结。
+内部 deployments/prepared request 不直接加入公开 API。BindingView 为 `spec + status`，
+其中 status 为 `{phase, error?}`；error 使用有界 `{kind, code}`，不暴露远端正文。
+状态和原因由同一 Repository 条件写更新。自动重试 Pending 保留上一失败原因；
+开始 Applying/Deleting 时清除；显式请求进入 Pending 时清除。
 
-| runtime 字段提案 | 语义 |
-|---|---|
-| `operation` | 当前/最近 Apply 或 Delete，不用于身份或增版 |
-| `attemptsStarted`、`maxAttempts`、`nextAttemptAt` | 已持久化预算与计划；终态 nextAttemptAt 为 null |
-| `lastError` | null 或 `{code, message, retryable}`，message 最多 256 UTF-8 bytes，禁止回显原始远端 body/路径/凭据 |
-| `deploymentObservation` | `PRESENT` / `ABSENT` / `UNKNOWN`，按目标记录保守聚合 |
-| `observedAt` | 支撑上述确认的时间；无充分确认时为 null，不伪装为实时观测 |
+重试次数和 nextAttemptAt 属于 WorkQueue 的进程内 AttemptSchedule，不属于持久化
+记录或 BindingView。自动重试保留该进度，显式新请求或重建队列重置。RetryPolicy 来自
+Runtime 装配的配置，不随 Binding 存储。移除原 `spec + status + runtime` 投影提案。
+可重试 error 与是否继续执行不同：FAILED 表示自动重试停止，即使 error.kind 为 RETRYABLE。
+mutation、GET、LIST 使用同一状态结构；状态变化和错误变化不改变 spec revision。
 
-aggregation：任一目标 Unknown 则 UNKNOWN；所有仍需考虑的目标均明确 Absent
-且不存在未记账本地操作时才为 ABSENT；有明确 Present 且无不确定目标时可为 PRESENT。
-PRESENT 只表示某些关联部署最近确认存在，不等同于当前 spec 已成功应用；是否达成
-最新 Apply 以 status=READY 及该次结果判断。没有记录但尚有 in-flight/未确认输入，
-不能只按空集合给 ABSENT。
-
-可重试 error 与是否还会自动重试分开解释：预算耗尽时 error.retryable 可以为 true，
-但 FAILED 和 nextAttemptAt=null 表示自动重试停止。不要为此把原错误分类改成永久拒绝。
-mutation、GET、LIST 采用同一投影，按一致读快照生成；新增字段计入既有 response
-预算，不能把无限目标列表或 request body 放入公开 BindingView。
-
-用户表达示例：
-
-- 所有目标明确 Absent 且 APPLY_FAILED：策略应用失败；最近确认无关联部署；自动重试停止。
-- 任一目标 Unknown 且 APPLY_FAILED：策略应用失败，当前生效状态无法确认；自动重试停止。
-- DELETE_FAILED：删除未完成，保留未确认清理的目标；不能宣称已回滚或已全部撤销。
-
-异步执行失败通过 Binding runtime/status 和安全诊断表达，不追改已经成功返回的
-PAP response。同步准入失败仍使用原 daemon error 层。
-
-每次实际 reconcile 用 OTel SDK 管理 span，记录 Binding ID、binding revision、操作、
-attempt、安全 error code 和 outcome；不自造 trace ID，不把 TraceId 当 CAS/幂等键。
-安全事件持久化若接入，独立于采样/exporter；本方案不把所有后台操作都虚构成既有
-SecurityEvent 类型，新增事件需同步相应语言无关 contract 与 fixture。
 
 ## 10. 实现工作包与依赖
 
-所有工作包均是待实施；每个包单独提供编译、可执行测试、直接消费者证据与回滚说明。
+每个工作包单独提供编译、可执行测试、直接消费者证据与回滚说明。
 类型/端口定义可先与 fake consumer 验证，不要求全局 backend-first 或统一冻结。
 
 | 工作包 | 交付范围 | 直接依赖与消费者 | relationship / acceptance |
 |---|---|---|---|
-| W1：PAP/API revision 对齐 | CR-001 至 CR-008；类型/状态表、PAP、memory adapter、protocol 与完整 CRUD fixture | 当前已合入 PAP API 的基线；消费者为 daemon core/handler/UDS | greenfield V2 correction / GREENFIELD_CONTRACT |
+| W1：PAP/API revision 对齐 | CR-001 至 CR-008；类型/状态表、PAP、memory adapter、protocol 与完整 CRUD fixture | PAP API 类型及契约；消费者为 daemon core/handler/UDS | greenfield V2 correction / GREENFIELD_CONTRACT |
 | W2：运行状态和事务 ports | 第 6 节记录、准入/认领/结果原子接口、retry control、内存 adapter 实现及 CAS consumer | W1 类型；PAP 和 Reconciler 直接消费；SQL schema 随 W5 | greenfield / GREENFIELD_CONTRACT |
 | W3：Client 准备与 update | 稳定请求、进程身份、旧/新目标分类、批量 delete、部分结果和幂等 | 现有 Adapter/Client；W2 的目标记录契约；Reconciler 消费 | adapter / ADAPTER_CONFORMANCE |
 | W4：Reconciler 单次执行 | Apply/Update/Delete、锁边界、结果 CAS、有界重试决策、虚拟时钟 | W2/W3 ports；fake repository/client/adapter 与 worker consumer | greenfield / GREENFIELD_CONTRACT |
 | W5：durable Repository（后续） | schema、约束、事务、due 查询、close/reopen 与跨重启恢复 | W1/W2；PAP/Reconciler 消费；不阻碍 W4/W6 首阶段交付 | adapter / ADAPTER_CONFORMANCE |
-| W6：daemon 集成与 runtime API | 基本通知、已有启停接线、CR-009、真实 UDS 与进程测试；补扫留 TODO | W1 至 W4 + 内存 repository；后续接 W5 增加跨重启恢复 | partial migration / PARTIAL_EQUIVALENCE + GREENFIELD_CONTRACT |
+| W6：Runtime 与 daemon 集成 | Queue/worker、到期/补扫、daemon 接线及单元/组件/竞争测试；完整 E2E 单独 PR | W1 至 W4 + 内存 Repository；后续接 W5 增加恢复与系统性注入测试 | partial migration / PARTIAL_EQUIVALENCE + GREENFIELD_CONTRACT |
 | W7：真实目标与发布证据 | AgentSight wire 联调、kernel E2E 条件验证、部署/升级回滚报告 | W6 和真实环境 | ADAPTER_CONFORMANCE / DISTRIBUTION_LIVE |
 
-W1 直接基于当前已合入 PAP API 的 checkout，Client 变更保持独立，再由集成分支
-装配；本轮仅更新文档。若拆成独立可合并 PR，记录各自 base
-和直接依赖，不让隐含 stacked 历史代替依赖说明。
+工作包按直接依赖推进；Client 变更与 Runtime 装配分别说明契约和消费者。
+各 PR 在验收报告中记录版本与直接依赖，不依赖未写明的分支堆叠关系。
 
 每包的完成记录包含：baseline、contract revision、V1 relationship、acceptance type、
 保留/修正行为、pass/fail 矩阵、外部兼容报告、内部 change record、直接消费者与 rollback。
@@ -729,14 +718,12 @@ repository，无需等待 W5，但不能声明 W5 的耐久性已验收。W7 不
 
 ### 11.1 产物与执行约定
 
-`v2/fixtures/reconciliation/ACCEPTANCE.md`、完整 JSON、crate-local runner 已建立；
-核心 22 项 / 47 变体及真实 Adapter/Client 的本地 HTTP 组合已通过。下面跨组件矩阵
-的 PAP、daemon、SQL 和真实 PEP 项目不能据此改成 PASS，分别按 [执行报告](../../v2/fixtures/reconciliation/RESULTS.md)
-标注未实现边界，不能以 Markdown 编号完成验收。
-若接入其它已有 Reconciler 分支，先迁移其旧 operation-revision fixtures，不能两套
-相互冲突的 fixture 都作为当前标准。
+核心标准、完整 JSON 与 crate-local runner 必须共同提供证据。PAP、daemon、SQL 和
+真实 PEP 按各自执行范围在[验收报告](../../v2/fixtures/reconciliation/RESULTS.md)记录结果，
+不能以核心测试或 Markdown 编号代替。旧 operation-revision fixtures 随契约升级，
+不能将两套相互冲突的 fixture 同时作为标准。
 
-每个 fixture 必须含：完整初始 BindingView、部署/重试/请求持久化记录、完整输入请求
+每个 fixture 必须含：完整初始 BindingView、部署/重试记录、本次请求数据、完整输入请求
 或触发序列、可控时钟、按顺序注入的 Adapter/Client/Repository 结果、完整最终记录、
 完整外部响应或安全错误，以及严格有序 interaction trace。禁止只断言 READY 或只列
 Markdown ID；允许符号 UUID 引用，但不得删掉 spec、IR、digest 或关键请求字段。
@@ -753,7 +740,7 @@ observation commit、status CAS 成功/冲突、retry schedule、notification/re
 | REC-API-001 | 创建、spec A 改 B、相同 B 更新 | revision 1/2/2；完整 spec；同 spec no-op |
 | REC-API-002 | READY/PENDING_APPLY Delete | revision 不变，spec 字节语义一致，PENDING_DELETE |
 | REC-API-003 | PENDING_DELETE/DELETING 重复 Delete | 原 status/revision/runtime，预算不重置；已删除 ID 返回 NotFound |
-| REC-API-004 | APPLY_FAILED 同 spec UPDATE；所有删除状态 UPDATE | Apply 重试同版保留 prepared；删除侧全部拒绝；已删除 ID NotFound |
+| REC-API-004 | APPLY_FAILED 同 spec UPDATE；所有删除状态 UPDATE | Apply 显式重试同版重新准备；删除侧全部拒绝；已删除 ID NotFound |
 | REC-API-005 | APPLYING Delete，及各 ING 状态 UPDATE | Delete 成功；相同 APPLYING UPDATE no-op；其它受限 UPDATE 为原 conflict |
 | REC-API-006 | 最大 revision 下 Delete/同次部署重试/新部署 | Delete 和同次重试可成功；changed-spec 耗尽；删除后新 ID CREATE 从 1 开始 |
 | REC-API-007 | 完整 15-method UDS CRUD | 更新后的完整 fixture；删除引用同版本 pending-delete；所有后续 GET/LIST 一致 |
@@ -793,7 +780,7 @@ Reconciler 核心职责。独立核心门禁以本节前述 ACCEPTANCE.md 为准
 | REC-021 | target 配置切换或丢失 | 旧记录仍指向原目标；不误删新 endpoint，不因无法定位清空记录 |
 | REC-022 | 公开错误及观测 | Unknown 不报未部署；latest spec 失败但旧目标 Present 不报 READY；message 有界 |
 | REC-023 | fake Client 使用非 UUID 或直接复用 SecCore Binding ID 的目标身份 | 同一 Reconciler 流程不执行 UUIDv5/强制 UUID 校验；保存和回传 Client 身份；不新增真实 PEP 实现 |
-| REC-024 | prepared 是不透明目标内容 | prepare 不修改 PEP；repository 保存先于 create/update；重试原样回传；Client 无 repository 依赖或回调 |
+| REC-024 | prepared 是不透明目标内容 | prepare 不修改 PEP；target 登记先于 create/update；本次原样传递、下次重新准备；Client 无 repository 依赖或回调 |
 
 核心标准还明确覆盖 Adapter 语义拒绝/内部错误、prepare 失败、正常 update、
 结果事务失败后重试记账及不同 PEP 身份形式，详见 `REC-CORE-*`；不能只执行
@@ -801,7 +788,7 @@ Reconciler 核心职责。独立核心门禁以本节前述 ACCEPTANCE.md 为准
 
 ### 11.4 验证层次与命令
 
-W1 在包含 API crates 的基线上运行现有命令，并在实现后执行新增 case：
+W1 执行 API crates 的相关检查，并覆盖新增 case：
 
 ```bash
 cd v2
@@ -816,10 +803,10 @@ git diff --check
 
 W2 至 W6 按阶段添加各自 crate-local fixture runner 和 direct-consumer 命令后才可
 标记对应包 Definition Ready；本方案不把尚不存在的命令写成已执行。首阶段 W6
-使用内存 repository 验证真实进程/UDS 与信号场景。后续 W5 才要求真实文件 SQLite
+使用内存 Repository 验证组件装配与生命周期，完整进程链路 E2E 单独 PR。后续 W5 才要求真实文件 SQLite
 close/reopen；REC-016/017/019 中跨进程恢复部分及其它依赖磁盘耐久性的断言随 W5
 验收，不阻碍首阶段。不能用内存对象重建代替重启证据。
-完整集成基线再跑 `cargo test --workspace --locked`，固定 lockfile 和直接依赖版本。
+集成验证执行 `cargo test --workspace --locked`，固定 lockfile 和直接依赖版本。
 
 | 证据层 | 能证明 | 不能替代 |
 |---|---|---|
@@ -837,7 +824,7 @@ UDS 若受 sandbox 的 Unix-socket bind 限制，明确记为 BLOCKED/NOT RUN �
 
 ### 12.1 状态与协议升级
 
-API 基线只有 process-local repository，其内部记录不构成持久化迁移来源。新 durable
+process-local repository 的内存记录不构成持久化迁移来源。durable
 schema 明确版本、约束和拒绝降级行为，由显式安装/迁移工具负责升级，daemon bootstrap
 只验证兼容，不隐式执行不可逆迁移。
 
@@ -848,7 +835,7 @@ schema 明确版本、约束和拒绝降级行为，由显式安装/迁移工具
 
 ### 12.2 回滚
 
-- W1 的开发基线回滚按同一组代码、contract 和 fixture 撤回，不能只回滚 service。
+- W1 回滚按同一组代码、contract 和 fixture 撤回，不能只回滚 service。
   supported 客户端的协议回滚必须遵循第 4.3 节的版本化过渡。
 - W2 至 W6 回滚前停止 mutation 准入，停止新 claim 并完整收尾本地 worker。首阶段
   内存状态不能靠重启保留；需要清理的目标在丢弃内存前处理，无法确认的遗留目标
@@ -860,12 +847,12 @@ schema 明确版本、约束和拒绝降级行为，由显式安装/迁移工具
 
 ### 12.3 开始实施时必须核实的直接依赖
 
-| 项目 | 当前状态 | 影响范围 |
+| 项目 | 必须核实的内容 | 影响范围 |
 |---|---|---|
-| 当前 PAP API 基线、supported 发布状态 | 已合入当前 checkout，发布状态未核实 | W1/CR-009 的版本化升级与兼容记录 |
-| Client create 同 body 重放、目标状态确认 | 稳定 prepared、部分结果及本地 HTTP 组合已通过；真实目标仍未联调 | W3 本地证据见 RESULTS.md，真实 PEP 另验 |
-| 表结构、配置与 runtime 字段 | 本文给出具体提案，尚未通过 executable Definition Review | W2/W5/CR-009，按直接依赖推进 |
-| Reconciler runner、daemon worker | 当前 checkout 未交付本文目标实现；首阶段接内存 repository | W4/W6 无需等待 SQL adapter |
+| PAP API 契约与 supported 发布状态 | 消费者支持范围及版本化过渡要求 | W1/CR-009 的升级与兼容记录 |
+| Client create 同 body 重放、目标状态确认 | 固定请求、部分结果及目标端真实幂等语义 | W3 组件结果见 RESULTS.md，真实 PEP 另验 |
+| 表结构、配置与 runtime 字段 | 可执行 Definition Review 和序列化约束 | W2/W5/CR-009，按直接依赖推进 |
+| Reconciler runner、daemon worker | 核心、Runtime 与 daemon 的端口匹配及直接消费者测试 | W4/W6 首阶段使用内存 Repository，无需等待 SQL adapter |
 | SQL adapter 及跨重启恢复 | 后续阶段 | W5 及 durable 验收，不阻碍首阶段功能 |
 | 跨服务晚完成、持续漂移、队列优化 | 明确延期 | 如实记录发布限制；不冒充本阶段已保证 |
 
@@ -873,9 +860,9 @@ schema 明确版本、约束和拒绝降级行为，由显式安装/迁移工具
 讨论产品方向。实施中发现约束无法同时满足时，先更新受影响的具体提案和 fixture，
 不能恢复 Delete bump revision 来绕过并发问题，也不能扩大为未请求的通用调度框架。
 
-## 13. 内部接口与重复逻辑清理（2026-09-08）
+## 13. 内部接口与重复逻辑清理
 
-本轮清理不改变 PAP wire、AgentSight HTTP、prepared/cleanup 字节或运行记录格式。
+此类内部清理不改变 PAP wire、AgentSight HTTP、prepared/cleanup 字节或运行记录格式。
 内部 Rust 调用方须同步迁移，不能以“没有生产装配”为理由移除组件正式入口。
 
 | 清理项 | 当前约束与回归依据 |
@@ -884,14 +871,22 @@ schema 明确版本、约束和拒绝降级行为，由显式安装/迁移工具
 | PAP status-only 写口 | 删除 `PapRepository::update_binding_status`；实际 worker 仅用 aggregate CAS，测试状态注入也用 CAS；旧 status/revision 冲突分别验证 |
 | Delete 状态函数 | `request_delete() -> Self` 是全定义函数，移除无效错误层；所有状态的接纳/幂等规则由类型契约测试固定 |
 | 重复校验 | PAP 每次构造只校验一次对应输入/输出，共享 name 规则但保持原错误；Client 每批清理只解析一次 target；耗时操作后的 PID/boot 二次检查保留 |
-| 执行内部状态 | slot/mutex 和 AttemptOutcome 不再公开；互斥、未知 ID 不分配、删除回收、panic/receipt 断言移入核心 unit tests，不删除验收场景 |
+| 执行内部状态 | 本次 slot 和 AttemptOutcome 不公开；Runtime 验证调度互斥，核心验证缺失 ID、panic/receipt 与结果写回 |
 | 删除完成赋值 | 完成条件和观测校验后直接生成 aggregate delete，不再构造不会落库的 Deleted 状态更新 |
 
 Adapter 仅移除已被输入校验排除的 glob 长度分支和无人消费的动态错误文本；ABI 上限、
 不支持的 glob、DSL 字面量检查及完整 golden 保留。PAP FakeRepository 复用实际内存
 实现，只保留竞争/异常注入包装；这不构成 durable repository 的证据。
 
-验证包括 workspace tests、Clippy `-D warnings`、格式与 diff 检查，以及核心 47 个
-fixture 变体。详细执行记录见 [RESULTS.md](../../v2/fixtures/reconciliation/RESULTS.md)。
+验证包括 workspace tests、Clippy `-D warnings`、格式与 diff 检查，以及核心完整
+fixture 矩阵。详细执行记录见 [RESULTS.md](../../v2/fixtures/reconciliation/RESULTS.md)。
 回退需同组恢复内部接口、调用方及测试；无 wire/state 迁移，不得只恢复无部署记账的
-status-only 写口供实际 worker 使用。真实 AgentSight、SQL 与 daemon worker 接线仍不在本轮范围。
+status-only 写口供实际 worker 使用。Runtime、SQL 与真实目标的验收按各自工作包提供。
+
+## Binding 调度拒绝契约补充（V2）
+
+PendingApply/PendingDelete 允许因入队拒绝直接进入 ApplyFailed/DeleteFailed；PAP 通过
+专用 Repository 原子条件写同步记录原因。worker 只认领最新 Pending，已 Failed 的旧唤醒
+跳过。GET/LIST 的 status.error 随 status.phase 一起保存，不改变 spec revision 或部署身份。
+范围、并发限制、wire fixtures 与可执行 BQA-001～010 验收见
+[Binding 队列拒绝验收](BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。

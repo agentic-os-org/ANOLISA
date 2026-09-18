@@ -1,0 +1,10 @@
+rule_id: shell-cd-sensitive-dir
+cwe_id: CWE-284
+desc_en: >-
+  Changing directory to sensitive system paths that contain
+  credentials, keys, or critical configuration.
+desc_zh: >-
+  切换到包含凭据、密钥或关键配置的敏感系统路径。
+regex: '\bcd\s+'
+severity: warn
+target_regexes_ref: sensitive_file_paths

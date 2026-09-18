@@ -29,7 +29,7 @@ pub(super) struct CardInputState {
     /// Bracketed paste passthrough inside the draft card: newlines paste as
     /// draft newlines instead of submitting.
     draft_paste: bool,
-    draft_completion: Option<String>,
+    draft_selection: Option<prompt_draft::DraftSlashSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,6 @@ enum CardInputKind {
 
 impl CardInputState {
     pub(super) fn apply_capture(&mut self, capture: &RawInputCapture) {
-        self.refresh_draft_completion(capture);
         let kind = match capture {
             RawInputCapture::Question {
                 id,
@@ -197,6 +196,7 @@ impl CardInputState {
         self.pending_input.clear();
         self.draft = PromptDraftEditor::default();
         self.draft_paste = false;
+        self.draft_selection = None;
     }
 
     pub(super) fn consume(
@@ -262,11 +262,10 @@ impl CardInputState {
                         idx = self.draft_pasted_newline(capture, &input, idx, &mut events);
                         continue;
                     }
+                    events.extend(self.draft_complete_command_on_submit(capture));
                     let event = self.submit(capture);
                     let submitted = event.is_some();
-                    if let Some(event) = event {
-                        events.push(event);
-                    }
+                    events.extend(event);
                     // Always clear free_text after a submit attempt so that a
                     // subsequent capture (e.g. the next auth field) starts with
                     // a clean buffer.  The outer consume_captured_input also
@@ -652,7 +651,7 @@ impl CardInputState {
                 Some(RawInputEvent::SessionResume(id.clone(), self.selected))
             }
             RawInputCapture::Evidence { id } => Some(RawInputEvent::EvidenceSend(id.clone())),
-            RawInputCapture::PromptDraft { id, .. } => self.draft_submit_event(id),
+            RawInputCapture::PromptDraft { id, .. } => self.draft_submit_event(id, capture),
         }
     }
 

@@ -50,6 +50,52 @@ use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
+/// Late-bound effect backends shared by raw execution and compensation.
+#[derive(Clone, Copy)]
+pub(crate) struct RawEffectFactories<'a> {
+    /// Select the existing service backend for the requested scope.
+    pub(crate) service: &'a dyn Fn(
+        &str,
+        &anolisa_env::EnvFacts,
+        ServiceScope,
+    ) -> Box<dyn anolisa_core::ServiceManager>,
+    /// Select the existing capability backend without changing support policy.
+    pub(crate) capability:
+        &'a dyn Fn(&str, &anolisa_env::EnvFacts) -> Box<dyn anolisa_core::CapabilityManager>,
+}
+
+impl RawEffectFactories<'static> {
+    /// Production factories remain lazy until support observation or execution.
+    pub(crate) fn system() -> Self {
+        Self {
+            service: &|mode, env, scope| match scope {
+                ServiceScope::System => service_for_install_mode(mode, env),
+                ServiceScope::User => user_service_for_install_mode(mode, env),
+            },
+            capability: &capability_for_install_mode,
+        }
+    }
+}
+
+impl RawEffectFactories<'_> {
+    /// Use the execution backend's support policy when inferring legacy grants.
+    pub(crate) fn hydrate_owned_file_contracts(
+        self,
+        store: &mut StateStore,
+        layout: &FsLayout,
+    ) -> usize {
+        let env = anolisa_env::EnvService::detect();
+        let install_mode = match layout.mode {
+            anolisa_platform::fs_layout::InstallMode::System => "system",
+            anolisa_platform::fs_layout::InstallMode::User => "user",
+        };
+        let supported = (self.capability)(install_mode, &env).supported();
+        crate::commands::common::hydrate_owned_file_contracts_with_capability_support(
+            store, layout, supported,
+        )
+    }
+}
+
 struct ReplayBackup {
     source: PathBuf,
     dest: PathBuf,
@@ -90,6 +136,7 @@ pub(crate) struct RawReplayOps<'a> {
     now: String,
     operation_id: String,
     env: anolisa_env::EnvFacts,
+    effects: RawEffectFactories<'a>,
     log: CentralLog,
     /// Resolution to download from; consumed by [`OwnedOps::download_verify`].
     resolution: Option<RawResolution>,
@@ -122,6 +169,7 @@ impl<'a> RawReplayOps<'a> {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: &'a CliContext,
+        effects: RawEffectFactories<'a>,
         layout: &'a FsLayout,
         component: String,
         scope: InstallationScope,
@@ -140,6 +188,7 @@ impl<'a> RawReplayOps<'a> {
             scope,
             now,
             env: anolisa_env::EnvService::detect(),
+            effects,
             log: CentralLog::open(layout.central_log.clone()),
             resolution: Some(resolution),
             prior,
@@ -221,7 +270,7 @@ impl<'a> RawReplayOps<'a> {
             return Vec::new();
         }
 
-        let manager = capability_for_install_mode(self.ctx.install_mode.as_str(), &self.env);
+        let manager = (self.effects.capability)(self.ctx.install_mode.as_str(), &self.env);
         let outcome = apply_capabilities(
             manager.as_ref(),
             &requests,
@@ -348,7 +397,7 @@ impl OwnedOps for RawReplayOps<'_> {
 
     fn set_capabilities(&mut self) -> Result<StepSuccess, OwnedOpError> {
         let prepared = self.prepared()?;
-        let manager = capability_for_install_mode(self.ctx.install_mode.as_str(), &self.env);
+        let manager = (self.effects.capability)(self.ctx.install_mode.as_str(), &self.env);
         let outcome = apply_capabilities(
             manager.as_ref(),
             &prepared.capabilities,
@@ -379,9 +428,9 @@ impl OwnedOps for RawReplayOps<'_> {
         // contract restarts through `systemctl --user`.
         let manager: Box<dyn anolisa_core::ServiceManager> =
             if !services.is_empty() && services.iter().all(|s| s.scope == ServiceScope::User) {
-                user_service_for_install_mode(mode, &self.env)
+                (self.effects.service)(mode, &self.env, ServiceScope::User)
             } else {
-                service_for_install_mode(mode, &self.env)
+                (self.effects.service)(mode, &self.env, ServiceScope::System)
             };
         let run = apply_services(
             manager.as_ref(),
@@ -530,6 +579,7 @@ pub(crate) struct RawTeardownOps<'a> {
     install_mode: String,
     operation_id: String,
     env: anolisa_env::EnvFacts,
+    effects: RawEffectFactories<'a>,
     log: CentralLog,
     /// The record's artifact as re-validated under the install lock: its
     /// file list drives removal and its service list drives the stop.
@@ -545,6 +595,7 @@ impl<'a> RawTeardownOps<'a> {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: &CliContext,
+        effects: RawEffectFactories<'a>,
         layout: &'a FsLayout,
         component: String,
         operation_id: String,
@@ -559,6 +610,7 @@ impl<'a> RawTeardownOps<'a> {
             install_mode: ctx.install_mode.as_str().to_string(),
             operation_id,
             env: anolisa_env::EnvService::detect(),
+            effects,
             log: CentralLog::open(layout.central_log.clone()),
             prior,
             hooks,
@@ -647,11 +699,11 @@ impl OwnedOps for RawTeardownOps<'_> {
         for (units, manager) in [
             (
                 sys_units,
-                service_for_install_mode(&self.install_mode, &self.env),
+                (self.effects.service)(&self.install_mode, &self.env, ServiceScope::System),
             ),
             (
                 user_units,
-                user_service_for_install_mode(&self.install_mode, &self.env),
+                (self.effects.service)(&self.install_mode, &self.env, ServiceScope::User),
             ),
         ] {
             if units.is_empty() {
@@ -1049,6 +1101,7 @@ pub(crate) struct RawInstallOps<'a> {
     now: String,
     operation_id: String,
     env: anolisa_env::EnvFacts,
+    effects: RawEffectFactories<'a>,
     log: CentralLog,
     /// Prepared artifact + resolved contract, validated pre-lock.
     prepared: Option<PreparedInstall>,
@@ -1079,6 +1132,7 @@ impl<'a> RawInstallOps<'a> {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: &'a CliContext,
+        effects: RawEffectFactories<'a>,
         layout: &'a FsLayout,
         component: String,
         scope: InstallationScope,
@@ -1102,6 +1156,7 @@ impl<'a> RawInstallOps<'a> {
             scope,
             now,
             env: anolisa_env::EnvService::detect(),
+            effects,
             log: CentralLog::open(layout.central_log.clone()),
             prepared: Some(prepared),
             prepared_files: Some(prepared_files),
@@ -1145,9 +1200,9 @@ impl<'a> RawInstallOps<'a> {
     ) -> Box<dyn anolisa_core::ServiceManager> {
         let mode = self.ctx.install_mode.as_str();
         if !services.is_empty() && services.iter().all(|s| s.scope == ServiceScope::User) {
-            user_service_for_install_mode(mode, &self.env)
+            (self.effects.service)(mode, &self.env, ServiceScope::User)
         } else {
-            service_for_install_mode(mode, &self.env)
+            (self.effects.service)(mode, &self.env, ServiceScope::System)
         }
     }
 
@@ -1246,7 +1301,7 @@ impl OwnedOps for RawInstallOps<'_> {
 
     fn set_capabilities(&mut self) -> Result<StepSuccess, OwnedOpError> {
         let prepared = self.prepared()?;
-        let manager = capability_for_install_mode(self.ctx.install_mode.as_str(), &self.env);
+        let manager = (self.effects.capability)(self.ctx.install_mode.as_str(), &self.env);
         let outcome = apply_capabilities(
             manager.as_ref(),
             &prepared.capabilities,

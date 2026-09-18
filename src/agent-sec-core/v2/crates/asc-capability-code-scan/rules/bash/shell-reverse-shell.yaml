@@ -1,0 +1,13 @@
+rule_id: shell-reverse-shell
+cwe_id: CWE-506
+desc_en: >-
+  Command establishes a reverse shell connection, allowing
+  a remote attacker to gain interactive access to the system.
+desc_zh: >-
+  命令建立反弹 Shell 连接，可能允许远程攻击者获取系统的交互式访问权限。
+regex: |-
+  \bexec[ \t]+[0-9]+<>[ \t]*["']?\/dev\/tcp\/
+  |\b(?:bash|sh|zsh|dash|ksh)\b(?=(?:(?!&&|(?<![<>])&(?!>))[^;\n|])*?[ \t]+-[A-Za-z]*i[A-Za-z]*\b)(?:(?!&&|(?<![<>])&(?!>))[^;\n|])*?(?:[0-9]*(?:<>|[<>]&?)|&>)[ \t]*["']?\/dev\/tcp\/
+  |\b(nc|ncat|netcat)\b[^;\n&]*[ \t]-[a-zA-Z]*e[ \t]
+  |\bsocat\b[^;\n&]*(exec|EXEC):
+severity: warn

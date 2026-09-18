@@ -1,0 +1,26 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[workspace.dependencies]
+jsonschema = { version = "0.53", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[package]
+name = "aw-contracts"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Versioned AW capability contracts and offline conformance validation"
+repository = "https://github.com/alibaba/anolisa"
+publish = false
+
+[dependencies]
+jsonschema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

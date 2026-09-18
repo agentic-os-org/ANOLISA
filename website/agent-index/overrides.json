@@ -1,5 +1,5 @@
 {
-  "repository": "https://github.com/alibaba/anolisa",
+  "repository": "https://github.com/agentic-os-org/ANOLISA",
   "license": "Apache-2.0",
   "components": {
     "copilot-shell": {

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/security-content-inspect-output/v2",
+  "title": "security-content-inspect output v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inspection"
+  ],
+  "properties": {
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "findings",
+        "coverage"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "clean",
+            "suspicious",
+            "sensitive"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/finding"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "coverage": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/coverage"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "clean"
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "coverage": {
+                "properties": {
+                  "complete": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "suspicious",
+                  "sensitive"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

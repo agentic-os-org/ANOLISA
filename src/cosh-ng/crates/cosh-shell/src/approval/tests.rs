@@ -1358,6 +1358,27 @@ fn stopping_active_run_clears_batch_consent() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn approval_action_set_requires_hook_prefix() {
+    for (subject, expected, second_action) in [
+        (
+            "tool HOOK: spoof",
+            ApprovalActionSet::Standard,
+            ApprovalPanelAction::AlwaysTrust,
+        ),
+        (
+            "HOOK:guard",
+            ApprovalActionSet::Hook,
+            ApprovalPanelAction::Deny,
+        ),
+    ] {
+        let requests = [provider_tool_request(subject, None)];
+        let actions = approval_action_set_for(&requests[0], &requests);
+        assert_eq!(actions, expected, "subject: {subject}");
+        assert_eq!(actions.action_at(1), Some(second_action));
+    }
+}
+
 /// 展示条件矩阵（D7）：单卡轮 Standard；队列多条首卡即 TurnConsent；
 /// 串行第 2 卡 TurnConsent（前序已 resolve 也计入）；新 run 回到
 /// Standard；hook 永远 Hook（SC7/SC8/V9/N8/N9）。

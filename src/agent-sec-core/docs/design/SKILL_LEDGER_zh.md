@@ -54,7 +54,7 @@ AI Agent 通过加载 Skill（结构化指令 + 辅助脚本）扩展能力。Sk
 **组件职责**：
 
 - **skill-ledger CLI**：核心基础设施。提供 `init`（初始化密钥并可为已覆盖 Skill 建立快速扫描 baseline）、`analyze`（只读内容分析，不创建账本状态）、`scan`（运行内置快速扫描器并签名入账）、`check`（只读检查 JSON + 验签 + 比哈希 + 输出状态，可供宿主 hook/capability 调用）、`certify`（导入外部 findings 并签名）等子命令。`scan` / `certify` 写入的 manifest 经 Ed25519 数字签名保护，防止篡改；当 `latest.json` 缺失时，`check` 仅在历史版本 artifact 也不存在时将该缺失判为 `none`，历史 artifact 仍存在则返回 `tampered`；latest 验真且与当前文件匹配时，仍按 `scanStatus` 返回状态（包括 `none`）。`analyze` / `check` 不创建版本或 snapshot。确定性逻辑不依赖 LLM，不可被 prompt injection 绕过。
-- **Scanner Registry**：可扩展扫描框架。通过配置注册扫描器（`builtin`/`cli`/`skill`/`api` 四种调用类型）和结果解析器（将异构扫描输出归一化为统一 `NormalizedFinding` 格式）。本版本默认注册 `skill-vetter`（`type: "skill"`，由 Agent 深度扫描后通过 `certify --findings` 消费）、`code-scanner` 和 `static-scanner`（均为 `type: "builtin"`，可由 `scan` 自动调用）。当前仅实现 `findings-array` parser；`cli`/`api` adapter 及其它 parser 类型为预留扩展点。旧名称 `skill-code-scanner`、`cisco-static-scanner` 仅作为兼容 alias 读取，不再作为公开名称展示或写入新 manifest。
+- **Scanner Registry**：可扩展扫描框架。通过配置注册扫描器（`builtin`/`cli`/`skill`/`api` 四种调用类型）和结果解析器（将异构扫描输出归一化为统一 `NormalizedFinding` 格式）。本版本默认注册 `skill-vetter`（`type: "skill"`，由 Agent 深度扫描后通过 `certify --findings` 消费）、`code-scanner` 和 `static-scanner`（均为 `type: "builtin"`，可由 `scan` 自动调用）。当前仅实现 `findings-array` parser；`cli`/`api` adapter 及其它 parser 类型为预留扩展点。
 - **skill-ledger Skill**：一个 Skill，三个阶段。Phase 1 做环境准备与状态查看；Phase 2 默认执行快速扫描认证（`scan` 调用内置 `code-scanner` 与 `static-scanner`）；Phase 3 在用户显式要求或确认后执行 Agent 驱动深度扫描（`skill-vetter`），再用 `certify --findings ... --delete-findings` 写入版本链。
 - **SkillFS + daemon activation**：推荐运行态入口。SkillFS 捕获 Skill 文件变化后调用 daemon 的 `skill_ledger.skillfs_notify_change` 接口，daemon 根据签名 manifest 和 activation policy 刷新 `.skill-meta/activation.json`，并尽力同步写入 xattr。
 - **Hook / capability 兼容层**：OpenClaw、copilot-shell、Hermes 和 Qwen Code 可挂载 `skill-ledger show` 作为兼容入口并读取统一 exposure summary 中的 `message`；Codex 和 Qoder CLI 在各自的 Skill 触发边界调用只读 `skill-ledger check`。默认发行配置继续挂载/注册；支持原生确认的宿主默认 `policy = "ask"`，Hermes 默认 `policy = "observe"`。
@@ -201,7 +201,7 @@ class SigningBackend(Protocol):
 ```jsonc
 {
   "signingBackend": "ed25519",  // 当前实现固定使用 ed25519；该字段保留给未来扩展
-  "activationPolicy": "pass_warn_only", // 当前唯一运行态策略；旧 pass_only/latest_scanned 会被归一化
+  "activationPolicy": "pass_warn_only", // 运行态策略
   "enableDefaultSkillDirs": true,   // 默认 true；false 时仅使用 managedSkillDirs
   "managedSkillDirs": [
     "/opt/custom-skills/*",         // glob 匹配目录下所有 skill
@@ -256,9 +256,9 @@ class SigningBackend(Protocol):
 
 **默认值**：内置六个静态默认目录及 raw 用户目录 `$XDG_DATA_HOME/anolisa/skills/*`（未设置或非法时为 `~/.local/share/anolisa/skills/*`）。静态目录（`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`），覆盖 OpenClaw、copilot-shell、Hermes、Qoder 用户级，以及 RPM 与 raw install 系统级 Skill。项目级 Qoder 目录不使用相对默认项，由 Qoder hook 根据事件中的绝对 `cwd` 运行时解析；显式 `scan` / `certify` 后再通过自动记忆写入绝对 `managedSkillDirs`。
 
-**合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录，不再兼容旧的 `skillDirs` 字段。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，历史配置值 `pass_only` / `latest_scanned` 会兼容读取并归一化；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
+**合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，配置校验在合并默认配置前执行，错误抛出 `ConfigError`；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
 
-**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
+**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录未被 `managedSkillDirs` 覆盖，会自动追加到该配置。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。raw 用户默认根的直接子 Skill 仅登记自身路径，避免可写 Skill 将只读兄弟 Skill 一并纳管；其它根目录下若有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。已有 glob 不自动收窄，因为配置不区分用户显式设置与历史自动登记；确认属于误扩大的 raw 根条目后，可手动替换为需要纳管的各个 Skill 路径。
 
 #### 默认后端：Ed25519 + 加密密钥文件
 
@@ -280,7 +280,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 #### 密钥管理
 
-**密钥生成**（`skill-ledger init`，或兼容入口 `init-keys`）：
+**密钥生成**（`skill-ledger init`）：
 
 ```
 1. 生成 Ed25519 密钥对（cryptography.hazmat.primitives.asymmetric.ed25519）
@@ -340,14 +340,12 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 默认行为还会发现已覆盖目录中的 Skill，并执行补齐式快速扫描，建立签名 baseline。`--no-baseline` 只初始化密钥，不扫描 Skill。对于 `/usr/share/anolisa/skills/` 或 `/usr/local/share/anolisa/skills/` 的直接子目录中由 host 提供、账本状态不可写的已打包 Skill，baseline 返回逐项 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`；该项不会阻断其它 Skill，也不会单独使命令返回非零退出码。其它访问、写入或扫描失败仍记录为 `error`，并使命令返回退出码 1。
 
-兼容入口 `init-keys` 仍保留，但作为低层命令隐藏，不在普通 help 与用户主流程中展示。
+重复初始化复用密钥并返回 `keyCreated: false`、`key: null`；新建密钥信息位于 `key`。`--force-keys` 更换密钥对，并归档原公钥供签名校验。
 
-**`skill-ledger rotate-keys`** — 密钥轮换（隐藏的预留接口，本版本不实现）
+**`skill-ledger rotate-keys`** — 密钥轮换（普通 help 可见，本版本不实现）
 
 当前直接执行该命令会在 stderr 报告 `not implemented`，以退出码 1 结束，且不会修改
 `key.enc`、`key.pub` 或 `keyring/`；`rotate-keys --help` 仍作为只读帮助以退出码 0 结束。
-
-设计思路：生成新密钥对 → 用新密钥重签 `latest.json` → 旧公钥移入 `keyring/` 供历史验证。
 
 **`skill-ledger check <skill_dir>`** — 低层完整性与扫描状态检查
 
@@ -378,6 +376,8 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 - 已有对应 scanner 结果且文件未变时跳过该 scanner。
 
 `scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。对于上述只读已打包系统 Skill，批量路径不运行 scanner，也不写入逐 Skill manifest、snapshot、`.skill-meta` 状态或配置，返回 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`。`skipped` 是运行状态，不是六种完整性状态之一，不表示 `pass`，也不构成认证；它本身不使批量命令失败，只有实际 `status=error` 才使批量命令返回退出码 1。全局密钥初始化行为不变。`--force` 会强制重跑其它请求 scanner 并重签 manifest。
+
+`scan --all` 和默认 `init` baseline 对 raw 用户默认根 `$XDG_DATA_HOME/anolisa/skills/`（回退为 `~/.local/share/anolisa/skills/`）的直接子目录也应用批量跳过：仅当来源为 host、未被 `managedSkillDirs` 覆盖且实际账本写入目标不可写时，返回 `status=skipped`、`reasonCode=readonly_default_skill`、`persisted=false`，不运行 scanner、不写账本或自动纳管。已纳管的用户 Skill、显式扫描、SkillFS backing 和 resolver 错误仍保持原有错误语义；可写目录正常扫描。已有 `.skill-meta` 时检查该目录的写入权限，否则检查 Skill 根目录。
 
 新版本只会链接历史中最近的完整可信 artifact：候选的 schema、`versionId`/文件名、`skillName`、manifestHash、签名与 snapshot 必须全部匹配。版本号从该可信父版本之后选择首个未被版本 JSON 或 snapshot 占用的编号；没有可信父版本时从 `v000001` 起选择首个空槽。这样既不覆盖损坏或部分写入的证据，也不允许无效 latest 或孤立的超大编号控制恢复可用性。无可信父版本时两个 previous 字段均为 `null`；只有可信父版本的 `always_allow` 决策可以继承。
 
@@ -427,7 +427,7 @@ resolver 状态规则：
 
 pending decision stub 不是 ledger 版本，不对应 `v000001.json` manifest，也不能作为 rollback 默认目标。它只包含安全 `SKILL.md` 占位内容，使 Agent 仍能通过普通 SkillFS discovery 发现该 skill，但真实风险内容不暴露。用户通过 `decide allow` / `decide rollback` / `decide block` 做出决策后，resolver 会切换到真实 snapshot 或 `target:null`，并清理 stale pending stub。
 
-`pass_warn_only` 是当前唯一运行态行为：只允许签名、manifest hash、snapshot 完整且 `scanStatus in {"pass","warn"}` 的 snapshot 由全局策略直接暴露。历史配置值 `pass_only` / `latest_scanned` 仅为兼容读取，会被归一化为 `pass_warn_only`，不再产生独立分支。resolver 始终只激活 snapshot，不激活 source/current 工作区。daemon 在收到 SkillFS 变更通知、扫描完成、用户决策或重启 reconcile 时调用该 resolver。
+`pass_warn_only` 是当前唯一运行态行为：只允许签名、manifest hash、snapshot 完整且 `scanStatus in {"pass","warn"}` 的 snapshot 由全局策略直接暴露。resolver 始终只激活 snapshot，不激活 source/current 工作区。daemon 在收到 SkillFS 变更通知、扫描完成、用户决策或重启 reconcile 时调用该 resolver。
 
 **`skill-ledger decide <skill_dir>`** — 写入或清除用户决策
 
@@ -442,10 +442,6 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 ```
 
 `--clear` 将 latest manifest 的 `userDecision` 置空，恢复全局 activation 行为。`rollback` 未指定 `--version` 时，默认选择当前用户决策或 `pass_warn_only` 策略下的真实 active version；若当前只有 pending stub 或 hidden，没有真实 active version，则报错。
-
-`decide` 是用户决策的唯一 CLI 入口；不保留早期的 `set-policy` 占位命令，因为其
-`allow | block | warning` 执行策略语义与按版本记录的用户决策并不等价。旧调用由 Typer
-按 unknown command 处理并返回退出码 2，不创建或修改 `.skill-meta`。
 
 **`skill-ledger show <skill_dir>`** — 展示统一暴露摘要和诊断信息
 
@@ -468,7 +464,7 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 
 **`skill-ledger list-scanners`** — 查看已注册扫描器
 
-列出内置默认及 `~/.config/agent-sec/skill-ledger/config.json` 中注册的扫描器，包括公开名称、调用类型、结果解析器、启用状态和 `autoInvocable`。默认只展示 canonical 名称：`code-scanner`、`static-scanner`、`skill-vetter`；旧名称只作为兼容 alias 读取。用于发现 `scan --scanners` 和 `certify --scanner` 可用的扫描器名称。
+列出内置默认及 `~/.config/agent-sec/skill-ledger/config.json` 中注册的扫描器，包括公开名称、调用类型、结果解析器、启用状态和 `autoInvocable`。默认注册名称为 `code-scanner`、`static-scanner`、`skill-vetter`。用于发现 `scan --scanners` 和 `certify --scanner` 可用的扫描器名称。
 
 **`skill-ledger audit <skill_dir>`** — 深度校验版本链完整性
 
@@ -619,7 +615,7 @@ agent-sec-cli skill-ledger scan <skill_dir>
 agent-sec-cli skill-ledger scan --all
 ```
 
-快速扫描完成后，Agent 再运行 `check` / `check --all` 读取最终状态并输出用户报告。报告中使用“快速扫描”称呼，不需要向用户展开内部扫描器名称。若需要限定扫描器，可使用 `--scanners code-scanner,static-scanner`；旧名称仅做兼容 alias。
+快速扫描完成后，Agent 再运行 `check` / `check --all` 读取最终状态并输出用户报告。报告中使用“快速扫描”称呼，不需要向用户展开内部扫描器名称。若需要限定扫描器，可使用 `--scanners code-scanner,static-scanner`。
 
 ### Phase 3：深度扫描认证（skill-vetter）
 

@@ -8,6 +8,7 @@ description = "Application runtime for Tokenless compression and retrieval"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 toon-format.workspace = true
 tokenless-ccr = { path = "../tokenless-ccr" }

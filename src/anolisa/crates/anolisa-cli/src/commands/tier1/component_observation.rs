@@ -553,6 +553,67 @@ mod tests {
     }
 
     #[test]
+    fn native_rpm_query_failure_is_unavailable_not_absent() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use anolisa_platform::command::{CommandOutput, CommandRunner};
+        use anolisa_platform::rpm_query::RpmPackageQuery;
+
+        struct Runner(Rc<RefCell<Option<CommandOutput>>>);
+
+        impl CommandRunner for Runner {
+            fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+                assert_eq!(program, "rpm");
+                assert_eq!(
+                    args,
+                    [
+                        "-q",
+                        "--qf",
+                        "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n",
+                        "tokenless"
+                    ]
+                );
+                Ok(self.0.borrow_mut().take().expect("exactly one RPM query"))
+            }
+        }
+
+        for stderr in ["", "error: cannot open Packages database in /dev/null\n"] {
+            let reply = Rc::new(RefCell::new(Some(CommandOutput {
+                code: Some(1),
+                stdout: "package tokenless is not installed\n".into(),
+                stderr: stderr.into(),
+            })));
+            let query = RpmPackageQuery::with_runner(Runner(Rc::clone(&reply)));
+            let observation =
+                observe_native_package(NativePm::Rpm, "tokenless", &query, "2026-09-11T00:00:00Z");
+            assert!(reply.borrow().is_none());
+            assert!(observation.installed_version.is_none());
+            if stderr.is_empty() {
+                assert!(observation.query_error.is_none());
+                assert!(
+                    matches!(observation.evidence, ProbeEvidence::Absent { provenance }
+                    if provenance.manager == NativePm::Rpm && provenance.package == "tokenless")
+                );
+            } else {
+                let expected_error = PackageQueryError::QueryFailed {
+                    command: "rpm".into(),
+                    code: Some(1),
+                    stderr: stderr.into(),
+                };
+                assert!(
+                    matches!(observation.evidence, ProbeEvidence::Unavailable { provenance, reason }
+                    if provenance.manager == NativePm::Rpm && provenance.package == "tokenless"
+                        && reason == expected_error.to_string())
+                );
+                assert!(matches!(observation.query_error,
+                    Some(PackageQueryError::QueryFailed { command, code: Some(1), stderr: actual })
+                        if command == "rpm" && actual == stderr));
+            }
+        }
+    }
+
+    #[test]
     fn native_package_evidence_preserves_query_outcomes() {
         let present = observe_native_package(
             NativePm::Rpm,

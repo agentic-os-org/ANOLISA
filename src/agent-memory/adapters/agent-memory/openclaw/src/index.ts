@@ -31,6 +31,40 @@ import {
 // shutdown for its lazy-start to begin).
 let activeClient: McpStdioClient | null = null;
 
+/** Stop the client a previous register() left running, if any.
+ *
+ *  Called *before* anything in register() that can throw. `resolveConfig`
+ *  rejects configuration the child would honor differently than the
+ *  operator meant — `profile: "expert"` (see `config.ts::resolveProfile`),
+ *  a malformed `userId`/`sessionId`, a missing binary — and that throw
+ *  aborts register(), so a teardown written after it never ran on exactly
+ *  the reloads that need one: the host keeps nothing from a failed
+ *  registration, and a hot-reload does not fire gateway_stop for the old
+ *  instance either. The previous subprocess would outlive the plugin that
+ *  owned it and hold the sqlite/git locks until the gateway exited, and the
+ *  reload after the operator fixed the config would start a second child
+ *  behind those locks.
+ *
+ *  Fire-and-forget, as before: the replacement client starts lazily and
+ *  must not wait on a stale shutdown to begin. */
+function stopStaleClient(api: OpenClawPluginApi): void {
+  if (!activeClient) return;
+  const stale = activeClient;
+  // Cleared before stopping rather than after: if this registration goes on
+  // to fail, `activeClient` must not keep pointing at a client we already
+  // asked to stop, or the next register() would tear the same one down
+  // again and warn about a hot-reload that has nothing left to clean up.
+  activeClient = null;
+  api.logger.warn?.(
+    "agent-memory: previous client still active during register() — tearing it down (hot-reload?)",
+  );
+  stale.stop().catch((err: unknown) => {
+    api.logger.warn?.(
+      `agent-memory: stale-client teardown failed (${err instanceof Error ? err.message : String(err)})`,
+    );
+  });
+}
+
 export default definePluginEntry({
   id: "memory-anolisa",
   name: "Anolisa Memory",
@@ -38,19 +72,9 @@ export default definePluginEntry({
     "Persistent memory backed by the agent-memory MCP server with namespace isolation and openat2 sandbox.",
   kind: "memory",
   register(api: OpenClawPluginApi) {
-    const config: AgentMemoryConfig = resolveConfig(api);
+    stopStaleClient(api);
 
-    if (activeClient) {
-      const stale = activeClient;
-      api.logger.warn?.(
-        "agent-memory: previous client still active during register() — tearing it down (hot-reload?)",
-      );
-      stale.stop().catch((err: unknown) => {
-        api.logger.warn?.(
-          `agent-memory: stale-client teardown failed (${err instanceof Error ? err.message : String(err)})`,
-        );
-      });
-    }
+    const config: AgentMemoryConfig = resolveConfig(api);
 
     const client = new McpStdioClient(config);
     activeClient = client;

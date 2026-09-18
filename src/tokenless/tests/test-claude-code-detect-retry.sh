@@ -36,6 +36,26 @@
 # ordinary pre-install state, and scenario 7 keeps the pre-existing rule
 # that an outright failing `plugin list` is transient and is retried.
 #
+# GH #3267 is that same race recurring under load: the #3082 fix bounded the
+# re-lists by count alone (2 of them, ~2s apart), and registry-index lag is a
+# wall-clock phenomenon, so on a host busy with a concurrent full build the
+# index outlasts those 2 attempts and the false "not installed" verdict comes
+# back. The re-list loop is therefore bounded by a wall-clock window as well
+# as by an attempt count, whichever ends first, and backs off between
+# attempts. Scenario 8 pins the lag that outlived the old budget and that the
+# shipped default now rides out; scenario 9 is its control at the old budget;
+# scenario 10 pins the window as an independent bound; scenario 11 pins the
+# exponential backoff and its ceiling; scenario 12 pins the backoff being
+# clamped to the time left in the window; scenario 13 pins the window being a
+# deadline for the retries nested inside a re-list too, so an omission that
+# turns into a failing CLI cannot run the probe past it; scenario 14 pins that
+# a clamped backoff whose sleep the host ran long past the window buys no new
+# attempt, which is scenario 12's boundary attempt waking up late.
+#
+# The backoff is asserted by stubbing `sleep` and reading the delays it was
+# asked for, never by measuring elapsed time: a timing assertion would flake
+# on exactly the loaded hosts this fix targets.
+#
 # detect.sh reads the manifests and the hook dispatcher from
 # $ANOLISA_ADAPTER_DIR, so every scenario points it at a synthetic adapter
 # tree the test controls; no scenario depends on the state of the checked-out
@@ -61,6 +81,14 @@ FAKE_PLUGIN_SRC="$FAKE_ADAPTER_DIR/claude-code"
 LATE_COUNT_FILE="$TEST_DIR/late-count"
 LATE_OMISSIONS=1
 PROVISIONER_PID=""
+# `sleep` is stubbed (scenarios 11-12) so the re-list backoff can be asserted
+# from the delays detect.sh asks for instead of from wall-clock time. Resolve
+# the real one first, while no stub shadows it.
+REAL_SLEEP="$(command -v sleep)"
+SLEEP_LOG="$TEST_DIR/sleep-calls.log"
+# Extra seconds the stubbed `sleep` waits beyond what detect.sh asked for
+# (scenario 14: a contended host firing the timer late).
+LATE_WAKE_EXTRA=0
 
 cleanup() {
     if [ -n "$PROVISIONER_PID" ]; then
@@ -96,6 +124,10 @@ fail() {
 #   late   — the first $LATE_OMISSIONS `plugin list` calls succeed but
 #            omit the plugin (GH #3082: the registry index has not caught up
 #            with the manifests the installer just wrote); later calls list it
+#   omit_then_fail
+#          — the first $LATE_OMISSIONS calls succeed but omit the plugin and
+#            every later call fails outright: the #3082 omission turning into
+#            a contended CLI part-way through a re-list
 # Like the real CLI, `plugin list` creates $HOME/.claude when it first
 # runs; the config dir does not exist before that. Every invocation is
 # appended to $CALL_LOG so the tests can count CLI calls.
@@ -119,7 +151,7 @@ plugin)
         echo "initializing plugin registry" >&2
         exit 1
     fi
-    if [ "$mode" = "late" ]; then
+    if [ "$mode" = "late" ] || [ "$mode" = "omit_then_fail" ]; then
         n=$(cat "$LATE_COUNT_FILE" 2>/dev/null || echo 0)
         n=$((n + 1))
         echo "$n" >"$LATE_COUNT_FILE"
@@ -127,6 +159,10 @@ plugin)
             mkdir -p "$HOME/.claude"
             echo "NAME                          STATUS"
             exit 0
+        fi
+        if [ "$mode" = "omit_then_fail" ]; then
+            echo "plugin registry unavailable" >&2
+            exit 1
         fi
     fi
     mkdir -p "$HOME/.claude"
@@ -179,15 +215,46 @@ cancel_provisioner() {
     PROVISIONER_PID=""
 }
 
-reset_env() {
-    rm -rf "$FAKE_HOME/.claude"
-    rm -f "$FAKE_BIN/claude" "$FLAKY_MARKER" "$LATE_COUNT_FILE"
-    echo ready >"$STUB_MODE_FILE"
-    LATE_OMISSIONS=1
+# Stub `sleep`: log the requested delay, then really sleep, so scenarios that
+# depend on wall-clock settling (scenario 1) keep working.
+install_sleep_stub() {
+    cat >"$FAKE_BIN/sleep" <<'STUB'
+#!/bin/sh
+[ -n "${SLEEP_LOG:-}" ] && printf '%s\n' "$*" >>"$SLEEP_LOG"
+exec "${REAL_SLEEP:-/bin/sleep}" "$@"
+STUB
+    chmod +x "$FAKE_BIN/sleep"
 }
 
-run_detect() { # run_detect <retries> <retry-delay> <plugin-relists>
+# Stub `sleep` with a late wake-up: log the requested delay, then really sleep
+# that delay plus <extra-seconds>. Models a contended host whose timer fires
+# well after the delay detect.sh asked for — how long the probe *requested* to
+# wait and how long it *actually* waited come apart, which is what decides
+# whether a clamped backoff may still start the attempt it was clamped for.
+install_late_sleep_stub() { # install_late_sleep_stub <extra-seconds>
+    LATE_WAKE_EXTRA="$1"
+    cat >"$FAKE_BIN/sleep" <<'STUB'
+#!/bin/sh
+[ -n "${SLEEP_LOG:-}" ] && printf '%s\n' "$*" >>"$SLEEP_LOG"
+exec "${REAL_SLEEP:-/bin/sleep}" \
+    "$(awk -v d="$1" -v e="${LATE_WAKE_EXTRA:-0}" 'BEGIN { printf "%.3f", d + e }')"
+STUB
+    chmod +x "$FAKE_BIN/sleep"
+}
+
+reset_env() {
+    rm -rf "$FAKE_HOME/.claude"
+    rm -f "$FAKE_BIN/claude" "$FAKE_BIN/sleep" "$FLAKY_MARKER" "$LATE_COUNT_FILE"
+    echo ready >"$STUB_MODE_FILE"
+    LATE_OMISSIONS=1
+    LATE_WAKE_EXTRA=0
+}
+
+run_detect() { # run_detect <retries> <retry-delay> <plugin-relists> [relist-window] [relist-max-delay]
+    # An empty argument leaves that knob at detect.sh's shipped default, so a
+    # scenario can pin the default budget rather than an override.
     : >"$CALL_LOG"
+    : >"$SLEEP_LOG"
     rm -f "$FLAKY_MARKER" "$LATE_COUNT_FILE"
     # Inherit only /usr/local/bin:/usr/bin:/bin (detect.sh itself prepends
     # $HOME/.local/bin): a claude installed elsewhere in the CI PATH must
@@ -199,15 +266,24 @@ run_detect() { # run_detect <retries> <retry-delay> <plugin-relists>
     FLAKY_MARKER="$FLAKY_MARKER" \
     LATE_COUNT_FILE="$LATE_COUNT_FILE" \
     LATE_OMISSIONS="$LATE_OMISSIONS" \
+    SLEEP_LOG="$SLEEP_LOG" \
+    REAL_SLEEP="$REAL_SLEEP" \
+    LATE_WAKE_EXTRA="$LATE_WAKE_EXTRA" \
     ANOLISA_ADAPTER_DIR="$FAKE_ADAPTER_DIR" \
     TOKENLESS_DETECT_RETRIES="$1" \
     TOKENLESS_DETECT_RETRY_DELAY="$2" \
     TOKENLESS_DETECT_PLUGIN_RELISTS="$3" \
+    TOKENLESS_DETECT_PLUGIN_RELIST_WINDOW="${4:-}" \
+    TOKENLESS_DETECT_PLUGIN_RELIST_MAX_DELAY="${5:-}" \
         bash "$DETECT" 2>&1
 }
 
 plugin_list_calls() {
     grep -c '^plugin$' "$CALL_LOG" || true
+}
+
+sleep_calls() {
+    grep -c . "$SLEEP_LOG" || true
 }
 
 # --- Scenario 1: the #2512 failure path, with settling retries ------------
@@ -361,5 +437,197 @@ grep -qF "installed ($PLUGIN_ID)" <<<"$out" \
 calls="$(plugin_list_calls)"
 [ "$calls" -eq 2 ] \
     || fail "the transient plugin-list failure should be retried once (saw $calls calls)" "$out"
+
+# --- Scenario 8: GH #3267, index lag outlives the #3085 budget -------------
+# The #3082 fix gave the re-list loop a hard count of 2. Under a concurrent
+# full build the registry index stays stale for longer than 2 cheap re-lists
+# cover, so the lag simulated here (4 omissions) is exactly the shape that
+# recurred as a false "not installed" in nightly runs. With the shipped
+# default budget — a wall-clock window plus a raised attempt count — detect.sh
+# must ride the same lag out and report ready on this very first execution.
+# The re-list delay is 0 so the scenario stays fast: what is under test is the
+# budget, not the pacing.
+reset_env
+install_claude_stub
+stage_adapter yes yes
+echo late >"$STUB_MODE_FILE"
+LATE_OMISSIONS=4
+if ! out="$(run_detect 3 0 "")"; then
+    fail "detect.sh should exit 0 (ready) when the index lag outlives the old 2-re-list budget" "$out"
+fi
+grep -qF "installed ($PLUGIN_ID)" <<<"$out" \
+    || fail "plugin should be reported installed once the lagging registry index catches up" "$out"
+grep -qF "claude-code: ready" <<<"$out" \
+    || fail "claude-code should be reported ready once the lagging registry index catches up" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 5 ] \
+    || fail "a 4-omission lag should be re-listed until the 5th list sees the plugin (saw $calls calls)" "$out"
+
+# --- Scenario 9 (control): same lag at the #3085 budget --------------------
+# The identical 4-omission lag with the old count-only budget of 2 re-lists
+# exhausts it and reports "not installed" (exit 1) — precisely the GH #3267
+# nightly failure. Proves the widened budget is what fixes scenario 8.
+reset_env
+install_claude_stub
+stage_adapter yes yes
+echo late >"$STUB_MODE_FILE"
+LATE_OMISSIONS=4
+set +e
+out="$(run_detect 3 0 2)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "at the old 2-re-list budget the same lag should exit 1, got $rc" "$out"
+grep -qF "not installed" <<<"$out" \
+    || fail "at the old budget the plugin should be reported not installed" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 3 ] \
+    || fail "the old budget should stop after 1 + 2 re-lists (saw $calls calls)" "$out"
+
+# --- Scenario 10: the window bounds the loop independently of the count ----
+# A zero settling window must end the re-list loop immediately even though the
+# attempt cap (5) is nowhere near reached: the two bounds are independent and
+# whichever runs out first wins. This is also how a caller opts out of
+# re-listing altogether.
+reset_env
+install_claude_stub
+stage_adapter yes yes
+echo absent >"$STUB_MODE_FILE"
+mkdir -p "$FAKE_HOME/.claude"
+set +e
+out="$(run_detect 3 0 5 0)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "an exhausted settle window should still exit 1 (installable), got $rc" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 1 ] \
+    || fail "a zero settle window must not re-list at all: plugin list ran $calls times" "$out"
+
+# --- Scenario 11: re-lists back off exponentially, up to a ceiling ---------
+# A wide window must not turn into hammering a contended CLI: the delay
+# doubles per attempt and stops growing at the ceiling. Asserted through a
+# `sleep` stub rather than elapsed time, so the assertion cannot flake on a
+# loaded runner.
+reset_env
+install_claude_stub
+install_sleep_stub
+stage_adapter yes yes
+echo absent >"$STUB_MODE_FILE"
+mkdir -p "$FAKE_HOME/.claude"
+set +e
+out="$(run_detect 3 0.01 5 60 0.04)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "a plugin that never appears should exit 1, got $rc" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 6 ] \
+    || fail "the attempt cap should allow 1 + 5 lists (saw $calls calls)" "$out"
+[ "$(sleep_calls)" -eq 5 ] \
+    || fail "each of the 5 re-lists should back off once (saw $(sleep_calls) sleeps)" "$out"
+expected_sleeps="$(printf '0.010\n0.020\n0.040\n0.040\n0.040')"
+[ "$(cat "$SLEEP_LOG")" = "$expected_sleeps" ] \
+    || fail "the backoff should double per attempt and stop at the ceiling" "$(cat "$SLEEP_LOG")"
+
+# --- Scenario 12: the backoff is clamped to the time left in the window ----
+# An unclamped 30s backoff against a 3s window would overshoot the settle
+# budget tenfold. The clamp keeps the probe inside its window: exactly one
+# re-list runs and its sleep is the remaining window, not the backoff.
+reset_env
+install_claude_stub
+install_sleep_stub
+stage_adapter yes yes
+echo absent >"$STUB_MODE_FILE"
+mkdir -p "$FAKE_HOME/.claude"
+set +e
+out="$(run_detect 3 30 5 3 60)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "a clamped final backoff should still exit 1, got $rc" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 2 ] \
+    || fail "the clamped sleep should consume the window after one re-list (saw $calls calls)" "$out"
+[ "$(sleep_calls)" -eq 1 ] \
+    || fail "expected exactly one clamped backoff, saw $(sleep_calls) sleeps" "$out"
+slept="$(cat "$SLEEP_LOG")"
+awk -v v="$slept" 'BEGIN { exit !(v > 0 && v <= 3) }' \
+    || fail "the backoff should be clamped to the 3s window, slept ${slept}s" "$out"
+
+# --- Scenario 13: the window bounds the retries nested in a re-list too -----
+# The omission-then-transient-failure sequence: the first `plugin list`
+# succeeds but omits the plugin (the GH #3082 registry lag), and every list
+# after that fails outright — what a contended host looks like once the CLI
+# starts failing part-way through a re-list. Given a 1s window, a 1s retry
+# delay and 3 retries, a probe whose nested retries ignore the deadline keeps
+# going after the clamped backoff has already spent that window: it issues 5
+# list calls about a second apart and returns only after ~4s, four times the
+# window it is documented to respect. Sharing one deadline between the re-list
+# loop and the retries nested in it caps the probe at the initial list plus
+# the single attempt that the clamped backoff bought.
+#
+# Asserted from what the probe asked for — the list calls it made and the
+# sleeps it requested — rather than from elapsed time, so the scenario cannot
+# flake on a loaded runner. The summed request is the wall-clock bound the
+# window promises: a probe that never sleeps longer than its window cannot
+# overrun it by more than the one call already in flight.
+reset_env
+install_claude_stub
+install_sleep_stub
+stage_adapter yes yes
+echo omit_then_fail >"$STUB_MODE_FILE"
+set +e
+out="$(run_detect 3 1 5 1)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "a probe that never sees the plugin should exit 1 (installable), got $rc" "$out"
+grep -qF "not installed" <<<"$out" \
+    || fail "the plugin should be reported not installed once the window expires" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -le 2 ] \
+    || fail "a 1s window should cap the probe at the initial list plus one re-list (saw $calls calls)" "$out"
+[ "$(sleep_calls)" -le 1 ] \
+    || fail "the retries nested in a re-list must not sleep past the window (saw $(sleep_calls) sleeps)" "$out"
+requested="$(awk '{ total += $1 } END { printf "%.3f", total }' "$SLEEP_LOG")"
+awk -v v="$requested" 'BEGIN { exit !(v <= 1) }' \
+    || fail "the probe should request no more sleep than its 1s window (requested ${requested}s)" "$out"
+
+# --- Scenario 14: a clamped backoff that wakes late buys no attempt ---------
+# The clamp decides how long detect.sh asks to wait, not how long a contended
+# host actually waits: its timer can fire well after the requested delay.
+# Scenario 12 pins the on-time case, where the sleep the clamp paid for does
+# get its one boundary attempt. Here the same clamped backoff — a 2s delay
+# clamped to a 1s window — wakes up 2s late, so the window closed about 2s ago
+# and the attempt would be a *brand new* `plugin list`, not an invocation
+# already in flight being allowed to finish. It must not start: being the sleep
+# the clamp shortened is not a licence on its own, the wake-up time decides.
+# Asserted from the call and sleep counts plus the delay requested, never from
+# elapsed time, so the scenario cannot flake on a loaded runner.
+reset_env
+install_claude_stub
+install_late_sleep_stub 2
+stage_adapter yes yes
+echo absent >"$STUB_MODE_FILE"
+mkdir -p "$FAKE_HOME/.claude"
+set +e
+out="$(run_detect 3 2 5 1)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] \
+    || fail "a plugin that never appears should exit 1 (installable), got $rc" "$out"
+grep -qF "not installed" <<<"$out" \
+    || fail "the plugin should be reported not installed once the window expires" "$out"
+calls="$(plugin_list_calls)"
+[ "$calls" -eq 1 ] \
+    || fail "a clamped backoff that woke up past the window must start no new list (saw $calls calls)" "$out"
+[ "$(sleep_calls)" -eq 1 ] \
+    || fail "expected exactly one backoff before the window closed (saw $(sleep_calls) sleeps)" "$out"
+# Proves the clamped path really was exercised: unclamped, the 2s delay would
+# have been requested as-is and the scenario would pass for the wrong reason.
+slept="$(cat "$SLEEP_LOG")"
+awk -v v="$slept" 'BEGIN { exit !(v > 0 && v <= 1) }' \
+    || fail "the 2s backoff should have been clamped to the 1s window, requested ${slept}s" "$out"
 
 echo "claude-code detect retry test passed"

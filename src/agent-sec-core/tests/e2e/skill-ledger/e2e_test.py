@@ -7,7 +7,7 @@ full CLI pipeline, cosh hook integration, and passphrase-protected key flows.
 
 Test groups:
    G1  Pre-flight & help
-   G2  init-keys
+   G2  init --no-baseline
    G3  Happy-path lifecycle (check → certify → check → audit)
    G4  check state machine
    G5  certify command
@@ -205,27 +205,26 @@ def case_help_available(ws: Workspace):
     assert (
         "skill-ledger" in r.stdout.lower()
     ), f"Expected 'skill-ledger' in help output: {r.stdout[:200]}"
-    assert "rotate-keys" not in r.stdout
-    assert "set-policy" not in r.stdout
+    assert "rotate-keys" in r.stdout
 
 
-# ── G2: init-keys ─────────────────────────────────────────────────────────
+# ── G2: init --no-baseline ─────────────────────────────────────────────────────────
 
 
-def case_init_keys_no_passphrase(ws: Workspace):
-    """init-keys without passphrase → exit 0, encrypted: false."""
-    r = run_skill_ledger(["init-keys"], env_extra=ws.env())
+def case_init_no_passphrase(ws: Workspace):
+    """init --no-baseline without passphrase → exit 0, encrypted: false."""
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert out.get("encrypted") is False, f"expected encrypted=false, got {out}"
     assert out.get("fingerprint", "").startswith("sha256:"), f"bad fingerprint: {out}"
 
 
-def case_init_keys_json_structure(ws: Workspace):
+def case_init_json_structure(ws: Workspace):
     """JSON output must contain all 4 expected fields."""
-    r = run_skill_ledger(["init-keys", "--force"], env_extra=ws.env())
+    r = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     for key in ("fingerprint", "publicKeyPath", "privateKeyPath", "encrypted"):
         assert key in out, f"Missing field '{key}' in output: {out}"
     assert len(out["fingerprint"]) > 10
@@ -233,37 +232,39 @@ def case_init_keys_json_structure(ws: Workspace):
     assert len(out["privateKeyPath"]) > 0
 
 
-def case_init_keys_reject_duplicate(ws: Workspace):
-    """Second init-keys without --force → exit 1."""
+def case_init_reuses_existing_keys(ws: Workspace):
+    """Repeated initialization reuses existing key material."""
     alt_data = ws.root / "alt_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0, f"first init failed: {r1.stderr}"
 
-    r2 = run_skill_ledger(["init-keys"], env_extra=env)
-    assert r2.returncode != 0, "Expected non-zero exit without --force"
-    assert (
-        "already exists" in r2.stderr.lower() or "already exists" in r2.stdout.lower()
-    ), f"Expected 'already exists' message: stdout={r2.stdout}, stderr={r2.stderr}"
+    r2 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
+    assert r2.returncode == 0, r2.stderr
+    repeated = parse_json_output(r2.stdout)
+    assert repeated["keyCreated"] is False
+    assert repeated["key"] is None
+    key_path = Path(parse_json_output(r1.stdout)["key"]["publicKeyPath"])
+    assert key_path.is_file()
 
 
-def case_init_keys_force_overwrite(ws: Workspace):
+def case_init_force_overwrite(ws: Workspace):
     """--force overwrites existing keys and produces a new fingerprint."""
     alt_data = ws.root / "force_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0
-    fp1 = parse_json_output(r1.stdout)["fingerprint"]
+    fp1 = parse_json_output(r1.stdout)["key"]["fingerprint"]
 
-    r2 = run_skill_ledger(["init-keys", "--force"], env_extra=env)
+    r2 = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=env)
     assert r2.returncode == 0, f"exit {r2.returncode}: {r2.stderr}"
-    fp2 = parse_json_output(r2.stdout)["fingerprint"]
+    fp2 = parse_json_output(r2.stdout)["key"]["fingerprint"]
     assert fp1 != fp2, f"Fingerprint should change after --force: {fp1}"
 
 
-def case_init_keys_with_passphrase_env(ws: Workspace):
+def case_init_with_passphrase_env(ws: Workspace):
     """SKILL_LEDGER_PASSPHRASE env var → encrypted: true."""
     alt_data = ws.root / "pass_data"
     alt_data.mkdir()
@@ -273,9 +274,9 @@ def case_init_keys_with_passphrase_env(ws: Workspace):
             "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
         }
     )
-    r = run_skill_ledger(["init-keys", "--passphrase"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert out.get("encrypted") is True, f"expected encrypted=true, got {out}"
 
 
@@ -283,7 +284,7 @@ def case_init_keys_with_passphrase_env(ws: Workspace):
 
 
 def case_full_lifecycle_pass(ws: Workspace):
-    """init-keys → check (none) → certify (pass) → check (pass) → audit (valid)."""
+    """init --no-baseline → check (none) → certify (pass) → check (pass) → audit (valid)."""
     skill = make_skill(
         ws.skills_dir,
         "lifecycle-pass",
@@ -830,22 +831,6 @@ def case_status_drifted_shows_details(ws: Workspace):
 # ── G9: reserved commands & edge cases ───────────────────────────────────
 
 
-def case_set_policy_removed(ws: Workspace) -> None:
-    """The removed set-policy placeholder fails without creating ledger state."""
-    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
-    metadata_dir = skill / ".skill-meta"
-    assert not metadata_dir.exists()
-
-    r = run_skill_ledger(
-        ["set-policy", str(skill), "--policy", "allow"], env_extra=ws.env()
-    )
-    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
-    assert r.stdout == ""
-    assert "no such command" in r.stderr.lower()
-    assert "set-policy" in r.stderr
-    assert not metadata_dir.exists()
-
-
 def case_rotate_keys_not_implemented(ws: Workspace) -> None:
     """rotate-keys fails explicitly without changing the isolated key store."""
     key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
@@ -891,14 +876,14 @@ def case_certify_empty_skill_dir(ws: Workspace):
 # ── G10: SKILL.md contract assertions ────────────────────────────────────
 
 
-def case_contract_init_keys_empty_passphrase_env(ws: Workspace):
+def case_contract_init_empty_passphrase_env(ws: Workspace):
     """SKILL_LEDGER_PASSPHRASE="" → passphrase-free init."""
     alt_data = ws.root / "contract_keys"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data), "SKILL_LEDGER_PASSPHRASE": ""})
-    r = run_skill_ledger(["init-keys"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert (
         out.get("encrypted") is False
     ), f"Empty passphrase should produce unencrypted keys, got {out}"
@@ -1085,9 +1070,9 @@ def case_passphrase_full_lifecycle(ws: Workspace):
         {"XDG_DATA_HOME": str(pp_data), "SKILL_LEDGER_PASSPHRASE": "s3cret-test"}
     )
 
-    r = run_skill_ledger(["init-keys", "--passphrase"], env_extra=env)
-    assert r.returncode == 0, f"init-keys exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    r = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
+    assert r.returncode == 0, f"init --no-baseline exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)["key"]
     assert out["encrypted"] is True
 
     skill = make_skill(ws.skills_dir, "pp-life", {"app.py": "pass\n"})
@@ -1127,7 +1112,7 @@ def case_passphrase_missing_env_fails(ws: Workspace):
     env_with = ws.env(
         {"XDG_DATA_HOME": str(pp_data), "SKILL_LEDGER_PASSPHRASE": "my-pass"}
     )
-    r = run_skill_ledger(["init-keys", "--passphrase"], env_extra=env_with)
+    r = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env_with)
     assert r.returncode == 0
 
     skill = make_skill(ws.skills_dir, "pp-noenv", {"f.txt": "data"})
@@ -1512,7 +1497,7 @@ def case_full_pipeline_vetter_to_hook(ws: Workspace):
 
 
 def case_key_rotation_old_sigs_verifiable(ws: Workspace):
-    """After init-keys --force, old signatures must still pass ``check``."""
+    """After init --no-baseline --force-keys, old signatures must still pass ``check``."""
     env = ws.env()
 
     s = make_skill(ws.skills_dir, "rotate-test", {"a.txt": "a"})
@@ -1531,9 +1516,9 @@ def case_key_rotation_old_sigs_verifiable(ws: Workspace):
     out = parse_json_output(r.stdout)
     assert out["status"] == "pass", f"Expected pass before rotation, got {out}"
 
-    r = run_skill_ledger(["init-keys", "--force"], env_extra=env)
-    assert r.returncode == 0, f"init-keys --force failed: {r.stderr}"
-    new_fp = parse_json_output(r.stdout)["fingerprint"]
+    r = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=env)
+    assert r.returncode == 0, f"init --no-baseline --force-keys failed: {r.stderr}"
+    new_fp = parse_json_output(r.stdout)["key"]["fingerprint"]
     assert (
         new_fp != old_fp
     ), f"Key rotation must produce a different fingerprint: old={old_fp}, new={new_fp}"
@@ -1565,14 +1550,16 @@ E2E_CASES = [
         init_default_keys=False,
     ),
     E2ECase(
-        "G2: init-keys no passphrase",
-        case_init_keys_no_passphrase,
+        "G2: init --no-baseline no passphrase",
+        case_init_no_passphrase,
         init_default_keys=False,
     ),
-    E2ECase("G2: init-keys JSON structure", case_init_keys_json_structure),
-    E2ECase("G2: init-keys reject duplicate", case_init_keys_reject_duplicate),
-    E2ECase("G2: init-keys --force overwrite", case_init_keys_force_overwrite),
-    E2ECase("G2: init-keys passphrase env", case_init_keys_with_passphrase_env),
+    E2ECase("G2: init --no-baseline JSON structure", case_init_json_structure),
+    E2ECase(
+        "G2: init --no-baseline reuse existing keys", case_init_reuses_existing_keys
+    ),
+    E2ECase("G2: init --no-baseline --force-keys overwrite", case_init_force_overwrite),
+    E2ECase("G2: init --no-baseline passphrase env", case_init_with_passphrase_env),
     E2ECase("G3: full pass lifecycle", case_full_lifecycle_pass),
     E2ECase("G3: multi-version chain", case_multi_version_lifecycle),
     E2ECase("G3: warn findings lifecycle", case_lifecycle_with_warn_findings),
@@ -1597,11 +1584,10 @@ E2E_CASES = [
     E2ECase("G7: --verify-snapshots", case_audit_verify_snapshots),
     E2ECase("G8: human-readable output", case_status_human_readable_output),
     E2ECase("G8: drifted details", case_status_drifted_shows_details),
-    E2ECase("G9: set-policy removed", case_set_policy_removed),
     E2ECase("G9: rotate-keys unavailable", case_rotate_keys_not_implemented),
     E2ECase("G9: list-scanners", case_list_scanners),
     E2ECase("G9: certify empty skill dir", case_certify_empty_skill_dir),
-    E2ECase("G10: empty passphrase env", case_contract_init_keys_empty_passphrase_env),
+    E2ECase("G10: empty passphrase env", case_contract_init_empty_passphrase_env),
     E2ECase("G10: check output schema", case_contract_check_output_schema),
     E2ECase(
         "G10: certify --scanner flags", case_contract_certify_explicit_scanner_flags
@@ -1665,8 +1651,8 @@ def _ensure_default_keys(ws: Workspace) -> None:
     key_path = ws.xdg_data / "agent-sec" / "skill-ledger" / "key.pub"
     if key_path.exists():
         return
-    r = run_skill_ledger(["init-keys"], env_extra=ws.env())
-    assert r.returncode == 0, f"init-keys preflight failed: {r.stderr}"
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=ws.env())
+    assert r.returncode == 0, f"init --no-baseline preflight failed: {r.stderr}"
 
 
 # ── Pytest entry points ─────────────────────────────────────────────────────

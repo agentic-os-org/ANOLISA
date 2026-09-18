@@ -30,6 +30,30 @@ const PROVIDERS: Provider[] = [
       { id: 'deepseek-r1', name: 'DeepSeek R1 (reasoning)', nameKey: 'opt.llm.model.deepseekR1Reasoning' },
     ],
   },
+  // Token Plan keys (sk-sp-…) and endpoint are isolated from the
+  // pay-as-you-go DashScope ones and must not be mixed (401 / surprise billing).
+  // Model list is the union of the current personal and team plan catalogs;
+  // stale ids 403 with AccessDenied.Unpurchased, so prune models once they
+  // leave both plans.
+  {
+    id: 'token-plan',
+    nameKey: 'opt.llm.provider.tokenPlan',
+    icon: '🎟️',
+    base_url: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    models: [
+      { id: 'qwen3.8-max', name: 'Qwen3.8 Max' },
+      { id: 'qwen3.8-flash', name: 'Qwen3.8 Flash' },
+      { id: 'qwen3.7-max', name: 'Qwen3.7 Max' },
+      { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus' },
+      { id: 'qwen3.6-flash', name: 'Qwen3.6 Flash' },
+      { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+      { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (reasoning)', nameKey: 'opt.llm.model.glm52Reasoning' },
+      { id: 'MiniMax-M2.5', name: 'MiniMax M2.5' },
+    ],
+  },
   {
     id: 'openai',
     nameKey: 'opt.llm.provider.openai',

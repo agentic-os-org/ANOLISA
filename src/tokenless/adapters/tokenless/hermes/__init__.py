@@ -134,6 +134,8 @@ _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
     ("run_compress", ("", {}, 0, ""), {}),
     # on_transform_tool_result: is_tokenless_retrieve_command(tool_name, args)
     ("is_tokenless_retrieve_command", ("", {}), {}),
+    # on_transform_tool_result: is_file_read_command(tool_name, args)
+    ("is_file_read_command", ("", {}), {}),
     # on_transform_tool_result: tokenless_retrieve_command_available()
     ("tokenless_retrieve_command_available", (), {}),
 )
@@ -292,6 +294,7 @@ from hook_utils import SKIP_TOOLS as _SKIP_TOOLS_SHARED
 from hook_utils import (
     build_post_tool_request,
     build_pre_tool_request,
+    is_file_read_command,
     is_tokenless_retrieve_command,
     resolve_binary,
     run_compress,
@@ -363,9 +366,11 @@ def _protocol_status(status: Any, result: str) -> str | None:
     return "error" if isinstance(parsed, dict) and parsed.get("error") else "success"
 
 
-def _content_origin(tool_name: str) -> str:
+def _content_origin(tool_name: str, args: Any) -> str:
     if tool_name in _SKIP_TOOLS:
         return "file_content"
+    if is_file_read_command(tool_name, args):
+        return "file_read"
     if tool_name in _SHELL_TOOLS:
         return "command_output"
     return "api_response"
@@ -501,7 +506,7 @@ def on_transform_tool_result(
         AGENT_ID,
         tool_name,
         protocol_status,
-        _content_origin(tool_name),
+        _content_origin(tool_name, args),
         output_optimization,
         result_kind="retrieve" if retrieve_result else "tool",
         recovery={

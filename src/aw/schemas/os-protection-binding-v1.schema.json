@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/os-protection-binding/v1",
+  "title": "os protection binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binding_id",
+    "scope",
+    "target_id",
+    "target_generation",
+    "policy_digest",
+    "authority_id",
+    "state",
+    "controls",
+    "observed_at_ms",
+    "expires_at_ms",
+    "evidence"
+  ],
+  "properties": {
+    "binding_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "target_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "target_generation": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "policy_digest": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+    },
+    "authority_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "state": {
+      "enum": [
+        "active",
+        "unavailable",
+        "failed"
+      ]
+    },
+    "controls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "control_id",
+          "mechanism",
+          "coverage"
+        ],
+        "properties": {
+          "control_id": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "mechanism": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "coverage": {
+            "enum": [
+              "enforced",
+              "declared",
+              "unsupported"
+            ]
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 16
+    },
+    "observed_at_ms": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "expires_at_ms": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+      },
+      "minItems": 0,
+      "maxItems": 16
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "active"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "minItems": 1
+          },
+          "controls": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

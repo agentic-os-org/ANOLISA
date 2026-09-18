@@ -20,11 +20,10 @@
 //! orchestrators dispatched.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 
 use anolisa_env::EnvFacts;
+use anolisa_platform::command::{CommandOutput, CommandRunner, InheritedLocaleCommandRunner};
 
 use crate::manifest::ServiceScope;
 
@@ -320,8 +319,8 @@ impl ServiceManager for NotSupportedServiceManager {
 /// Real `systemctl` backend. Resolves the binary off `PATH`, and
 /// returns spawn errors as `ServiceError::Spawn` so the caller can
 /// downgrade them to warnings.
-pub struct SystemdServiceManager {
-    binary: PathBuf,
+pub struct SystemdServiceManager<R = InheritedLocaleCommandRunner> {
+    runner: R,
     /// System vs user manager. A user-scoped instance prefixes every
     /// invocation with `--user`, so ops target the caller's `systemd
     /// --user` instance instead of the system manager. Set from install
@@ -329,7 +328,7 @@ pub struct SystemdServiceManager {
     scope: ServiceScope,
 }
 
-impl SystemdServiceManager {
+impl SystemdServiceManager<InheritedLocaleCommandRunner> {
     /// Build a **system**-scope manager that invokes `systemctl` from
     /// `PATH`.
     pub fn new() -> Self {
@@ -339,33 +338,53 @@ impl SystemdServiceManager {
     /// Build a manager bound to `scope`. A [`ServiceScope::User`] manager
     /// prefixes every `systemctl` call with `--user`.
     pub fn with_scope(scope: ServiceScope) -> Self {
-        Self {
-            binary: PathBuf::from("systemctl"),
-            scope,
-        }
+        Self::with_runner(scope, InheritedLocaleCommandRunner)
+    }
+}
+
+impl<R: CommandRunner> SystemdServiceManager<R> {
+    /// Build a scope-bound backend with injectable process execution.
+    pub fn with_runner(scope: ServiceScope, runner: R) -> Self {
+        Self { runner, scope }
     }
 
-    /// `systemctl` command seeded with `--user` when this manager is
-    /// user-scoped, so probe / op / reload all target the right manager.
-    fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.binary);
+    fn run(&self, args: &[&str]) -> Result<CommandOutput, ServiceError> {
+        let mut scoped_args = Vec::with_capacity(args.len() + 1);
         if self.scope == ServiceScope::User {
-            cmd.arg("--user");
+            scoped_args.push("--user");
         }
-        cmd
+        scoped_args.extend_from_slice(args);
+        self.runner
+            .run("systemctl", &scoped_args)
+            .map_err(|source| ServiceError::Spawn { source })
     }
 
     fn probe_state(&self, unit: &str) -> Result<ServiceState, ServiceError> {
-        let mut cmd = self.command();
-        cmd.arg("is-active").arg(unit);
-        let output = cmd
-            .output()
-            .map_err(|source| ServiceError::Spawn { source })?;
-        // `is-active` exits 3 for inactive/failed units — read stdout
-        // regardless of exit code.
-        let stdout = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_lowercase();
+        let output = self.run(&["is-active", unit])?;
+        let stdout = output.stdout.trim().to_lowercase();
+        // is-active also uses nonzero exits for domain states. A failed
+        // query with empty output must not masquerade as a missing unit.
+        let observed_state = matches!(output.code, Some(3 | 4))
+            && output.stderr.trim().is_empty()
+            && matches!(
+                stdout.as_str(),
+                "active"
+                    | "reloading"
+                    | "activating"
+                    | "deactivating"
+                    | "inactive"
+                    | "failed"
+                    | "unknown"
+                    | "maintenance"
+            );
+        if output.code != Some(0) && !observed_state {
+            return Err(ServiceError::NonZeroExit {
+                op: "is-active".to_string(),
+                unit: unit.to_string(),
+                code: output.code.unwrap_or(-1),
+                stderr: output.stderr.trim().to_string(),
+            });
+        }
         Ok(match stdout.as_str() {
             "active" => ServiceState::Active,
             "reloading" | "activating" => ServiceState::Activating,
@@ -376,7 +395,9 @@ impl SystemdServiceManager {
             _ => ServiceState::Unknown,
         })
     }
+}
 
+impl<R: CommandRunner + Send + Sync> SystemdServiceManager<R> {
     fn run_op(&self, op: ServiceOp, unit: &str) -> Result<ServiceOutcome, ServiceError> {
         let prior = self.probe_state(unit)?;
         if matches!(op, ServiceOp::Probe) {
@@ -390,14 +411,10 @@ impl SystemdServiceManager {
                 message: format!("systemctl is-active reported {}", prior.as_str()),
             });
         }
-        let mut cmd = self.command();
-        cmd.arg(op.as_str()).arg(unit);
-        let output = cmd
-            .output()
-            .map_err(|source| ServiceError::Spawn { source })?;
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let output = self.run(&[op.as_str(), unit])?;
+        if output.code != Some(0) {
+            let code = output.code.unwrap_or(-1);
+            let stderr = output.stderr.trim().to_string();
             return Err(ServiceError::NonZeroExit {
                 op: op.as_str().to_string(),
                 unit: unit.to_string(),
@@ -430,13 +447,13 @@ impl SystemdServiceManager {
     }
 }
 
-impl Default for SystemdServiceManager {
+impl Default for SystemdServiceManager<InheritedLocaleCommandRunner> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ServiceManager for SystemdServiceManager {
+impl<R: CommandRunner + Send + Sync> ServiceManager for SystemdServiceManager<R> {
     fn manager(&self) -> &str {
         // Report the scope in the label (a user-scoped instance drives
         // `systemctl --user`, a distinct namespace). Shared with the install
@@ -451,14 +468,10 @@ impl ServiceManager for SystemdServiceManager {
         self.scope == scope
     }
     fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
-        let mut cmd = self.command();
-        cmd.arg("daemon-reload");
-        let output = cmd
-            .output()
-            .map_err(|source| ServiceError::Spawn { source })?;
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let output = self.run(&["daemon-reload"])?;
+        if output.code != Some(0) {
+            let code = output.code.unwrap_or(-1);
+            let stderr = output.stderr.trim().to_string();
             return Err(ServiceError::NonZeroExit {
                 op: "daemon-reload".to_string(),
                 unit: String::new(),
@@ -1127,7 +1140,372 @@ pub fn deactivate_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::io;
     use std::path::PathBuf;
+
+    struct ScriptedRunner {
+        calls: Mutex<VecDeque<(Vec<String>, io::Result<CommandOutput>)>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(scope: ServiceScope, steps: Vec<(&str, io::Result<CommandOutput>)>) -> Self {
+            Self {
+                calls: Mutex::new(
+                    steps
+                        .into_iter()
+                        .map(|(op, result)| {
+                            let mut args = Vec::new();
+                            if scope == ServiceScope::User {
+                                args.push("--user".to_string());
+                            }
+                            args.push(op.to_string());
+                            if op != "daemon-reload" {
+                                args.push("test.service".to_string());
+                            }
+                            (args, result)
+                        })
+                        .collect(),
+                ),
+            }
+        }
+
+        fn assert_finished(&self) {
+            assert!(self.calls.lock().unwrap().is_empty());
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            assert_eq!(program, "systemctl");
+            let (expected, result) = self
+                .calls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected service call");
+            assert_eq!(args, expected);
+            result
+        }
+    }
+
+    fn command_output(code: Option<i32>, stdout: &str, stderr: &str) -> io::Result<CommandOutput> {
+        Ok(CommandOutput {
+            code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        })
+    }
+
+    #[test]
+    fn systemd_probe_bus_failure_is_not_missing() {
+        let runner = ScriptedRunner::new(
+            ServiceScope::System,
+            vec![(
+                "is-active",
+                command_output(Some(1), "", "Failed to connect to bus: Host is down\n"),
+            )],
+        );
+        let manager = SystemdServiceManager::with_runner(ServiceScope::System, runner);
+        let error = manager.probe_service("test.service").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "systemctl is-active test.service exited with status 1: Failed to connect to bus: Host is down"
+        );
+        assert!(matches!(error, ServiceError::NonZeroExit { code: 1, .. }));
+        manager.runner.assert_finished();
+    }
+
+    #[test]
+    fn systemd_probe_preserves_supported_states_and_success_parsing() {
+        let states = [
+            ("active", ServiceState::Active),
+            ("reloading", ServiceState::Activating),
+            ("activating", ServiceState::Activating),
+            ("deactivating", ServiceState::Deactivating),
+            ("inactive", ServiceState::Inactive),
+            ("failed", ServiceState::Failed),
+            ("unknown", ServiceState::NotInstalled),
+            ("maintenance", ServiceState::Unknown),
+        ];
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            for code in [0, 3, 4] {
+                for (token, state) in states {
+                    let stdout = format!(" \t{}\n", token.to_uppercase());
+                    let runner = ScriptedRunner::new(
+                        scope,
+                        vec![("is-active", command_output(Some(code), &stdout, " \t\n"))],
+                    );
+                    let manager = SystemdServiceManager::with_runner(scope, runner);
+                    let outcome = manager.probe_service("test.service").unwrap();
+                    assert_eq!(outcome.state, state);
+                    assert_eq!(outcome.manager, scope.manager_label());
+                    assert!(outcome.supported);
+                    assert!(!outcome.changed);
+                    assert!(manager.handles_scope(scope));
+                    manager.runner.assert_finished();
+                }
+            }
+            for (stdout, state) in [
+                ("", ServiceState::NotInstalled),
+                ("new-state", ServiceState::Unknown),
+            ] {
+                let manager = SystemdServiceManager::with_runner(
+                    scope,
+                    ScriptedRunner::new(
+                        scope,
+                        vec![("is-active", command_output(Some(0), stdout, "warning"))],
+                    ),
+                );
+                assert_eq!(manager.probe_service("test.service").unwrap().state, state);
+                manager.runner.assert_finished();
+            }
+        }
+    }
+
+    #[test]
+    fn systemd_probe_rejects_failed_and_ambiguous_observations() {
+        for code in [Some(1), Some(2), Some(3), Some(4), Some(5), None] {
+            for (stdout, stderr) in [
+                ("", ""),
+                (" \n", "\t"),
+                ("inactive", " warning \n"),
+                ("unknown", "Failed to connect to bus"),
+                ("new-state", ""),
+                ("inactive\nfailed", ""),
+                ("unit inactive", ""),
+            ] {
+                let runner = ScriptedRunner::new(
+                    ServiceScope::System,
+                    vec![("is-active", command_output(code, stdout, stderr))],
+                );
+                let manager = SystemdServiceManager::with_runner(ServiceScope::System, runner);
+                let error = manager.probe_service("test.service").unwrap_err();
+                match error {
+                    ServiceError::NonZeroExit {
+                        op,
+                        unit,
+                        code: actual,
+                        stderr: detail,
+                    } => {
+                        assert_eq!(op, "is-active");
+                        assert_eq!(unit, "test.service");
+                        assert_eq!(actual, code.unwrap_or(-1));
+                        assert_eq!(detail, stderr.trim());
+                    }
+                    other => panic!("unexpected error: {other}"),
+                }
+                manager.runner.assert_finished();
+            }
+        }
+        for code in [Some(1), Some(2), Some(5), None] {
+            let manager = SystemdServiceManager::with_runner(
+                ServiceScope::System,
+                ScriptedRunner::new(
+                    ServiceScope::System,
+                    vec![("is-active", command_output(code, "active", ""))],
+                ),
+            );
+            assert!(matches!(
+                manager.probe_service("test.service"),
+                Err(ServiceError::NonZeroExit { .. })
+            ));
+            manager.runner.assert_finished();
+        }
+    }
+
+    fn dispatch_service(
+        manager: &dyn ServiceManager,
+        op: ServiceOp,
+    ) -> Result<ServiceOutcome, ServiceError> {
+        match op {
+            ServiceOp::Start => manager.start_service("test.service"),
+            ServiceOp::Stop => manager.stop_service("test.service"),
+            ServiceOp::Restart => manager.restart_service("test.service"),
+            ServiceOp::Enable => manager.enable_service("test.service"),
+            ServiceOp::Disable => manager.disable_service("test.service"),
+            ServiceOp::Probe => manager.probe_service("test.service"),
+            ServiceOp::DaemonReload => manager.daemon_reload(),
+        }
+    }
+
+    #[test]
+    fn systemd_operations_preserve_scope_sequence_and_changes() {
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            for op in [
+                ServiceOp::Start,
+                ServiceOp::Stop,
+                ServiceOp::Restart,
+                ServiceOp::Enable,
+                ServiceOp::Disable,
+            ] {
+                let (prior, post, post_code) = if op == ServiceOp::Stop {
+                    ("active", "inactive", 3)
+                } else {
+                    ("inactive", "active", 0)
+                };
+                let runner = ScriptedRunner::new(
+                    scope,
+                    vec![
+                        (
+                            "is-active",
+                            command_output(Some(if prior == "active" { 0 } else { 3 }), prior, ""),
+                        ),
+                        (op.as_str(), command_output(Some(0), "", "")),
+                        ("is-active", command_output(Some(post_code), post, "")),
+                    ],
+                );
+                let manager = SystemdServiceManager::with_runner(scope, runner);
+                let outcome = dispatch_service(&manager, op).unwrap();
+                assert_eq!(outcome.op, op);
+                assert_eq!(outcome.unit, "test.service");
+                assert_eq!(outcome.manager, scope.manager_label());
+                assert!(outcome.changed);
+                assert_eq!(
+                    outcome.state,
+                    if op == ServiceOp::Stop {
+                        ServiceState::Inactive
+                    } else {
+                        ServiceState::Active
+                    }
+                );
+                assert_eq!(
+                    outcome.message,
+                    format!(
+                        "systemctl {} test.service ok (state={})",
+                        op.as_str(),
+                        outcome.state.as_str()
+                    )
+                );
+                manager.runner.assert_finished();
+            }
+            let manager = SystemdServiceManager::with_runner(
+                scope,
+                ScriptedRunner::new(
+                    scope,
+                    vec![("daemon-reload", command_output(Some(0), "", ""))],
+                ),
+            );
+            let outcome = manager.daemon_reload().unwrap();
+            assert_eq!(outcome.state, ServiceState::Unknown);
+            assert!(outcome.changed);
+            assert_eq!(outcome.unit, "");
+            assert_eq!(outcome.message, "systemctl daemon-reload ok");
+            manager.runner.assert_finished();
+        }
+    }
+
+    #[test]
+    fn systemd_maintenance_observation_does_not_block_operations() {
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            for op in [
+                ServiceOp::Start,
+                ServiceOp::Stop,
+                ServiceOp::Restart,
+                ServiceOp::Enable,
+                ServiceOp::Disable,
+            ] {
+                let manager = SystemdServiceManager::with_runner(
+                    scope,
+                    ScriptedRunner::new(
+                        scope,
+                        vec![
+                            ("is-active", command_output(Some(3), "maintenance\n", "")),
+                            (op.as_str(), command_output(Some(0), "", "")),
+                            ("is-active", command_output(Some(3), "maintenance\n", "")),
+                        ],
+                    ),
+                );
+                let outcome = dispatch_service(&manager, op).unwrap();
+                assert_eq!(outcome.state, ServiceState::Unknown);
+                assert_eq!(outcome.op, op);
+                assert_eq!(
+                    outcome.changed,
+                    matches!(
+                        op,
+                        ServiceOp::Restart | ServiceOp::Enable | ServiceOp::Disable
+                    )
+                );
+                manager.runner.assert_finished();
+            }
+        }
+    }
+
+    #[test]
+    fn systemd_failures_stop_at_the_failing_phase() {
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            for op in [
+                ServiceOp::Start,
+                ServiceOp::Stop,
+                ServiceOp::Restart,
+                ServiceOp::Enable,
+                ServiceOp::Disable,
+                ServiceOp::Probe,
+                ServiceOp::DaemonReload,
+            ] {
+                let phase_count = if matches!(op, ServiceOp::Probe | ServiceOp::DaemonReload) {
+                    1
+                } else {
+                    3
+                };
+                for phase in 0..phase_count {
+                    for failure in 0..3 {
+                        let mut steps = Vec::new();
+                        if phase > 0 {
+                            steps.push(("is-active", command_output(Some(0), "active", "")));
+                        }
+                        if phase > 1 {
+                            steps.push((op.as_str(), command_output(Some(0), "", "")));
+                        }
+                        let failing_op = if op == ServiceOp::DaemonReload || phase == 1 {
+                            op.as_str()
+                        } else {
+                            "is-active"
+                        };
+                        let output = match failure {
+                            0 => Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "spawn denied",
+                            )),
+                            1 => command_output(Some(1), "ignored stdout", " failure detail \n"),
+                            _ => command_output(None, "active", " failure detail \n"),
+                        };
+                        steps.push((failing_op, output));
+                        let manager = SystemdServiceManager::with_runner(
+                            scope,
+                            ScriptedRunner::new(scope, steps),
+                        );
+                        match dispatch_service(&manager, op).unwrap_err() {
+                            ServiceError::Spawn { source } => {
+                                assert_eq!(failure, 0);
+                                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+                                assert_eq!(source.to_string(), "spawn denied");
+                            }
+                            ServiceError::NonZeroExit {
+                                op: actual,
+                                unit,
+                                code,
+                                stderr,
+                            } => {
+                                assert_eq!(actual, failing_op);
+                                assert_eq!(
+                                    unit,
+                                    if op == ServiceOp::DaemonReload {
+                                        ""
+                                    } else {
+                                        "test.service"
+                                    }
+                                );
+                                assert_eq!(code, if failure == 1 { 1 } else { -1 });
+                                assert_eq!(stderr, "failure detail");
+                            }
+                        }
+                        manager.runner.assert_finished();
+                    }
+                }
+            }
+        }
+    }
 
     fn fake_env(os: &str, container: Option<&str>) -> EnvFacts {
         EnvFacts {

@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/operation-record/v1",
+  "title": "Durable external operation state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation_id",
+    "capability",
+    "scope",
+    "resource_id",
+    "resource_generation",
+    "expected_revision",
+    "input_digest",
+    "idempotency_key",
+    "state",
+    "sequence",
+    "evidence"
+  ],
+  "properties": {
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "resource_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "resource_generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "expected_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "input_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "approval_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "approved",
+        "started",
+        "succeeded",
+        "no_effect",
+        "uncertain"
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+      },
+      "minItems": 0,
+      "maxItems": 16
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "approved",
+              "started",
+              "succeeded",
+              "uncertain"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "approval_ref"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "succeeded",
+              "no_effect"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

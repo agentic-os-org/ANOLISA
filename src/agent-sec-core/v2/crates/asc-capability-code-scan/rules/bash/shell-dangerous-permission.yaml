@@ -1,0 +1,12 @@
+rule_id: shell-dangerous-permission
+cwe_id: CWE-732
+desc_en: >-
+  Command sets dangerous file permissions that may allow unauthorized
+  access or privilege escalation (world-writable, setuid/setgid).
+desc_zh: >-
+  命令设置危险的文件权限，可能允许未授权访问或权限提升（全局可写、setuid/setgid）。
+regex: |-
+  \bchmod\b[^;\n&]*\s[0-7]*(77|66)[0-7]\b
+  |\bchmod\b[^;\n&]*\s[2467][0-7]{3}\b
+  |\bchmod\b[^;\n&]*\s[ugoa]*\+[rwxst]*s
+severity: warn

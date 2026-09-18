@@ -14,7 +14,7 @@ use super::readonly_pipeline::{
     ReadonlyPipelineError, ReadonlyPipelineOutput,
 };
 
-/// Execution plan for a fully-whitelisted compound command (issue #1882).
+/// Execution plan for a readonly compound or a single stderr-suppressed command.
 /// The plan carries parser tokens verbatim: steps are spawned directly
 /// with `std::process::Command`, so no shell parsing layer ever touches
 /// the assessed text and every expansion mechanism (history, glob,
@@ -34,15 +34,17 @@ pub(crate) struct ReadonlyCompoundStep {
     /// eligibility verdict and the executed binary can never diverge.
     pub(crate) program: PathBuf,
     pub(crate) argv: Vec<String>,
+    /// Connect stderr to the null device rather than capturing it.
+    pub(crate) suppress_stderr: bool,
 }
 
-/// Builds an execution plan when — and only when — a compound command is
-/// eligible for auto-execution. Eligibility is exactly "a plan exists",
-/// so the assessment path and the execution path can never disagree
-/// about what would run. Returns `None` for every ineligible shape, in
-/// which case the caller keeps the pre-existing AskUser flow untouched.
+/// Builds a readonly argv plan without overriding the caller's risk policy.
+/// Assessment and execution use the same builder, so the validated argv is
+/// the argv that runs. Returns `None` for shapes that still need approval.
 ///
-/// Eligibility rules (design §2):
+/// A simple command with exclusively `2>` / `2>>` null sinks uses one step
+/// with null stderr. All other simple commands keep their existing route.
+/// Compound eligibility rules (design §2):
 /// 1. shape is `AndOrList` or `Sequence` (all other shapes fail closed);
 /// 2. no null-redirections were stripped by the parser (stripping loses
 ///    the user's output-suppression intent);
@@ -73,33 +75,37 @@ pub(crate) struct ReadonlyCompoundStep {
 ///    terminal instead.
 pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyCompoundPlan> {
     let parsed = parse_command(command);
-    if !matches!(
-        parsed.shape,
-        CommandShape::AndOrList | CommandShape::Sequence
-    ) {
-        return None;
-    }
-    if parsed.null_redirections > 0 {
-        return None;
-    }
-    if parsed.segments.len() < 2 {
-        return None;
-    }
-    if parsed.segment_connectors.len() != parsed.segments.len() - 1 {
-        // A doubled separator (`pwd && && df`) swallows an empty segment;
-        // bash would reject the line outright, so fail closed instead of
-        // executing a re-interpretation.
-        return None;
-    }
+    let suppress_stderr =
+        parsed.shape == CommandShape::Simple && parsed.null_redirections.is_stderr_only();
+    let segments = if suppress_stderr {
+        if parsed.requires_shell_expansion {
+            return None;
+        }
+        vec![parsed.stages]
+    } else {
+        if !matches!(
+            parsed.shape,
+            CommandShape::AndOrList | CommandShape::Sequence
+        ) || !parsed.null_redirections.is_empty()
+            || parsed.segments.len() < 2
+            || parsed.segment_connectors.len() != parsed.segments.len() - 1
+        {
+            // Missing segments/connectors would change shell short-circuit semantics.
+            return None;
+        }
+        parsed.segments
+    };
 
-    let mut steps = Vec::with_capacity(parsed.segments.len());
-    for (index, segment) in parsed.segments.iter().enumerate() {
+    let mut steps = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
         if segment.len() != 1 {
             return None;
         }
         let argv = &segment[0];
         if argv.is_empty()
             || argv.iter().any(|token| token.contains(['$', '`']))
+            // ponytail: ambiguous escapes/comments stay manual until the parser models them.
+            || (suppress_stderr && argv.iter().any(|token| token.contains(['\\', '\n', '\r', '#'])))
             || CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
             || segment_reads_stdin(argv)
             || !broker::configured_readonly_command(argv)
@@ -115,6 +121,7 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
             },
             program,
             argv: argv.clone(),
+            suppress_stderr,
         });
     }
     Some(ReadonlyCompoundPlan { steps })
@@ -270,7 +277,11 @@ fn run_compound_steps(
             .env("PATH", TRUSTED_EXECUTABLE_DIRS.join(":"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(if step.suppress_stderr {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            });
         for key in PASSTHROUGH_ENV_KEYS {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);

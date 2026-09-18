@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/execution-intent/v1",
+  "title": "Final execution intent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intent_id",
+    "scope",
+    "tool_name",
+    "tool_definition_digest",
+    "executor_revision",
+    "arguments",
+    "target_id",
+    "target_generation",
+    "working_directory_ref",
+    "environment_revision",
+    "expires_at_ms",
+    "protection_policy_digest"
+  ],
+  "properties": {
+    "intent_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "tool_definition_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "executor_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "media_type",
+        "digest"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "media_type": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/media_type"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      }
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "target_generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "working_directory_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "environment_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "expires_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "protection_policy_digest": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/capabilities/security.command.inspect/output/v1",
+  "title": "security.command.inspect/v1 output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision"],
+  "properties": {
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "reasons", "findings", "scanned_bytes"],
+      "properties": {
+        "verdict": {
+          "enum": ["allow", "warn", "deny"]
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9._-]{1,64}$"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule_id",
+              "category",
+              "severity",
+              "confidence",
+              "count"
+            ],
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "pattern": "^[a-z0-9._-]{1,64}$"
+              },
+              "category": {
+                "enum": [
+                  "secret",
+                  "personal_data",
+                  "credential",
+                  "dangerous_pattern",
+                  "obfuscation",
+                  "other"
+                ]
+              },
+              "severity": {
+                "enum": ["info", "low", "medium", "high", "critical"]
+              },
+              "confidence": {
+                "enum": ["low", "medium", "high"]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              }
+            }
+          }
+        },
+        "scanned_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Exact UTF-8 bytes inspected; Core requires this value to equal the submitted command length before accepting a gate verdict."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "allow"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "maxItems": 0
+              },
+              "findings": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["warn", "deny"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "minItems": 1
+              },
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

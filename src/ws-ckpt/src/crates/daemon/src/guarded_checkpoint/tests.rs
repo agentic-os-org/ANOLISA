@@ -119,7 +119,11 @@ impl StorageBackend for TestBackend {
         Ok(self.current_diff.lock().unwrap().clone())
     }
 
-    async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
+    async fn cleanup_snapshots(
+        &self,
+        _: &str,
+        _: &[String],
+    ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
         anyhow::bail!("unused test backend operation")
     }
 

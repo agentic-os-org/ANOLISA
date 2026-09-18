@@ -159,6 +159,8 @@ ws-ckpt reload
 | `reload` | 通知 daemon 重新加载 `config.toml` |
 | `plugin` | 安装/卸载 ws-ckpt Agent runtime（openclaw/hermes）插件 |
 
+OpenClaw adapter 要求 OpenClaw >= 2026.2.13。若检测到的版本或配置能力无法安全更新工具 allowlist，安装会中止，避免留下不完整的集成。
+
 ## 组件
 
 | 组件 | 状态 | 说明 |

@@ -1,0 +1,15 @@
+[package]
+name = "asc-action-types"
+description = "Shared action contracts for AgentSecCore capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

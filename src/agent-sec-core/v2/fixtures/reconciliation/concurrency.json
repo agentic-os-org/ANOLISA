@@ -44,7 +44,6 @@
     },
     "trace": [
       "read",
-      "read",
       "claim",
       "claim:matched",
       "adapter",
@@ -117,14 +116,15 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "intermediate": {
       "$ref": "record.create.registered"
     },
     "expected": null,
     "trace": [
-      "read",
       "read",
       "claim",
       "claim:matched",

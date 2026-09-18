@@ -1,0 +1,8 @@
+rule_id: shell-passwd-useradd
+cwe_id: CWE-284
+desc_en: >-
+  Detects user/password management commands that may create backdoor accounts
+desc_zh: >-
+  检测可能创建后门账户的用户/密码管理命令
+regex: '(^|[^./\w])(useradd|usermod|passwd|chpasswd)\b'
+severity: warn

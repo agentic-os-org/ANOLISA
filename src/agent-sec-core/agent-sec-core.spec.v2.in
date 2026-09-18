@@ -13,7 +13,7 @@
 # of bundled native extensions; -19 takes noticeably longer with no real gain.
 %define _binary_payload w.zstdio
 %define _source_payload w.zstdio
-%{!?_userunitdir:%global _userunitdir /usr/lib/systemd/user}
+%{!?_unitdir:%global _unitdir /usr/lib/systemd/system}
 
 # Preserve original shebang (#!/usr/bin/env bash) for cross-platform compatibility
 %undefine __brp_mangle_shebangs
@@ -47,9 +47,9 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 
-%{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_preun:%{error:missing %%systemd_user_preun; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_postun:%{error:missing %%systemd_user_postun; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_post:%{error:missing %%systemd_post; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_preun:%{error:missing %%systemd_preun; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_postun_with_restart:%{error:missing %%systemd_postun_with_restart; install systemd-rpm-macros in the rpmbuild environment}}
 
 # Metapackage: pull all subpackages
 Requires:       agent-sec-cli = %{version}-%{release}
@@ -86,7 +86,7 @@ domain socket and carries no Python runtime of its own.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
-%{_userunitdir}/agent-sec-core.service
+%{_unitdir}/agent-sec-core.service
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/sec-core
@@ -94,13 +94,13 @@ domain socket and carries no Python runtime of its own.
 %license LICENSE
 
 %post -n agent-sec-cli
-%systemd_user_post agent-sec-core.service
+%systemd_post agent-sec-core.service
 
 %preun -n agent-sec-cli
-%systemd_user_preun agent-sec-core.service
+%systemd_preun agent-sec-core.service
 
 %postun -n agent-sec-cli
-%systemd_user_postun_with_restart agent-sec-core.service
+%systemd_postun_with_restart agent-sec-core.service
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook

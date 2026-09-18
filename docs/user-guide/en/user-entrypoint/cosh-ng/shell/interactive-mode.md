@@ -76,6 +76,27 @@ as a multiline editor without changing how later shell input is routed. Enter
 sends the request, `Shift+Enter` adds a line, and `Esc` cancels it and restores
 the shell prompt.
 
+Type `/` as the first token to browse public slash commands. Continue typing to
+filter by prefix (`/ho` suggests `/hooks`); Up/Down selects a candidate and
+scrolls through the six-row list. Tab replaces the command token and adds a
+space for arguments. When a single-line draft contains only the command token,
+Enter accepts and executes the selected candidate (the first candidate by
+default). Drafts with arguments or multiple lines are submitted as written.
+Esc cancels the Composer, including when the list is open.
+Slash commands use the same local command handlers and confirmation cards as
+at the shell prompt. A command submission ends the Composer: its interactive
+card takes over input, or the shell prompt returns when the command finishes.
+Unknown command names display a local error instead of starting an Agent turn.
+
+`/skill:<name>` still selects a Skill for an Agent request; `/skills` manages
+Skills. Existing absolute paths such as `/tmp` and `/etc`, and paths containing
+another slash such as `/tmp/file`, remain Agent text. Bare `/` opens the command
+menu; exact registered command names take precedence over same-named paths.
+Prefix a request with `??` to discuss a slash command literally,
+for example `?? /help explain this command`. Commands in later tokens do not
+activate the menu. Tabs and newlines inside bracketed paste remain text.
+Ordinary shell prompts retain their native path completion.
+
 The first token may select one Skill, and any later whitespace-separated token
 that starts with `@` requests a file or directory from the current workspace:
 

@@ -114,6 +114,7 @@ fn main() {
     println!(
         "\n[cost analysis] (heuristic estimate: bytes/4 tokens, single canonical fixture, linear projection)"
     );
+    println!("  note: order-of-magnitude guidance only; not a billing-grade prediction.");
     println!(
         "  assumptions: {}-round session, {} sessions/day, {} days/month",
         assumptions["rounds_per_session"],

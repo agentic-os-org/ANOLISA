@@ -9,6 +9,22 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.2] - 2026-09-15
+
+### 新增
+
+- 支持的搜索结果列表（包括不带上下文行的 Claude Code 原生 `Grep` 结果）现在会共享连续重复的文件路径，同时保留每条已接收的匹配、行号和行尾。这项无损优化默认开启，要求宿主支持文本替换；可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭（[#3173](https://github.com/alibaba/anolisa/pull/3173)）。
+
+### 变更
+
+- 内置 RTK 升级至 0.49.0，采用保守的管道改写规则，并保持 `sudo` 命令不变。直接使用 `rtk grep` 时，须改用 `--max-len` 和 `--max` 设置 RTK 显示限制：`-l` 和 `-m` 现在保留原生 grep 含义，文件类型过滤改用 `rtk rg -t`（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+- 支持的 RTK 过滤器现在会通过 `rtk recall HASH` 提示恢复已保留的失败或截断输出。恢复存储以宿主 OS 用户为范围，受容量和过期限制；共用该用户的会话可以访问同一存储。RTK recall 与 Tokenless Stash 检索仍相互独立（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+
+### 修复
+
+- Cosh-NG 和 copilot-shell 在 Protocol v2 下现在能正确归因 JSON 编码的 shell 结果中的失败，保留原始失败输出，并将错误详情送交诊断（[#2238](https://github.com/alibaba/anolisa/pull/2238)）。
+- 内置 RTK 保留 pytest 启动和回退诊断，即使关闭恢复存储也不会丢失这些信息，并在 stderr 旁保留未发现测试的摘要（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+
 ## [0.8.1] - 2026-09-09
 
 ### 新增

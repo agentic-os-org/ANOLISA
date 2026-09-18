@@ -12,7 +12,10 @@ from typing import Any
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
-from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
+from agent_sec_cli.skill_ledger.activation_policy import (
+    validate_activation_policy,
+)
+from agent_sec_cli.skill_ledger.config import load_config, resolve_skill_dirs
 from agent_sec_cli.skill_ledger.core.auditor import audit
 from agent_sec_cli.skill_ledger.core.certifier import (
     certify,
@@ -27,6 +30,8 @@ from agent_sec_cli.skill_ledger.core.decision import (
     show_skill,
 )
 from agent_sec_cli.skill_ledger.core.status import ledger_status
+from agent_sec_cli.skill_ledger.errors import ConfigError
+from agent_sec_cli.skill_ledger.scanner.names import validate_scanner_name
 from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
 from agent_sec_cli.skill_ledger.signing.ed25519 import NativeEd25519Backend
 from agent_sec_cli.skill_ledger.signing.key_manager import (
@@ -194,6 +199,22 @@ class SkillLedgerBackend(BaseBackend):
                 exit_code=1,
                 error_type="ValueError",
             )
+        try:
+            # Validate before handlers can initialize keys or mutate ledger state.
+            load_config()
+            for name in kwargs.get("scanner_names") or []:
+                validate_scanner_name(name)
+            if "scanner" in kwargs:
+                validate_scanner_name(kwargs["scanner"])
+            if kwargs.get("policy") is not None:
+                validate_activation_policy(kwargs["policy"])
+        except (ConfigError, ValueError) as exc:
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
         return handler(ctx, **kwargs)
 
     # ------------------------------------------------------------------
@@ -282,31 +303,6 @@ class SkillLedgerBackend(BaseBackend):
                 exit_code=1,
                 error_type=type(exc).__name__,
             )
-
-    def _do_init_keys(
-        self,
-        ctx: RequestContext,
-        *,
-        force: bool = False,
-        passphrase: str | None = None,
-        **kw: Any,
-    ) -> ActionResult:
-        try:
-            result = self._generate_keys(force=force, passphrase=passphrase)
-        except Exception as exc:
-            return ActionResult(
-                success=False,
-                error=str(exc),
-                exit_code=1,
-                error_type=type(exc).__name__,
-            )
-
-        data = {"command": "init-keys", **result}
-        return ActionResult(
-            success=True,
-            stdout=json.dumps(data, ensure_ascii=False) + "\n",
-            data=data,
-        )
 
     def _do_check(
         self,

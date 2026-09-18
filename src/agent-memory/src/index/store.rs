@@ -467,10 +467,19 @@ impl BM25Store {
             .into_iter()
             .map(|(path, snippet, bm25_score, _body, mtime_ms)| {
                 let decay = time_decay(mtime_ms, self.time_decay_lambda);
-                // BM25 scores are negative (more negative = worse).
-                // Normalize: higher bm25_score (less negative) is better.
-                // Apply time decay as an additive boost.
-                let adjusted_score = bm25_score + self.time_decay_alpha * decay;
+                // FTS5's `bm25()` is negative and *more negative is a better
+                // match* — which is why the SQL above orders by `rank`
+                // ascending to keep the best `top_k` rows. Negate it so
+                // `SearchHit::score` means "higher is better" like the two
+                // sibling scorers (`search_like`, `search_vec`) and so the
+                // additive recency boost lifts a good match instead of being
+                // subtracted from it: sorted descending, the raw value ranked
+                // the weakest matched row first and handed
+                // `search_hybrid_inner`'s RRF the BM25 ranks in reverse. FTS5
+                // clamps a negative IDF to ~0, so relevance is never below
+                // zero on this path.
+                let relevance = -bm25_score;
+                let adjusted_score = relevance + self.time_decay_alpha * decay;
                 let suspicious =
                     crate::safety::looks_like_prompt_injection(&strip_snippet_markers(&snippet));
                 SearchHit {
@@ -482,6 +491,7 @@ impl BM25Store {
             })
             .collect();
 
+        // Best match first — `score` is "higher is better" on every path.
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
 
         Ok(out)
@@ -1556,7 +1566,8 @@ mod tests {
     #[test]
     fn search_ranks_recent_higher() {
         // Two files with the same content but different mtimes.
-        // The more recent one should rank higher (less negative bm25 + decay boost).
+        // The more recent one should rank higher (identical bm25 relevance,
+        // so the recency boost is the only thing that can separate them).
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1578,9 +1589,116 @@ mod tests {
 
         let hits = s.search("rust", 5, true).unwrap();
         assert_eq!(hits.len(), 2);
-        // The new file should rank higher (higher score = less negative + decay boost)
+        // The new file should rank higher (same relevance, larger decay boost)
         assert_eq!(hits[0].path, "new.md");
         assert_eq!(hits[1].path, "old.md");
+    }
+
+    /// Corpus for the relevance-ordering tests below.
+    ///
+    /// Four unrelated documents keep `walrus` a discriminative term: with
+    /// only the two matching rows in the table its IDF goes negative and
+    /// every bm25 value collapses towards zero, which hides ordering bugs.
+    /// `lambda = alpha = 0` disables the recency boost and every row shares
+    /// one mtime, so whatever order comes out is produced by relevance
+    /// alone.
+    fn relevance_corpus() -> BM25Store {
+        let mut s = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        // Same term six times in a short document: the strongest match.
+        s.upsert(
+            "strong.md",
+            now_ms,
+            20,
+            "walrus walrus walrus walrus walrus walrus",
+            None,
+        )
+        .unwrap();
+        // Same term once in a long document: a real but much weaker match.
+        s.upsert(
+            "weak.md",
+            now_ms,
+            20,
+            &format!("walrus {}", "plain filler words ".repeat(40)),
+            None,
+        )
+        .unwrap();
+        for (i, body) in [
+            "notes about the compiler and its borrow checker",
+            "a recipe for tomato soup with basil",
+            "meeting notes on the quarterly roadmap",
+            "an unrelated essay on medieval bookbinding",
+        ]
+        .iter()
+        .enumerate()
+        {
+            s.upsert(&format!("filler{i}.md"), now_ms, 20, body, None)
+                .unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn search_ranks_the_stronger_bm25_match_first() {
+        // Regression: the scorer used to add the recency boost to the raw
+        // (negative-is-better) `bm25()` value and sort descending, so the
+        // weakest matched row was reported first. `memory_search`,
+        // `memory_about` and the OpenClaw auto-recall hook all present
+        // results in the order they arrive, and `search_hybrid_inner`
+        // derives its RRF weight from that position.
+        let s = relevance_corpus();
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["strong.md", "weak.md"],
+            "the document that repeats the query term must outrank the one \
+             that mentions it once in passing; got {paths:?} with scores {:?}",
+            hits.iter().map(|h| h.score).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn search_reports_one_score_convention_on_every_path() {
+        // `search_like` (any term < 3 chars) and `search_vec` both report
+        // "higher is better". The BM25 path must not hand the same
+        // `SearchHit::score` field the opposite convention, or a client
+        // cannot order hits at all — the auto-recall hook fuses results from
+        // several queries by rank. The two keyword paths are also
+        // non-negative, which `search_vec`'s cosine is not.
+        let s = relevance_corpus();
+
+        let bm25_hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(bm25_hits.len(), 2);
+        assert!(
+            bm25_hits[0].score > 0.0,
+            "a discriminative term has a positive IDF, so its BM25 relevance \
+             must land above zero; got {}",
+            bm25_hits[0].score
+        );
+        assert!(
+            bm25_hits[0].score > bm25_hits[1].score,
+            "scores must descend with relevance: {} vs {}",
+            bm25_hits[0].score,
+            bm25_hits[1].score
+        );
+
+        // "wa" is below the trigram tokenizer's 3-char floor, so the same
+        // corpus is served by the LIKE fallback: substring frequency 6 vs 1.
+        let like_hits = s.search("wa", 5, true).unwrap();
+        assert_eq!(like_hits.len(), 2);
+        assert_eq!(like_hits[0].path, "strong.md");
+        assert!(like_hits[0].score > 0.0);
+        assert!(
+            like_hits[0].score > like_hits[1].score,
+            "scores must descend with relevance: {} vs {}",
+            like_hits[0].score,
+            like_hits[1].score
+        );
     }
 
     #[test]

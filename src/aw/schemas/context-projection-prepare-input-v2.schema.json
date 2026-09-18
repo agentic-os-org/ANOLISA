@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-input/v2",
+  "title": "context-projection-prepare input v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "boundary",
+    "constraints"
+  ],
+  "properties": {
+    "artifact": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/artifact"
+    },
+    "boundary": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/boundary"
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allow_text_reencoding",
+        "accepted_reversibility"
+      ],
+      "properties": {
+        "allow_text_reencoding": {
+          "type": "boolean"
+        },
+        "accepted_reversibility": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "lossless",
+              "retrievable",
+              "unrecoverable"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

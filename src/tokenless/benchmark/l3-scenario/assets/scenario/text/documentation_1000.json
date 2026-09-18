@@ -1,0 +1,45 @@
+{
+ "suite": "scenario",
+ "scenario": "documentation_1000",
+ "display_name": "Text: Documentation (1K tokens)",
+ "content_type": "text",
+ "size_label": "1K tokens",
+ "source": {
+  "reference": "headroom benchmarks/bench_latency.py::generate_scenarios()",
+  "headroom_native": true,
+  "headroom_revision": "e616dcf788e29e285b5ab5c17af49585c0d60613",
+  "headroom_dirty": false
+ },
+ "model_limit": 200000,
+ "message_count": 4,
+ "tool_message_count": 1,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful assistant.\n\nCurrent date: 2025-01-06"
+  },
+  {
+   "role": "user",
+   "content": "Analyze the following data."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_bench_1",
+     "type": "function",
+     "function": {
+      "name": "get_data",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_bench_1",
+   "content": "The deployment pipeline uses blue-green deployments with automated canary analysis. Each deployment is validated against health checks, latency percentiles, and error rate thresholds before traffic is shifted. Rollback is automated if any SLO is breached during the canary window, typically set to 15 minutes for non-critical services.\n\nPerformance testing is integrated into the CI/CD pipeline. Load tests run against a staging environment that mirrors production topology. Baseline metrics are captured for each release candidate and compared against the previous stable release. Regressions greater than 10% in p99 latency automatically block the deployment.\n\nSecurity follows a defense-in-depth strategy with multiple layers of protection. All inter-service communication uses mTLS with certificate rotation every 90 days. API authentication uses short-lived JWT tokens with refresh token rotation. Secrets are managed through HashiCorp Vault with automatic rotation policies.\n\nThe caching layer uses a tiered approach: L1 in-memory caches with a 60-second TTL for hot data, L2 Redis caches with a 5-minute TTL for frequently accessed resources, and L3 CDN caching for static assets. Cache invalidation follows a pub/sub pattern to ensure consistency across service instances without requiring cache stampede protection.\n\nPerformance testing is integrated into the CI/CD pipeline. Load tests run against a staging environment that mirrors production topology. Baseline metrics are captured for each release candidate and compared against the previous stable release. Regressions greater than 10% in p99 latency automatically block the deployment.\n\nDatabase optimization is critical for maintaining low-latency responses under load. We use connection pooling with a minimum of 10 and maximum of 100 connections per service. Read replicas handle analytics queries to avoid impacting transactional workloads. Indexes are maintained on frequently queried columns with regular analysis of query plans.\n\nThe caching layer uses a tiered approach: L1 in-memory caches with a 60-second TTL for hot data, L2 Redis caches with a 5-minute TTL for frequently accessed resources, and L3 CDN caching for static assets. Cache invalidation follows a pub/sub pattern to ensure consistency across service instances without requiring cache stampede protection.\n\nThe system architecture follows a microservices pattern with clear separation of concerns. Each service owns its data store and communicates through well-defined APIs. Event-driven messaging handles asynchronous workflows, while synchronous REST APIs serve real-time requests. The API gateway handles routing, authentication, and rate limiting at the edge.\n\nThe deployment pipeline uses blue-green deployments with automated canary analysis. Each deployment is validated against health checks, latency percentiles, and error rate thresholds before traffic is shifted. Rollback is automated if any SLO is breached during the canary window, typically set to 15 minutes for non-critical services.\n\nThe caching layer uses a tiered approach: L1 in-memory caches with a 60-second TTL for hot data, L2 Redis caches with a 5-minute TTL for frequently accessed resources, and L3 CDN caching for static assets. Cache invalidation follows a pub/sub pattern to ensure consistency across service instances without requiring cache stampede protection.\n\nThe deployment pipeline uses blue-green deployments with automated canary analysis. Each deployment is validated against health checks, latency percentiles, and error rate thresholds before traffic is shifted. Rollback is automated if any SLO is breached during the canary window, typically set to 15 minutes for non-critical services.\n\nThe system architecture follows a microservices pattern with clear separation of concerns. Each service owns its data store and communicates through well-defined APIs. Event-driven messaging handles asynchronous workflows, while synchronous REST APIs serve real-time requests. T"
+  }
+ ]
+}

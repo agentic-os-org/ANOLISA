@@ -177,6 +177,10 @@ name = "prompt-scanner"
 source = "{datadir}/skills/prompt-scanner/"
 
 [[adapters.openclaw.skills]]
+name = "pii-checker"
+source = "{datadir}/skills/pii-checker/"
+
+[[adapters.openclaw.skills]]
 name = "skill-ledger"
 source = "{datadir}/skills/skill-ledger/"
 
@@ -209,6 +213,10 @@ source = "{datadir}/skills/code-scanner/"
 [[adapters.hermes.skills]]
 name = "prompt-scanner"
 source = "{datadir}/skills/prompt-scanner/"
+
+[[adapters.hermes.skills]]
+name = "pii-checker"
+source = "{datadir}/skills/pii-checker/"
 
 [[adapters.hermes.skills]]
 name = "skill-ledger"

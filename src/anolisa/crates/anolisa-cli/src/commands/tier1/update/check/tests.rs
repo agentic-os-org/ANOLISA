@@ -1253,7 +1253,7 @@ fn update_check_resolves_legacy_rpm_component_without_metadata() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
     let path = cache_path(&layout);
-    write_cache(&path, &report).expect("write cache");
+    write_cache(&path, &report, cache_now).expect("write cache");
     let cached = read_cache(&path).expect("read cache");
     assert!(cached.report.action_required);
     assert_eq!(cached.report.summary.reconciliations, 1);
@@ -1472,20 +1472,29 @@ fn report_with_target(target: Option<&str>) -> UpdateCheckReport {
     }
 }
 
+fn cache_now() -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-09-11T12:00:00Z")
+        .expect("fixed test time")
+        .with_timezone(&Utc)
+}
+
 #[test]
 fn update_check_cache_round_trips_and_respects_ttl() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
     let path = cache_path(&layout);
 
-    write_cache(&path, &report_with_target(None)).expect("write cache");
+    write_cache(&path, &report_with_target(None), cache_now).expect("write cache");
 
     let cache = read_cache(&path).expect("cache readable");
     assert_eq!(cache.report.summary.updates, 1);
-    assert!(is_fresh(&cache.generated_at), "just-written cache is fresh");
+    assert!(
+        is_fresh(&cache.generated_at, cache_now),
+        "just-written cache is fresh"
+    );
 
     // A far-past timestamp is stale.
-    assert!(!is_fresh("2000-01-01T00:00:00Z"));
+    assert!(!is_fresh("2000-01-01T00:00:00Z", cache_now));
 }
 
 /// A cached report must not be reused for a different (or absent) target — the
@@ -1495,21 +1504,240 @@ fn update_check_cache_usable_requires_matching_target() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
     let path = cache_path(&layout);
-    write_cache(&path, &report_with_target(Some("image-v1.0"))).expect("write cache");
+    write_cache(&path, &report_with_target(Some("image-v1.0")), cache_now).expect("write cache");
     let cache = read_cache(&path).expect("cache readable");
 
     assert!(
-        cache_is_usable(&cache, Some("image-v1.0")),
+        cache_is_usable(&cache, Some("image-v1.0"), cache_now),
         "same target reuses the cache"
     );
     assert!(
-        !cache_is_usable(&cache, None),
+        !cache_is_usable(&cache, None, cache_now),
         "a plain MOTD must not reuse a targeted report"
     );
     assert!(
-        !cache_is_usable(&cache, Some("image-v2.0")),
+        !cache_is_usable(&cache, Some("image-v2.0"), cache_now),
         "a different target must not reuse the report"
     );
+}
+
+fn cache_args() -> UpdateArgs {
+    UpdateArgs {
+        component: None,
+        command: None,
+        check: true,
+        motd: true,
+        refresh: false,
+        target: None,
+    }
+}
+
+#[test]
+fn update_check_cache_clock_drives_real_handler_paths() {
+    for (scenario, expected_events) in [
+        ("fresh", vec!["check"]),
+        ("ttl", vec!["check"]),
+        ("offset", vec!["check"]),
+        ("explicit_target", vec!["check"]),
+        ("expired", vec!["check", "compute", "write"]),
+        ("future", vec!["check", "compute", "write"]),
+        ("target_mismatch", vec!["check", "compute", "write"]),
+        ("target_missing", vec!["check", "compute", "write"]),
+        ("invalid_time", vec!["compute", "write"]),
+        ("missing", vec!["compute", "write"]),
+        ("corrupt", vec!["compute", "write"]),
+        ("refresh", vec!["compute", "write"]),
+        ("json", vec!["compute", "write"]),
+        ("human", vec!["compute", "write"]),
+    ] {
+        let sandbox = crate::test_support::TestSandbox::new();
+        let mut ctx = sandbox.context(crate::context::InstallMode::System);
+        let layout = common::resolve_layout(&ctx);
+        let path = cache_path(&layout);
+        let mut args = cache_args();
+        let mut cache = UpdateCheckCache {
+            generated_at: cache_now().to_rfc3339(),
+            report: report_with_target(Some(DEFAULT_TARGET_PROFILE_NAME)),
+        };
+        match scenario {
+            "ttl" => {
+                cache.generated_at =
+                    (cache_now() - chrono::Duration::seconds(CACHE_TTL_SECS)).to_rfc3339()
+            }
+            "expired" => {
+                cache.generated_at = (cache_now()
+                    - chrono::Duration::seconds(CACHE_TTL_SECS)
+                    - chrono::Duration::nanoseconds(1))
+                .to_rfc3339()
+            }
+            "future" => {
+                cache.generated_at = (cache_now() + chrono::Duration::nanoseconds(1)).to_rfc3339()
+            }
+            "offset" => cache.generated_at = "2026-09-11T20:00:00+08:00".into(),
+            "invalid_time" => cache.generated_at = "not a timestamp".into(),
+            "target_mismatch" => cache.report.target = Some("image-other".into()),
+            "target_missing" => cache.report.target = None,
+            "explicit_target" => {
+                args.target = Some("image-custom".into());
+                cache.report.target = args.target.clone();
+            }
+            "refresh" => args.refresh = true,
+            "json" => ctx.json = true,
+            "human" => args.motd = false,
+            _ => {}
+        }
+        if scenario != "missing" {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("cache parent");
+            let body = if scenario == "corrupt" {
+                "invalid JSON".to_string()
+            } else {
+                serde_json::to_string(&cache).unwrap()
+            };
+            std::fs::write(&path, body).expect("seed cache");
+        }
+        let before = std::fs::read(&path).ok();
+        let events = RefCell::new(Vec::new());
+        let written_at =
+            cache_now() + chrono::Duration::seconds(61) + chrono::Duration::nanoseconds(123);
+        let report = report_with_target(Some(effective_target_name(args.target.as_deref())));
+        handle_update_check_with(
+            &args,
+            &ctx,
+            || {
+                let writing = events.borrow().contains(&"compute");
+                events
+                    .borrow_mut()
+                    .push(if writing { "write" } else { "check" });
+                if writing {
+                    assert!(path.parent().unwrap().is_dir(), "mkdir before write clock");
+                    written_at
+                } else {
+                    cache_now()
+                }
+            },
+            |target, actual_ctx, actual_layout| {
+                assert_eq!(target, args.target.as_deref());
+                assert!(std::ptr::eq(actual_ctx, &ctx));
+                assert_eq!(actual_layout.cache_dir, layout.cache_dir);
+                assert!(!events.borrow().contains(&"compute"));
+                events.borrow_mut().push("compute");
+                assert_eq!(std::fs::read(&path).ok(), before, "no write before compute");
+                Ok(report.clone())
+            },
+        )
+        .expect(scenario);
+        assert_eq!(*events.borrow(), expected_events, "{scenario}");
+        if expected_events == ["check"] {
+            assert_eq!(
+                std::fs::read(&path).ok(),
+                before,
+                "cache hit must not rewrite"
+            );
+        } else {
+            let saved = read_cache(&path).expect("new cache");
+            assert_eq!(saved.generated_at, "2026-09-11T12:01:01Z", "{scenario}");
+            assert_eq!(
+                serde_json::to_value(saved.report).unwrap(),
+                serde_json::to_value(&report).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn update_check_cache_report_failure_keeps_old_cache() {
+    for (motd, json) in [(true, false), (true, true), (false, false), (false, true)] {
+        let sandbox = crate::test_support::TestSandbox::new();
+        let mut ctx = sandbox.context(crate::context::InstallMode::System);
+        ctx.json = json;
+        let path = cache_path(&common::resolve_layout(&ctx));
+        let mut args = cache_args();
+        args.motd = motd;
+        write_cache(
+            &path,
+            &report_with_target(Some(DEFAULT_TARGET_PROFILE_NAME)),
+            || cache_now() - chrono::Duration::days(1),
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let events = RefCell::new(Vec::new());
+        let result = handle_update_check_with(
+            &args,
+            &ctx,
+            || {
+                assert!(events.borrow().is_empty(), "no write clock after failure");
+                events.borrow_mut().push("check");
+                cache_now()
+            },
+            |_, _, _| {
+                events.borrow_mut().push("compute");
+                Err(CliError::Runtime {
+                    command: CHECK_COMMAND.into(),
+                    reason: "scripted report failure".into(),
+                })
+            },
+        );
+        if motd {
+            result.expect("MOTD failure stays silent even with JSON");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), "EXECUTION_FAILED");
+            assert!(matches!(error, CliError::Runtime { command, reason }
+                if command == CHECK_COMMAND && reason == "scripted report failure"));
+        }
+        assert_eq!(
+            *events.borrow(),
+            if motd && !json {
+                vec!["check", "compute"]
+            } else {
+                vec!["compute"]
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn update_check_cache_write_failures_preserve_lazy_clock_and_success() {
+    for parent_conflict in [true, false] {
+        let sandbox = crate::test_support::TestSandbox::new();
+        let ctx = sandbox.context(crate::context::InstallMode::System);
+        let path = cache_path(&common::resolve_layout(&ctx));
+        let parent = path.parent().unwrap();
+        let blocker = if parent_conflict {
+            std::fs::create_dir_all(parent.parent().unwrap()).unwrap();
+            parent.to_path_buf()
+        } else {
+            std::fs::create_dir_all(&path).unwrap();
+            path.join("sentinel")
+        };
+        std::fs::write(&blocker, "preserve me").unwrap();
+        let events = RefCell::new(Vec::new());
+        handle_update_check_with(
+            &cache_args(),
+            &ctx,
+            || {
+                assert!(!parent_conflict, "mkdir failure must not read clock");
+                assert!(parent.is_dir());
+                events.borrow_mut().push("write");
+                cache_now()
+            },
+            |_, _, _| {
+                events.borrow_mut().push("compute");
+                Ok(report_with_target(Some(DEFAULT_TARGET_PROFILE_NAME)))
+            },
+        )
+        .expect("best-effort cache write");
+        assert_eq!(
+            *events.borrow(),
+            if parent_conflict {
+                vec!["compute"]
+            } else {
+                vec!["compute", "write"]
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "preserve me");
+    }
 }
 
 // ── repo config read-only + target profile ──────────────────────────
@@ -1597,8 +1825,13 @@ fn update_check_rejects_user_mode() {
         refresh: false,
         target: None,
     };
-    let err =
-        super::handle_update_check(&args, &user_ctx()).expect_err("user mode must be rejected");
+    let err = handle_update_check_with(
+        &args,
+        &user_ctx(),
+        || panic!("user mode must not read cache clock"),
+        |_, _, _| panic!("user mode must not compute a report"),
+    )
+    .expect_err("user mode must be rejected");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
 }
 
@@ -1614,7 +1847,13 @@ fn update_check_motd_user_mode_is_silent() {
         refresh: false,
         target: None,
     };
-    super::handle_update_check(&args, &user_ctx()).expect("motd in user mode is a silent Ok");
+    handle_update_check_with(
+        &args,
+        &user_ctx(),
+        || panic!("user MOTD must not read cache clock"),
+        |_, _, _| panic!("user MOTD must not compute a report"),
+    )
+    .expect("motd in user mode is a silent Ok");
 }
 
 /// An omitted `--target` maps to the release default name for both the report
@@ -1706,11 +1945,12 @@ fn update_check_cache_usable_for_omitted_target_matches_default() {
     write_cache(
         &path,
         &report_with_target(Some(DEFAULT_TARGET_PROFILE_NAME)),
+        cache_now,
     )
     .expect("write cache");
     let cache = read_cache(&path).expect("cache readable");
     assert!(
-        cache_is_usable(&cache, Some(effective_target_name(None))),
+        cache_is_usable(&cache, Some(effective_target_name(None)), cache_now),
         "omitted target reuses the default-target cache"
     );
 }

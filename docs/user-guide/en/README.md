@@ -63,6 +63,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | Hardening, code scanning, prompt scanning, skill ledger |
+| [OWASP Agentic Top 10 Control Mapping](agent-security/owasp-agentic-top10.md) | ANOLISA | Security controls, conditions, and evidence for ten Agentic risk categories |
 | [Code Scanner Hook Configuration](agent-security/agent-sec-core/code-scanner.md) | agent-sec-core | Per-agent hook modes, environment variables, and fallback behavior |
 | [Prompt Scanner](agent-security/agent-sec-core/prompt-scanner.md) | agent-sec-core | Prompt injection / jailbreak detection, modes, and verdicts |
 | [PII Checker](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | Personal data / credential detection and redaction |

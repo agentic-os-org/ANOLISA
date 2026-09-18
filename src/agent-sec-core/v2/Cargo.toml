@@ -5,21 +5,33 @@ resolver = "3"
 members = [
     "apps/asc-cli",
     "apps/asc-daemon",
-    "crates/daemon/asc-daemon-client",
-    "crates/daemon/asc-daemon-core",
-    "crates/daemon/asc-daemon-handler",
-    "crates/daemon/asc-daemon-protocol",
-    "crates/daemon/asc-daemon-service",
-    "crates/foundation/asc-foundation-types",
-    "crates/integrations/asc-agentsight-client",
-    "crates/policy/adapters/asc-policy-adapter-agentsight",
-    "crates/policy/asc-pap",
-    "crates/policy/asc-pap-repository-memory",
-    "crates/policy/asc-pcp",
-    "crates/policy/asc-policy-engine",
-    "crates/policy/asc-policy-target-contracts",
-    "crates/policy/asc-policy-types",
-    "crates/policy/asc-policy-repository",
+    "crates/asc-action-runtime",
+    "crates/asc-action-types",
+    "crates/asc-capability-code-scan",
+    "crates/asc-daemon-client",
+    "crates/asc-daemon-core",
+    "crates/asc-daemon-handler",
+    "crates/asc-daemon-protocol",
+    "crates/asc-daemon-service",
+    "crates/asc-event-log",
+    "crates/asc-event-sink",
+    "crates/asc-observability",
+    "crates/asc-security-events",
+    "crates/asc-telemetry",
+    "crates/asc-security-summary",
+    "crates/asc-persistence-sqlite",
+    "crates/asc-sqlite-kernel",
+    "crates/asc-foundation-types",
+    "crates/asc-agentsight-client",
+    "crates/asc-policy-adapter-agentsight",
+    "crates/asc-pap",
+    "crates/asc-pap-repository-memory",
+    "crates/asc-pcp",
+    "crates/asc-policy-runtime",
+    "crates/asc-policy-engine",
+    "crates/asc-policy-target-contracts",
+    "crates/asc-policy-types",
+    "crates/asc-policy-repository",
 ]
 
 [workspace.package]
@@ -31,32 +43,53 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [workspace.dependencies]
-asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
+asc-policy-runtime = { path = "crates/asc-policy-runtime" }
+asc-action-runtime = { path = "crates/asc-action-runtime" }
+asc-action-types = { path = "crates/asc-action-types" }
+asc-agentsight-client = { path = "crates/asc-agentsight-client" }
+asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
 asc-daemon = { path = "apps/asc-daemon" }
-asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
-asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
-asc-daemon-handler = { path = "crates/daemon/asc-daemon-handler" }
-asc-daemon-protocol = { path = "crates/daemon/asc-daemon-protocol" }
-asc-daemon-service = { path = "crates/daemon/asc-daemon-service" }
-asc-foundation-types = { path = "crates/foundation/asc-foundation-types" }
-asc-pap = { path = "crates/policy/asc-pap" }
-asc-pap-repository-memory = { path = "crates/policy/asc-pap-repository-memory" }
-asc-pcp = { path = "crates/policy/asc-pcp" }
-asc-policy-adapter-agentsight = { path = "crates/policy/adapters/asc-policy-adapter-agentsight" }
-asc-policy-engine = { path = "crates/policy/asc-policy-engine" }
-asc-policy-target-contracts = { path = "crates/policy/asc-policy-target-contracts" }
-asc-policy-repository = { path = "crates/policy/asc-policy-repository" }
-asc-policy-types = { path = "crates/policy/asc-policy-types" }
+asc-daemon-client = { path = "crates/asc-daemon-client" }
+asc-daemon-core = { path = "crates/asc-daemon-core" }
+asc-daemon-handler = { path = "crates/asc-daemon-handler" }
+asc-daemon-protocol = { path = "crates/asc-daemon-protocol" }
+asc-daemon-service = { path = "crates/asc-daemon-service" }
+asc-event-log = { path = "crates/asc-event-log" }
+asc-event-sink = { path = "crates/asc-event-sink" }
+asc-foundation-types = { path = "crates/asc-foundation-types" }
+asc-observability = { path = "crates/asc-observability" }
+asc-pap = { path = "crates/asc-pap" }
+asc-pap-repository-memory = { path = "crates/asc-pap-repository-memory" }
+asc-pcp = { path = "crates/asc-pcp" }
+asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
+asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
+asc-policy-engine = { path = "crates/asc-policy-engine" }
+asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
+asc-policy-repository = { path = "crates/asc-policy-repository" }
+asc-policy-types = { path = "crates/asc-policy-types" }
+asc-security-events = { path = "crates/asc-security-events" }
+asc-telemetry = { path = "crates/asc-telemetry" }
+asc-security-summary = { path = "crates/asc-security-summary" }
+asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
+fancy-regex = "0.16"
+nix = { version = "0.31", default-features = false, features = ["user"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serial_test = "3"
 socket2 = "0.6"
 sha2 = "0.10"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-properties = "0.1"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+yaml-rust2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

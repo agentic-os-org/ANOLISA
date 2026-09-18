@@ -10,8 +10,8 @@ const config: Config = {
   tagline: 'The operating layer for agent workloads',
   url: siteUrl,
   baseUrl,
-  organizationName: 'alibaba',
-  projectName: 'anolisa',
+  organizationName: 'agentic-os-org',
+  projectName: 'ANOLISA',
   favicon: 'img/brand/favicon.ico',
   trailingSlash: true,
   onBrokenLinks: 'throw',
@@ -105,7 +105,7 @@ const config: Config = {
         {to: '/changelog', label: 'Changelog', position: 'left'},
         {to: '/agents/', label: 'For Agents', position: 'left'},
         {
-          href: 'https://github.com/alibaba/anolisa',
+          href: 'https://github.com/agentic-os-org/ANOLISA',
           label: 'GitHub',
           position: 'right',
           className: 'headerGithubLink',
@@ -137,14 +137,14 @@ const config: Config = {
         {
           title: 'Community',
           items: [
-            {label: 'GitHub', href: 'https://github.com/alibaba/anolisa'},
+            {label: 'GitHub', href: 'https://github.com/agentic-os-org/ANOLISA'},
             {
               label: 'Contributing',
-              href: 'https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING.md',
+              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md',
             },
             {
               label: 'Security',
-              href: 'https://github.com/alibaba/anolisa/blob/main/SECURITY.md',
+              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md',
             },
           ],
         },

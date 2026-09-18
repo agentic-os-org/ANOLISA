@@ -218,7 +218,7 @@ for (const row of componentRows) {
   const defaultInstall =
     defaultInstallMethod === 'bootstrap'
       ? installCommand
-      : `https://github.com/alibaba/anolisa/tree/main/${row.source_path}`;
+      : `https://github.com/agentic-os-org/ANOLISA/tree/main/${row.source_path}`;
   const installMethod = componentOverride.install_method || defaultInstallMethod;
   const install = componentOverride.install || defaultInstall;
   const installVariants = componentOverride.install_variants || [
@@ -244,7 +244,7 @@ for (const row of componentRows) {
     version: await componentVersion(row.source_path),
     description: await componentDescription(row.source_path, row.name),
     source_path: row.source_path,
-    documentation_path: `https://github.com/alibaba/anolisa/tree/main/${row.source_path}`,
+    documentation_path: `https://github.com/agentic-os-org/ANOLISA/tree/main/${row.source_path}`,
     install,
     install_method: installMethod,
     install_variants: installVariants,
@@ -293,7 +293,7 @@ const index = {
     source,
     url: source === 'docs/QUICKSTART.md'
       ? siteHref('docs/quickstart/')
-      : `https://github.com/alibaba/anolisa/blob/main/${source}`,
+      : `https://github.com/agentic-os-org/ANOLISA/blob/main/${source}`,
   })),
   components,
   platform_support: {

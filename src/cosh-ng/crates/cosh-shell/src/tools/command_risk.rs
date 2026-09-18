@@ -11,6 +11,7 @@ use super::command_risk_pipeline::assess_pipeline;
 use super::command_risk_verdict::high_risk_program_assessment;
 use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
+use super::readonly_compound::build_readonly_compound_plan;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
 pub use super::command_risk_model::{
@@ -80,7 +81,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     }
 
     let null_redirections = parsed.null_redirections;
-    if null_redirections > 0 && parsed.shape == CommandShape::Complex {
+    if !null_redirections.is_empty() && parsed.shape == CommandShape::Complex {
         // Subshells, brace groups, and background syntax cannot be
         // reliably segmented; keep the pre-fix fail-closed classification
         // for redirection-carrying complex commands.
@@ -130,7 +131,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             | CommandShape::RedirectionWrite => unreachable!("handled above"),
         }
     };
-    if null_redirections > 0 {
+    if !null_redirections.is_empty() {
         apply_null_redirection_policy(&mut result);
     }
     result
@@ -229,6 +230,17 @@ pub(super) fn assess_simple_command(
     }
 
     let mut stage = stage_assessment(&program, command_tokens);
+    if stage.impact != RiskImpact::High
+        && stage.interaction == InteractionRequirement::None
+        && parsed.null_redirections.is_stderr_only()
+        && build_readonly_compound_plan(command).is_some()
+    {
+        let evidence = AutoAllowEvidence::StderrSuppressedReadonly;
+        stage.impact = RiskImpact::Low;
+        stage.confidence = AssessmentConfidence::High;
+        stage.reasons.insert(0, evidence.reason_code());
+        return finalize_simple(policy, command, parsed.shape, stage, Some(evidence));
+    }
     if let Some(readonly) = direct_readonly_evidence(command) {
         stage.impact = RiskImpact::Low;
         stage.confidence = AssessmentConfidence::High;
@@ -282,7 +294,8 @@ fn assess_first_stage(
             CommandShape::Simple
         },
         stages: parsed.stages.first().cloned().into_iter().collect(),
-        null_redirections: 0,
+        requires_shell_expansion: parsed.requires_shell_expansion,
+        null_redirections: Default::default(),
         segments: Vec::new(),
         segment_connectors: Vec::new(),
     };

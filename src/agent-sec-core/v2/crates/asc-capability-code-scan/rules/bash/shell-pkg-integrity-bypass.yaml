@@ -1,0 +1,19 @@
+rule_id: shell-pkg-integrity-bypass
+cwe_id: CWE-494
+desc_en: >-
+  Package manager command bypasses signature or integrity
+  verification, allowing installation of untrusted packages.
+desc_zh: >-
+  包管理器命令绕过签名或完整性验证，允许安装不受信任的软件包。
+regex: |-
+  \b(apt-get|apt)\b[^;|&\n]*(--allow-unauthenticated|--force-yes)
+  |\b(yum|dnf)\b[^;|&\n]*--nogpgcheck
+  |\bgem\b[^;|&\n]*--no-verify
+  |\bapk\b[^;|&\n]*--allow-untrusted
+  |\bsnap\b[^;|&\n]*--dangerous
+  |\bflatpak\b[^;|&\n]*--no-gpg-verify
+  |\brpm\b[^;|&\n]*(--nosignature|--nodigest)
+  |\bdpkg\b[^;|&\n]*--force-bad-verify
+  |\bgo\b[^;|&\n]*get[^;|&\n]*-insecure
+  |\b(GONOSUMCHECK|GOINSECURE)=
+severity: warn

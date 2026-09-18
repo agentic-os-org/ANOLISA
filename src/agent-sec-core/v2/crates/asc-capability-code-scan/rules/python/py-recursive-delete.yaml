@@ -1,0 +1,11 @@
+rule_id: py-recursive-delete
+cwe_id: CWE-78
+desc_en: >-
+  Code performs recursive directory deletion using shutil.rmtree()
+  or os.removedirs(), which may destroy important data.
+desc_zh: >-
+  代码使用 shutil.rmtree() 或 os.removedirs() 执行递归目录删除，可能破坏重要数据。
+regex: |-
+  \bshutil\.rmtree\s*\(
+  |\bos\.removedirs\s*\(
+severity: warn

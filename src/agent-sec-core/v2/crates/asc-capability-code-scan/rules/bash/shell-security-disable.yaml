@@ -1,0 +1,13 @@
+rule_id: shell-security-disable
+cwe_id: CWE-284
+desc_en: >-
+  Command disables critical security mechanisms including
+  SELinux, firewall, or packet filtering rules.
+desc_zh: >-
+  命令禁用关键安全机制，包括 SELinux、防火墙或数据包过滤规则。
+regex: |-
+  \bsetenforce\s+0\b
+  |\bufw\s+disable\b
+  |\biptables\b[^;|&\n]*(-P\s+\w+\s+ACCEPT|-F\b)
+  |\bsystemctl\s+(stop|disable)\s+firewalld\b
+severity: warn

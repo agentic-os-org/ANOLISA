@@ -24,7 +24,7 @@ PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
-.PHONY: build install uninstall clean test test-openclaw-install help
+.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall help
 
 build:
 	cd src && cargo build --release --workspace
@@ -48,6 +48,7 @@ else
 	rm -rf "$(DESTDIR)$(ADAPTER_DIR)/scripts" 2>/dev/null || true
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw"
 	install -p -m 0644 scripts/openclaw/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -p -m 0644 scripts/openclaw/lib-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
@@ -159,13 +160,21 @@ clean:
 
 test:
 	cd src && cargo test --workspace
-	$(MAKE) test-openclaw-install
+	$(MAKE) test-openclaw-scripts
+
+test-openclaw-scripts: test-openclaw-compat test-openclaw-install test-openclaw-uninstall
+
+test-openclaw-compat:
+	bash tests/openclaw-compat.sh
 
 test-openclaw-install:
 	bash tests/openclaw-install.sh
 
+test-openclaw-uninstall:
+	bash tests/openclaw-uninstall.sh
+
 help:
-	@echo "Targets: build install uninstall clean test test-openclaw-install"
+	@echo "Targets: build install uninstall clean test test-openclaw-scripts"
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= staging root for packages"

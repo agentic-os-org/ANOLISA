@@ -1,3 +1,8 @@
+// Shared integration-test helpers. Each test binary that declares `mod support`
+// compiles this file independently and uses only the subset it needs, so a
+// helper unused by one binary is not dead code across the suite.
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 

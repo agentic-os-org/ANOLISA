@@ -56,13 +56,13 @@ pub struct ManualDependency {
     pub hint: String,
 }
 
-/// A dependency that cannot be satisfied on this host (kernel version,
-/// platform capability). The install must not proceed.
+/// A dependency that blocks provisioning: a host requirement cannot be met,
+/// or a failed presence query makes automatic installation unsafe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvableDependency {
     /// Logical dependency name.
     pub name: String,
-    /// Why this host cannot satisfy the dependency.
+    /// Host requirement or query failure that blocks installation.
     pub reason: String,
 }
 
@@ -78,8 +78,7 @@ pub struct ProvisionPlan {
     /// Dependencies that require manual intervention
     /// (`kind = LanguageRuntime`, `status = Unresolved`).
     pub manual: Vec<ManualDependency>,
-    /// Dependencies that cannot be satisfied on this host
-    /// (`status = Unresolvable`).
+    /// Dependencies that block installation (`Unresolvable` or `ProbeFailed`).
     pub unresolvable: Vec<UnresolvableDependency>,
     /// Count of dependencies already satisfied.
     pub satisfied_count: usize,
@@ -115,8 +114,13 @@ impl ProvisionPlan {
 
                     match resolution.kind {
                         DependencyKind::SystemPackage => {
-                            let package_name =
-                                resolve_package_name(dep, env).unwrap_or(resolution.name.clone());
+                            let Some(package_name) = resolve_package_name(dep, env) else {
+                                result.unresolvable.push(UnresolvableDependency {
+                                    name: resolution.name.clone(),
+                                    reason: "cannot select a system package for an unknown package family".into(),
+                                });
+                                continue;
+                            };
                             result.installable.push(ProvisionablePackage {
                                 name: resolution.name.clone(),
                                 package_name,
@@ -153,6 +157,12 @@ impl ProvisionPlan {
                     result.unresolvable.push(UnresolvableDependency {
                         name: resolution.name.clone(),
                         reason: reason.clone(),
+                    });
+                }
+                DependencyStatus::ProbeFailed { error } => {
+                    result.unresolvable.push(UnresolvableDependency {
+                        name: resolution.name.clone(),
+                        reason: format!("dependency probe failed: {error}"),
                     });
                 }
             }
@@ -247,24 +257,7 @@ fn resolve_package_name(dep: Option<&RuntimeDependency>, env: &ResolverEnv) -> O
                 dep.packages.deb.clone()
             }
         }
-        _ => {
-            // Unknown package base: system packages fall back to dep name,
-            // language runtimes require an explicit mapping.
-            if dep.kind == DependencyKind::SystemPackage {
-                Some(
-                    dep.packages
-                        .rpm
-                        .clone()
-                        .or_else(|| dep.packages.deb.clone())
-                        .unwrap_or_else(|| dep.name.clone()),
-                )
-            } else {
-                dep.packages
-                    .rpm
-                    .clone()
-                    .or_else(|| dep.packages.deb.clone())
-            }
-        }
+        _ => None,
     }
 }
 

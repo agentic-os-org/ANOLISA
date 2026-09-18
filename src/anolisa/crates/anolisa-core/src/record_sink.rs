@@ -130,7 +130,19 @@ impl<'a> StoreRecordSink<'a> {
             };
             *existing_relation = relation;
             if let Some(observation) = observation {
-                *last_observed = Some(observation.clone());
+                let mut refreshed = observation.clone();
+                if refreshed.source_repo.is_none() {
+                    refreshed.source_repo = last_observed
+                        .as_ref()
+                        .filter(|prior| {
+                            prior.evr.is_some()
+                                && prior.arch.is_some()
+                                && prior.evr == refreshed.evr
+                                && prior.arch == refreshed.arch
+                        })
+                        .and_then(|prior| prior.source_repo.clone());
+                }
+                *last_observed = Some(refreshed);
             }
             existing.status = LifecycleStatus::Installed;
             existing.last_operation_id = operation_id;
@@ -215,7 +227,19 @@ impl RecordSink for StoreRecordSink<'_> {
                     };
                 }
                 if let Some(observation) = observation {
-                    *last_observed = Some(observation.clone());
+                    let mut refreshed = observation.clone();
+                    if refreshed.source_repo.is_none() {
+                        refreshed.source_repo = last_observed
+                            .as_ref()
+                            .filter(|prior| {
+                                prior.evr.is_some()
+                                    && prior.arch.is_some()
+                                    && prior.evr == refreshed.evr
+                                    && prior.arch == refreshed.arch
+                            })
+                            .and_then(|prior| prior.source_repo.clone());
+                    }
+                    *last_observed = Some(refreshed);
                 }
                 existing.status = LifecycleStatus::Installed;
                 existing.last_operation_id = operation_id;
@@ -273,6 +297,43 @@ mod tests {
             services: Vec::new(),
             external_modified_files: Vec::new(),
             provisioned_packages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn source_follows_artifact_identity_on_refresh_and_management_change() {
+        for write in [
+            RecordWrite::RefreshObservation,
+            RecordWrite::DelegatedManaged,
+        ] {
+            for (version, arch, expected) in [
+                ("1.0", Some("x86_64"), Some("anolisa-release")),
+                ("2.0", Some("x86_64"), None),
+                ("1.0", Some("aarch64"), None),
+                ("1.0", None, None),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let path = tmp.path().join("installed.toml");
+                let mut store = StateStore::empty();
+                let mut sink = StoreRecordSink::new(&mut store, &path, context("cosh"));
+                sink.write_record(RecordWrite::DelegatedManaged, Some(&observation("1.0")))
+                    .unwrap();
+                let mut fresh = observation(version);
+                fresh.arch = arch.map(String::from);
+                fresh.source_repo = None;
+                sink.write_record(write, Some(&fresh)).unwrap();
+                let record = sink.store().find(ObjectKind::Component, "cosh").unwrap();
+                let ProviderBinding::Delegated {
+                    last_observed: Some(observed),
+                    ..
+                } = &record.binding
+                else {
+                    panic!("delegated observation")
+                };
+                assert_eq!(observed.version, version);
+                assert_eq!(observed.arch.as_deref(), arch);
+                assert_eq!(observed.source_repo.as_deref(), expected);
+            }
         }
     }
 

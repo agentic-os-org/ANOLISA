@@ -1,0 +1,14 @@
+rule_id: py-sensitive-file-access
+cwe_id: CWE-200
+desc_en: >-
+  Code accesses sensitive system files containing credentials,
+  keys, or critical configuration via open(), pathlib, or
+  permission-changing functions.
+desc_zh: >-
+  代码通过 open()、pathlib 或权限修改函数访问包含凭据、密钥或关键配置的敏感系统文件。
+regex: |-
+  \bopen\s*\(
+  |\bPath\s*\([^)]*\)\.(read_text|read_bytes|write_text|write_bytes)\s*\(
+  |\bos\.(chmod|chown)\s*\(
+severity: warn
+target_regexes_ref: sensitive_file_paths

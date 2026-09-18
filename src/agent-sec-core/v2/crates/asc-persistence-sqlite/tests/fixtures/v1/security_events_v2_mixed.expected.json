@@ -1,0 +1,225 @@
+{
+    "auto_vacuum": 0,
+    "exists": true,
+    "journal_mode": "wal",
+    "sqlite_master": [
+        "idx_category_epoch",
+        "idx_event_type",
+        "idx_run_id_timestamp_epoch",
+        "idx_session_id_timestamp_epoch",
+        "idx_session_run_timestamp_epoch",
+        "idx_timestamp_epoch",
+        "idx_trace_id",
+        "idx_verdict_timestamp_epoch",
+        "security_events",
+        "sqlite_autoindex_security_events_1"
+    ],
+    "tables": [
+        {
+            "columns": [
+                {
+                    "cid": 0,
+                    "dflt_value": null,
+                    "name": "event_id",
+                    "notnull": 1,
+                    "pk": 1,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 1,
+                    "dflt_value": null,
+                    "name": "event_type",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 2,
+                    "dflt_value": null,
+                    "name": "category",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 3,
+                    "dflt_value": "'succeeded'",
+                    "name": "result",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 4,
+                    "dflt_value": null,
+                    "name": "timestamp",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 5,
+                    "dflt_value": null,
+                    "name": "timestamp_epoch",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "FLOAT"
+                },
+                {
+                    "cid": 6,
+                    "dflt_value": "''",
+                    "name": "trace_id",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 7,
+                    "dflt_value": null,
+                    "name": "pid",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "INTEGER"
+                },
+                {
+                    "cid": 8,
+                    "dflt_value": null,
+                    "name": "uid",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "INTEGER"
+                },
+                {
+                    "cid": 9,
+                    "dflt_value": null,
+                    "name": "session_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 10,
+                    "dflt_value": null,
+                    "name": "run_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 11,
+                    "dflt_value": null,
+                    "name": "call_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 12,
+                    "dflt_value": null,
+                    "name": "tool_call_id",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 13,
+                    "dflt_value": null,
+                    "name": "details",
+                    "notnull": 1,
+                    "pk": 0,
+                    "type": "TEXT"
+                },
+                {
+                    "cid": 14,
+                    "dflt_value": null,
+                    "name": "verdict",
+                    "notnull": 0,
+                    "pk": 0,
+                    "type": "TEXT"
+                }
+            ],
+            "indexes": [
+                {
+                    "columns": [
+                        "category",
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_category_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "event_type"
+                    ],
+                    "name": "idx_event_type",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "run_id",
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_run_id_timestamp_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "session_id",
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_session_id_timestamp_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "session_id",
+                        "run_id",
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_session_run_timestamp_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_timestamp_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "trace_id"
+                    ],
+                    "name": "idx_trace_id",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "verdict",
+                        "timestamp_epoch"
+                    ],
+                    "name": "idx_verdict_timestamp_epoch",
+                    "origin": "c",
+                    "unique": 0
+                },
+                {
+                    "columns": [
+                        "event_id"
+                    ],
+                    "name": "sqlite_autoindex_security_events_1",
+                    "origin": "pk",
+                    "unique": 1
+                }
+            ],
+            "name": "security_events"
+        }
+    ],
+    "user_version": 3
+}

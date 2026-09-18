@@ -504,6 +504,22 @@ fn execute_merged_updates_with_deps(
     }
 
     let provider = DelegatedProvider::new(query, txn);
+    // Capture live native identity, not the possibly stale planning or state EVR.
+    // A failed/ambiguous pre-read cannot establish provenance; the existing
+    // transaction and post-observation path still decides the member's outcome.
+    let before: HashMap<_, _> = active
+        .iter()
+        .map(|(item, _)| {
+            let observation = provider.observe(&item.package, &now);
+            if let Err(err) = &observation {
+                output(BatchOutputEvent::Warning(format!(
+                    "cannot establish '{}' identity before update ({err}); repository source will not be inferred",
+                    item.package
+                )));
+            }
+            (item.package.clone(), observation)
+        })
+        .collect();
     match provider.transact(NativeAction::Update, &all_packages) {
         Ok(()) => {
             // The members' per-component operations link back to one parent
@@ -561,9 +577,14 @@ fn execute_merged_updates_with_deps(
                 };
                 let result = {
                     let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
+                    let mut execution_target =
+                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package));
+                    if let Some(Ok(prior)) = before.get(&item.package) {
+                        execution_target = execution_target.with_update_from(prior);
+                    }
                     execute_delegated_steps_resumed(
                         tail,
-                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
+                        execution_target,
                         &provider,
                         &mut sink,
                         &mut journal,
@@ -799,6 +820,8 @@ mod tests {
     /// that a merged batch shared one dnf run.
     struct FakeHost {
         installed: StdHashMap<String, PackageInfo>,
+        before_update: StdHashMap<String, PackageInfo>,
+        repository: Option<&'static str>,
         multiple_versions: Vec<String>,
         calls: RefCell<Vec<(String, Vec<String>)>>,
         fail_update: bool,
@@ -812,6 +835,8 @@ mod tests {
                     .iter()
                     .map(|(name, info)| ((*name).to_string(), info.clone()))
                     .collect(),
+                before_update: StdHashMap::new(),
+                repository: None,
                 multiple_versions: Vec::new(),
                 calls: RefCell::new(Vec::new()),
                 fail_update,
@@ -841,6 +866,11 @@ mod tests {
                     detail: "2 installed versions".to_string(),
                 });
             }
+            if self.calls.borrow().is_empty()
+                && let Some(info) = self.before_update.get(package)
+            {
+                return Ok(Some(info.clone()));
+            }
             Ok(self.installed.get(package).cloned())
         }
         fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
@@ -852,6 +882,9 @@ mod tests {
     }
 
     impl PackageTransaction for FakeHost {
+        fn repository_source(&self) -> Option<&str> {
+            self.repository
+        }
         fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("this path must not preflight an install")
         }
@@ -1013,6 +1046,7 @@ mod tests {
                 &retry_host,
                 &retry_host,
                 true,
+                crate::test_support::raw_effects(),
             );
             Ok(application::member_application_outcome(outcome))
         };
@@ -1179,6 +1213,58 @@ mod tests {
                     .expect("scan journals")
                     .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn merged_update_records_only_changed_sources_using_live_pre_transaction_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        let mut host = FakeHost::new(
+            &[
+                (
+                    "copilot-shell",
+                    pkg_info("copilot-shell", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+                (
+                    "agent-sec-core",
+                    pkg_info("agent-sec-core", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+            ],
+            false,
+        );
+        host.before_update.insert(
+            "copilot-shell".into(),
+            pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64"),
+        );
+        host.repository = Some("configured");
+        let result = execute_merged_updates_with_deps(
+            vec![
+                u5_item("cosh", "copilot-shell", "1.0.0-1.al4"),
+                u5_item("sec-core", "agent-sec-core", "1.0.0-1.al4"),
+            ],
+            &c,
+            &host,
+            &host,
+            true,
+            &mut |_| panic!("no retry"),
+            &mut |_| {},
+        );
+        assert_eq!(result.items.len(), 2);
+        let store = load_store(&c);
+        // sec-core had already changed externally; the no-op transaction
+        // establishes no source for that artifact and must discard stale history.
+        for (component, source) in [("cosh", Some("configured")), ("sec-core", None)] {
+            let record = store.find(ObjectKind::Component, component).unwrap();
+            let anolisa_core::domain::ProviderBinding::Delegated {
+                last_observed: Some(observation),
+                ..
+            } = &record.binding
+            else {
+                panic!("missing observation")
+            };
+            assert_eq!(observation.source_repo.as_deref(), source, "{component}");
         }
     }
 
@@ -1797,7 +1883,7 @@ mod tests {
             }],
         };
         let json = serde_json::to_value(&previewed).expect("serialize");
-        assert_eq!(json["plan"][0], "dnf update copilot-shell");
+        assert_eq!(json["plan"][0], "RPM package manager: update copilot-shell");
         assert_eq!(json["plan"][1], "observe copilot-shell");
         assert_eq!(
             json["adapter_actions"],

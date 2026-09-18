@@ -69,7 +69,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
         test-agentscope-integration test-hooks test-claude-code-detect \
-        test-hook-parity
+        test-hook-parity test-rtk-integration test-benchmark-rtk-probe
 
 # Default target
 all: build
@@ -81,7 +81,7 @@ build-tokenless:
 	@echo "==> Building tokenless + rtk..."
 	just setup-rtk
 	cargo build --release
-	cargo build --release --manifest-path third_party/rtk/Cargo.toml
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
@@ -239,9 +239,9 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-hook-parity \
+test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup
+      test-npm-package test-toon-cleanup test-benchmark-rtk-probe
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -257,7 +257,24 @@ test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh
 
-test-integration:
+# Protocol v2 golden parity belongs to the integration contract, and this is the
+# only tokenless test target a CI job calls (`make test-hook-parity` has no
+# workflow caller). The prerequisite also builds target/debug/tokenless first:
+# without that binary tests/test_hook_parity.py skips itself (skipUnless), so the
+# goldens would go unenforced while the job still reported green. make runs the
+# prerequisite once even though the aggregate `test` target lists both names.
+#
+# The two shell suites ride along for the same reason: they are members of the
+# `make test` aggregate that no workflow ever called (grepping .github/ for the
+# targets and for test-claude-code-detect-retry.sh / test-toon-cleanup.sh
+# returns nothing), so detect.sh's first-run plugin re-list retry and the
+# stale-toon ownership rules in install-helpers/uninstall only ran on developer
+# machines. Both are plain bash plus recursive make over a mktemp sandbox with
+# stub binaries -- no cargo, node or jq, and no rtk build -- so they cost about
+# a second and are safe to run ahead of the Python contract below. They cannot
+# go on `test-rtk-integration` instead: that target's own recipe is what fetches
+# and builds the vendored rtk, and this one runs earlier in the CI job.
+test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_codex_response_diagnostics.py
@@ -272,6 +289,28 @@ test-integration:
 	python3 tests/test_resolve_agent_id.py
 	python3 tests/test_release_regression_probe.py
 	python3 tests/test_qwenpaw_plugin.py
+	python3 tests/test_cosh_ng_compat.py
+
+# The L1 runner records an `rtk_version` in benchmark_identity.json through a
+# best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
+# resolved through PATH, the probe runs under a timeout(1) deadline whose child
+# is reaped, and only a successful probe records a version (everything else
+# collapses to "unavailable"). tests/test-benchmark-rtk-version-probe.sh guards
+# exactly that contract with stub binaries, but no target ever ran it, so a
+# probe regression reached CI unnoticed: the benchmark job would either stall on
+# a hung rtk or silently publish an "unavailable" identity. The suite needs no
+# rtk build and finishes in a few seconds, so it runs ahead of the pinned build
+# below and fails fast. `test-rtk-integration` is the only RTK target a CI job
+# calls ("Test bundled RTK integration"), which is what puts this in CI.
+test-benchmark-rtk-probe:
+	@echo "==> Testing benchmark RTK version probe..."
+	bash tests/test-benchmark-rtk-version-probe.sh
+
+test-rtk-integration: test-benchmark-rtk-probe
+	bash scripts/setup-rtk.sh
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
+	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
+		python3 tests/test_rtk_integration.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
@@ -302,7 +341,7 @@ python-wheel:
 	@echo "==> Building Tokenless Python wheel..."
 	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
 		just setup-rtk; \
-		cargo build --release --manifest-path third_party/rtk/Cargo.toml; \
+		cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml; \
 	fi
 	@test -x "$(PYTHON_RTK_BINARY)" || { \
 		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
@@ -615,6 +654,8 @@ help:
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
+	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
+	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"

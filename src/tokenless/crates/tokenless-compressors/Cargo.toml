@@ -7,6 +7,7 @@ description = "Compressor engines for tokenless content compression"
 
 [dependencies]
 csv.workspace = true
+html5ever.workspace = true
 # Stash trait + key + marker only — no SQLite backend here. The runtime
 # supplies the concrete backend, so this crate stays free of rusqlite.
 tokenless-ccr = { path = "../tokenless-ccr", default-features = false }

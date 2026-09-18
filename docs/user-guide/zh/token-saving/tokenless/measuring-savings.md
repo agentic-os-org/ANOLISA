@@ -71,6 +71,25 @@ tokenless stats summary --limit 1000
 
 `--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats diff --limit` 一致。
 
+## 节省率字段定义
+
+Tokenless 的节省率统一遵循“节省量 ÷ 原始未压缩量”的定义，各字段的差别只在统计口径和负值处理。`tokenless stats` 输出的全部百分比字段定义如下：
+
+| 字段 | 来源 | 计算公式 | 负值处理 |
+|------|------|----------|----------|
+| `chars_saved_percent` | `stats summary --json`（total 与按操作分组） | (before_chars − after_chars) ÷ before_chars × 100% | 钳制：节省量不会低于 0 |
+| `tokens_saved_percent` | `stats summary --json`（total 与按操作分组） | (before_tokens − after_tokens) ÷ before_tokens × 100% | 钳制：节省量不会低于 0 |
+| `saved_percent` | `stats summary --compare --json` | (baseline_tokens − tokenless_tokens) ÷ baseline_tokens × 100% | 钳制：节省量不会低于 0 |
+| `saved_percent` | `stats diff --json`（每条链路和阶段） | (before_tokens − after_tokens) ÷ before_tokens × 100% | 保留：变大的链路或阶段报告负百分比 |
+
+分母为 0 时，所有字段都返回 0%。
+
+`saved_percent` 出现在两种 Schema 中，基础公式相同，但统计口径与符号处理不同：`--compare` 的值由两次运行的总量（`baseline_tokens` 与 `tokenless_tokens`）计算，Token 增加时钳制为 0%；`stats diff --json` 则为每条链路和每个阶段各报告一个 `saved_percent`，由该对象自身的 `before_tokens` 与 `after_tokens` 计算，允许为负。示例：before=100、after=150 Token 时，`--compare` 报告 0%，`stats diff` 报告 -50%。
+
+文本输出中的 `Saved: N tokens (X%)` 对应 `tokens_saved_percent`：分母是同一批记录 `before_tokens` 之和，即原始未压缩大小，而不是会话总消耗，也不是任何提供商侧缓存指标。
+
+> `tokenless-stats` 不会输出 `savings_rate`、`cached_tokens`、`total_cached_tokens` 字段，也不采集模型提供商的 prompt-cache 命中数据。如果其他工具的报告里出现按 `cached_tokens ÷ total_tokens` 计算的 `savings_rate`，该数字描述的是提供商侧 prompt-cache 命中占比，不代表 Tokenless 压缩节省，也不是 `tokenless-stats` 产出的。
+
 ## 查看单条记录
 
 列出最近记录：
@@ -144,17 +163,36 @@ cargo run --release --bin compression_rate -- --json
 报告使用仓库内置的
 `src/tokenless/benchmark/l1-compressor/fixtures/tool_response.json` 和
 `src/tokenless/benchmark/l1-compressor/fixtures/schema_search.json`，并应用当前检出源码的
-默认压缩配置。Tokenless 0.7.11 的参考结果如下：
+默认压缩配置。fixture 由 `python/gen_fixtures.py` 生成，不含随机数、逐字节可复现。
+Tokenless 0.8.2（commit `a30575361`）的参考结果如下：
 
 | JSON 字段 | 独立测试阶段与输入 | 节省率 |
 |---|---|---:|
-| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 65.8% |
+| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 36.3% |
 | `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
 | `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.0% |
 | `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
 
-TOON 独立测试出现负数，表示编码后反而变大。Active 模式下，Runtime 会在候选结果
-没有减少估算 Token 数时输出原始 JSON。
+同一份报告还会在两个 canonical fixture 上度量混合负载的叠加配置（`stacking.configs`），
+分母是二者合并后的基线（5,551 估算 Token），因此单项行会低于上面的独立节省率：
+
+| 配置 | 运行内容 | 节省率 |
+|---|---|---:|
+| `response_only` | 仅响应压缩 | 34.0% |
+| `schema_only` | 仅 Schema 压缩 | 3.0% |
+| `schema_response` | Schema + 响应叠加 | 37.0% |
+| `response_toon` | 响应压缩 + TOON | 47.4% |
+| `toon_only` | 对原始 Payload 仅做 TOON 编码 | 15.8% |
+| `full_stack` | Schema + 响应 + TOON | 50.3% |
+
+含 TOON 的叠加行是不做门控的度量（benchmark 无条件执行 TOON 编码）；部署中的
+Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结果与这些行可能略有
+差异。TOON 独立测试出现负数，表示编码后反而变大。Active 模式下，Runtime 会在
+候选结果没有减少估算 Token 数时输出原始 JSON。快照数字只属于测量时的确切 commit；
+压缩率随版本演进，升级后请重新运行报告，引用数字时注明 commit 或版本。
+
+如需完整的质量/对抗测试加本报告（跳过 criterion 性能基准，约需几分钟），在同一
+目录运行 `./run-benchmarks.sh --quick`。
 
 这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、易于
 压缩的合成数据；测试只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
@@ -199,7 +237,7 @@ tokenless stats summary \
 
 ## 正确解释节省率
 
-`stats summary` 中的压缩率只针对 Tokenless 经手的 Payload。估算会话总体收益时，可以使用：
+各百分比字段的定义见[节省率字段定义](#节省率字段定义)。`stats summary` 中的压缩率只针对 Tokenless 经手的 Payload。估算会话总体收益时，可以使用：
 
 ```text
 总体估算节省率
@@ -207,6 +245,17 @@ tokenless stats summary \
 ```
 
 例如，Payload 压缩率为 60%，但工具 Payload 只占会话总 Token 的 20%，则总体估算收益约为 12%。这个结果仍不是提供商账单保证值。
+
+## 压缩率的适用场景
+
+压缩率取决于 Payload 中有多少可移除内容，不同场景差异很大：
+
+- **收益高**：返回大量统一结构记录的工具（列表、表格、搜索结果），携带 `debug`/`trace`/`logs` 等冗余字段的 Payload，或描述冗长的 Schema。
+- **收益中等**：Shell 输出只有超过 Layer 2 阈值（字符串 65,536 字符、数组头部窗口 128 项、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损清理和记录缩减（至少 33 条记录的对象数组）。
+- **收益接近零**：短于 200 字符最小门禁的响应；已足够紧凑、没有冗余的 JSON；任何没有变小的输入（尺寸保护会保留原文）。
+- **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 默认原样透传，显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 后才做上下文裁剪；其他纯文本、Stack Trace、HTML 和源码目前原样透传。
+
+参考数字总是属于测量时的确切 commit——可复现负载、当前快照及其限制见上文[运行仓库参考负载](#运行仓库参考负载)。实际会话收益还需乘以工具 Payload 占会话总 Token 的比例，见[正确解释节省率](#正确解释节省率)。完整触发规则见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 
 ## AgentSight 本地展示
 

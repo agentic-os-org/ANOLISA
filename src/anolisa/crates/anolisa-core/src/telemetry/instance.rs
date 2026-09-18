@@ -513,6 +513,38 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_keeps_metadata_after_missing_desktop_id() {
+        use crate::telemetry::metadata::{with_cloud_init_disabled, with_metadata_responses};
+
+        with_cloud_init_disabled(|| {
+            with_metadata_responses(
+                &[
+                    ("instance-id", 200, "i-test"),
+                    ("desktop-id", 404, "missing"),
+                    ("instance/instance-type", 200, "ecs.g9i.xlarge"),
+                    ("instance/instance-type", 200, "ecs.g9i.xlarge"),
+                    ("owner-account-id", 404, "missing"),
+                    ("image-id", 200, "ubuntu-test.vhd"),
+                ],
+                |base| {
+                    let dir = TempDir::new().unwrap();
+                    let mut config = crate::telemetry::test_config(&dir);
+                    config.metadata_url = format!("{base}/region-id");
+                    write_instance_snapshot(&config, false).unwrap();
+                    let content =
+                        fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+                    let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
+                    assert_eq!(snapshot["instance.source"], "ecs");
+                    assert_eq!(snapshot["instance.type"], "ecs.g9i.xlarge");
+                    assert_eq!(snapshot["instance.image-id"], "ubuntu-test.vhd");
+                    assert!(!content.contains("i-test"));
+                    assert!(!config.identity_cache_path.exists());
+                },
+            );
+        });
+    }
+
+    #[test]
     fn test_probe_product_type_unknown() {
         crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();

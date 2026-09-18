@@ -295,7 +295,7 @@ const capabilityShowcases: readonly CapabilityShowcase[] = [
       zh: '这里展示仓库中的 Benchmark 区间。实际结果会随 Payload 变化，也不能直接换算成 Provider 账单的节省比例。',
     },
     noteLink: {en: 'Read the benchmark methodology', zh: '查看 Benchmark 方法'},
-    noteHref: 'https://github.com/alibaba/anolisa/tree/main/src/tokenless/benchmark',
+    noteHref: 'https://github.com/agentic-os-org/ANOLISA/tree/main/src/tokenless/benchmark',
     views: tokenlessViews,
   },
   {

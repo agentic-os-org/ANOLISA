@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/provider-receipt/v1",
+  "title": "Content-free provider receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_id",
+    "provider_id",
+    "provider_version",
+    "manifest_digest",
+    "capability",
+    "scope",
+    "input_schema",
+    "input_digest",
+    "disposition",
+    "meters",
+    "evidence",
+    "started_at_ms",
+    "completed_at_ms",
+    "plan_ref"
+  ],
+  "properties": {
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "provider_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "provider_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "input_schema": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+    },
+    "input_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "disposition": {
+      "enum": [
+        "produced",
+        "bypassed",
+        "denied",
+        "failed",
+        "uncertain",
+        "effect_applied"
+      ]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "digest",
+        "bytes"
+      ],
+      "properties": {
+        "schema": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "error_code": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "meters": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/meter"
+      },
+      "minItems": 0,
+      "maxItems": 32
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+      },
+      "minItems": 0,
+      "maxItems": 16
+    },
+    "started_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "completed_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "plan_ref": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/plan_ref"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "produced"
+          }
+        },
+        "required": [
+          "disposition"
+        ]
+      },
+      "then": {
+        "required": [
+          "output"
+        ],
+        "not": {
+          "required": [
+            "error_code"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "enum": [
+              "denied",
+              "failed",
+              "uncertain"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error_code"
+        ],
+        "not": {
+          "required": [
+            "output"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "bypassed"
+          }
+        },
+        "required": [
+          "disposition"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "output"
+              ]
+            },
+            {
+              "required": [
+                "error_code"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "effect_applied"
+          }
+        },
+        "required": [
+          "disposition"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "minItems": 1
+          }
+        },
+        "not": {
+          "required": [
+            "error_code"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -51,8 +51,8 @@ jobs:
       ${{ github.repository == 'alibaba/anolisa' &&
       'anolisa-k8s-general-ci-x64' || 'ubuntu-latest' }}
     env:
-      SITE_URL: ${{ github.repository == 'alibaba/anolisa' && 'https://agentic-os.sh' || format('https://{0}.github.io', github.repository_owner) }}
-      BASE_URL: ${{ github.repository == 'alibaba/anolisa' && '/' || format('/{0}/', github.event.repository.name) }}
+      SITE_URL: ${{ github.repository == 'agentic-os-org/ANOLISA' && 'https://agentic-os.sh' || format('https://{0}.github.io', github.repository_owner) }}
+      BASE_URL: ${{ github.repository == 'agentic-os-org/ANOLISA' && '/' || format('/{0}/', github.event.repository.name) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -67,8 +67,22 @@ jobs:
           cache-dependency-path: website/package-lock.json
 
       - name: Configure GitHub Pages
+        id: pages
         if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
+
+      - name: Verify the build URL matches GitHub Pages
+        if: github.event_name != 'pull_request'
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const buildUrl = new URL(process.env.BASE_URL, process.env.SITE_URL);
+          const pagesUrl = new URL(`${process.env.PAGES_URL.replace(/\/$/, '')}/`);
+          assert.equal(buildUrl.href, pagesUrl.href,
+            'SITE_URL and BASE_URL must match the configured GitHub Pages URL');
+          NODE
 
       - name: Install website dependencies
         run: npm ci --prefix website
@@ -85,6 +99,11 @@ jobs:
           SITE_URL: https://example.github.io
           BASE_URL: /base-url-check/
         run: npm run build --prefix website
+
+      # Webpack's cached CSS can retain the sub-path font URLs.
+      - name: Clear the sub-path build cache
+        working-directory: website
+        run: npm exec -- docusaurus clear
 
       - name: Build Docusaurus and check Markdown links
         run: npm run build --prefix website
@@ -108,7 +127,7 @@ jobs:
         run: npm run check:links --prefix website
 
       - name: Remove production custom domain from fork preview
-        if: github.repository != 'alibaba/anolisa'
+        if: github.repository != 'agentic-os-org/ANOLISA'
         run: rm -f website/build/CNAME
 
       - name: Upload Pages artifact
@@ -122,7 +141,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' ||
-      (github.repository != 'alibaba/anolisa' &&
+      (github.repository != 'agentic-os-org/ANOLISA' &&
       github.ref == 'refs/heads/chore/gh-pages')))
     needs: build
     permissions:

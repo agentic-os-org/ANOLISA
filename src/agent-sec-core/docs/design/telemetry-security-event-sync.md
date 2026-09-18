@@ -29,6 +29,14 @@ Telemetry 只用于聚合分析组件使用量、成功率、版本分布和结�
 - 组件文件创建、权限管理和 logrotate 配置。
 - 用户主动授权的详细诊断支持包。
 
+## 1.1 V2 scan 共同实现
+
+V2 的等价职责由 `asc-action-runtime` 的 Runtime/Finalizer 承担，所有注册 scan 共用
+`asc-telemetry` allowlist 和 `asc-event-sink::telemetry::TelemetryWriter`。
+不要求各 capability/handler 手动记录 telemetry。V1 的以下字段和门控规则仍是 oracle；
+当前只实现 code-scan 的 telemetry 投影和 fixture；其它扫描能力随各自后续提交加入。
+详见 [V2 共享生命周期与验收](RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)。
+
 ## 2. 数据流与故障隔离
 
 实际数据流为：

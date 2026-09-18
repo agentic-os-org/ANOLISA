@@ -26,7 +26,7 @@ async function document(source, language) {
     language,
     markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
-      return `${image}[${label}](https://github.com/alibaba/anolisa/blob/main/${resolved})`;
+      return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
     }),
   };
 }

@@ -93,7 +93,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 |---|---|---|
 | 服务 | `GET /health`、`GET /metrics`、`GET /api/docs` | 存活探测、Prometheus 指标、路由清单（`/health` 与 `/metrics` 仅本机可访问） |
 | 认证 | `GET /api/auth/status`、`GET /api/auth/verify`、`POST /api/auth/login` | 认证状态、能力列表、令牌换 cookie |
-| 会话与调用 | `GET /api/sessions`、`GET /api/sessions/{id}/traces`、`GET /api/sessions/{id}/resources`、`GET /api/traces/{id}`、`GET /api/conversations/{id}`、`POST /api/sessions/search` | 会话列表、会话内调用与进程资源、单次调用详情、语义搜索 |
+| 会话与调用 | `GET /api/sessions`、`GET /api/sessions/{id}/traces`、`GET /api/sessions/{id}/resources`、`GET /api/traces/{id}`、`GET /api/conversations/{id}`、`POST /api/sessions/search` | 会话列表、会话内对话摘要（以 `conversation_id` 为键）与进程资源、按 response_id 的单次调用详情、语义搜索 |
 | 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/agent-names` | Token 时序、延迟分位、Agent 过滤项 |
 | 中断 | `GET /api/interruptions`、`/count`、`/stats`、`/session-counts`、`/conversation-counts`、`POST /api/interruptions/{id}/resolve` | 排查与关闭 |
 | Agent 健康 | `GET /api/agent-health`、`DELETE /api/agent-health/{pid}`、`POST /api/agent-health/{pid}/restart` | 实时状态与恢复动作 |

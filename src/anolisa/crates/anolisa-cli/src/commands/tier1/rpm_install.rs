@@ -35,7 +35,7 @@ impl PendingRpmInstall {
         if self.transaction.steps[self.install_step].status != TransactionStepStatus::Done {
             self.transaction
                 .mark_done(self.install_step)
-                .map_err(|err| journal_error(command, "record completed dnf install", err))?;
+                .map_err(|err| journal_error(command, "record completed RPM install", err))?;
         }
         Ok(())
     }

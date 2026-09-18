@@ -1,0 +1,817 @@
+{
+ "suite": "scenario",
+ "scenario": "tools_20",
+ "display_name": "Schema: 20 Tool Definitions",
+ "content_type": "schema",
+ "size_label": "20 tools",
+ "source": {
+  "reference": "four-layer plan L3 table, single-turn row: 'system prompt + 20 tool schemas + one exchange' targeting SchemaCompressor. Added here because headroom's benchmark fixtures carry no tools array, so without it neither side's schema compaction appears in L3.",
+  "headroom_native": false,
+  "headroom_revision": "e616dcf788e29e285b5ab5c17af49585c0d60613",
+  "headroom_dirty": false
+ },
+ "model_limit": 200000,
+ "message_count": 2,
+ "tool_message_count": 0,
+ "tool_count": 20,
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "search_code",
+    "description": "Search code repositories for a pattern. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "search_code parameters",
+     "properties": {
+      "pattern": {
+       "type": "string",
+       "title": "Pattern",
+       "description": "The pattern argument for search_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how pattern interacts with the other parameters of this tool.",
+       "examples": [
+        "example_pattern_1",
+        "example_pattern_2"
+       ]
+      },
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for search_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "glob": {
+       "type": "string",
+       "title": "Glob",
+       "description": "The glob argument for search_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how glob interacts with the other parameters of this tool.",
+       "examples": [
+        "example_glob_1",
+        "example_glob_2"
+       ]
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read the contents of a file from disk. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "read_file parameters",
+     "properties": {
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for read_file. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "start_line": {
+       "type": "string",
+       "title": "Start Line",
+       "description": "The start line argument for read_file. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how start_line interacts with the other parameters of this tool.",
+       "examples": [
+        "example_start_line_1",
+        "example_start_line_2"
+       ]
+      },
+      "end_line": {
+       "type": "string",
+       "title": "End Line",
+       "description": "The end line argument for read_file. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how end_line interacts with the other parameters of this tool.",
+       "examples": [
+        "example_end_line_1",
+        "example_end_line_2"
+       ]
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Write content to a file, creating it if absent. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "write_file parameters",
+     "properties": {
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for write_file. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "content": {
+       "type": "string",
+       "title": "Content",
+       "description": "The content argument for write_file. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how content interacts with the other parameters of this tool.",
+       "examples": [
+        "example_content_1",
+        "example_content_2"
+       ]
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "run_tests",
+    "description": "Execute a test suite and return the results. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "run_tests parameters",
+     "properties": {
+      "suite": {
+       "type": "string",
+       "title": "Suite",
+       "description": "The suite argument for run_tests. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how suite interacts with the other parameters of this tool.",
+       "examples": [
+        "example_suite_1",
+        "example_suite_2"
+       ]
+      },
+      "filter": {
+       "type": "string",
+       "title": "Filter",
+       "description": "The filter argument for run_tests. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how filter interacts with the other parameters of this tool.",
+       "examples": [
+        "example_filter_1",
+        "example_filter_2"
+       ]
+      },
+      "verbose": {
+       "type": "string",
+       "title": "Verbose",
+       "description": "The verbose argument for run_tests. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how verbose interacts with the other parameters of this tool.",
+       "examples": [
+        "example_verbose_1",
+        "example_verbose_2"
+       ]
+      }
+     },
+     "required": [
+      "suite"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "query_database",
+    "description": "Run a read-only SQL query against the app database. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "query_database parameters",
+     "properties": {
+      "sql": {
+       "type": "string",
+       "title": "Sql",
+       "description": "The sql argument for query_database. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how sql interacts with the other parameters of this tool.",
+       "examples": [
+        "example_sql_1",
+        "example_sql_2"
+       ]
+      },
+      "limit": {
+       "type": "string",
+       "title": "Limit",
+       "description": "The limit argument for query_database. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how limit interacts with the other parameters of this tool.",
+       "examples": [
+        "example_limit_1",
+        "example_limit_2"
+       ]
+      }
+     },
+     "required": [
+      "sql"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_logs",
+    "description": "Retrieve service logs for a time window. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "get_logs parameters",
+     "properties": {
+      "service": {
+       "type": "string",
+       "title": "Service",
+       "description": "The service argument for get_logs. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how service interacts with the other parameters of this tool.",
+       "examples": [
+        "example_service_1",
+        "example_service_2"
+       ]
+      },
+      "since": {
+       "type": "string",
+       "title": "Since",
+       "description": "The since argument for get_logs. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how since interacts with the other parameters of this tool.",
+       "examples": [
+        "example_since_1",
+        "example_since_2"
+       ]
+      },
+      "level": {
+       "type": "string",
+       "title": "Level",
+       "description": "The level argument for get_logs. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how level interacts with the other parameters of this tool.",
+       "examples": [
+        "example_level_1",
+        "example_level_2"
+       ]
+      }
+     },
+     "required": [
+      "service"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_metrics",
+    "description": "Fetch time-series metrics for a service. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "get_metrics parameters",
+     "properties": {
+      "service": {
+       "type": "string",
+       "title": "Service",
+       "description": "The service argument for get_metrics. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how service interacts with the other parameters of this tool.",
+       "examples": [
+        "example_service_1",
+        "example_service_2"
+       ]
+      },
+      "metric": {
+       "type": "string",
+       "title": "Metric",
+       "description": "The metric argument for get_metrics. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how metric interacts with the other parameters of this tool.",
+       "examples": [
+        "example_metric_1",
+        "example_metric_2"
+       ]
+      },
+      "window": {
+       "type": "string",
+       "title": "Window",
+       "description": "The window argument for get_metrics. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how window interacts with the other parameters of this tool.",
+       "examples": [
+        "example_window_1",
+        "example_window_2"
+       ]
+      }
+     },
+     "required": [
+      "service"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "list_files",
+    "description": "List files under a directory. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "list_files parameters",
+     "properties": {
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for list_files. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "recursive": {
+       "type": "string",
+       "title": "Recursive",
+       "description": "The recursive argument for list_files. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how recursive interacts with the other parameters of this tool.",
+       "examples": [
+        "example_recursive_1",
+        "example_recursive_2"
+       ]
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "git_diff",
+    "description": "Show the diff between two revisions. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "git_diff parameters",
+     "properties": {
+      "base": {
+       "type": "string",
+       "title": "Base",
+       "description": "The base argument for git_diff. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how base interacts with the other parameters of this tool.",
+       "examples": [
+        "example_base_1",
+        "example_base_2"
+       ]
+      },
+      "head": {
+       "type": "string",
+       "title": "Head",
+       "description": "The head argument for git_diff. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how head interacts with the other parameters of this tool.",
+       "examples": [
+        "example_head_1",
+        "example_head_2"
+       ]
+      },
+      "paths": {
+       "type": "string",
+       "title": "Paths",
+       "description": "The paths argument for git_diff. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how paths interacts with the other parameters of this tool.",
+       "examples": [
+        "example_paths_1",
+        "example_paths_2"
+       ]
+      }
+     },
+     "required": [
+      "base"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "git_log",
+    "description": "List commits reachable from a revision. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "git_log parameters",
+     "properties": {
+      "revision": {
+       "type": "string",
+       "title": "Revision",
+       "description": "The revision argument for git_log. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how revision interacts with the other parameters of this tool.",
+       "examples": [
+        "example_revision_1",
+        "example_revision_2"
+       ]
+      },
+      "limit": {
+       "type": "string",
+       "title": "Limit",
+       "description": "The limit argument for git_log. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how limit interacts with the other parameters of this tool.",
+       "examples": [
+        "example_limit_1",
+        "example_limit_2"
+       ]
+      }
+     },
+     "required": [
+      "revision"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "create_issue",
+    "description": "Open a tracker issue. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "create_issue parameters",
+     "properties": {
+      "title": {
+       "type": "string",
+       "title": "Title",
+       "description": "The title argument for create_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how title interacts with the other parameters of this tool.",
+       "examples": [
+        "example_title_1",
+        "example_title_2"
+       ]
+      },
+      "body": {
+       "type": "string",
+       "title": "Body",
+       "description": "The body argument for create_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how body interacts with the other parameters of this tool.",
+       "examples": [
+        "example_body_1",
+        "example_body_2"
+       ]
+      },
+      "labels": {
+       "type": "string",
+       "title": "Labels",
+       "description": "The labels argument for create_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how labels interacts with the other parameters of this tool.",
+       "examples": [
+        "example_labels_1",
+        "example_labels_2"
+       ]
+      }
+     },
+     "required": [
+      "title"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "update_issue",
+    "description": "Update an existing tracker issue. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "update_issue parameters",
+     "properties": {
+      "number": {
+       "type": "string",
+       "title": "Number",
+       "description": "The number argument for update_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how number interacts with the other parameters of this tool.",
+       "examples": [
+        "example_number_1",
+        "example_number_2"
+       ]
+      },
+      "state": {
+       "type": "string",
+       "title": "State",
+       "description": "The state argument for update_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how state interacts with the other parameters of this tool.",
+       "examples": [
+        "example_state_1",
+        "example_state_2"
+       ]
+      },
+      "body": {
+       "type": "string",
+       "title": "Body",
+       "description": "The body argument for update_issue. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how body interacts with the other parameters of this tool.",
+       "examples": [
+        "example_body_1",
+        "example_body_2"
+       ]
+      }
+     },
+     "required": [
+      "number"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "send_email",
+    "description": "Send an email to a recipient list. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "send_email parameters",
+     "properties": {
+      "to": {
+       "type": "string",
+       "title": "To",
+       "description": "The to argument for send_email. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how to interacts with the other parameters of this tool.",
+       "examples": [
+        "example_to_1",
+        "example_to_2"
+       ]
+      },
+      "subject": {
+       "type": "string",
+       "title": "Subject",
+       "description": "The subject argument for send_email. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how subject interacts with the other parameters of this tool.",
+       "examples": [
+        "example_subject_1",
+        "example_subject_2"
+       ]
+      },
+      "body": {
+       "type": "string",
+       "title": "Body",
+       "description": "The body argument for send_email. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how body interacts with the other parameters of this tool.",
+       "examples": [
+        "example_body_1",
+        "example_body_2"
+       ]
+      }
+     },
+     "required": [
+      "to"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "schedule_task",
+    "description": "Schedule a task for later execution. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "schedule_task parameters",
+     "properties": {
+      "cron": {
+       "type": "string",
+       "title": "Cron",
+       "description": "The cron argument for schedule_task. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how cron interacts with the other parameters of this tool.",
+       "examples": [
+        "example_cron_1",
+        "example_cron_2"
+       ]
+      },
+      "command": {
+       "type": "string",
+       "title": "Command",
+       "description": "The command argument for schedule_task. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how command interacts with the other parameters of this tool.",
+       "examples": [
+        "example_command_1",
+        "example_command_2"
+       ]
+      }
+     },
+     "required": [
+      "cron"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "http_request",
+    "description": "Perform an outbound HTTP request. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "http_request parameters",
+     "properties": {
+      "method": {
+       "type": "string",
+       "title": "Method",
+       "description": "The method argument for http_request. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how method interacts with the other parameters of this tool.",
+       "examples": [
+        "example_method_1",
+        "example_method_2"
+       ]
+      },
+      "url": {
+       "type": "string",
+       "title": "Url",
+       "description": "The url argument for http_request. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how url interacts with the other parameters of this tool.",
+       "examples": [
+        "example_url_1",
+        "example_url_2"
+       ]
+      },
+      "headers": {
+       "type": "string",
+       "title": "Headers",
+       "description": "The headers argument for http_request. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how headers interacts with the other parameters of this tool.",
+       "examples": [
+        "example_headers_1",
+        "example_headers_2"
+       ]
+      },
+      "body": {
+       "type": "string",
+       "title": "Body",
+       "description": "The body argument for http_request. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how body interacts with the other parameters of this tool.",
+       "examples": [
+        "example_body_1",
+        "example_body_2"
+       ]
+      }
+     },
+     "required": [
+      "method"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "parse_json",
+    "description": "Parse a JSON document and extract a path. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "parse_json parameters",
+     "properties": {
+      "document": {
+       "type": "string",
+       "title": "Document",
+       "description": "The document argument for parse_json. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how document interacts with the other parameters of this tool.",
+       "examples": [
+        "example_document_1",
+        "example_document_2"
+       ]
+      },
+      "json_path": {
+       "type": "string",
+       "title": "Json Path",
+       "description": "The json path argument for parse_json. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how json_path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_json_path_1",
+        "example_json_path_2"
+       ]
+      }
+     },
+     "required": [
+      "document"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "format_code",
+    "description": "Format source code with the project formatter. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "format_code parameters",
+     "properties": {
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for format_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "language": {
+       "type": "string",
+       "title": "Language",
+       "description": "The language argument for format_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how language interacts with the other parameters of this tool.",
+       "examples": [
+        "example_language_1",
+        "example_language_2"
+       ]
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "lint_code",
+    "description": "Run the linter over a path. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "lint_code parameters",
+     "properties": {
+      "path": {
+       "type": "string",
+       "title": "Path",
+       "description": "The path argument for lint_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how path interacts with the other parameters of this tool.",
+       "examples": [
+        "example_path_1",
+        "example_path_2"
+       ]
+      },
+      "rules": {
+       "type": "string",
+       "title": "Rules",
+       "description": "The rules argument for lint_code. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how rules interacts with the other parameters of this tool.",
+       "examples": [
+        "example_rules_1",
+        "example_rules_2"
+       ]
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "build_project",
+    "description": "Build the project and report failures. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "build_project parameters",
+     "properties": {
+      "target": {
+       "type": "string",
+       "title": "Target",
+       "description": "The target argument for build_project. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how target interacts with the other parameters of this tool.",
+       "examples": [
+        "example_target_1",
+        "example_target_2"
+       ]
+      },
+      "release": {
+       "type": "string",
+       "title": "Release",
+       "description": "The release argument for build_project. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how release interacts with the other parameters of this tool.",
+       "examples": [
+        "example_release_1",
+        "example_release_2"
+       ]
+      }
+     },
+     "required": [
+      "target"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "deploy_service",
+    "description": "Deploy a service to an environment. This tool is part of the standard agent toolset. It validates its arguments, reports actionable errors, and never mutates state unless documented. Prefer it over shelling out when applicable.",
+    "parameters": {
+     "type": "object",
+     "title": "deploy_service parameters",
+     "properties": {
+      "service": {
+       "type": "string",
+       "title": "Service",
+       "description": "The service argument for deploy_service. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how service interacts with the other parameters of this tool.",
+       "examples": [
+        "example_service_1",
+        "example_service_2"
+       ]
+      },
+      "environment": {
+       "type": "string",
+       "title": "Environment",
+       "description": "The environment argument for deploy_service. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how environment interacts with the other parameters of this tool.",
+       "examples": [
+        "example_environment_1",
+        "example_environment_2"
+       ]
+      },
+      "version": {
+       "type": "string",
+       "title": "Version",
+       "description": "The version argument for deploy_service. Provide a well-formed value; **markdown** is supported in free-text fields. See the guide for details on how version interacts with the other parameters of this tool.",
+       "examples": [
+        "example_version_1",
+        "example_version_2"
+       ]
+      }
+     },
+     "required": [
+      "service"
+     ]
+    }
+   }
+  }
+ ],
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful AI assistant.\n\nCurrent date: 2025-01-06\nToday is Monday, January 6th, 2025.\n\nYou have access to various tools for searching and querying data.\nAlways provide accurate and helpful responses."
+  },
+  {
+   "role": "user",
+   "content": "Find where the retry policy is configured."
+  }
+ ]
+}

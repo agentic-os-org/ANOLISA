@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/capabilities/security.content.inspect/output/v1",
+  "title": "security.content.inspect/v1 output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["inspection"],
+  "properties": {
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "findings", "scanned_bytes", "truncated"],
+      "properties": {
+        "verdict": {
+          "enum": ["clean", "suspicious", "sensitive"]
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule_id",
+              "category",
+              "severity",
+              "confidence",
+              "count"
+            ],
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "pattern": "^[a-z0-9._-]{1,64}$"
+              },
+              "category": {
+                "enum": [
+                  "secret",
+                  "personal_data",
+                  "credential",
+                  "dangerous_pattern",
+                  "obfuscation",
+                  "other"
+                ]
+              },
+              "severity": {
+                "enum": ["info", "low", "medium", "high", "critical"]
+              },
+              "confidence": {
+                "enum": ["low", "medium", "high"]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              }
+            }
+          }
+        },
+        "scanned_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Exact UTF-8 bytes inspected. Core requires complete results to equal the submitted input length and truncated risk facts to cover a strict non-empty prefix."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True only for a partial suspicious or sensitive fact; a clean result must be complete."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "clean"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["suspicious", "sensitive"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

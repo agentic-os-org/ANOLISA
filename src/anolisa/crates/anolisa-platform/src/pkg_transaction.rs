@@ -65,6 +65,13 @@ pub enum PackageTransactionError {
 /// single-package call is the one-element slice; callers must not pass an
 /// empty slice.
 pub trait PackageTransaction {
+    /// Explicit source constrained by this transaction, not historical installation provenance.
+    /// Record it only after a successful install/reinstall and observation, or an
+    /// update whose observation confirms the version changed. A no-op proves no origin.
+    fn repository_source(&self) -> Option<&str> {
+        None
+    }
+
     /// Resolve an install using the same repositories and solver as apply,
     /// without downloading packages, running scriptlets, or changing rpmdb.
     /// Metadata caches may be refreshed. Pass the exact pinned specs, if any.
@@ -108,7 +115,7 @@ pub trait PackageTransaction {
     /// transaction.
     ///
     /// Delegates the whole file transaction to the package manager's
-    /// reinstall verb (`dnf reinstall`). Unlike [`install`], which is a no-op
+    /// reinstall operation. Unlike [`install`], which is a no-op
     /// success for an already-installed package, reinstall re-runs the file
     /// transaction so damaged or missing files are restored from the package
     /// payload. Versions do not change; a package that is absent is a

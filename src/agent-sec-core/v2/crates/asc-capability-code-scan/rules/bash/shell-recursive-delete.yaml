@@ -1,0 +1,9 @@
+rule_id: shell-recursive-delete
+cwe_id: CWE-78
+desc_en: >-
+  Recursive deletion using rm with -r flag is a high-risk operation
+  that can cause irreversible data loss.
+desc_zh: >-
+  使用 rm -r 进行递归删除是高风险操作，可能导致不可逆的数据丢失。
+regex: '\brm[ \t]+(-[a-zA-Z]*[rR][a-zA-Z]*\b|--recursive\b)'
+severity: warn

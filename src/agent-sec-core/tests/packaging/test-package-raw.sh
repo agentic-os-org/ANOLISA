@@ -37,10 +37,7 @@ install -d -m 0755 \
     "$BUILD/qoder-plugin/.qoder-plugin" \
     "$BUILD/qoder-plugin/hooks" \
     "$BUILD/qwen-code-extension/hooks" \
-    "$BUILD/cosh-extension/hooks" \
-    "$BUILD/skills/code-scanner" \
-    "$BUILD/skills/prompt-scanner" \
-    "$BUILD/skills/skill-ledger/references"
+    "$BUILD/cosh-extension/hooks"
 
 printf '__version__ = "%s"\n' "$VERSION" > \
     "$BUILD/site-packages/agent_sec_cli/__init__.py"
@@ -124,10 +121,7 @@ printf 'print("fixture")\n' > "$BUILD/qwen-code-extension/hooks/hook.py"
 cp "$ROOT/cosh-extension/cosh-extension.json" "$BUILD/cosh-extension/"
 printf 'print("fixture")\n' > "$BUILD/cosh-extension/hooks/hook.py"
 
-for skill in code-scanner prompt-scanner skill-ledger; do
-    printf '# %s\n' "$skill" > "$BUILD/skills/$skill/SKILL.md"
-done
-printf '# fixture\n' > "$BUILD/skills/skill-ledger/references/protocol.md"
+make -C "$ROOT" stage-skills BUILD_DIR="$BUILD"
 
 run_package() {
     local output="$1"
@@ -170,6 +164,12 @@ cmp "$ROOT/.anolisa/component.toml" \
     "$MANIFEST_STAGE/share/anolisa/components/sec-core/component.toml"
 make -C "$ROOT" install-component-manifest install-systemd-user \
     DESTDIR="$RPM_STAGE"
+make -C "$ROOT" install-skills BUILD_DIR="$BUILD" DESTDIR="$RPM_STAGE"
+for skill_dir in "$ROOT"/skills/*; do
+    skill="$(basename "$skill_dir")"
+    cmp "$skill_dir/SKILL.md" "$STAGE/share/anolisa/skills/$skill/SKILL.md"
+    cmp "$skill_dir/SKILL.md" "$RPM_STAGE/usr/share/anolisa/skills/$skill/SKILL.md"
+done
 cmp "$ROOT/.anolisa/component.toml" \
     "$RPM_STAGE/usr/share/anolisa/components/sec-core/component.toml"
 if [ -e "$ROOT/adapters/component.toml" ]; then
@@ -286,6 +286,8 @@ for expected in \
     "./adapters/sec-core/cosh/cosh-extension.json" \
     "./share/anolisa/skills/code-scanner/SKILL.md" \
     "./share/anolisa/skills/prompt-scanner/SKILL.md" \
+    "./share/anolisa/skills/pii-checker/SKILL.md" \
+    "./share/anolisa/skills/security-observability/SKILL.md" \
     "./share/anolisa/skills/skill-ledger/SKILL.md" \
     "./share/anolisa/sec-core/agent-sec-core.service.in" \
     "./share/doc/sec-core/LICENSE"; do
@@ -306,6 +308,19 @@ fi
 
 tar -xzOf "$OUT_ONE/$ARTIFACT" ./.anolisa/component.toml > "$TMP/contract.toml"
 cmp "$ROOT/.anolisa/component.toml" "$TMP/contract.toml"
+python3 - "$TMP/contract.toml" "$STAGE" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+manifest = tomllib.loads(Path(sys.argv[1]).read_text())
+stage = Path(sys.argv[2])
+for framework in ("openclaw", "hermes"):
+    adapter = next(item for item in manifest["adapters"] if item["framework"] == framework)
+    skill = next(item for item in adapter[framework]["skills"] if item["name"] == "pii-checker")
+    source = skill["source"].replace("{datadir}", str(stage / "share/anolisa"))
+    assert (Path(source) / "SKILL.md").is_file(), (framework, source)
+PY
 tar -xzOf "$OUT_ONE/$ARTIFACT" "./$ASSET_VERIFY_PACKAGE_PATH" \
     > "$TMP/asset-verify-config.conf"
 assert_asset_verify_config "$TMP/asset-verify-config.conf"

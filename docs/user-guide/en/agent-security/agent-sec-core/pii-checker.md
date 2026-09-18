@@ -6,6 +6,19 @@ PII Checker detects personal data and credentials in Agent inputs and outputs. I
 structured verdict, produces safe evidence and optional redacted text, and records sanitized
 Security Events for audit and Observability correlation.
 
+## Use the bundled Skill
+
+With V1 `agent-sec-cli` installed and the `pii-checker` Skill available to the Agent,
+ask it to check a specified file for personal data or credentials, or to generate
+a redacted copy. The Skill reports redacted evidence and does not rewrite the input
+file unless requested. A completed scan with no findings is not a guarantee that the
+content contains no sensitive information.
+
+The Skill ships in `agent-sec-skills` for RPM installations and in the ANOLISA raw
+package's shared skills directory. Cosh-NG discovers that directory; the OpenClaw and
+Hermes adapters declare `pii-checker` for delivery into their respective Skill directories.
+Other Agent installations must make the Skill available through their own discovery paths.
+
 ## Scan text
 
 Provide exactly one input source: inline text, standard input, or a UTF-8 file.

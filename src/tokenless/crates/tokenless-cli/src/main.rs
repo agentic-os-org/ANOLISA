@@ -271,6 +271,14 @@ enum StatsCommands {
     Disable,
 }
 
+/// Boolean switch from the environment: `1`, `true`, or `yes` (case-insensitive)
+/// enable it; any other value disables it; unset keeps `default`.
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name).map_or(default, |value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -562,14 +570,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 &request,
                 &EntryOptions {
                     compression_enabled: compression_on,
-                    search_path_sharing_enabled: std::env::var(
+                    search_path_sharing_enabled: env_flag(
                         "TOKENLESS_SEARCH_PATH_SHARING_ENABLED",
-                    )
-                    .map_or(true, |value| {
-                        value == "1"
-                            || value.eq_ignore_ascii_case("true")
-                            || value.eq_ignore_ascii_case("yes")
-                    }),
+                        true,
+                    ),
+                    diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
+                    html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", false),
                     stash_enabled: true,
                     rtk_path,
                     rtk_data_dir,

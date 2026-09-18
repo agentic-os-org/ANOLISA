@@ -178,15 +178,15 @@ fn default_max_tool_calls() -> u32 {
     10
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HooksConfig {
-    #[serde(default)]
+    /// Config hooks run unless explicitly disabled, independently of extensions.
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Last explicit value applied by a trusted configuration layer.
     ///
-    /// This distinguishes the default `false` from a system/user-requested
-    /// disable so installed extensions can auto-enable hooks without allowing
-    /// untrusted project configuration to override the kill switch.
+    /// Installed extensions can auto-enable hooks unless a trusted layer
+    /// disables them; project configuration cannot override that decision.
     #[serde(skip)]
     pub(crate) enabled_override: Option<bool>,
     #[serde(default, rename = "PreToolUse")]
@@ -205,6 +205,23 @@ pub struct HooksConfig {
     pub before_model: Vec<HookDefinition>,
     #[serde(default, rename = "AfterModel")]
     pub after_model: Vec<HookDefinition>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enabled_override: None,
+            pre_tool_use: Vec::new(),
+            post_tool_use: Vec::new(),
+            post_tool_use_failure: Vec::new(),
+            user_prompt_submit: Vec::new(),
+            session_start: Vec::new(),
+            stop: Vec::new(),
+            before_model: Vec::new(),
+            after_model: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -870,6 +887,7 @@ impl CoreConfig {
 
     fn apply_bare_isolation(&mut self) {
         self.hooks = HooksConfig {
+            enabled: false,
             enabled_override: Some(false),
             ..Default::default()
         };
@@ -1204,6 +1222,7 @@ mod tests {
         assert_eq!(config.agent.session_token_limit, 128_000);
         assert_eq!(config.agent.max_tool_calls_per_turn, 10);
         assert!(config.session.auto_persist);
+        assert!(config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, None);
     }
 
@@ -1217,6 +1236,66 @@ mod tests {
 
         assert!(!config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, Some(false));
+    }
+
+    #[tokio::test]
+    async fn layered_config_hooks_run_without_opt_in_and_respect_explicit_disable() {
+        use crate::hook::{HookDecision, HookFailureKind, HookSystem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let extension_hooks = serde_json::from_value(serde_json::json!({
+            "PreToolUse": [{"hooks": [{
+                "type": "command", "name": "extension-probe",
+                "command": "printf '{\"systemMessage\":\"extension-ran\"}'"
+            }]}]
+        }))
+        .unwrap();
+
+        for enabled in [None, Some(true), Some(false)] {
+            let flag = enabled
+                .map(|value| format!("[hooks]\nenabled = {value}\n"))
+                .unwrap_or_default();
+            std::fs::write(
+                &path,
+                format!("{flag}[[hooks.PreToolUse]]\nname = 'config-probe'\ncommand = 'true'\n"),
+            )
+            .unwrap();
+
+            for paths in [
+                (Some(path.as_path()), None, None),
+                (None, Some(path.as_path()), None),
+                (None, None, Some(path.as_path())),
+            ] {
+                let config = CoreConfig::load_from_paths(paths.0, paths.1, paths.2);
+                for with_extension in [false, true] {
+                    let mut system = HookSystem::from_config(&config.hooks);
+                    if with_extension {
+                        system.register_extension_hooks(&extension_hooks);
+                    }
+                    let result = system
+                        .fire_pre_tool_use("s1", "/tmp", "tool-1", "WriteFile", &Value::Null, None)
+                        .await;
+
+                    if enabled == Some(false) {
+                        assert_eq!(result.decision, HookDecision::Passthrough);
+                        assert!(result.hook_failures.is_empty());
+                    } else {
+                        assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+                        assert_eq!(result.hook_failures.len(), 1);
+                        assert_eq!(result.hook_failures[0].kind, HookFailureKind::EmptyOutput);
+                    }
+                    assert_eq!(
+                        result
+                            .notifications
+                            .iter()
+                            .any(|n| n.message == "extension-ran"),
+                        with_extension && (enabled != Some(false) || paths.2.is_some()),
+                        "enabled={enabled:?}, paths={paths:?}, extension={with_extension}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

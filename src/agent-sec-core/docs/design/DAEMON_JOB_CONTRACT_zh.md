@@ -47,9 +47,10 @@ Rust 首版必须先区分 readiness-critical preparation 和 daemon ready 后�
 | Background service | 由 daemon 启动并长期存活；不等待首个 run 完成即可 Ready | `skill-ledger-activation` actor | 最小化 JobSupervisor |
 | Background run | service 的一次具体处理 | startup reconcile、一次 debounced Skill 变更批次 | service 内的一次有界执行 |
 
-startup reconcile 虽然由 daemon 启动触发，但它不阻止当前 socket bind，语义上属于
-background run，而不是 readiness-critical preparation。周期触发只是未来可能增加的 trigger；
-当前没有注册任何具体 production periodic Job。
+V1 Skill Ledger 的 startup reconcile 虽然由 daemon 启动触发，但它不阻止当前 socket bind，
+语义上属于 background run，而不是 readiness-critical preparation。V1 production registry
+没有注册具体 periodic Job；此陈述不涵盖 V2。V2 Binding reconciliation 的通知、重试定时器、
+补偿扫描及 DJOB 验收映射见第 11.4 节，不要求引入通用 periodic scheduler。
 
 长期 background service 的运行状态不能代替最近一次 run 的结果。Rust 首版只需在 health
 中区分 `running/degraded/stopped` 和最近一次 outcome，不需要预先实现两套可扩展状态机。
@@ -222,6 +223,9 @@ kill。该进程协议和三阶段终止流程是 **[CURRENT]** Python 实现细
 - **[HISTORICAL]** one-shot 未处理异常结束该原型 run，并把状态设为 `error`；
 - **[HISTORICAL]** periodic 未处理异常结束当前原型 run，但不终止后续周期；
 - Skill Ledger 某个变更失败时记录 `last_error/last_processed`，继续处理后续通知；
+- 每次 Skill Ledger 处理在创建密钥、扫描、签名或更新 activation 前加载并校验配置。
+  配置错误以 `ConfigError` 上报，本次处理无上述副作用；修正配置后可处理后续通知，
+  不自动重试已失败变更；
 - Job runtime failure 当前不会自动停止 daemon 或改变 daemon 顶层 `status`；
 - Job 启动阶段抛错则 daemon 启动失败并执行资源回滚。
 
@@ -438,6 +442,61 @@ DJOB-005/006 不进入 Rust 首版 no-regression 或 release gate；只有未来
 
 这些 ID 必须映射到机器可执行 manifest 和真实 test/fixture。只存在 Markdown 表格不表示
 迁移门禁已经完成。
+
+### 11.4 **[TARGET V2]** Policy reconciliation 专用后台服务
+
+此服务由 `asc-policy-runtime` 实现，daemon 仅装配；它不依赖通用 periodic scheduler 或
+完整 JobSupervisor。PAP Binding 提交后通知、retry 到期和有界补扫是触发源。Runtime 与
+通知入口可用是 Binding 写准入条件，不是 daemon 启动条件，也不等待每个目标 READY。
+Policy/Scope CRUD 不依赖 reconciliation；实际存储错误由各自 Repository 操作返回。
+每次尝试才通过 factory 创建 Client，读取凭据；凭据或连接失败按 Binding 重试处理。
+每次执行重新读取和准备；退避释放 worker，
+同 Binding 互斥到实际调用退出。dirty 仅负责下一轮检查。
+
+自动重试必须等待：Superseded 和仓储错误默认等待 1 秒，RetryAt 按期限等待；
+若期限在收尾期间已过去，仍至少等待 1 毫秒。队列默认首次调用后最多自动重试 4 次，
+三类结果共用次数；耗尽后保留内存 Exhausted 条目，timer/补扫不能复活。
+新 Delete/Update 通知仍立即将等待或耗尽条目改为 Queued，Running 的 dirty 在退出后优先处理，
+并重置队列计数；核心已提交的业务预算不被队列重置。Exhausted 仍计入容量，
+不伪造业务失败落库或丢弃目标责任；计数不跨 Runtime 重建。
+Runtime 直接从 reconciler 获取同一时钟实例，不另行注入 timer 时钟。每页补扫只加锁一次，
+不改变已有条目；tick 暂保留全 entries 扫描，不承诺满容量下的扫描延迟。
+
+业务 FAILED 与服务 health 分离。单 Binding 存储/数据错误及 CAS 竞争耗尽保留 WaitingRetry 或 Exhausted，
+不维护全局 storage_errors 集合，也不阻断其它请求。存储/数据错误输出 ID 与安全错误诊断，
+CAS 耗尽返回独立的 Contended；后续调用重读并恢复已有状态，不伪造失败落库或远端结果。
+补扫失败影响 health，但不关闭写准入。Runtime 初始化失败保留 Policy/Scope CRUD、查询及其它服务，
+注入不可用通知入口仅拒绝 Binding mutation。
+单次 reconcile 的可展开 panic 由核心先尝试结果/失败记账，再由 worker 在调用边界捕获；
+最新记录已终结或删除时移除队列条目，否则保留 Exhausted 停止自动执行，避免补扫重放。
+查询结果也失败或 panic 时同样按未确认处理；新通知/dirty 仍优先，worker 继续处理其它 Binding。
+不覆盖已提交成功结果，不因 panic 清空 deployments，也不把旧尝试失败写到新 Delete/Update。
+timer/scanner 或 worker 调度代码自身 panic 才停止领取并标记 reconciliation 服务失败，关闭 Binding 写准入；
+daemon 仅记录健康变化，不因此请求全进程 shutdown，Policy/Scope CRUD 和读查询仍可用。
+这遵循“单个 Job error 不自动等于顶层 daemon 不可用”的原则。首版不自动重建
+失败 Runtime，需进程重启。取消不会中断同步
+Client；shutdown 先关闭请求准入并 drain 请求，再停止领取/扫描并 join 实际调用。30s drain
+到期后只由进程退出结束剩余工作，不提前释放执行所有权。首版内存记录在重启后丢失；
+持久化后重启恢复须独立验收。服务不创建自定义 trace ID，OTel 集成沿用迁移架构的统一契约。
+
+以下均映射到 `v2/crates/asc-policy-runtime/src/reconciliation/tests.rs` 的可执行测试：
+
+| ID | 行为 | fixture / test |
+|---|---|---|
+| DJOB-024 | 同 ID 合并、并发领取和 dirty/finish 竞争 | `fifo_coalesces_and_dirty_survives_notification_finish_races`、`concurrent_takers_never_claim_one_id_twice` |
+| DJOB-025 | 退避释放 worker，Delete 提前唤醒，重新准备 | `one_worker_serves_other_bindings_during_retry_and_reprepares_on_deadline`、`delete_preempts_waiting_retry_without_waiting_for_clock` |
+| DJOB-026 | 容量包括执行/等待，通知遗漏经稳定 ID 分页补回 | `capacity_includes_running_and_waiting_and_stop_wakes_takers`、`compensation_pages_past_capacity_without_any_notifications` |
+| DJOB-027 | 提交后通知、准入失败无通知、timer 服务失败关闭 Binding 新写 | `pap_notification_observes_committed_state_and_failed_admission_never_notifies`、`timer_panic_closes_admission_and_shutdown_observes_failure` |
+| DJOB-028 | 停机等待实际调用、旧 Apply 观察不覆盖 Delete | `shutdown_retains_actual_call_until_join_and_closes_write_admission`、`delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup` |
+| DJOB-029 | 单 Binding 错误重试不阻断其它 Binding/PAP CRUD；扫描降级不关闭准入 | `binding_errors_retry_without_blocking_other_bindings_or_pap_writes`、`scan_failure_degrades_health_without_closing_binding_admission` |
+| DJOB-030 | 自动重试等待且有上限，补扫不复活；新通知立即触发并重置队列预算 | `automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings`、`new_notifications_reset_queue_budget_and_preempt_waiting_or_exhaustion`、`zero_retry_budget_stops_first_failure_and_submillisecond_delay_is_rejected` |
+| DJOB-031 | 单次 reconcile panic 隔离，保留完成事实/目标责任，worker 继续处理其它 Binding | `panic_tests.rs`：`attempt_panic_records_failure_and_same_worker_completes_next_binding`、`committed_success_survives_attempt_panic_without_replay`、`unconfirmed_panic_stops_only_that_binding_until_new_notification` |
+| DJOB-032 | panic 收尾与新通知竞争不丢工作、不重入，新 Delete 可继续清理 | `panic_tests.rs`：`delete_during_attempt_panic_keeps_dirty_and_cleans_registered_target`、`panic_completion_and_new_notification_race_never_loses_work` |
+| DJOB-033 | Runtime 沿用核心时钟；批量补扫保留既有任务、容量及到期语义 | `one_worker_serves_other_bindings_during_retry_and_reprepares_on_deadline`（非零起点）、`batch_discovery_preserves_existing_work_and_applies_capacity_and_deadlines` |
+
+运行入口：`cargo test -p asc-policy-runtime --locked --offline`。组件中的 scripted 错误不等于
+系统性 fault-injection 交付。完整 CLI/daemon E2E 单独 PR，SQLite/崩溃恢复和系统性注入等待
+persistent Repository；这些边界见 [Runtime 设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)。
 
 ## 12. 当前实现证据
 

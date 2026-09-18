@@ -85,6 +85,9 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	@echo "🧪 Running E2E tests on installed RPM..."
 	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
+	@# The code-scanner rule inventory test parses rule YAML directly, so PyYAML
+	@# is required even though the CLI itself is installed from the RPM.
+	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
@@ -102,16 +105,17 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
 	@command -v agent-sec-daemon >/dev/null 2>&1 || { echo "ERROR: agent-sec-daemon not found on PATH"; exit 1; }
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
-	python3 -m pytest tests/e2e/ tests/v2/e2e/ \
-		--import-mode=importlib \
-		--ignore=tests/e2e/cli/test_capabilities_e2e.py \
+	@# The shared code-scanner E2E imports rule metadata before it can decide
+	@# whether source-only inventory assertions apply to this installed V2 RPM.
+	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 python3 -m pytest tests/e2e/ tests/v2/ \
+		--import-mode=importlib -ra \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
 		--ignore=tests/e2e/cli/test_scan_pii_e2e.py \
 		--ignore=tests/e2e/cli/test_session_report_e2e.py \
 		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
-		--ignore=tests/e2e/code-scanner/e2e_test.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
 		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
@@ -122,13 +126,11 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/linux-sandbox \
 		-v --tb=short
 	@# Pending V2 capabilities behind the ignores above:
-	@#   cli/test_capabilities_e2e.py             -> capability view command
 	@#   cli/test_events_e2e.py                   -> security event query
 	@#   cli/test_observability_record_*_e2e.py   -> observability record sinks
 	@#   cli/test_scan_pii_e2e.py                 -> PII scanning
 	@#   cli/test_session_report_e2e.py           -> session report
 	@#   cli/test_skill_ledger_analyze_e2e.py     -> skill ledger analyze
-	@#   code-scanner/e2e_test.py                 -> code scanning
 	@#   codex|qoder|qwen hook tests              -> hooks calling the V2 CLI
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
 	@#   prompt-scanner/test_prompt_scanner_e2e.py -> prompt scanning
@@ -227,7 +229,7 @@ endef
 # target is prepended by each aggregate.
 RPM_INSTALL_COMMON_TARGETS := install-cosh-hook install-codex-plugin install-qoder-plugin \
 	install-openclaw-plugin install-hermes-plugin install-qwen-code-extension \
-	install-skills install-component-manifest install-systemd-user
+	install-skills install-component-manifest
 
 # V2 Rust binaries are collected here by build-cli-v2 and consumed by
 # install-cli-v2, mirroring the build/install split used for linux-sandbox.
@@ -456,6 +458,8 @@ SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
 SYSTEMD_USER_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core.service.in
 SYSTEMD_SERVICE_BINDIR ?= /usr/bin
 SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
+SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
+SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -595,17 +599,23 @@ install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) install-systemd-user ## Install all (RPM build)
 
-# V2 differs from install-all-for-rpmbuild only in the CLI/daemon implementation;
-# both versions install the same systemd unit contract.
+# V2 installs a system-scope unit; the V1 raw/RPM user unit remains separate.
 .PHONY: install-all-for-rpmbuild-v2
 install-all-for-rpmbuild-v2: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild-v2: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) ## Install all (V2 RPM build)
+install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
+
+.PHONY: install-systemd-system
+install-systemd-system: ## Stage V2 system unit
+	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)
+	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
+		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 
 # =============================================================================
 # UNINSTALL

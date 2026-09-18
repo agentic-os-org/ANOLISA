@@ -240,7 +240,7 @@ def test_process_skill_change_resolves_activation_after_scan_error(
         raise RuntimeError("scanner failed")
 
     def fake_policy() -> str:
-        return "pass_only"
+        return "pass_warn_only"
 
     def fake_resolve(
         received_root: ResolvedSkillRoot,
@@ -285,7 +285,7 @@ def test_process_skill_change_resolves_activation_after_scan_error(
     assert events == [
         ("root", skill_dir.resolve()),
         ("scan", root, backend),
-        ("resolve", root, backend, "pass_only"),
+        ("resolve", root, backend, "pass_warn_only"),
     ]
 
 
@@ -344,7 +344,7 @@ def test_process_skill_change_reports_activation_error_per_skill(
     ) -> dict[str, Any]:
         assert received_root is root
         assert received_backend is backend
-        assert policy == "pass_only"
+        assert policy == "pass_warn_only"
         raise RuntimeError("activation failed")
 
     monkeypatch.setattr(
@@ -366,7 +366,7 @@ def test_process_skill_change_reports_activation_error_per_skill(
     )
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation_policy",
-        lambda: "pass_only",
+        lambda: "pass_warn_only",
     )
 
     result = process_skill_change(

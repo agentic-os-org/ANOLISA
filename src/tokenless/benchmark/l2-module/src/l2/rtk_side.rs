@@ -71,7 +71,11 @@ pub fn locate_rtk() -> Result<PathBuf, L2Error> {
     })
 }
 
-/// Runs `argv` raw and then wrapped by `rtk_bin`, both under `cwd`.
+/// Runs `argv` raw and then `rtk_argv` wrapped by `rtk_bin`, both under `cwd`.
+///
+/// `rtk_argv` is normally the same argv; it differs where rtk's filter is
+/// selected by a subcommand name that is not an executable program, so the
+/// unfiltered baseline needs a different invocation for the same content.
 ///
 /// Output is captured as stdout followed by stderr: agents see both streams,
 /// so both count as payload. A non-zero raw exit status is an error (the
@@ -82,10 +86,24 @@ pub fn locate_rtk() -> Result<PathBuf, L2Error> {
 ///
 /// [`L2Error::Command`] when either process cannot be spawned or the raw
 /// command fails.
-pub fn run_paired(rtk_bin: &Path, argv: &[String], cwd: &Path) -> Result<PairedRun, L2Error> {
+pub fn run_paired(
+    rtk_bin: &Path,
+    argv: &[String],
+    rtk_argv: &[String],
+    cwd: &Path,
+) -> Result<PairedRun, L2Error> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| L2Error::Command("command spec has an empty argv".to_string()))?;
+    // An empty rtk_argv would invoke rtk with no subcommand, which succeeds and
+    // prints usage: the run would record that as a compression measurement.
+    // Fail instead of measuring the help text.
+    if rtk_argv.is_empty() {
+        return Err(L2Error::Command(format!(
+            "command spec {argv:?} has an empty rtk_argv: rtk would run with no \
+             subcommand and its usage output would be measured as compression"
+        )));
+    }
 
     let start = Instant::now();
     let raw = Command::new(program)
@@ -104,7 +122,7 @@ pub fn run_paired(rtk_bin: &Path, argv: &[String], cwd: &Path) -> Result<PairedR
 
     let start = Instant::now();
     let wrapped = Command::new(rtk_bin)
-        .args(argv)
+        .args(rtk_argv)
         .current_dir(cwd)
         .output()
         .map_err(|e| L2Error::Command(format!("spawn rtk {:?} failed: {e}", rtk_bin.display())))?;

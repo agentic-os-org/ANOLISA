@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型静态派发给 `JsonCompressor` 或 `BuildLogCompressor`。JSON 压缩器只解析一次输入，先生成不截断数据的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器只处理成功的 `command_output`，先清理终端控制输出，再对已识别构建与测试日志中的重复常规进度进行可恢复缩减。Tool Error 保留原始输出并只追加环境诊断；其他内容类型当前透传。
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享默认启用；Diff 上下文裁剪与 HTML 页面转写需要分别通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 和 `TOKENLESS_HTML_EXTRACTION_ENABLED` 显式开启。JSON 压缩器只解析一次输入，先生成不截断数据的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器只处理成功的 `command_output`，先清理终端控制输出，再对已识别构建与测试日志中的重复常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。
 
 ## 二、8 条压缩规则
 
@@ -121,18 +121,35 @@ Hook 转换为 `operation: "post_tool"` 的 v2 Request
    ↓
 Runtime 执行门禁、内容检测和静态派发
    ↓
-JSON → `JsonCompressor`；Build Log → `BuildLogCompressor`；其他 → Passthrough
+JSON → `JsonCompressor`；Build Log → `BuildLogCompressor`；Tabular → `TabularCompressor`；
+Search Results → `SearchResultsCompressor`；Diff → Runtime Diff 裁剪（需开启）；
+HTML → `HtmlExtractor`（需开启）；其他 → Passthrough
    ↓
 Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
    ↓
 Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
-**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。当前静态派发
-`ContentType::Json -> JsonCompressor` 与 `ContentType::BuildLog -> BuildLogCompressor`。
-JSON 清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON 都在
-同一次 JSON 领域调用内完成；Build Log 的 Terminal Cleanup、方言分类、Stack Trace 保护和
-可恢复 Progress Reduction 都在同一次 Build Log 领域调用内完成。其他 ContentType 当前透传。
+**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。工具错误、`file_content` 来源和
+低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类；共享 PostTool Hook
+与 Hermes 插件还把只打印本地文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、
+`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）报告为
+`file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样；`Grep` 工具输出只允许进入无损的 Search Results
+路径共享。通过入口后按下表静态派发，每个领域各调用一次：
+
+| ContentType | 前提 | 领域处理 | 默认 |
+|------|------|------|------|
+| `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON | 启用 |
+| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
+| `tabular` | 宿主支持文本替换 | `TabularCompressor`：CSV/TSV 视图，保留单元格或可恢复选取整行 | 启用 |
+| `search_results` | 来源为 `api_response`，宿主支持文本替换 | `SearchResultsCompressor`：连续行共享重复路径，无损 | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
+| `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
+| `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog、menu）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 关闭，`TOKENLESS_HTML_EXTRACTION_ENABLED=true` 开启 |
+
+Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。Diff 与 HTML
+没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在 Shell `PATH` 中）时，即使已开启
+环境变量也原文透传。
+其余 ContentType（如 `stack_trace`、`plain_text`）透传。
 Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
 `tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的
 Marker 会提示模型通过已有 Shell Tool 执行
@@ -396,6 +413,10 @@ Schema、字符串、深度、普通数组和 BuildLog 的省略提示使用同�
 |------|--------|
 | JSON 领域压缩器（JsonCompressor） | `crates/tokenless-compressors/src/json.rs` |
 | Build Log 领域压缩器（BuildLogCompressor） | `crates/tokenless-compressors/src/build_log.rs` |
+| Tabular 领域压缩器（TabularCompressor） | `crates/tokenless-compressors/src/tabular.rs` |
+| Search Results 领域压缩器（SearchResultsCompressor） | `crates/tokenless-compressors/src/search_results.rs` |
+| HTML 领域转写器（HtmlExtractor） | `crates/tokenless-compressors/src/html.rs` |
+| Diff 上下文裁剪 | `crates/tokenless-runtime/src/post_tool/diff.rs` |
 | PostTool Pipeline 与最终仲裁 | `crates/tokenless-runtime/src/post_tool/` |
 | Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
 | 内容压缩公开 API | `crates/tokenless-compressors/src/lib.rs` |
@@ -435,6 +456,34 @@ echo '{"name":"test","value":42}' | tokenless compress-toon --min-toon-chars 0 |
 
 # 附带统计追踪（自动记录到 SQLite 数据库）
 tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
+```
+
+`tests/test-toon-full.sh` 把上面这套契约做成手动 E2E 校验（不是 make 目标）。它驱动
+PATH 上的 `tokenless`，因此要求该二进制与本 checkout 同版本（`TOKENLESS_ALLOW_VERSION_SKEW=1`
+可放行已安装的旧版本）。场景 1/2 只需要仓库树；场景 3 需要一个启用了 tokenless 插件的
+OpenClaw、GNU `timeout`（coreutils，用于给每次模型调用限时），且必须显式设置
+`TOKENLESS_TOON_FULL_LIVE=1` 才会真实调用模型。OpenClaw 的状态目录按
+`OPENCLAW_STATE_DIR` → `OPENCLAW_HOME` → `~/.openclaw` 解析（与
+`adapters/tokenless/openclaw/scripts/` 下的 install/detect 脚本一致），CLI 路径可用
+`OPENCLAW_BIN` 覆盖。可选前置条件缺失记为 SKIP，不计入失败；但一旦设置了
+`TOKENLESS_TOON_FULL_LIVE=1`，场景 3 的前置条件缺失会直接报错退出，不会以"全部跳过"
+的姿态给出绿色结果。
+
+`timeout` 约束的是**每一次** OpenClaw 调用，只读探测（`openclaw plugins list`）也不例外：
+缺少 `timeout` 时脚本根本不会发起该调用，探测退化为只查磁盘上的
+`<state-dir>/extensions/tokenless` 并在结论里注明"未查询 plugins list"；显式 live 运行则在
+探测之前就报错退出，不会卡在探测里。live 模式下 session 查询失败、超时或返回不可解析的内容
+一律计为 FAIL，只有"查询成功但没有可复用 session"才保留 SKIP——否则一次什么也没验证的 live
+运行会显示 0 failures 并 exit 0。
+
+场景 3 还有一条**既存限制**（早于本次改动，merge base 就存在）：3.1 断言的
+`rtk-rewrite` / `schema-compression` / `response-compression` / `toon-compression`
+并不是插件当前的输出，`adapters/tokenless/openclaw/index.ts` 打印的是 `pre-tool` /
+`post-tool`，且仅在 verbose 开启时打印。重新推导这些断言需要一台启用了 tokenless 插件的
+真实 OpenClaw 主机，因此暂按原样保留；脚本中对应位置已就地标注 KNOWN STALE。
+
+```bash
+PATH="src/tokenless/target/debug:$PATH" bash src/tokenless/tests/test-toon-full.sh
 ```
 
 ### 9.2 通过统计数据库验证压缩效果

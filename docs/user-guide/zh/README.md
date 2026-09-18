@@ -63,6 +63,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | 系统加固、代码扫描、提示词扫描、技能账本 |
+| [OWASP Agentic Top 10 控制映射](agent-security/owasp-agentic-top10.md) | ANOLISA | 十类 Agentic 风险对应的安全控制、适用条件与证据 |
 | [Code Scanner Hook 配置](agent-security/agent-sec-core/code-scanner.md) | agent-sec-core | 各 Agent 的 hook 模式、环境变量与 fallback 行为 |
 | [Prompt Scanner](agent-security/agent-sec-core/prompt-scanner.md) | agent-sec-core | 提示词注入 / 越狱检测、模式与 verdict |
 | [PII 检测](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | 个人数据/凭证检测与脱敏 |

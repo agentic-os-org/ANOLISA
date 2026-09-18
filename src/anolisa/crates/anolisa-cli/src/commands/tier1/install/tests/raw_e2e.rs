@@ -17,6 +17,7 @@ use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
 
 const JSON_REASON_ENV: &str = "ANOLISA_TEST_MISSING_INDEX_REASON";
+const PLATFORM_JSON_REASON_ENV: &str = "ANOLISA_TEST_PLATFORM_MISMATCH_REASON";
 const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
 const JSON_END: &str = "ANOLISA_TEST_JSON_END";
 
@@ -40,6 +41,32 @@ fn render_missing_index_error_json_child() {
     crate::output::write_stdout(format_args!("{JSON_END}"), true);
     crate::output::flush_stdout();
     assert_eq!(exit_code, std::process::ExitCode::from(1));
+}
+
+/// Isolated child for the platform-mismatch regression: renders the reason the
+/// real resolver produced through the production `--json` path, so the parent
+/// asserts the multi-line platform list survives the envelope instead of
+/// assuming a string escapes correctly.
+#[test]
+#[ignore = "invoked as an isolated child by the platform-mismatch regression"]
+fn render_platform_mismatch_error_json_child() {
+    let reason = std::env::var(PLATFORM_JSON_REASON_ENV)
+        .expect("platform-mismatch JSON child must be invoked by its parent regression test");
+    let tmp = tempdir().expect("tmpdir");
+    let err = crate::response::CliError::InvalidArgument {
+        command: "install agentsight".to_string(),
+        reason,
+    };
+
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_BEGIN}"), true);
+    crate::output::flush_stdout();
+    let exit_code =
+        crate::response::render_error(&ctx_with_prefix(true, Some(tmp.path().join("sys"))), &err);
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_END}"), true);
+    crate::output::flush_stdout();
+    assert_eq!(exit_code, std::process::ExitCode::from(2));
 }
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
@@ -968,8 +995,26 @@ fn install_raw_end_to_end_applies_optional_capability() {
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install with optional capability must succeed even without root");
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|factories| {
+            handle_with_effects(a, &ctx_with_prefix(false, Some(prefix.clone())), factories)
+        })
+        .expect("install with fake capability must succeed");
+    assert_eq!(
+        effects.calls(),
+        vec![
+            "capability factory system".to_string(),
+            format!(
+                "apply {} CAP_BPF",
+                FsLayout::system(Some(prefix.clone()))
+                    .bin_dir
+                    .join("agentsight")
+                    .display()
+            ),
+            "service factory system System".to_string(),
+        ]
+    );
 
     let layout = FsLayout::system(Some(prefix));
     assert!(
@@ -1040,8 +1085,22 @@ fn install_raw_end_to_end_records_declared_service() {
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install with a declared service must succeed (activation is best-effort)");
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|factories| {
+            handle_with_effects(a, &ctx_with_prefix(false, Some(prefix.clone())), factories)
+        })
+        .expect("install with a declared service must succeed");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory system",
+            "service factory system System",
+            "DaemonReload System ",
+            "Enable System agentsight.service",
+            "Start System agentsight.service",
+        ]
+    );
 
     let layout = FsLayout::system(Some(prefix));
     assert!(
@@ -1490,6 +1549,233 @@ sha256 = "{sha}"
         err.reason().contains("installable versions: 0.2.0"),
         "refusal must still list installable versions: {}",
         err.reason()
+    );
+}
+
+/// Overwrite the fixture repo's `v1/index.toml` with exactly these rows,
+/// leaving the published component index as the fixture wrote it: identity
+/// resolution keeps accepting the component while the distribution resolver
+/// sees only what this wrote. Rows are
+/// `(component, version, os, arch, pkg_base)`, where a `None` `pkg_base` omits
+/// the selector. Artifact bytes and checksums stay placeholders — every caller
+/// fails resolution, so nothing is fetched.
+fn rewrite_index_rows(repo_root: &Path, rows: &[(&str, &str, &str, &str, Option<&str>)]) {
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for (component, version, os, arch, pkg_base) in rows {
+        let pkg_base_line = match pkg_base {
+            Some(base) => format!("pkg_base = \"{base}\"\n"),
+            None => String::new(),
+        };
+        index.push_str(&format!(
+            "\n[[entries]]\ncomponent = \"{component}\"\nversion = \"{version}\"\nchannel = \"stable\"\nartifact_type = \"tar_gz\"\nbackend = \"raw\"\nurl = \"{component}-{version}-{os}-{arch}.tar.gz\"\nos = \"{os}\"\narch = \"{arch}\"\n{pkg_base_line}install_modes = [\"system\"]\nsha256 = \"{sha}\"\n",
+            sha = "0".repeat(64),
+        ));
+    }
+    std::fs::write(repo_root.join("v1/index.toml"), index).expect("write index");
+}
+
+/// A component the repository publishes but not for this host is a platform
+/// gap, not an unknown name. The refusal must name the requested platform and
+/// list every platform the repository does carry — deduplicated, in a stable
+/// order, and identical through the `--json` envelope.
+#[test]
+fn install_platform_mismatch_lists_published_platforms() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    // Neither architecture is one ANOLISA runs on, so the rows stay foreign on
+    // every supported host. ppc64le is published twice (one row per version) to
+    // pin the dedup, and s390x is listed first to pin the sort.
+    rewrite_index_rows(
+        &repo_root,
+        &[
+            ("agentsight", "0.3.0", "linux", "s390x", None),
+            ("agentsight", "0.2.0", "linux", "ppc64le", None),
+            ("agentsight", "0.1.0", "linux", "ppc64le", None),
+        ],
+    );
+    let env = anolisa_env::EnvService::detect();
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("a host the repository publishes nothing for must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert_eq!(err.exit_code(), 2);
+    assert!(
+        reason.contains(&format!("is not available for {}/{}", env.os, env.arch)),
+        "mismatch must name the requested platform: {reason}"
+    );
+    assert!(
+        reason.contains("available platforms:\n  - linux/ppc64le\n  - linux/s390x"),
+        "mismatch must list every published platform, deduplicated and sorted: {reason}"
+    );
+    assert_eq!(
+        reason.matches("linux/ppc64le").count(),
+        1,
+        "one line per platform, not one per published version: {reason}"
+    );
+    assert!(
+        !reason.contains("no distribution entry matches the query"),
+        "mismatch must replace the generic resolver rendering: {reason}"
+    );
+
+    // Run this test executable as an isolated child so the production
+    // renderer's stdout can be asserted without replacing process-global
+    // output in-process.
+    let child_module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child_test = format!("{child_module}::render_platform_mismatch_error_json_child");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([child_test.as_str(), "--exact", "--ignored", "--nocapture"])
+        .env(PLATFORM_JSON_REASON_ENV, &reason)
+        .output()
+        .expect("run isolated JSON renderer child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "JSON renderer child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let (_, after_begin) = stdout
+        .split_once(JSON_BEGIN)
+        .expect("child stdout must contain the JSON start marker");
+    let (json, _) = after_begin
+        .split_once(JSON_END)
+        .expect("child stdout must contain the JSON end marker");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.trim()).expect("rendered error must be valid JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["command"], "install agentsight");
+    assert_eq!(parsed["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(parsed["error"]["reason"], reason);
+}
+
+/// An unknown package keeps the generic not-found rendering: reporting a
+/// platform gap for a name the index never carried would send the operator to
+/// a different build host instead of a different component name.
+#[test]
+fn install_unknown_package_keeps_generic_not_found_diagnostic() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    let env = anolisa_env::EnvService::detect();
+    // The repository is not empty — it publishes this host, for another
+    // package — so the refusal has to come from the name and not the platform.
+    rewrite_index_rows(
+        &repo_root,
+        &[(
+            "tokenless",
+            "0.2.0",
+            env.os.as_str(),
+            env.arch.as_str(),
+            None,
+        )],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("an unpublished package must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains("cannot resolve package 'agentsight'"),
+        "unknown package must keep the generic rendering: {reason}"
+    );
+    assert!(
+        reason.contains("no distribution entry matches the query"),
+        "unknown package must keep the resolver's own wording: {reason}"
+    );
+    assert!(
+        !reason.contains("available platforms"),
+        "unknown package must not be reported as a platform gap: {reason}"
+    );
+}
+
+/// A platform the repository does publish for is not a platform gap. Here a
+/// selector the resolver applies after os/arch (`pkg_base`) causes the
+/// refusal, and it must keep the generic rendering rather than be
+/// misattributed to the build host.
+#[test]
+fn install_host_platform_published_keeps_generic_not_found_diagnostic() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    let env = anolisa_env::EnvService::detect();
+    rewrite_index_rows(
+        &repo_root,
+        &[(
+            "agentsight",
+            "0.2.0",
+            env.os.as_str(),
+            env.arch.as_str(),
+            Some("zzz-no-such-package-base"),
+        )],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("an unsatisfiable package base must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains("cannot resolve package 'agentsight'"),
+        "a later-filter refusal must keep the generic rendering: {reason}"
+    );
+    assert!(
+        !reason.contains("available platforms"),
+        "a published platform must not be reported as a platform gap: {reason}"
+    );
+}
+
+/// A version pin does not outrank the platform gap. With no row for this host
+/// at all, the pin-specific wording would report the version as unpublished
+/// for this platform and hide that the repository publishes nothing here.
+#[test]
+fn install_pinned_version_on_unpublished_platform_lists_platforms() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component_versions(&repo_root, "agentsight", &["0.2.0"], &["system"]);
+    rewrite_index_rows(
+        &repo_root,
+        &[
+            ("agentsight", "0.2.0", "linux", "s390x", None),
+            ("agentsight", "0.1.0", "linux", "ppc64le", None),
+        ],
+    );
+    let env = anolisa_env::EnvService::detect();
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.2.0".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("a pinned version on an unpublished platform must fail");
+    let reason = err.reason();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        reason.contains(&format!("is not available for {}/{}", env.os, env.arch)),
+        "the platform gap must win over the pin wording: {reason}"
+    );
+    assert!(
+        reason.contains("available platforms:\n  - linux/ppc64le\n  - linux/s390x"),
+        "the pin refusal must still list the published platforms: {reason}"
+    );
+    assert!(
+        !reason.contains("not published"),
+        "the pin wording would hide the platform gap: {reason}"
     );
 }
 
@@ -2485,5 +2771,264 @@ install_modes = [1]
         err.reason().contains("cannot parse") && err.reason().contains("self-update"),
         "got: {}",
         err.reason()
+    );
+}
+
+#[test]
+fn raw_effect_capability_policy_matrix() {
+    for supported in [false, true] {
+        for optional in [false, true] {
+            for fail in [false, true] {
+                let tmp = tempdir().expect("tmpdir");
+                let prefix = tmp.path().join("sys");
+                let repo = write_local_repo_component_with_capability(
+                    &tmp.path().join("repo"),
+                    "agentsight",
+                    "0.2.0",
+                    &["system"],
+                    "{bindir}/agentsight",
+                    &["CAP_BPF"],
+                    optional,
+                );
+                let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+                let layout = common::resolve_layout(&ctx);
+                let mut request = args("agentsight");
+                request.repo = Some(repo);
+                let mut effects = crate::test_support::RawEffectRecorder::default();
+                effects.supported = supported;
+                effects.fail_capability = fail;
+                let result = effects.with(|f| handle_with_effects(request, &ctx, f));
+                let aborted = supported && fail && !optional;
+                assert_eq!(result.is_err(), aborted);
+                assert_eq!(layout.bin_dir.join("agentsight").exists(), !aborted);
+                assert_eq!(
+                    effects
+                        .calls()
+                        .iter()
+                        .filter(|s| s.starts_with("apply "))
+                        .count(),
+                    usize::from(supported)
+                );
+                assert_eq!(
+                    effects
+                        .calls()
+                        .iter()
+                        .filter(|s| s.starts_with("service factory"))
+                        .count(),
+                    usize::from(!aborted)
+                );
+                let store = load_v5_store(&layout);
+                assert_eq!(
+                    store.find(ObjectKind::Component, "agentsight").is_some(),
+                    !aborted
+                );
+                if aborted {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .reason()
+                            .contains("required capability application failed")
+                    );
+                } else {
+                    let warnings = result.unwrap();
+                    assert_eq!(
+                        warnings
+                            .iter()
+                            .filter(|w| w.contains("optional capability"))
+                            .count(),
+                        usize::from(supported && fail)
+                    );
+                    let record = store
+                        .find(ObjectKind::Component, "agentsight")
+                        .expect("record");
+                    let grants = &owned_artifact(record)
+                        .files
+                        .iter()
+                        .find(|f| f.path == layout.bin_dir.join("agentsight"))
+                        .expect("binary")
+                        .capabilities;
+                    assert_eq!(!grants.is_empty(), supported && !fail);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_effect_service_failures_remain_ordered_warnings() {
+    use anolisa_core::ServiceOp;
+    for fail in [
+        None,
+        Some(ServiceOp::DaemonReload),
+        Some(ServiceOp::Enable),
+        Some(ServiceOp::Start),
+    ] {
+        for supported in [false, true] {
+            let tmp = tempdir().expect("tmpdir");
+            let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+            let mut request = args("agentsight");
+            request.repo = Some(write_local_repo_component_with_service(
+                &tmp.path().join("repo"),
+                "agentsight",
+                "0.2.0",
+                &["system"],
+                "agentsight.service",
+                true,
+                true,
+            ));
+            let mut effects = crate::test_support::RawEffectRecorder::default();
+            effects.supported = supported;
+            effects.fail_service = fail;
+            let warnings = effects
+                .with(|f| handle_with_effects(request, &ctx, f))
+                .expect("best effort");
+            let mut expected = vec!["capability factory system", "service factory system System"];
+            if supported {
+                expected.extend([
+                    "DaemonReload System ",
+                    "Enable System agentsight.service",
+                    "Start System agentsight.service",
+                ]);
+            }
+            assert_eq!(effects.calls(), expected);
+            assert_eq!(warnings.len(), usize::from(supported && fail.is_some()));
+            if let Some(op) = fail.filter(|_| supported) {
+                assert!(warnings[0].contains(op.as_str()), "{warnings:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_effect_preview_noop_and_refusal_do_not_create_managers() {
+    for case in ["preview", "noop", "refusal"] {
+        let tmp = tempdir().expect("tmpdir");
+        let mut ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+        let mut request = args("agentsight");
+        request.repo = Some(write_local_repo_component_with_service(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            if case == "refusal" {
+                &["user"]
+            } else {
+                &["system"]
+            },
+            "agentsight.service",
+            true,
+            true,
+        ));
+        if case == "noop" {
+            handle_with_fake_rpm(
+                {
+                    let mut seed = args("agentsight");
+                    seed.repo = request.repo.clone();
+                    seed
+                },
+                &ctx,
+            )
+            .expect("seed installation");
+        }
+        ctx.dry_run = case == "preview";
+        let effects = crate::test_support::RawEffectRecorder::default();
+        let result = effects.with(|f| handle_with_effects(request, &ctx, f));
+        assert_eq!(result.is_err(), case == "refusal");
+        assert!(effects.calls().is_empty(), "{case}: {:?}", effects.calls());
+    }
+}
+
+#[test]
+fn raw_effect_post_enable_failure_compensates_activated_units() {
+    let tmp = tempdir().expect("tmpdir");
+    let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+    let root = tmp.path().join("repo");
+    let repo = write_local_repo_component_with_service(
+        &root,
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "agentsight.service",
+        true,
+        true,
+    );
+    let manifest = format!(
+        "{}\n[[component.hooks]]\nphase = \"post_enable\"\nscript = \"hooks/fail.sh\"\nstrict = true\n",
+        service_manifest("agentsight.service", true, true, None)
+    );
+    replace_repo_artifact(
+        &root,
+        "agentsight",
+        &build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"binary\n"),
+            ("hooks/fail.sh", b"#!/bin/sh\nexit 1\n"),
+        ]),
+    );
+    let mut request = args("agentsight");
+    request.repo = Some(repo);
+    let effects = crate::test_support::RawEffectRecorder::default();
+    let err = effects
+        .with(|f| handle_with_effects(request, &ctx, f))
+        .expect_err("strict hook");
+    assert!(err.reason().contains("post_enable"), "{err}");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory system",
+            "service factory system System",
+            "DaemonReload System ",
+            "Enable System agentsight.service",
+            "Start System agentsight.service",
+            "Stop System agentsight.service",
+            "Disable System agentsight.service",
+        ]
+    );
+    let layout = common::resolve_layout(&ctx);
+    assert!(!layout.bin_dir.join("agentsight").exists());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none()
+    );
+}
+
+#[test]
+fn raw_effect_install_user_scope_keeps_its_manager_routing() {
+    let tmp = tempdir().expect("tmpdir");
+    let ctx = crate::test_support::context_for_root(
+        tmp.path(),
+        crate::context::InstallMode::User,
+        Some(tmp.path().join("sys")),
+        Default::default(),
+    );
+    let root = tmp.path().join("repo");
+    let repo = write_local_repo_component(&root, "agentsight", "0.2.0", &["user"]);
+    let manifest = format!(
+        "{}\n[[component.services]]\nunit = \"agentsight.service\"\nscope = \"user\"\nenable = true\nstart = true\n",
+        component_manifest_toml("agentsight", "0.2.0", &["user"])
+    );
+    replace_repo_artifact(
+        &root,
+        "agentsight",
+        &build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"binary\n"),
+        ]),
+    );
+    let mut request = args("agentsight");
+    request.repo = Some(repo);
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|f| handle_with_effects(request, &ctx, f))
+        .expect("user service install");
+    assert_eq!(
+        effects.calls(),
+        [
+            "capability factory user",
+            "service factory user User",
+            "DaemonReload User ",
+            "Enable User agentsight.service",
+            "Start User agentsight.service",
+        ]
     );
 }

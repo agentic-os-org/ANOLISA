@@ -299,8 +299,6 @@ const enUSMessages = {
   'atif.loadFailed': 'Load failed',
 
   // ── ConversationList ──
-  'cl.traceDetails': 'Trace Details',
-  'cl.noDataForTrace': 'No data for this trace',
   'cl.loadingTraces': 'Loading traces...',
   'cl.noTraces': 'No traces in this session',
   'cl.noMessageData': 'No message data',
@@ -675,6 +673,7 @@ const enUSMessages = {
   'opt.history.col.lastUpdated': 'Last updated at',
   'opt.history.paginationSummary': '{count} results · page {page}/{total}',
   'opt.llm.provider.dashscope': 'Alibaba Cloud DashScope',
+  'opt.llm.provider.tokenPlan': 'Alibaba Cloud Token Plan',
   'opt.llm.provider.openai': 'OpenAI',
   'opt.llm.provider.deepseek': 'DeepSeek',
   'opt.llm.provider.zhipu': 'Zhipu GLM',
@@ -1317,8 +1316,6 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'atif.loadFailed': '加载失败',
 
     // ── ConversationList ──
-    'cl.traceDetails': 'Trace 详情',
-    'cl.noDataForTrace': '该 Trace 暂无数据',
     'cl.loadingTraces': '加载 traces...',
     'cl.noTraces': '该 session 暂无 traces',
     'cl.noMessageData': '无消息数据',
@@ -1693,6 +1690,7 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'opt.history.col.lastUpdated': '最近更新',
     'opt.history.paginationSummary': '{count} 条结果 · 第 {page}/{total} 页',
     'opt.llm.provider.dashscope': '阿里云 DashScope',
+    'opt.llm.provider.tokenPlan': '阿里云 Token Plan',
     'opt.llm.provider.openai': 'OpenAI',
     'opt.llm.provider.deepseek': 'DeepSeek',
     'opt.llm.provider.zhipu': '智谱 GLM',

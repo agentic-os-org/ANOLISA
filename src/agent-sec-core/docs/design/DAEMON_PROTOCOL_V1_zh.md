@@ -428,11 +428,11 @@ next offset。items 按 `(timestamp_epoch, kind)` 升序排列：
 PAP administration 是新增的 V2 method family，不是九个 V1 method 之一。第一版接口采用
 互斥的 `{requestId,result}` 或 `{requestId,error}` 响应，不保留 POC 的 `poc.*` method、
 `ok/data/stdout/stderr/exit_code` envelope 或兼容分支。输入和输出以
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-methods.json` 为可执行清单。
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-methods.json` 为可执行清单。
 `requestId` 是 daemon 为每次 dispatch 生成的 UUID；`error` 固定为 `{code,message}`，
 success 不得再包一层 `{policy}`、`{scope}` 或 `{binding}`。
 
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
 15 个 method 的有状态 CRUD 场景及完整 response value，包括 Canonical Policy IR、Scope
 template、Binding 内嵌快照、revision、status 和确定性 digest。daemon 生成的 request/resource
 UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 UUID 格式、CREATE 捕获值在后续
@@ -441,7 +441,7 @@ UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 
 bootstrap E2E 消费。binary 测试通过服务端启动配置 `--policy-admin-uid <测试 UID>`
 执行完整成功场景，无需 root；另行验证非 root 默认 `permission_denied`。root 环境同时
 验证默认授权成功路径，不使用跳过授权的测试开关。
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-invalid-requests.json` 冻结 method
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-invalid-requests.json` 冻结 method
 params 构造失败时的 `invalid_request` code 和有界、安全 message，并由真实 UDS integration
 fixture 消费。
 
@@ -482,6 +482,16 @@ CREATE 的 stable identity 由 PAP 生成；UPDATE 不兼作 upsert。Policy/Sco
 Apply/Delete 意图返回对应 pending 状态；幂等请求返回已有状态（如 READY、APPLYING、
 DELETING）。daemon handler 不等待 Reconciler，不把 acceptance 表述为目标完成。
 
+[TARGET V2] Binding 入队被拒且条件失败写入成功时，命令返回错误：队列满为
+`resource_exhausted`，提交后队列停止为 `unavailable`。message 包含已保存的 Binding
+ID/revision 及具体原因。Failed 写入未确认时返回 `internal`，明确后台仍可能执行；
+worker 已抢先认领则返回当前状态，不覆盖为 Failed。BindingView 的 status 从字符串改为
+`{phase, error?: {kind, code}}`；无错误时省略 error，显式重试及 worker 认领时清除旧错误。
+Repository 不保存尝试次数、重试时间或策略；它们仅为进程内调度信息，重启不继承。调度原因码为
+`RECONCILE_QUEUE_FULL`/`RECONCILE_QUEUE_STOPPED`，kind 为 `REJECTED`。
+这是未发布 V2 契约修订，不改 V1；详见
+[调度拒绝验收及并发边界](BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。
+
 [TARGET V2] `bindingRevision` 仅在 spec 改变时递增；同 spec 的 ApplyFailed 重试、
 Delete 和 DeleteFailed 重试均保留 revision。Delete 保留完整 spec 与既有部署记录，
 允许在 Applying 时受理；PendingDelete/Deleting/DeleteFailed 拒绝所有 UPDATE，不能
@@ -493,7 +503,7 @@ reconcile worker；硬删除行为由 PAP + Reconciler 内存组合测试验证�
 Policy CREATE/UPDATE 在 PAP 内同步调用 `PolicyCompiler::lower(TemplateEnvelope) ->
 PolicyEnvelope`。当前产品 compiler 只实现 `prevent_file_deletion`，其输入与完整 Canonical
 Policy IR 输出由
-`v2/crates/policy/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
+`v2/crates/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
 `ResourceOperation::Delete + FileResolution::PathEntry`。该模板只覆盖对匹配目录项的删除操作，
 例如 unlink/rmdir；rename/move、link、truncate、内容修改和其它 namespace mutation 不在其
 保护范围内。其它 `PolicyTemplate` kind 在各自 lowering 与直接 Adapter conformance 完成前

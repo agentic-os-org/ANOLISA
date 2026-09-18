@@ -16,7 +16,9 @@ categories = ["filesystem", "command-line-utilities"]
 
 # This crate targets Linux only. user_namespace, mount(2), cgroup v2,
 # inotify, journald are all required at runtime. Build on macOS/Windows
-# will fail — push to a Linux host (see docs/design.md) and build there.
+# will fail — push to a Linux host and build there (`make remote-build`
+# / `make remote-test`); ../../docs/BUILDING.md lists the host
+# prerequisites (CMake, libsystemd headers, Node.js).
 
 [dependencies]
 # MCP Server & Client

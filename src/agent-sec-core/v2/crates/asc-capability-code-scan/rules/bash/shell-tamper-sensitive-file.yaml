@@ -1,0 +1,10 @@
+rule_id: shell-tamper-sensitive-file
+cwe_id: CWE-284
+desc_en: >-
+  Tampering with sensitive system files that control
+  authentication, access control, or system configuration.
+desc_zh: >-
+  篡改控制认证、访问控制或系统配置的敏感系统文件。
+regex: '(\b(tee|chmod|chown)\b|>>?\s*|\bsed\s+-[a-zA-Z]*i)'
+severity: warn
+target_regexes_ref: sensitive_file_paths

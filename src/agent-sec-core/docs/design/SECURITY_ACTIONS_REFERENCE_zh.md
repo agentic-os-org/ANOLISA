@@ -517,7 +517,6 @@ Skill Ledger 完整性状态恰好为以下六种，文档和实现不得删减�
 | command | 参数 | 读写/说明 |
 | --- | --- | --- |
 | `init` | `baseline=true`, `passphrase=null`, `passphrase_requested=false`, `force_keys=false`, `scanner_names=null` | 创建/轮换 key；可为已覆盖 Skill 建 baseline |
-| `init-keys` | `force=false`, `passphrase=null` | 低层兼容入口，生成/轮换 key |
 | `check` | `skill_dir=null`, `all_skills=false` | 只读；单目录必填或 `all_skills=true` |
 | `certify` | `skill_dir`, `findings`, `scanner=skill-vetter`, `scanner_version=null`, `delete_findings=false`, `all_skills=false`, `scanner_names=null` | 导入外部 findings，签名建版本；`all_skills` 必须 false、`scanner_names` 必须 null |
 | `scan` | `skill_dir=null`, `all_skills=false`, `scanner_names=null`, `force=false` | 运行 built-in scanner，签名建版本 |
@@ -559,6 +558,13 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 
 ### 10.5 Success/error 规则
 
+- 所有受支持的 middleware command 在执行前加载并校验配置。配置错误返回
+  ConfigError/exit 1，不执行密钥、扫描、签名、activation 或导出操作。
+- 请求参数 `scanner_names`、`scanner`、`policy` 校验失败时，middleware 返回
+  ValueError/exit 1，CLI 参数错误退出 2。
+- `rotate-keys` 是 CLI 可见命令，不经过 middleware；stdout 为空、stderr 明确报未实现、
+  exit 1，不修改密钥与 keyring。
+
 - `check` 单目录：`deny/tampered` 为 success false/exit 1；其它六状态中的
   pass/none/drifted/warn 为 success true/exit 0。
 - `check --all`：任一 `tampered/deny/error` 导致 success false/exit 1；只有 error item
@@ -567,7 +573,7 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 - `scan/certify` 单目录：只要领域调用无 exception 就 success true；scan verdict
   warn/deny 是正常结果。
 - `audit`：`valid` 决定 success 和 exit code。
-- `status/decide/show/export/init-keys`：领域调用成功即 success true；exception 转为
+- `status/decide/show/export`：领域调用成功即 success true；exception 转为
   success false/exit 1 和 exception type。
 - `list-scanners`：成功时 success true；当前 registry 加载 exception 走 middleware
   unhandled-error path，而不是返回 ActionResult failure。
@@ -577,7 +583,7 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 ### 10.6 Side effects 和并发
 
 - `check/status/audit/list-scanners/show` 是领域只读。
-- `init/init-keys` 写 key；force rotation 先归档旧 public key。
+- `init` 写 key；`force_keys=true` 先归档旧 public key。
 - `scan/certify` 写 config、signed manifest、version snapshot 和 latest。
 - `certify(delete_findings=true)` 成功后删除输入 findings。
 - `decide` 写 signed user decision，rollback 可以恢复文件并产生新版本；clear 也刷新
@@ -647,7 +653,7 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 - code：bash/python、空输入、unsupported language、regex/LLM、四 verdict；
 - prompt：四 mode、空输入、native unavailable、model exception、完整 1.0 schema；
 - PII：七 source、低置信度、UTF-8 byte 截断、raw/redact、custom rules invalid、四 verdict；
-- Skill Ledger：11 command、六状态、batch severity、key lifecycle、write failure、并发和
+- Skill Ledger：10 command、六状态、batch severity、key lifecycle、write failure、并发和
   crash recovery。
 
 ## 13. 当前实现证据

@@ -1,0 +1,24 @@
+[package]
+name = "asc-persistence-sqlite"
+description = "SQLite bindings for the security-event and observability streams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-observability = { workspace = true }
+asc-security-events = { workspace = true }
+asc-sqlite-kernel = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

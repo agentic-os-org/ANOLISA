@@ -114,7 +114,7 @@ fn rtk_paired_run_captures_both_sides() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let run = run_paired(Path::new("/bin/echo"), &argv, &cwd).expect("paired run");
+    let run = run_paired(Path::new("/bin/echo"), &argv, &argv, &cwd).expect("paired run");
     assert!(
         run.raw_text.contains("hello world"),
         "raw: {:?}",
@@ -132,9 +132,28 @@ fn rtk_paired_run_captures_both_sides() {
 
 #[test]
 fn rtk_paired_run_rejects_empty_argv() {
-    let err = run_paired(Path::new("/bin/echo"), &[], &std::env::temp_dir())
+    let err = run_paired(Path::new("/bin/echo"), &[], &[], &std::env::temp_dir())
         .expect_err("empty argv must fail");
     assert!(matches!(err, L2Error::Command(_)), "got {err:?}");
+}
+
+#[test]
+fn rtk_paired_run_rejects_empty_rtk_argv() {
+    // rtk with no subcommand prints usage and exits zero, so an empty rtk_argv
+    // would be measured as compressed output rather than failing. The raw argv
+    // here cannot spawn: if the guard were dropped, the raw command would run
+    // first and the error would name the spawn failure, so asserting on the
+    // message keeps this test from passing for the wrong reason.
+    let argv = vec!["/nonexistent/l2-raw-command".to_string()];
+    let err = run_paired(Path::new("/bin/echo"), &argv, &[], &std::env::temp_dir())
+        .expect_err("empty rtk_argv must fail");
+    let L2Error::Command(message) = &err else {
+        panic!("got {err:?}");
+    };
+    assert!(
+        message.contains("empty rtk_argv"),
+        "must be rejected before either process is spawned, got: {message}"
+    );
 }
 
 #[test]
@@ -162,7 +181,7 @@ fn rtk_paired_run_fails_on_raw_command_failure() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let err = run_paired(Path::new("/bin/echo"), &argv, &std::env::temp_dir())
+    let err = run_paired(Path::new("/bin/echo"), &argv, &argv, &std::env::temp_dir())
         .expect_err("raw failure must surface");
     assert!(matches!(err, L2Error::Command(_)), "got {err:?}");
 }

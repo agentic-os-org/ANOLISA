@@ -281,6 +281,8 @@ impl PyTokenlessRuntime {
         *,
         compression_enabled=true,
         search_path_sharing_enabled=true,
+        diff_compression_enabled=false,
+        html_extraction_enabled=false,
         stats_enabled=true,
         sls_enabled=false
     ))]
@@ -288,6 +290,8 @@ impl PyTokenlessRuntime {
         data_dir: Option<PathBuf>,
         compression_enabled: bool,
         search_path_sharing_enabled: bool,
+        diff_compression_enabled: bool,
+        html_extraction_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
     ) -> PyResult<Self> {
@@ -297,6 +301,8 @@ impl PyTokenlessRuntime {
             sls_enabled,
             compression_enabled,
             search_path_sharing_enabled,
+            diff_compression_enabled,
+            html_extraction_enabled,
         })
         .map_err(to_python_error)?;
         Ok(Self { inner })

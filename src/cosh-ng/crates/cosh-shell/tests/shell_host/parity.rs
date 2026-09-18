@@ -275,56 +275,150 @@ fn enhanced_bash_preserves_last_argument_across_prompt_boundary() {
 }
 
 #[test]
-fn enhanced_bash_keeps_internal_prompt_hooks_out_of_child_env() {
+fn bash_prompt_command_attributes_and_child_environment_follow_integration_contract() {
     if !bash_available() {
         return;
     }
 
-    let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-prompt-command-env-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let config = ShellHostConfig::new("prompt-command-env", &work_dir)
-        .with_integration(ShellIntegration::Enhanced)
-        .with_env("PROMPT_COMMAND", "printf ''")
-        .with_env("LANG", "C.UTF-8")
-        .with_env("LC_ALL", "C.UTF-8");
-    let output = run_scripted_bash(
-        &config,
-        &[ScriptedInput::command(
-            "printf '__PROMPT_COMMAND__=%s\\n' \"$(declare -p PROMPT_COMMAND)\"; \
-             if env | grep -q '^PROMPT_COMMAND='; then \
-               printf '__CHILD_PROMPT_COMMAND__=present\\n'; \
-             else \
-               printf '__CHILD_PROMPT_COMMAND__=absent\\n'; \
-             fi; \
-             (PROMPT_COMMAND=('printf p1' 'printf p2'); \
-             printf '__REASSIGNED_PROMPT_COMMAND__=%s\\n' \
-             \"$(declare -p PROMPT_COMMAND)\")",
-        )],
-    )
-    .expect("scripted bash");
+    let supports_array = bash_supports_prompt_command_array();
+    for (fixture, inherited, startup, expected_trace) in [
+        ("scalar", "USER_PROMPT_TRACE+=scalar", "", "scalar"),
+        (
+            "array",
+            "",
+            "PROMPT_COMMAND=('USER_PROMPT_TRACE+=first' 'USER_PROMPT_TRACE+=second')\n",
+            if supports_array {
+                "firstsecond"
+            } else {
+                "first"
+            },
+        ),
+        ("empty", "", "", ""),
+        (
+            "unassigned",
+            "",
+            "unset PROMPT_COMMAND; export PROMPT_COMMAND\n",
+            "",
+        ),
+    ] {
+        for login_shell in [false, true] {
+            for integration in [ShellIntegration::Native, ShellIntegration::Enhanced] {
+                let enhanced = integration == ShellIntegration::Enhanced;
+                let context = format!("{fixture}/login={login_shell}/{integration:?}");
+                let root = tempfile::Builder::new()
+                    .prefix("cosh-shell-prompt-command-")
+                    .tempdir()
+                    .expect("prompt command root");
+                let home = root.path().join("home");
+                std::fs::create_dir_all(&home).expect("home");
+                let startup_file = if login_shell {
+                    ".bash_profile"
+                } else {
+                    ".bashrc"
+                };
+                // System login profiles may rewrite PROMPT_COMMAND before this
+                // user startup file. Establish each fixture after those hooks.
+                std::fs::write(
+                    home.join(startup_file),
+                    format!(
+                        "PS1='__PROMPT_COMMAND_READY__ '\nUSER_PROMPT_TRACE=\n\
+                         unset PROMPT_COMMAND\nexport PROMPT_COMMAND='{inherited}'\n{startup}"
+                    ),
+                )
+                .expect("startup file");
+                let mut config =
+                    ShellHostConfig::new("prompt-command-env", root.path().join("work"))
+                        .with_integration(integration)
+                        .with_env("HOME", home.display().to_string())
+                        .with_env("PROMPT_COMMAND", inherited)
+                        .with_env("LANG", "C.UTF-8")
+                        .with_env("LC_ALL", "C.UTF-8");
+                config.login_shell = login_shell;
+                config.raw_action_watchdog = Duration::from_secs(2);
+                let mut rendered = Vec::new();
+                let output = run_raw_relay_bash_with_actions(
+                    &config,
+                    vec![
+                        RawRelayAction::wait(Duration::from_millis(100)),
+                        RawRelayAction::line(
+                            "printf '%s' \"$USER_PROMPT_TRACE\" > \"$HOME/hook-trace\"; \
+                             declare -p PROMPT_COMMAND > \"$HOME/declaration\"; \
+                             env | grep '^PROMPT_COMMAND=' > \"$HOME/child-env\" || :; \
+                             (PROMPT_COMMAND=('printf p1' 'printf p2'); \
+                              declare -p PROMPT_COMMAND > \"$HOME/reassigned\")",
+                        ),
+                        RawRelayAction::line("exit"),
+                    ],
+                    &mut rendered,
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+                let terminal = String::from_utf8_lossy(&rendered);
+                assert_eq!(output.exit_status, Some(0), "{context}: {terminal}");
+                let read = |name| {
+                    std::fs::read_to_string(home.join(name))
+                        .unwrap_or_else(|error| panic!("{context}/{name}: {error}: {terminal}"))
+                };
+                assert_eq!(read("hook-trace"), expected_trace, "{context}");
 
-    let terminal = String::from_utf8_lossy(&output.terminal_output);
-    let expected = if bash_supports_prompt_command_array() {
-        "__PROMPT_COMMAND__=declare -ax PROMPT_COMMAND="
-    } else {
-        "__PROMPT_COMMAND__=declare -- PROMPT_COMMAND="
-    };
-    assert!(terminal.contains(expected), "{terminal}");
-    assert!(
-        terminal.contains("__CHILD_PROMPT_COMMAND__=absent"),
-        "{terminal}"
-    );
-    let reassigned = if bash_supports_prompt_command_array() {
-        "__REASSIGNED_PROMPT_COMMAND__=declare -ax PROMPT_COMMAND="
-    } else {
-        "__REASSIGNED_PROMPT_COMMAND__=declare -a PROMPT_COMMAND="
-    };
-    assert!(terminal.contains(reassigned), "{terminal}");
+                let declaration = read("declaration");
+                let attributes = if enhanced {
+                    if supports_array {
+                        "-ax"
+                    } else {
+                        "--"
+                    }
+                } else if fixture == "array" {
+                    "-ax"
+                } else {
+                    "-x"
+                };
+                assert!(
+                    declaration.starts_with(&format!("declare {attributes} PROMPT_COMMAND")),
+                    "{context}: {declaration}"
+                );
+                assert_eq!(
+                    declaration.contains("_COSH_PROMPT_STATUS"),
+                    enhanced,
+                    "{context}"
+                );
+                assert_eq!(
+                    declaration.contains("_cosh_bounded_prompt_marker"),
+                    enhanced,
+                    "{context}"
+                );
 
-    let _ = std::fs::remove_dir_all(&work_dir);
+                // Native launches Bash without a marker rcfile. Exported scalars
+                // retain their original child value; arrays have no environment entry.
+                let child_env = read("child-env");
+                let child_value = child_env
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PROMPT_COMMAND="));
+                let expected_child = if !enhanced && matches!(fixture, "scalar" | "empty") {
+                    Some(inherited)
+                } else {
+                    None
+                };
+                assert_eq!(child_value, expected_child, "{context}: {child_env}");
+                let reassigned_attributes = if enhanced && !supports_array {
+                    "-a"
+                } else {
+                    "-ax"
+                };
+                assert!(
+                    read("reassigned")
+                        .starts_with(&format!("declare {reassigned_attributes} PROMPT_COMMAND=")),
+                    "{context}: {}",
+                    read("reassigned")
+                );
+                if !enhanced {
+                    assert!(
+                        !config.work_dir.join("cosh-marker.bash").exists(),
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

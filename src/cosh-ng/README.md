@@ -78,16 +78,18 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted is the default. The `◇ ` prefix shows that Cosh may classify
-and route submitted input before the foreground Shell executes it:
+Enhanced Assisted is the default. The `◇` status line above the prompt shows
+that Cosh may classify and route submitted input before the foreground Shell executes it:
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ explain why this service keeps restarting
+◇
+user@host:~/project$ git status
+◇
+user@host:~/project$ explain why this service keeps restarting
 ```
 
 At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only. Its
-`◌ ` prefix means ordinary input goes to the Shell while post-command insights
+`◌` status line means ordinary input goes to the Shell while post-command insights
 remain available. Press `Shift+Tab` again to return to Assisted mode.
 
 Start Native explicitly when the session must have no Cosh hooks, observation,
@@ -96,6 +98,10 @@ or insights:
 ```bash
 COSH_SHELL_INTEGRATION=native cosh
 ```
+
+Enhanced does not preserve exported Bash `PROMPT_COMMAND` values in child
+processes. See [Bash prompt compatibility](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-compatibility)
+for the version-specific attribute limits and Native alternative.
 
 ```text
 $ hello
@@ -108,7 +114,16 @@ for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. In enhanced integration, the cosh-core runtime makes
 `/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
-`@path` references.
+`@path` references. Type `/` in the Composer to browse slash commands, use
+Up/Down to select, and press Enter to execute the selected command. Use Tab to
+complete a command before adding arguments; Enter submits drafts with arguments
+or multiple lines as written.
+Ordinary shell prompts keep native path completion.
+
+In `cosh-core`, configured Hooks run by default without `hooks.enabled = true`.
+Explicit `hooks.enabled = false` keeps config Hooks disabled even when Extensions
+are installed. See [Hooks](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md)
+for disable scope and fail-closed `PreToolUse` behavior.
 
 For `type = "aliyun"`, SysOM automatically prefers a reachable VPC endpoint.
 Set `ai.providers.<id>.sysom_endpoint` to pin an endpoint; `COSH_SYSOM_ENDPOINT`

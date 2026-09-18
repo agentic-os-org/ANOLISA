@@ -20,7 +20,7 @@ clean-rtk:
 # Build tokenless (requires setup-rtk for rtk binary)
 build: setup-rtk
     cargo build --release
-    cargo build --release --manifest-path {{rtk_dir}}/Cargo.toml
+    cargo build --release --locked --manifest-path {{rtk_dir}}/Cargo.toml
 
 # Build everything (tokenless + rtk; TOON is linked in via the
 # toon-format library crate)

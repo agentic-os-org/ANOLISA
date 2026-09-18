@@ -5,6 +5,7 @@
 //! they already confirmed. The decision is a pure transition on [`RuntimeAuthState`] so the card
 //! dispatcher only has to choose between re-rendering the panel and cancelling it.
 
+use super::menu::{management_entry_index, AuthManagementEntry};
 use super::provider_management::{provider_actions, ExistingProvider, ProviderAction};
 use super::runtime::{AuthPhase, RuntimeAuthState};
 
@@ -17,15 +18,6 @@ pub(super) enum BackOutcome {
     Cancel,
 }
 
-/// Index of the first field the current flow is allowed to change.
-///
-/// An edit starts at 1 because field 0 is the injected Provider ID, and
-/// `send_auth_response` takes the identity of an edit from `editing_provider_name` instead —
-/// stepping back onto that field would offer an edit that cannot take effect.
-fn first_editable_field(auth: &RuntimeAuthState) -> usize {
-    usize::from(auth.editing_provider_name.is_some())
-}
-
 /// Moves the flow one step back, reporting whether there was a step left to take.
 pub(super) fn step_back(auth: &mut RuntimeAuthState) -> BackOutcome {
     // Every other phase is a menu the user reaches in one keystroke, so ESC there keeps the
@@ -33,8 +25,11 @@ pub(super) fn step_back(auth: &mut RuntimeAuthState) -> BackOutcome {
     if auth.phase != AuthPhase::FillingField {
         return BackOutcome::Cancel;
     }
-    if auth.current_field > first_editable_field(auth) {
-        auth.current_field -= 1;
+    if let Some(previous) = (0..auth.current_field.min(auth.current_provider().fields.len()))
+        .rev()
+        .find(|&index| auth.field_is_editable(index))
+    {
+        auth.current_field = previous;
         auth.field_error = None;
         // `collected_values` is the form and `field_input` only the editable projection of the
         // field under the cursor, so re-projecting is what both restores the earlier value and
@@ -51,10 +46,16 @@ pub(super) fn step_back(auth: &mut RuntimeAuthState) -> BackOutcome {
 /// flow the user pressed ESC on.
 fn leave_form(auth: &mut RuntimeAuthState) -> BackOutcome {
     let Some(provider_name) = auth.editing_provider_name.as_deref() else {
-        // A new provider came from the template picker, where a further ESC cancels. Values
-        // collected so far are left alone: re-answering the picker clears them anyway, so a
-        // template switch cannot leak the previous template's input.
-        auth.phase = AuthPhase::SelectingProvider;
+        if auth.from_sysom_shortcut {
+            auth.phase = AuthPhase::ManagingProviders;
+            auth.selected_provider = management_entry_index(
+                &auth.sysom,
+                auth.existing_providers.len(),
+                AuthManagementEntry::SysomShortcut,
+            );
+        } else {
+            auth.phase = AuthPhase::SelectingProvider;
+        }
         discard_field_draft(auth);
         return BackOutcome::Redraw;
     };

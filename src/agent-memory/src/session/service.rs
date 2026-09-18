@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use super::base::SessionBase;
 use super::id::SessionId;
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
@@ -42,7 +43,16 @@ pub enum EndAction {
 /// Per-process session scratch + log.
 pub struct SessionLogService {
     sid: SessionId,
+    /// Keeps the base directory's descriptor open. `root`, `scratch` and
+    /// `log_path` are all built on `/proc/self/fd/<n>`, which only resolves
+    /// while this is alive — dropping it would dangle every path below and
+    /// let the descriptor number be recycled to an unrelated file.
+    base: SessionBase,
+    /// `<anchored base>/<sid>` — the path every filesystem operation uses.
     root: PathBuf,
+    /// `<display base>/<sid>` — the same directory by the name an operator
+    /// recognises. Reporting only.
+    display_root: PathBuf,
     scratch: PathBuf,
     log_path: PathBuf,
     /// Held file handle for jsonl appends — avoids repeated open/close.
@@ -69,10 +79,37 @@ impl SessionLogService {
         mount_ns: &str,
         mirror_dir: Option<&Path>,
     ) -> Result<Self> {
-        let root = base_dir.as_ref().join(sid.as_str());
+        Self::start_in(
+            SessionBase::open_creating(base_dir.as_ref())?,
+            sid,
+            owner_user_id,
+            agent_id,
+            mount_ns,
+            mirror_dir,
+        )
+    }
+
+    /// Same as [`Self::start`], but on a base that has already been opened
+    /// and validated. The session tree is built through that one
+    /// descriptor, so nothing that happens to the base's *pathname* between
+    /// validation and here can redirect it.
+    pub fn start_in(
+        base: SessionBase,
+        sid: SessionId,
+        owner_user_id: &str,
+        agent_id: Option<&str>,
+        mount_ns: &str,
+        mirror_dir: Option<&Path>,
+    ) -> Result<Self> {
+        let root = base.path().join(sid.as_str());
+        let display_root = base.display_path().join(sid.as_str());
         let scratch = root.join(SCRATCH_DIR);
         let log_path = root.join(LOG_FILE);
 
+        // `<sid>` is created with mkdirat against the base descriptor: the
+        // one step where a swapped pathname would matter most, and the one
+        // that can be done without touching the pathname at all.
+        base.mkdir_child(sid.as_str(), 0o700)?;
         std::fs::create_dir_all(&scratch)?;
         // Enforce 0700 on session root so only the owner can read
         // meta.toml (owner_user_id, agent_id, mount_ns) and log.jsonl
@@ -133,7 +170,9 @@ impl SessionLogService {
 
         Ok(Self {
             sid,
+            base,
             root,
+            display_root,
             scratch,
             log_path,
             log_file: Mutex::new(log_file),
@@ -145,8 +184,32 @@ impl SessionLogService {
         &self.sid
     }
 
+    /// The session directory as paths see it: anchored to the descriptor the
+    /// base was validated through, so nothing that happens to the base's
+    /// pathname can redirect what is read or written here.
+    ///
+    /// Valid only while this service is alive — the descriptor backing it is
+    /// dropped with the service. Use [`Self::display_root`] for anything
+    /// that has to outlive it (logs, a path shown to an operator).
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The same directory by the pathname an operator configured or the
+    /// fallback message reported. Use this in logs; use [`Self::root`] for
+    /// anything that touches the filesystem.
+    pub fn display_root(&self) -> &Path {
+        &self.display_root
+    }
+
+    /// The base directory this session lives under.
+    ///
+    /// Mostly here to be explicit about why the field exists at all: holding
+    /// the [`SessionBase`] is what keeps the descriptor open, and therefore
+    /// what keeps every path above resolving to the directory that was
+    /// validated rather than to whatever the pathname points at now.
+    pub fn base(&self) -> &SessionBase {
+        &self.base
     }
 
     pub fn scratch_root(&self) -> &Path {

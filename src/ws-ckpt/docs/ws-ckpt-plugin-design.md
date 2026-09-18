@@ -30,7 +30,7 @@
 | 语言         | Python 3                                                     | TypeScript → Node ESM                                                 |
 | 入口         | `register(ctx)`                                            | `register(api)`                                                      |
 | 配置位置     | `~/.hermes/config.yaml` 的 `plugins.ws-ckpt` 节          | `~/.openclaw/openclaw.json` 的 `plugins.entries.ws-ckpt.config` 节 |
-| 子进程调用   | `subprocess.run(["ws-ckpt", ...], timeout=30)`             | `execFile("ws-ckpt", [...], { timeout: 30_000 })`                    |
+| 子进程调用   | `subprocess.run(["ws-ckpt", ...], timeout=240)`            | `execFile("ws-ckpt", [...], { timeout: 240_000 })`                   |
 | Hook 三件套  | `on_session_start` / `pre_llm_call` / `on_session_end` | `session_start` / `message_received` / `agent_end`               |
 
 两个实现共享同一组核心抽象:
@@ -224,7 +224,7 @@ plugins:
 ## 实现细节
 
 - **Reload 安全**：`register()` 可重入，`pluginState` 模块级单例 + 原地更新引用，老 hook closure 不会引用陈旧对象
-- **OpenClaw tools.alsoAllow 兜底**：`register()` 时自动把缺失的 `ws-ckpt-*` 写入 `openclaw.json` 的 allowlist（原子写 + 进程级 dedup），Hermes 不需要（toolset 直接注册）
+- **OpenClaw tool allowlist 兜底**：OpenClaw 最低支持版本为 2026.2.13；这是 config 写入路径首次避免固化 runtime defaults，并在写盘前恢复未修改 `${VAR}` 引用的版本。`config set` 从 `$include` 和环境变量解析后的 `snapshot.resolved` 构造变更。`install-openclaw.sh` 在 `plugins install` 之前经 `openclaw config set`（官方 config mutation 通道）合并写入；已有非空 `tools.allow` 时沿用该字段，否则使用 `tools.alsoAllow`。OpenClaw ≥ 2026.9.1 必须使用条件写；2026.2.13 ≤ version < 2026.9.1 仅在根配置不含 `$include` 时使用 JSON 模式。版本或写入能力不可验证、legacy 配置含 `$include`、条件写失败时，安装会 fail closed；卸载则告警并继续清理本地文件。`register()` 只做缺失检测并告警，绝不直写 `openclaw.json`（OpenClaw ≥ 2026.9.2 的 config 快照哈希守卫会把外部直写判为 "config changed since last load"）。Hermes 不需要（toolset 直接注册）
 
 ---
 
@@ -242,6 +242,7 @@ plugins:
 ## 前提条件
 
 - 已执行提供 plugin 注册安装脚本(Hermes / OpenClaw)
+- OpenClaw plugin 使用 OpenClaw >= 2026.2.13
 - ws-ckpt CLI 已安装
 - ws-ckpt daemon 在线(`ws-ckpt status` 返回 0)
 - 启动 Agent 时 cwd 在工作区**外**——否则 CWD 守卫会自动禁用 `autoCheckpoint`,用户需手工 cd 出来再重启

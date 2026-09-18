@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/context-adoption/v1",
+  "title": "Environment result observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_id",
+    "scope",
+    "boundary_id",
+    "boundary_revision",
+    "receipt_digest",
+    "source_digest",
+    "decision",
+    "reason",
+    "ledger_status"
+  ],
+  "properties": {
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "boundary_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "boundary_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "receipt_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "source_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "candidate_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "decision": {
+      "enum": [
+        "adopted",
+        "preserved",
+        "overridden",
+        "unverified"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "candidate_selected",
+        "no_candidate",
+        "no_savings",
+        "recovery_unavailable",
+        "environment_rejected",
+        "later_transform",
+        "cancelled",
+        "proof_unavailable",
+        "ledger_unavailable"
+      ]
+    },
+    "effective_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "effective_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary",
+        "representation_id",
+        "revision",
+        "evidence",
+        "observed_at_ms"
+      ],
+      "properties": {
+        "boundary": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/proof_boundary"
+        },
+        "representation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "evidence": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+        },
+        "observed_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "ledger_status": {
+      "enum": [
+        "committed",
+        "unavailable"
+      ]
+    },
+    "ledger_evidence": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "adopted",
+              "preserved",
+              "overridden"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "effective_digest",
+          "effective_bytes",
+          "proof"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "adopted"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "required": [
+          "candidate_digest"
+        ],
+        "properties": {
+          "reason": {
+            "const": "candidate_selected"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "unverified"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "proof_unavailable",
+              "ledger_unavailable",
+              "cancelled"
+            ]
+          }
+        },
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "effective_digest"
+              ]
+            },
+            {
+              "required": [
+                "effective_bytes"
+              ]
+            },
+            {
+              "required": [
+                "proof"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ledger_status": {
+            "const": "committed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "ledger_evidence"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "ledger_evidence"
+          ]
+        }
+      }
+    }
+  ]
+}

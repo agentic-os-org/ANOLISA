@@ -7,12 +7,16 @@ notifications, or extra context, and enable them only from a source you trust.
 
 ## Enable and manage Hooks
 
+For `cosh-core`, declaring a Hook enables it by default; `hooks.enabled = true`
+is optional. An explicit `hooks.enabled = false` disables config Hooks and emits
+a warning when definitions are present. A system/user disable also prevents
+Extension Hooks from auto-enabling. A project disable affects only config Hooks;
+installed Extensions cannot re-enable those disabled config Hooks. `--bare`
+continues to disable all Hooks.
+
 Define them in `~/.copilot-shell/config.toml` or a trusted project config:
 
 ```toml
-[hooks]
-enabled = true
-
 [[hooks.PreToolUse]]
 name = "security-check"
 command = "/usr/local/bin/my-security-hook"
@@ -62,9 +66,13 @@ Write one JSON object to stdout:
 }
 ```
 
-`allow` continues, `block`/`deny` stops the operation, `ask` requests user
-confirmation, and an empty response passes through. Exit code `2` also blocks;
-other non-zero exits are warnings. The default timeout is 60 seconds; set a
+`allow` continues, `block`/`deny` stops the operation, and `ask` requests user
+confirmation. Exit code `2` also blocks. In `cosh-core`, config `PreToolUse`
+Hooks fail closed on empty output, invalid JSON, timeout, or unexpected non-zero
+exit unless that Hook explicitly sets `fail_open = true`. Extension Hooks may
+return empty output on success; their execution errors still fail closed.
+Return `{}` for an explicit passthrough from a config Hook.
+The default timeout is 60 seconds; set a
 shorter `timeout` when a check must be quick. Use `sequential = true` when
 multiple Hooks for an event must run in order.
 

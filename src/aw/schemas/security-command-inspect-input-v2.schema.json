@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/security-command-inspect-input/v2",
+  "title": "security-command-inspect input v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command",
+    "boundary",
+    "execution_intent_digest"
+  ],
+  "properties": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "digest",
+        "language"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "language": {
+          "enum": [
+            "auto",
+            "bash",
+            "python"
+          ]
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        }
+      }
+    },
+    "boundary": {
+      "const": "pre_tool"
+    },
+    "execution_intent_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    }
+  }
+}

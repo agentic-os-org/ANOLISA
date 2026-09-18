@@ -1,0 +1,15 @@
+rule_id: py-unsafe-deserialization
+cwe_id: CWE-502
+desc_en: >-
+  Code deserializes data using pickle, yaml.load(), marshal, or shelve,
+  which can execute arbitrary code from untrusted input.
+desc_zh: >-
+  代码使用 pickle、yaml.load()、marshal 或 shelve 反序列化数据，
+  可能从不受信任的输入执行任意代码。
+regex: |-
+  \bpickle\.(load|loads)\s*\(
+  |\byaml\.load\s*\((?![^)]*Loader\s*=)
+  |\byaml\.(unsafe_load|full_load)\s*\(
+  |\bmarshal\.(load|loads)\s*\(
+  |\bshelve\.open\s*\(
+severity: warn

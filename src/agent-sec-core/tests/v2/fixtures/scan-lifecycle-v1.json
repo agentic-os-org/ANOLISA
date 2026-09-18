@@ -1,0 +1,367 @@
+{
+  "oracle": "V1 lifecycle.post_action + telemetry.schema",
+  "cases": [
+    {
+      "action": "code_scan",
+      "agent": " codex ",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "pass",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "pass",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "codex",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "pass",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": "unapproved-product",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "pass",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "pass",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "pass",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": " codex ",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "warn",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "warn",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "codex",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "warn",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": "unapproved-product",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "warn",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "warn",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "warn",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": " codex ",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "deny",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "deny",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "codex",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "deny",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": "unapproved-product",
+      "success": true,
+      "exit_code": 0,
+      "error": null,
+      "error_type": "",
+      "data": {
+        "verdict": "deny",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "succeeded",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "deny",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          }
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "succeeded",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "deny",
+        "seccore.elapsed_ms": 7
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": " codex ",
+      "success": false,
+      "exit_code": 1,
+      "error": "scanner failed",
+      "error_type": "ScanError",
+      "data": {
+        "verdict": "error",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "failed",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "error",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          },
+          "error": "scanner failed",
+          "error_type": "ScanError",
+          "exit_code": 1
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "codex",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "failed",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "error",
+        "seccore.elapsed_ms": 7,
+        "seccore.error_type": "ScanError",
+        "seccore.exit_code": 1
+      }
+    },
+    {
+      "action": "code_scan",
+      "agent": "unapproved-product",
+      "success": false,
+      "exit_code": 1,
+      "error": "scanner failed",
+      "error_type": "ScanError",
+      "data": {
+        "verdict": "error",
+        "elapsed_ms": 7,
+        "raw_evidence": "SECRET_RESULT"
+      },
+      "audit": {
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "result": "failed",
+        "trace_id": "legacy-test",
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call",
+        "tool_call_id": "tool",
+        "details": {
+          "request": {
+            "safe_length": 12
+          },
+          "result": {
+            "verdict": "error",
+            "elapsed_ms": 7,
+            "raw_evidence": "SECRET_RESULT"
+          },
+          "error": "scanner failed",
+          "error_type": "ScanError",
+          "exit_code": 1
+        }
+      },
+      "telemetry": {
+        "component.name": "agent-sec-core",
+        "component.version": "<version>",
+        "component.agent_name": "",
+        "seccore.event_type": "code_scan",
+        "seccore.category": "code_scan",
+        "seccore.result": "failed",
+        "seccore.timestamp": "<timestamp>",
+        "seccore.verdict": "error",
+        "seccore.elapsed_ms": 7,
+        "seccore.error_type": "ScanError",
+        "seccore.exit_code": 1
+      }
+    }
+  ]
+}

@@ -3553,4 +3553,256 @@ name = "copilot-shell"
             "no drift entry when the record is already escalated",
         );
     }
+
+    // -----------------------------------------------------------------
+    // Adapter observation projection over a real scan collector (#3310)
+    //
+    // The tests above feed the projection a hand-written `ScanEntry`. These
+    // drive the real [`AdapterManager::scan`] collector over a staged fixture
+    // and project its output, so a drift between what the collector emits and
+    // what `component status` assumes fails here rather than in production.
+    // -----------------------------------------------------------------
+
+    const OBS_COMPONENT: &str = "observation-demo";
+    const OBS_FRAMEWORK: &str = "cosh";
+
+    const OBS_MANIFEST: &str = r#"[component]
+name = "observation-demo"
+version = "0.1.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "cosh"
+adapter_type = "extension"
+source = "adapters/observation-demo/cosh"
+dest = "{datadir}/adapters/{component}/cosh/"
+"#;
+
+    /// Stage a system-mode world whose installed state declares
+    /// `OBS_COMPONENT` with a `cosh` extension adapter and a valid on-disk
+    /// bundle, then return the tempdir (keeping the fixture alive), the layout,
+    /// and the entries the real scan collector produced. With `receipt`, an
+    /// enabled receipt for the same component/framework is planted first, so
+    /// the row is receipt-backed instead of a bare candidate.
+    ///
+    /// The `cosh` driver needs no framework CLI for `scan`: detection is
+    /// side-effect-free, so this fixture spawns nothing.
+    fn stage_real_scan(receipt: bool) -> (tempfile::TempDir, FsLayout, Vec<ScanEntry>) {
+        use anolisa_core::InstallMode as StateInstallMode;
+        use anolisa_core::adapter::claim::{
+            AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, CoshClaim,
+            DRIVER_SCHEMA_VERSION, DriverPayload,
+        };
+        use anolisa_core::adapter::manager::AdapterManager;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(root.path());
+        let resource_root = layout
+            .datadir
+            .join("adapters")
+            .join(OBS_COMPONENT)
+            .join(OBS_FRAMEWORK);
+        std::fs::create_dir_all(&resource_root).expect("resource root");
+        let marker = resource_root.join("cosh-extension.json");
+        std::fs::write(
+            &marker,
+            format!(r#"{{"id":"{OBS_COMPONENT}","name":"Observation Demo"}}"#),
+        )
+        .expect("bundle marker");
+        write_manifest_snapshot(&layout, OBS_COMPONENT, OBS_MANIFEST);
+
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let extension_dir = home
+            .join(".copilot-shell")
+            .join("extensions")
+            .join(OBS_COMPONENT);
+        std::fs::create_dir_all(&extension_dir).expect("cosh extension dir");
+        std::fs::write(
+            extension_dir.join(".anolisa-adapter"),
+            b"ANOLISA-managed cosh extension\n",
+        )
+        .expect("ownership marker");
+
+        let mut component = component_object(OBS_COMPONENT, "0.1.0", ObjectStatus::Installed);
+        component.files.push(OwnedFile {
+            path: marker,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        });
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..InstalledState::default()
+        };
+        state.objects.push(component);
+        if receipt {
+            state.adapter_claims.push(AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: OBS_COMPONENT.to_string(),
+                framework: OBS_FRAMEWORK.to_string(),
+                plugin_id: Some(OBS_COMPONENT.to_string()),
+                adapter_type: Some("extension".to_string()),
+                enabled_at: "2026-01-01T00:00:00Z".to_string(),
+                resource_root: resource_root.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                notices: Vec::new(),
+                resources: vec![ClaimResource {
+                    id: "cosh_extension_dir".to_string(),
+                    purpose: "cosh_extension_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: extension_dir,
+                    },
+                }],
+                driver_payload: DriverPayload::Cosh(CoshClaim {
+                    extension_dir_resource: "cosh_extension_dir".to_string(),
+                }),
+            });
+        }
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("save state");
+
+        let manager = AdapterManager::new(layout.clone(), Some(home), "tester".to_string());
+        let entries = manager.scan().expect("real scan").entries;
+        (root, layout, entries)
+    }
+
+    /// The real scan row for the fixture component.
+    fn obs_row(entries: &[ScanEntry]) -> &ScanEntry {
+        entries
+            .iter()
+            .find(|entry| entry.component == OBS_COMPONENT && entry.framework == OBS_FRAMEWORK)
+            .unwrap_or_else(|| {
+                panic!(
+                    "real scan produced no {OBS_COMPONENT}/{OBS_FRAMEWORK} row; got {:?}",
+                    entries
+                        .iter()
+                        .map(|entry| (entry.component.clone(), entry.framework.clone()))
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    /// Unwrap `Present`, naming the evidence shape that arrived instead.
+    fn present_observations(
+        evidence: ProbeEvidence<Vec<AdapterObservation>, AdapterProvenance>,
+    ) -> (AdapterProvenance, Vec<AdapterObservation>) {
+        match evidence {
+            ProbeEvidence::Present { provenance, value } => (provenance, value),
+            ProbeEvidence::Absent { provenance } => {
+                panic!("real scan rows must project as Present, got Absent {provenance:?}")
+            }
+            ProbeEvidence::Unavailable { reason, .. } => {
+                panic!("a successful scan must not project as Unavailable: {reason}")
+            }
+            ProbeEvidence::NotRequested => panic!("the adapter probe was requested"),
+        }
+    }
+
+    #[test]
+    fn adapter_observation_projection_preserves_a_real_receipt_scan() {
+        let (_root, layout, entries) = stage_real_scan(true);
+        let row = obs_row(&entries);
+        // Pre-condition: the collector really produced a receipt-backed row.
+        assert!(row.declared, "the installed manifest declares the adapter");
+        assert!(
+            row.enabled,
+            "the planted receipt makes the row receipt-backed"
+        );
+        assert_eq!(row.claim_status, Some(ClaimStatus::Enabled));
+        assert_eq!(row.source_status, Some(AdapterSourceStatus::Available));
+
+        let state_paths = vec![layout.state_dir.join("installed.toml")];
+        let (provenance, observations) = present_observations(collect_adapter_observations(
+            OBS_COMPONENT,
+            &AdapterScanEvidence::Available(&entries),
+            &state_paths,
+        ));
+        assert_eq!(provenance.state_paths, state_paths);
+        assert_eq!(observations.len(), 1);
+
+        // Field-by-field fidelity: the projection copies the collector's
+        // verdict, it never re-derives or defaults one.
+        let observation = &observations[0];
+        assert_eq!(observation.component, row.component);
+        assert_eq!(observation.framework, row.framework);
+        assert_eq!(observation.declared, row.declared);
+        assert_eq!(observation.resource_root, row.resource_root);
+        assert_eq!(observation.driver_available, row.driver_available);
+        assert_eq!(observation.framework_detected, row.framework_detected);
+        assert_eq!(observation.adapter_type, row.adapter_type);
+        assert_eq!(observation.enabled, row.enabled);
+        assert_eq!(observation.claim_status, row.claim_status);
+        assert_eq!(observation.source_reason, row.source_reason);
+        assert_eq!(
+            observation.source_status,
+            Some(AdapterSourceSnapshot::Available),
+            "the manager's source verdict maps 1:1 onto the stable snapshot"
+        );
+    }
+
+    #[test]
+    fn adapter_observation_projection_keeps_a_real_candidate_row_source_free() {
+        let (_root, layout, entries) = stage_real_scan(false);
+        let row = obs_row(&entries);
+        assert!(row.declared, "the installed manifest declares the adapter");
+        assert!(!row.enabled, "no receipt was planted");
+
+        let state_paths = vec![layout.state_dir.join("installed.toml")];
+        let (_, observations) = present_observations(collect_adapter_observations(
+            OBS_COMPONENT,
+            &AdapterScanEvidence::Available(&entries),
+            &state_paths,
+        ));
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert!(observation.declared);
+        assert!(!observation.enabled);
+        assert_eq!(observation.claim_status, None);
+        assert_eq!(
+            observation.source_status, None,
+            "a candidate row must not gain a source verdict in projection"
+        );
+        assert_eq!(observation.source_reason, None);
+        assert_eq!(observation.resource_root, row.resource_root);
+    }
+
+    #[test]
+    fn adapter_observation_projection_reports_absent_for_an_unrelated_component() {
+        let (_root, layout, entries) = stage_real_scan(true);
+        assert!(!entries.is_empty(), "pre-condition: the fixture has a row");
+
+        let state_paths = vec![layout.state_dir.join("installed.toml")];
+        // A component the real scan never saw is confirmed Absent — the
+        // collector was consulted and established absence — rather than being
+        // projected as an empty Present value.
+        match collect_adapter_observations(
+            "no-such-component",
+            &AdapterScanEvidence::Available(&entries),
+            &state_paths,
+        ) {
+            ProbeEvidence::Absent { provenance } => {
+                assert_eq!(provenance.state_paths, state_paths);
+            }
+            ProbeEvidence::Present { value, .. } => {
+                panic!("an unrelated component must not project rows: {value:?}")
+            }
+            ProbeEvidence::Unavailable { reason, .. } => {
+                panic!("a successful scan must not be Unavailable: {reason}")
+            }
+            ProbeEvidence::NotRequested => panic!("the adapter probe was requested"),
+        }
+    }
 }

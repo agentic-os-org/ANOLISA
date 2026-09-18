@@ -646,10 +646,10 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
   appear in `events` output, and omit `unmanaged`. An earlier revision imported
   that critical/attention vocabulary and had to be reverted.
 - `skill_ledger` is the only scan type whose events can legitimately carry no
-  verdict. Eleven `skill-ledger` subcommands route through `invoke()` and emit
+  verdict. Ten `skill-ledger` subcommands route through `invoke()` and emit
   events, but `_project_event_verdict` only projects six (`init`, `scan`,
   `check`, `show`, `certify`, `decide`); the rest (`status`, `audit`,
-  `list-scanners`, `export`, `init-keys`) produce an audit record with no
+  `list-scanners`, `export`) produce an audit record with no
   verdict, so the aggregation reports them as `MISSING`. Verified on a live host:
   of 1476 events, `pii_scan`/`code_scan`/`prompt_scan` were 100% verdict-bearing
   while three of four `skill_ledger` events lacked one.

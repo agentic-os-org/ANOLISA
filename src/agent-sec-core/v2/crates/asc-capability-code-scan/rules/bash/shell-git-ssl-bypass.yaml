@@ -1,0 +1,11 @@
+rule_id: shell-git-ssl-bypass
+cwe_id: CWE-295
+desc_en: >-
+  Git command disables SSL certificate verification,
+  allowing man-in-the-middle attacks on repository operations.
+desc_zh: >-
+  Git 命令禁用 SSL 证书验证，使仓库操作面临中间人攻击风险。
+regex: |-
+  \bGIT_SSL_NO_VERIFY\s*=\s*(true|1)\b
+  |\bgit\b[^;|&\n]*-c[^;|&\n]*http\.sslVerify\s*=\s*false
+severity: warn

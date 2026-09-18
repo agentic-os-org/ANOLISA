@@ -15,7 +15,7 @@ use crate::progress::{self, Activity, ProgressReporter};
 use crate::response::CliError;
 
 use super::dispatch::{RpmdbProbe, execute_planned, host_backends, plan_component};
-use super::{InstallArgs, InstallOutcome};
+use super::{InstallArgs, InstallOutcome, RawEffectFactories};
 
 /// Resolved command input plus whether the caller requested preview or apply.
 pub(super) struct InstallRequest<'a> {
@@ -163,6 +163,7 @@ pub(super) fn run_with_planned_components(
         privilege::is_root(),
         planned_components,
         &mut activity,
+        RawEffectFactories::system(),
     )
 }
 
@@ -181,6 +182,7 @@ pub(super) fn run_with_dependencies(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, CliError> {
     run_with_dependencies_classified(
         request,
@@ -192,6 +194,7 @@ pub(super) fn run_with_dependencies(
         is_root,
         planned_components,
         reporter,
+        effects,
     )
     .map_err(ApplicationFailure::into_cli_error)
 }
@@ -208,6 +211,7 @@ pub(super) fn run_with_dependencies_classified(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
+    effects: RawEffectFactories<'_>,
 ) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let planned = plan_component(request.component, request.args, ctx, env, rpmdb, query, txn)?;
     let prepared = prepare_plan(&planned.plan, request.intent);
@@ -234,6 +238,7 @@ pub(super) fn run_with_dependencies_classified(
         is_root,
         planned_components,
         reporter,
+        effects,
     )
 }
 

@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from agent_sec_cli.skill_ledger.config import (
     is_default_system_skill_dir,
+    is_default_user_skill_dir,
+    is_managed_covered,
     remember_skill_dir,
 )
 from agent_sec_cli.skill_ledger.core.file_hasher import (
@@ -61,6 +63,7 @@ from agent_sec_cli.skill_ledger.scanner.builtins.dispatcher import (
 from agent_sec_cli.skill_ledger.scanner.names import (
     DEFAULT_BUILTIN_SCANNERS,
     canonicalize_scanner_name,
+    validate_scanner_name,
 )
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
 from agent_sec_cli.skill_ledger.scanner.registry import (
@@ -87,11 +90,19 @@ def _remember_skill_dir_best_effort(skill_dir: str) -> None:
         )
 
 
-def _readonly_system_skip_payload(
+def _readonly_default_skip_payload(
     root: ResolvedSkillRoot,
 ) -> dict[str, Any] | None:
-    """Return a batch skip result for a host-backed, read-only system Skill."""
-    if root.source != "host" or not is_default_system_skill_dir(root.canonical_dir):
+    """Skip read-only host defaults while keeping managed user Skills strict."""
+    if root.source != "host":
+        return None
+    if is_default_system_skill_dir(root.canonical_dir):
+        reason_code = "readonly_system_skill"
+    elif is_default_user_skill_dir(root.canonical_dir) and not is_managed_covered(
+        root.canonical_dir
+    ):
+        reason_code = "readonly_default_skill"
+    else:
         return None
     writable, _reason = ledger_update_access(root)
     if writable:
@@ -100,7 +111,7 @@ def _readonly_system_skip_payload(
         "canonicalSkillDir": str(root.canonical_dir),
         "skillName": root.skill_name,
         "status": "skipped",
-        "reasonCode": "readonly_system_skill",
+        "reasonCode": reason_code,
         "persisted": False,
     }
 
@@ -157,7 +168,7 @@ def _build_scan_entry(
 ) -> ScanEntry:
     """Construct a :class:`ScanEntry` from normalised findings."""
     return ScanEntry(
-        scanner=canonicalize_scanner_name(scanner),
+        scanner=validate_scanner_name(scanner),
         version=scanner_version or "unknown",
         status=_determine_scan_status(normalized),
         findings=[f.to_findings_dict() for f in normalized],
@@ -171,7 +182,7 @@ def _resolve_parser_and_normalise(
     registry: ScannerRegistry,
 ) -> list[NormalizedFinding]:
     """Look up the parser for *scanner_name* and normalise raw findings."""
-    canonical_name = canonicalize_scanner_name(scanner_name)
+    canonical_name = validate_scanner_name(scanner_name)
     parser_info = registry.get_parser_for_scanner(canonical_name)
     if parser_info is None:
         logger.debug(
@@ -413,7 +424,7 @@ def _merge_scan_entries(
     scan_entries: list[ScanEntry],
 ) -> None:
     """Replace existing scanner entries with incoming entries and canonical names."""
-    incoming = {canonicalize_scanner_name(entry.scanner) for entry in scan_entries}
+    incoming = {validate_scanner_name(entry.scanner) for entry in scan_entries}
     merged: list[ScanEntry] = []
     seen: set[str] = set()
 
@@ -426,7 +437,7 @@ def _merge_scan_entries(
         seen.add(canonical)
 
     for entry in scan_entries:
-        entry.scanner = canonicalize_scanner_name(entry.scanner)
+        entry.scanner = validate_scanner_name(entry.scanner)
         if entry.scanner in seen:
             continue
         merged.append(entry)
@@ -521,7 +532,10 @@ def scan_skill(
     """Run built-in scanners as needed and record signed scan results."""
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
-    if _readonly_system_skip_payload(root) is not None:
+    if (
+        is_default_system_skill_dir(root.canonical_dir)
+        and _readonly_default_skip_payload(root) is not None
+    ):
         raise SkillLedgerError(
             f"cannot update read-only system skill: {root.canonical_dir}; "
             "use 'agent-sec-cli skill-ledger analyze <skill_dir> --format json' "
@@ -532,7 +546,7 @@ def scan_skill(
     current_hashes = compute_file_hashes(io_skill_dir)
     registry = ScannerRegistry.from_config()
     requested = [
-        canonicalize_scanner_name(name)
+        validate_scanner_name(name)
         for name in (scanner_names or DEFAULT_BUILTIN_SCANNERS)
     ]
 
@@ -624,7 +638,7 @@ def scan_batch(
         try:
             root = resolve_skill_root(skill_dir)
             validate_resolved_skill_root(root)
-            skipped = _readonly_system_skip_payload(root)
+            skipped = _readonly_default_skip_payload(root)
             if skipped is not None:
                 results.append(skipped)
                 continue
@@ -660,6 +674,7 @@ def certify(
     delete_findings: bool = False,
 ) -> dict[str, Any]:
     """Import external scanner findings and record them in a signed manifest."""
+    validate_scanner_name(scanner)
     if findings_path is None:
         raise FindingsFileError(
             "<missing>",
@@ -669,10 +684,10 @@ def certify(
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
+    registry = ScannerRegistry.from_config()
     _remember_skill_dir_best_effort(str(root.canonical_dir))
 
     current_hashes = compute_file_hashes(io_skill_dir)
-    registry = ScannerRegistry.from_config()
     manifest, state, new_version_created = _prepare_manifest_for_update(
         io_skill_dir,
         current_hashes,

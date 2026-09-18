@@ -2,10 +2,15 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/overview.md)
 
-`cosh` starts in Enhanced Assisted mode. The `◇ ` prefix shows that Cosh may
-route natural-language input before bash or zsh executes it. Press `Shift+Tab`
+`cosh` starts in Enhanced Assisted mode. The `◇` status line above the prompt
+shows that Cosh may route natural-language input before bash or zsh executes it. Press `Shift+Tab`
 at an empty prompt for Enhanced Shell-only (`◌ `), or select Native at startup
 when the session must have no Cosh hooks, observation, or insights.
+
+The status is printed when a prompt opens, control returns from a card, or
+routing changes. It scrolls with terminal output. Shell prompts start on the
+next line, keeping normal wrapping and cursor movement; editing redraws do not
+add status lines. Native sessions have no Cosh status line.
 
 ## A typical workflow
 
@@ -43,6 +48,34 @@ select Native with `shell.integration = "native"` or
 Approved Shell commands in enhanced integration stay in the foreground Shell,
 so prompts, output, job control, and `Ctrl+C` remain usable. See
 [Tool approval](approval.md) for the safety rules.
+
+## Bash prompt compatibility
+
+Enhanced combines user `PROMPT_COMMAND` hooks with Cosh's prompt hooks. User
+hooks configured before integration keep their execution order under the
+selected Bash version. Both Assisted and Shell-only use this integration.
+
+The variable's representation and child environment have these limits:
+
+- Bash 5.1 and newer use an array. An existing export attribute is retained,
+  but Bash does not export array values. A previously exported scalar
+  `PROMPT_COMMAND` therefore no longer reaches child processes, including
+  when its original value was an empty string.
+- Bash 4.3–5.0 use a combined scalar without the export attribute. This keeps
+  Cosh's internal hook text out of child processes; the original user scalar
+  is not exported either.
+
+Configure prompt hooks in each interactive shell's startup files when child
+shells should initialize them independently. Choose Native at startup when
+the session must preserve Bash's own prompt-variable representation and
+environment behavior. Native provides no Cosh hooks, observation, or insights;
+switching Enhanced to Shell-only does not remove the limits above.
+
+`--resume` always selects Enhanced, even with `COSH_SHELL_INTEGRATION=native`
+or `shell.integration = "native"`. Omit `--resume` when Native behavior is required.
+
+These limits apply to Bash `PROMPT_COMMAND`, not ordinary environment variables
+or the interactive continuation prompt `PS2`.
 
 ## Sessions and proactive help
 

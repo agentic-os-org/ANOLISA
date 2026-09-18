@@ -391,6 +391,7 @@ Every fix commit must be attributed correctly:
 - Use `chore(<scope>): bump version to X.Y.Z` (not `release(...)` — commitlint rejects non-standard types).
 - Version bump is always the **last commit** in a feature branch.
 - All version-bearing files for the component must be updated atomically. This includes whichever of the following exist: `Cargo.toml` or `package.json`, `.anolisa/component.toml`, `manifests/<name>.toml`, `dist/<name>.spec`, and `CHANGELOG.md`.
+- `CHANGELOG.md` (and its `_zh` counterpart) is edited **only** in the version bump commit. Feature, fix, docs and test commits must not touch it, even when the change is user-visible — the entry is written when the version is cut, together with the other version-bearing files. Do not add a changelog line to a feature PR and expect the bump to merge it.
 
 ### Format check
 

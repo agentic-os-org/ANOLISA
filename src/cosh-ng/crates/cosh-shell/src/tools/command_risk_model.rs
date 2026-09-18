@@ -93,6 +93,8 @@ pub enum AutoAllowEvidence {
     /// plan is executed by the dedicated argv executor — no shell
     /// parsing layer, no text rebuild, no handoff.
     CompoundReadonly,
+    /// A single readonly argv step with stderr connected to the null device.
+    StderrSuppressedReadonly,
 }
 
 impl AutoAllowEvidence {
@@ -102,6 +104,7 @@ impl AutoAllowEvidence {
             Self::GuardedDiagnostic => "safe-diagnostic-family",
             Self::ReadonlyPipelineExecutor => "readonly-pipeline-executor",
             Self::CompoundReadonly => "compound-readonly",
+            Self::StderrSuppressedReadonly => "stderr-suppressed-readonly",
         }
     }
 }
@@ -307,9 +310,10 @@ impl AutoExecutionPolicy {
             // reuses the readonly pipeline primitives, so there is no
             // separate mechanism to gate behind a runtime flag
             // (issue #1882).
-            Some(AutoAllowEvidence::CompoundReadonly) => {
-                AutoExecutionRoute::CompoundReadonlyExecutor
-            }
+            // The same argv executor also handles one stderr-suppressed step.
+            Some(
+                AutoAllowEvidence::CompoundReadonly | AutoAllowEvidence::StderrSuppressedReadonly,
+            ) => AutoExecutionRoute::CompoundReadonlyExecutor,
             Some(AutoAllowEvidence::GuardedDiagnostic) if self.guarded_diagnostic_executor => {
                 AutoExecutionRoute::GuardedDiagnosticExecutor
             }

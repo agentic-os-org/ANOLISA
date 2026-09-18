@@ -872,6 +872,21 @@ pub fn migrate_v3_symlinks(store: &mut StateStore, layout: &FsLayout) -> usize {
 ///
 /// Returns the number of metadata fields populated.
 pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -> usize {
+    let env = anolisa_env::EnvService::detect();
+    let install_mode = match layout.mode {
+        anolisa_platform::fs_layout::InstallMode::System => "system",
+        anolisa_platform::fs_layout::InstallMode::User => "user",
+    };
+    let supported = anolisa_core::capability_for_install_mode(install_mode, &env).supported();
+    hydrate_owned_file_contracts_with_capability_support(store, layout, supported)
+}
+
+/// Hydrate legacy metadata using an already observed capability-support decision.
+pub(crate) fn hydrate_owned_file_contracts_with_capability_support(
+    store: &mut StateStore,
+    layout: &FsLayout,
+    capability_probe_supported: bool,
+) -> usize {
     use std::collections::HashMap;
 
     use anolisa_core::expand_layout_placeholders;
@@ -893,14 +908,6 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
         let mode = u32::from_str_radix(octal, 8).ok()?;
         (mode <= 0o7777).then(|| format!("{mode:04o}"))
     }
-
-    let env = anolisa_env::EnvService::detect();
-    let install_mode = match layout.mode {
-        anolisa_platform::fs_layout::InstallMode::System => "system",
-        anolisa_platform::fs_layout::InstallMode::User => "user",
-    };
-    let capability_probe_supported =
-        anolisa_core::capability_for_install_mode(install_mode, &env).supported();
 
     let mut hydrated = 0;
     for installation in &mut store.installations {

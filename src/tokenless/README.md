@@ -11,6 +11,12 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
+The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+not isolated by Tokenless tenant or session.
+See [bundled RTK commands](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#bundled-rtk-commands)
+for flag migration, pipeline behavior, and output recovery.
+
 Agent adapters are available for:
 
 - **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
@@ -36,6 +42,8 @@ retrieval, and attribution.
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
 | Search path sharing | workload-dependent | Enabled by default: API search listings, including Claude native Grep, share consecutive file paths and retain every received match; disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False`; command output remains on its existing route |
+| Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
+| HTML page rendering | workload-dependent | Opt in with `TOKENLESS_HTML_EXTRACTION_ENABLED=1` or SDK `html_extraction_enabled=True`; renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery. Disabled by default; file reads pass through |
 | CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
@@ -721,6 +729,14 @@ bundle into `<working dir>/plugins/tokenless/` (`QWENPAW_WORKING_DIR`, else
 `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`) and installs
 the `anolisa_tokenless` wheel listed in `requirements.txt` from the matching
 GitHub Release. Records are written under `<workspace>/.tokenless`.
+
+Before the bundle is handed over, the installer probes that pinned wheel URL and
+stops with an explanatory error when the asset answers `404`. Set
+`ANOLISA_SKIP_WHEEL_PREFLIGHT=1` to skip the probe on offline or mirrored
+networks; `ANOLISA_TOKENLESS_PROBE_TIMEOUT` bounds each probe in seconds
+(default 15). See
+[troubleshooting](../../docs/user-guide/en/token-saving/tokenless/troubleshooting.md#qwenpaw-install-reports-an-unavailable-sdk-wheel)
+for the full reference.
 
 ## DeepSeek Harness Plugin
 

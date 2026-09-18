@@ -24,7 +24,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -32,6 +32,7 @@ license = "Apache-2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 csv = "1.4"
+html5ever = "0.39"
 regex = "1.10"
 thiserror = "2.0"
 clap = { version = "4", features = ["derive"] }

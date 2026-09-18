@@ -387,6 +387,49 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
 }
 
 #[test]
+fn composer_slash_retains_workspace_before_the_next_shell_ready() {
+    let mut parser = parser_for_test("composer-workspace");
+    let (generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender
+        .send(RawInputEvent::PtyUserWrite {
+            generation: generation.bump(),
+            line_submits: 0,
+        })
+        .unwrap();
+    sender
+        .send(RawInputEvent::PromptDraftSubmit {
+            id: "composer-1".into(),
+            text: "/health".into(),
+            slash: true,
+            workspace_cwd: Some("/workspace/project".into()),
+        })
+        .unwrap();
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut Vec::new(),
+        "prompt$ ",
+        &mut 0,
+        &mut prompt_replay,
+        &PromptPresentation::new(false),
+    )
+    .unwrap();
+    assert!(!parser
+        .events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ShellReady));
+    let intercepts = parser
+        .events
+        .iter()
+        .filter(|event| event.component.as_deref() == Some("slash"))
+        .collect::<Vec<_>>();
+    assert_eq!(intercepts.len(), 1);
+    assert_eq!(intercepts[0].input.as_deref(), Some("/health"));
+    assert_eq!(intercepts[0].cwd.as_deref(), Some("/workspace/project"));
+}
+
+#[test]
 fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let mut parser = parser_for_test("candidate-cursor-restore");
     let (_generation, mut prompt_replay) = tracker_for_test();
@@ -422,7 +465,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
 }
 
 #[test]
-fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
+fn isolated_candidate_repaints_do_not_add_status_lines() {
     let mut parser = parser_for_test("candidate-prompt-owner");
     let (_generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -458,7 +501,7 @@ fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
 
     assert_eq!(
         String::from_utf8(output).expect("utf8 output"),
-        "\r\x1b[2K◇ prompt> 你好\r\x1b[2K◇ prompt> 你好\n\r\x1b[2K◇ prompt> "
+        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\n\r\x1b[2Kprompt> "
     );
 }
 

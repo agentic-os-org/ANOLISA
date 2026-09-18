@@ -9,6 +9,45 @@
 
 ## [未发布]
 
+## [0.3.12] - 2026-09-16
+
+### 变更
+
+- 以 root 身份运行 `anolisa upgrade --dry-run` 时，现在会通过系统依赖求解器
+  检查合并后的新增 RPM 安装集合，冲突会显示为错误。非 root 用户仍可预览，
+  但会明确提示尚未检查安装冲突；使用 `sudo` 重试并保留原有 `--target` 选项
+  即可执行检查
+  ([#3294](https://github.com/agentic-os-org/ANOLISA/pull/3294))。
+- 内置 ws-ckpt 适配器元数据现在要求 OpenClaw `>=2026.2.13`，
+  阻止在配置写入可能持久化展开后的环境变量值及运行时默认值的旧版宿主上启用适配器
+  ([#3239](https://github.com/agentic-os-org/ANOLISA/pull/3239))。
+
+### 修复
+
+- `anolisa adapter enable <component> openclaw` 现在会在安装后显式激活插件，
+  恢复被上次卸载保留为禁用状态的插件。激活操作独立探测 capability 授权支持，
+  `--dry-run` 也会显示激活命令
+  ([#3223](https://github.com/agentic-os-org/ANOLISA/pull/3223))。
+- Sandbox 安装和卸载现在以 DNF 退出状态判断成功与否，即使输出包含
+  “already installed” 或 “No match” 等文本也不会掩盖失败；
+  安装失败后不再继续后续配置阶段或记录成功
+  ([#3226](https://github.com/agentic-os-org/ANOLISA/pull/3226))。
+- RPM 软件包及文件归属查询现在区分明确缺失与数据库、命令执行失败，
+  避免错误地报告“未安装”
+  ([#3230](https://github.com/agentic-os-org/ANOLISA/pull/3230))。
+- Raw 组件服务管理现在会报告 `systemctl is-active` 查询失败，
+  不再将其视为 unit 缺失；合法的 inactive、failed 等服务状态仍受支持
+  ([#3240](https://github.com/agentic-os-org/ANOLISA/pull/3240))。
+- RPM 查询失败，或系统软件包、语言运行时探测遇到权限、执行及信号终止错误时，
+  运行依赖检查现在会阻止自动安装依赖。`anolisa doctor` 会保留诊断信息，
+  引导检查探测失败，而不是建议安装被误判为缺失的依赖
+  ([#3280](https://github.com/agentic-os-org/ANOLISA/pull/3280)、
+  [#3285](https://github.com/agentic-os-org/ANOLISA/pull/3285))。
+- Debian 运行依赖检查现在区分可用、缺失、安装未完成及查询失败状态。
+  安装未完成时需先手动恢复软件包状态，才能继续自动安装依赖；`doctor` 会引导检查
+  软件包状态。Multi-Arch 查询默认选择本机架构，除非依赖明确指定其他架构
+  ([#3292](https://github.com/agentic-os-org/ANOLISA/pull/3292))。
+
 ## [0.3.11] - 2026-09-09
 
 ### 新增

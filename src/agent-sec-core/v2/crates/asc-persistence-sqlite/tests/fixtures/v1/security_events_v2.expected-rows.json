@@ -1,0 +1,36 @@
+[
+    {
+        "call_id": null,
+        "category": "code_scan",
+        "details": {
+            "result": {
+                "verdict": "allow"
+            }
+        },
+        "event_id": "r2-b",
+        "event_type": "code_scan",
+        "result": "succeeded",
+        "run_id": "r-2",
+        "session_id": "s-1",
+        "timestamp": "2026-01-02T03:05:05+00:00",
+        "tool_call_id": null,
+        "trace_id": "t-2"
+    },
+    {
+        "call_id": "c-1",
+        "category": "code_scan",
+        "details": {
+            "result": {
+                "verdict": "deny"
+            }
+        },
+        "event_id": "r2-a",
+        "event_type": "code_scan",
+        "result": "succeeded",
+        "run_id": "r-1",
+        "session_id": "s-1",
+        "timestamp": "2026-01-02T03:04:05+00:00",
+        "tool_call_id": "tc-1",
+        "trace_id": "t-1"
+    }
+]

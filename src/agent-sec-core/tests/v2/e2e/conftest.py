@@ -1,8 +1,7 @@
 """Shared fixtures for the V2 policy-CLI end-to-end suite.
 
 These tests drive the real ``agent-sec-cli`` and ``agent-sec-daemon`` binaries over a
-Unix domain socket, so they only make sense against an RPM-installed
-environment where both binaries are on ``PATH``. A missing binary fails the run
+Unix domain socket, with either V2 build outputs or RPM-installed binaries on ``PATH``. A missing binary fails the run
 instead of skipping it: skipping would let a broken package slip through the
 gate silently.
 
@@ -14,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -91,7 +91,7 @@ class DaemonHandle:
 
 
 def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
-    """Starts a foreground daemon and waits for its socket to appear."""
+    """Starts a foreground daemon and waits for a complete protocol response."""
     argv = [_require(DAEMON_BIN), "--socket", str(socket_path)]
     for uid in admin_uids:
         argv += ["--policy-admin-uid", str(uid)]
@@ -104,7 +104,17 @@ def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
     deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
     while time.monotonic() < deadline:
         if socket_path.exists():
-            return process
+            try:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.settimeout(0.2)
+                    probe.connect(str(socket_path))
+                    probe.sendall(
+                        b'{"method":"policy.templates.list","params":{"limit":1,"offset":0}}\n'
+                    )
+                    if probe.recv(4096).endswith(b"\n"):
+                        return process
+            except (OSError, TimeoutError):
+                pass
         if process.poll() is not None:
             _, stderr = process.communicate()
             raise AssertionError(

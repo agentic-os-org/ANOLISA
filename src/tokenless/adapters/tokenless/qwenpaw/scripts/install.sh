@@ -5,6 +5,8 @@
 # directory, validates plugin.py, installs requirements.txt into QwenPaw's
 # Python environment, and hot-loads when QwenPaw is running. It exits 0 even
 # when it fails, so the installed files are compared with the source afterwards.
+# requirements.txt pins the SDK wheel to a GitHub Release asset for this exact
+# version, so that asset is probed before the bundle is handed over.
 set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qwenpaw}"
@@ -52,6 +54,120 @@ print(sdk.__version__)
 PY
 }
 
+# The bundle pins the native SDK wheel by direct URL, and that URL is a GitHub
+# Release asset for this exact Tokenless version. A version bump can land on
+# main before the matching `tokenless/vX.Y.Z` release is published, and then
+# `qwenpaw plugin install` dies inside pip with a bare "HTTP error 404" that
+# never says which asset is missing. Probe the asset for this host first so the
+# failure names the asset, its release tag, and how to close the gap.
+#
+# The probe is advisory: with no probe tool, no wheel line matching this
+# platform, or an unreachable network it stays out of the way and leaves the
+# verdict to pip. Only an explicit 404 reads as "this asset cannot be
+# downloaded" -- it says nothing about whether the release itself exists.
+# ANOLISA_SKIP_WHEEL_PREFLIGHT=1 turns the probe off for offline mirrors.
+wheel_url_for_host() {
+    local pattern
+    case "$(uname -s 2>/dev/null || true)/$(uname -m 2>/dev/null || true)" in
+        Linux/x86_64)  pattern='manylinux_2_17_x86_64' ;;
+        Linux/aarch64) pattern='manylinux_2_17_aarch64' ;;
+        Darwin/arm64)  pattern='macosx_11_0_arm64' ;;
+        *)             return 0 ;;
+    esac
+    sed -n "s|^anolisa-tokenless @ \(https://[^ ;]*${pattern}[^ ;]*\.whl\).*|\1|p" \
+        "$PLUGIN_SRC/requirements.txt" | head -n 1
+}
+
+probe_http_status() {
+    local url="$1" timeout="${ANOLISA_TOKENLESS_PROBE_TIMEOUT:-15}"
+    if command -v curl >/dev/null 2>&1; then
+        # curl prints 000 when it cannot reach the host at all.
+        curl -sIL -o /dev/null --max-time "$timeout" -w '%{http_code}' "$url" 2>/dev/null || true
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$url" "$timeout" <<'PY' 2>/dev/null || true
+import sys
+import threading
+import urllib.error
+import urllib.request
+
+url, timeout = sys.argv[1], float(sys.argv[2])
+verdict = []
+
+
+def probe():
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            verdict.append(response.status)
+    except urllib.error.HTTPError as error:
+        verdict.append(error.code)
+    except (urllib.error.URLError, OSError, ValueError):
+        pass  # unreachable host: no verdict, leave it to pip
+
+
+# urlopen's timeout bounds each socket operation, not the whole exchange: a
+# server or proxy that dribbles response headers, or a chain of slow redirects,
+# keeps it busy for many multiples of ANOLISA_TOKENLESS_PROBE_TIMEOUT. curl's
+# --max-time is a total cap, so hold the same line here -- past the deadline the
+# probe reports nothing and the verdict stays with pip.
+worker = threading.Thread(target=probe, daemon=True)
+worker.start()
+worker.join(timeout)
+if verdict and not worker.is_alive():
+    print(verdict[0])
+PY
+        return 0
+    fi
+    return 1
+}
+
+preflight_wheel() {
+    if [ "${ANOLISA_SKIP_WHEEL_PREFLIGHT:-0}" = "1" ]; then
+        return 0
+    fi
+    local url status tag
+    url="$(wheel_url_for_host)" || return 0
+    if [ -z "$url" ]; then
+        return 0
+    fi
+    status="$(probe_http_status "$url")" || return 0
+    if [ "$status" = "404" ]; then
+        # A lone 404 can also be a truncated redirect chain or a proxy hiccup,
+        # and a wrong verdict here blocks an install that would otherwise work,
+        # so confirm it before believing it.
+        status="$(probe_http_status "$url")" || return 0
+    fi
+    case "$status" in
+        404) ;;
+        # Published, still redirecting, or unreachable: no verdict, pip decides.
+        2??|3??|000|"") return 0 ;;
+        *)
+            echo "[${COMPONENT}] Could not verify the SDK wheel at ${url} (probe reported HTTP ${status}); leaving the verdict to pip." >&2
+            return 0
+            ;;
+    esac
+    tag="${url#*/tokenless/v}"
+    tag="${tag%%/*}"
+    cat >&2 <<EOF
+[${COMPONENT}] The Tokenless ${tag} Python SDK wheel asset is unavailable (HTTP 404):
+[${COMPONENT}]   ${url}
+[${COMPONENT}] This package was built from a source tree already at ${tag}, but that asset
+[${COMPONENT}] cannot be downloaded. A maintainer must check whether the GitHub Release
+[${COMPONENT}] \`tokenless/v${tag}\` exists:
+[${COMPONENT}]   - it does not: push the \`tokenless/v${tag}\` tag and approve the \`release\`
+[${COMPONENT}]     environment so the publish workflow uploads the wheels;
+[${COMPONENT}]   - it does: the upload was incomplete, so delete that release and re-run
+[${COMPONENT}]     the publish workflow, which refuses to overwrite an existing release.
+[${COMPONENT}] Until the asset is downloadable, install a Tokenless package whose version
+[${COMPONENT}] already has published wheels.
+[${COMPONENT}] Behind an offline or mirrored network, re-run with
+[${COMPONENT}] ANOLISA_SKIP_WHEEL_PREFLIGHT=1 to let pip resolve the wheel itself.
+EOF
+    return 1
+}
+
 echo "[${COMPONENT}] Installing ${AGENT} plugin..."
 
 if [ ! -f "$PLUGIN_SRC/plugin.json" ] || [ ! -f "$PLUGIN_SRC/plugin.py" ] || [ ! -f "$PLUGIN_SRC/requirements.txt" ]; then
@@ -71,6 +187,13 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
     echo "DRY-RUN: QWENPAW_WORKING_DIR=${QWENPAW_WORKING_DIR%/} $QWENPAW_BIN plugin install $PLUGIN_SRC --force"
     exit 0
+fi
+
+# Fail before QwenPaw copies anything: an unpublishable wheel leaves a bundle
+# that is installed but cannot run.
+if ! preflight_wheel; then
+    echo "[${COMPONENT}] Not handing QwenPaw a bundle whose SDK wheel cannot be downloaded." >&2
+    exit 1
 fi
 
 QWENPAW_WORKING_DIR="${QWENPAW_WORKING_DIR%/}" "$QWENPAW_BIN" plugin install "$PLUGIN_SRC" --force

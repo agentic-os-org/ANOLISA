@@ -7,6 +7,195 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::context::{CliContext, InstallMode, ResolvedLayouts};
 use crate::packaged::PackagedDataProbe;
 
+/// Explicit fake effect factories for lifecycle tests that do not inspect calls.
+pub(crate) fn raw_effects() -> crate::commands::tier1::install::RawEffectFactories<'static> {
+    crate::commands::tier1::install::RawEffectFactories {
+        service: &|_, _, scope| Box::new(anolisa_core::FakeServiceManager::with_scope(scope)),
+        capability: &|_, _| Box::new(anolisa_core::FakeCapabilityManager::new()),
+    }
+}
+
+/// Records raw effects across freshly-created managers, including compensation.
+#[derive(Clone)]
+pub(crate) struct RawEffectRecorder {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    capability_contents: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    pub(crate) supported: bool,
+    pub(crate) fail_service: Option<anolisa_core::ServiceOp>,
+    pub(crate) fail_capability: bool,
+}
+
+impl Default for RawEffectRecorder {
+    fn default() -> Self {
+        Self {
+            calls: Default::default(),
+            capability_contents: Default::default(),
+            supported: true,
+            fail_service: None,
+            fail_capability: false,
+        }
+    }
+}
+
+impl RawEffectRecorder {
+    pub(crate) fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+
+    pub(crate) fn capability_contents(&self) -> Vec<Vec<u8>> {
+        self.capability_contents
+            .lock()
+            .expect("contents lock")
+            .clone()
+    }
+
+    fn record(&self, event: String) {
+        self.calls.lock().expect("calls lock").push(event);
+    }
+
+    pub(crate) fn with<T>(
+        &self,
+        run: impl FnOnce(crate::commands::tier1::install::RawEffectFactories<'_>) -> T,
+    ) -> T {
+        let service = |mode: &str, _: &anolisa_env::EnvFacts, scope| {
+            self.record(format!("service factory {mode} {scope:?}"));
+            Box::new(RecordingService {
+                recorder: self.clone(),
+                scope,
+                inner: anolisa_core::FakeServiceManager::with_scope(scope),
+            }) as Box<dyn anolisa_core::ServiceManager>
+        };
+        let capability = |mode: &str, _: &anolisa_env::EnvFacts| {
+            self.record(format!("capability factory {mode}"));
+            Box::new(RecordingCapability(self.clone())) as Box<dyn anolisa_core::CapabilityManager>
+        };
+        run(crate::commands::tier1::install::RawEffectFactories {
+            service: &service,
+            capability: &capability,
+        })
+    }
+}
+
+struct RecordingService {
+    recorder: RawEffectRecorder,
+    scope: anolisa_core::ServiceScope,
+    inner: anolisa_core::FakeServiceManager,
+}
+
+impl RecordingService {
+    fn call(
+        &self,
+        op: anolisa_core::ServiceOp,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        use anolisa_core::{ServiceManager, ServiceOp};
+        self.recorder
+            .record(format!("{op:?} {:?} {unit}", self.scope));
+        if self.recorder.fail_service == Some(op) {
+            self.inner.fail(op, unit);
+        }
+        match op {
+            ServiceOp::Probe => self.inner.probe_service(unit),
+            ServiceOp::Start => self.inner.start_service(unit),
+            ServiceOp::Stop => self.inner.stop_service(unit),
+            ServiceOp::Restart => self.inner.restart_service(unit),
+            ServiceOp::Enable => self.inner.enable_service(unit),
+            ServiceOp::Disable => self.inner.disable_service(unit),
+            ServiceOp::DaemonReload => self.inner.daemon_reload(),
+        }
+    }
+}
+
+impl anolisa_core::ServiceManager for RecordingService {
+    fn manager(&self) -> &str {
+        "fake"
+    }
+    fn supported(&self) -> bool {
+        self.recorder.supported
+    }
+    fn unsupported_reason(&self) -> Option<&str> {
+        Some("fixture unsupported")
+    }
+    fn handles_scope(&self, scope: anolisa_core::ServiceScope) -> bool {
+        self.scope == scope
+    }
+    fn daemon_reload(&self) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::DaemonReload, "")
+    }
+    fn probe_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Probe, unit)
+    }
+    fn start_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Start, unit)
+    }
+    fn stop_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Stop, unit)
+    }
+    fn restart_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Restart, unit)
+    }
+    fn enable_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Enable, unit)
+    }
+    fn disable_service(
+        &self,
+        unit: &str,
+    ) -> Result<anolisa_core::ServiceOutcome, anolisa_core::ServiceError> {
+        self.call(anolisa_core::ServiceOp::Disable, unit)
+    }
+}
+
+struct RecordingCapability(RawEffectRecorder);
+
+impl anolisa_core::CapabilityManager for RecordingCapability {
+    fn manager(&self) -> &str {
+        "fake"
+    }
+    fn supported(&self) -> bool {
+        self.0.supported
+    }
+    fn unsupported_reason(&self) -> Option<&str> {
+        Some("fixture unsupported")
+    }
+    fn apply(
+        &self,
+        path: &Path,
+        caps: &[String],
+    ) -> Result<anolisa_core::CapabilityOutcome, anolisa_core::CapabilityError> {
+        assert!(
+            path.is_file(),
+            "capability applied only after placing/restoring a file"
+        );
+        self.0
+            .capability_contents
+            .lock()
+            .expect("contents lock")
+            .push(std::fs::read(path).expect("capability target"));
+        self.0
+            .record(format!("apply {} {}", path.display(), caps.join(",")));
+        let inner = anolisa_core::FakeCapabilityManager::new();
+        if self.0.fail_capability {
+            inner.fail(path);
+        }
+        inner.apply(path, caps)
+    }
+}
+
 /// Output and execution flags for an isolated test context.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TestContextOptions {

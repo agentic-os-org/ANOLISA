@@ -10,7 +10,7 @@ import {
   websiteDir,
 } from './lib.mjs';
 
-const repository = 'https://github.com/alibaba/anolisa';
+const repository = 'https://github.com/agentic-os-org/ANOLISA';
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const baseUrl = process.env.BASE_URL ?? '/';
 const docsOutput = path.join(generatedDir, 'docs');

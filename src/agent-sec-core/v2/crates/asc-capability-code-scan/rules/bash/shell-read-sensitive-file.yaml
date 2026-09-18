@@ -1,0 +1,12 @@
+rule_id: shell-read-sensitive-file
+cwe_id: CWE-200
+desc_en: >-
+  Reading sensitive system files that contain credentials,
+  keys, or critical system configuration.
+desc_zh: >-
+  读取包含凭据、密钥或关键系统配置的敏感系统文件。
+regex: |-
+  \bcat\b(?![ \t]*(?:-[A-Za-z-]+[ \t]*)*(?:(?:[0-9]*>>?|&>)[ \t]*(?:"(?:\\.|[^"\\])*"|'[^']*'|[^ \t;|&<>]+)[ \t]*(?:[0-9]*<<-?[ \t]*(?:"(?:\\.|[^"\\])*"|'[^']*'|\\?[A-Za-z_][A-Za-z0-9_]*))?[ \t]*$|[0-9]*<<-?[ \t]*(?:"(?:\\.|[^"\\])*"|'[^']*'|\\?[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:[0-9]*>>?|&>)[ \t]*(?:"(?:\\.|[^"\\])*"|'[^']*'|[^ \t;|&<>]+)[ \t]*$))
+  |\b(?:less|more|head|tail|cp|scp|rsync|tar)\b
+severity: warn
+target_regexes_ref: sensitive_file_paths

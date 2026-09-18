@@ -44,7 +44,11 @@ disposition keeps the original. The hook currently routes:
 |---------|------------------------------|
 | JSON | Lossless structural cleanup; TOON may be selected for text-capable replacement slots |
 | JSON requiring record reduction or string, array, or depth truncation | Applied only when Marker command recovery is available; otherwise rejected with `recoverability_unavailable` |
-| Build/test/package logs, long plain text, diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching domain compressor is connected |
+| Build/test/package logs from command output | Terminal cleanup and routine-progress reduction; every omitted run carries an in-place retrieval marker |
+| CSV/TSV tables when the host can replace output with text | Full compaction; tables with more than 32 data rows may reduce rows when Stash-backed recovery is available |
+| API search-result listings when path sharing is enabled and the host can replace output with text | Lossless search path sharing; every received match is retained |
+| Git diffs from command output when `TOKENLESS_DIFF_COMPRESSION_ENABLED` opts in (default off) and the host can replace output with text | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
+| Long plain text, stack trace, HTML, source code, unknown | Passthrough until a matching domain compressor is connected |
 
 Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
 selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
@@ -151,6 +155,8 @@ structured command failures are sent to Core for environment diagnosis even
 when compression is disabled. When a later waterfall listener replaces the
 canonical `value`, Tokenless examines only that replacement and never applies
 content compression to it.
+
+For the full trigger conditions (compression switch, minimum response length, supported content domains, strictly-smaller guard) and threshold semantics, see [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
 
 ## Manage adapters with anolisa (recommended)
 

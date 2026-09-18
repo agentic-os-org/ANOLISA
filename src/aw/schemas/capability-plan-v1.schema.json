@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/capability-plan/v1",
+  "title": "capability plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "revision",
+    "event_id",
+    "scope",
+    "boundary_id",
+    "boundary_revision",
+    "boundary",
+    "policy_revision",
+    "source_digest",
+    "steps"
+  ],
+  "properties": {
+    "plan_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "revision": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "event_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "boundary_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "boundary_revision": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "boundary": {
+      "enum": [
+        "pre_tool",
+        "post_tool",
+        "before_model",
+        "proxy"
+      ]
+    },
+    "policy_revision": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "source_digest": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_id",
+          "capability",
+          "input_schema",
+          "output_schema",
+          "selection",
+          "providers",
+          "required",
+          "on_failure",
+          "input_source"
+        ],
+        "properties": {
+          "step_id": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "capability": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "input_schema": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+          },
+          "output_schema": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+          },
+          "selection": {
+            "enum": [
+              "exactly_one",
+              "all_distinct_providers"
+            ]
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "provider_id",
+                "provider_version",
+                "manifest_digest"
+              ],
+              "properties": {
+                "provider_id": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+                },
+                "provider_version": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+                },
+                "manifest_digest": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+                }
+              }
+            },
+            "minItems": 0,
+            "maxItems": 16
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "on_failure": {
+            "enum": [
+              "reject_plan",
+              "record_gap_and_continue",
+              "deny_dispatch"
+            ]
+          },
+          "input_source": {
+            "const": "boundary_source"
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 32
+    },
+    "os_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_digest",
+        "required_controls"
+      ],
+      "properties": {
+        "policy_digest": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+        },
+        "required_controls": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "boundary": {
+            "const": "pre_tool"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "os_requirement"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "os_requirement"
+          ]
+        }
+      }
+    }
+  ]
+}

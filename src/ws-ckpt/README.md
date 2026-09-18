@@ -161,6 +161,8 @@ ws-ckpt reload
 | `reload` | Notify daemon to reload `config.toml` |
 | `plugin` | Install/uninstall ws-ckpt Agent runtime plugins (openclaw/hermes) |
 
+The OpenClaw adapter requires OpenClaw >= 2026.2.13. Installation stops rather than leaving a partial integration when the detected version or config capabilities cannot update the tool allowlist safely.
+
 ## License
 
 Licensed under the Apache License, Version 2.0; see [LICENSE](../../LICENSE).

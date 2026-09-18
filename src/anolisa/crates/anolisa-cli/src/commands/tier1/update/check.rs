@@ -257,6 +257,19 @@ struct CheckInputs<'a> {
 
 /// Production entry point for `anolisa update --check`.
 pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
+    handle_update_check_with(args, ctx, Utc::now, compute_update_check_report)
+}
+
+fn handle_update_check_with<N, C>(
+    args: &UpdateArgs,
+    ctx: &CliContext,
+    mut now: N,
+    compute: C,
+) -> Result<(), CliError>
+where
+    N: FnMut() -> chrono::DateTime<Utc>,
+    C: FnOnce(Option<&str>, &CliContext, &FsLayout) -> Result<UpdateCheckReport, CliError>,
+{
     // `update --check` only understands the system / RPM-image scenario: it
     // reasons about rpm-owned components and repo candidates. In user mode there
     // is no rpmdb-backed toolchain to reason about, so refuse explicitly rather
@@ -283,7 +296,11 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
         && !args.refresh
         && !ctx.json
         && let Some(cache) = read_cache(&cache_path)
-        && cache_is_usable(&cache, Some(effective_target_name(args.target.as_deref())))
+        && cache_is_usable(
+            &cache,
+            Some(effective_target_name(args.target.as_deref())),
+            &mut now,
+        )
     {
         render::render_motd(ctx, &cache.report);
         return Ok(());
@@ -300,7 +317,7 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
     };
     let report = {
         let _activity = progress::Activity::start(feedback, "Checking for updates...");
-        match compute_update_check_report(args.target.as_deref(), ctx, &layout) {
+        match compute(args.target.as_deref(), ctx, &layout) {
             Ok(report) => report,
             Err(err) => {
                 // MOTD must stay quiet and low-noise on failure; a JSON/human
@@ -315,7 +332,7 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
 
     // The cache is not authoritative state; a write failure (e.g. a non-root
     // MOTD probe against a root-owned cache dir) is non-fatal.
-    let _ = write_cache(&cache_path, &report);
+    let _ = write_cache(&cache_path, &report, &mut now);
 
     render::render_report(ctx, args, &report);
     Ok(())
@@ -1455,16 +1472,20 @@ fn read_cache(path: &Path) -> Option<UpdateCheckCache> {
 /// Whether a cached report may be reused for a MOTD render: it must be fresh AND
 /// have been computed for the same target, so a prior `--target` run never leaks
 /// its report into a plain MOTD (or a different target's).
-fn cache_is_usable(cache: &UpdateCheckCache, target: Option<&str>) -> bool {
-    is_fresh(&cache.generated_at) && cache.report.target.as_deref() == target
+fn cache_is_usable(
+    cache: &UpdateCheckCache,
+    target: Option<&str>,
+    now: impl FnOnce() -> chrono::DateTime<Utc>,
+) -> bool {
+    is_fresh(&cache.generated_at, now) && cache.report.target.as_deref() == target
 }
 
 /// Whether a cache timestamp is within [`CACHE_TTL_SECS`] of now (and not in the
 /// future, which would indicate a corrupt/adversarial timestamp).
-fn is_fresh(generated_at: &str) -> bool {
+fn is_fresh(generated_at: &str, now: impl FnOnce() -> chrono::DateTime<Utc>) -> bool {
     match chrono::DateTime::parse_from_rfc3339(generated_at) {
         Ok(ts) => {
-            let age = Utc::now().signed_duration_since(ts.with_timezone(&Utc));
+            let age = now().signed_duration_since(ts.with_timezone(&Utc));
             age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(CACHE_TTL_SECS)
         }
         Err(_) => false,
@@ -1472,12 +1493,16 @@ fn is_fresh(generated_at: &str) -> bool {
 }
 
 /// Best-effort cache write; failures are swallowed by the caller.
-fn write_cache(path: &Path, report: &UpdateCheckReport) -> std::io::Result<()> {
+fn write_cache(
+    path: &Path,
+    report: &UpdateCheckReport,
+    now: impl FnOnce() -> chrono::DateTime<Utc>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let cache = UpdateCheckCache {
-        generated_at: super::now_iso8601(),
+        generated_at: now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         report: report.clone(),
     };
     let body = serde_json::to_string_pretty(&cache)

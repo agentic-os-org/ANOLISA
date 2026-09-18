@@ -23,6 +23,7 @@ fn raw_plan(steps: &[(&[&str], SegmentConnector)]) -> ReadonlyCompoundPlan {
                 program: resolve_trusted_executable(argv[0])
                     .unwrap_or_else(|| std::path::PathBuf::from(argv[0])),
                 argv: argv.iter().map(ToString::to_string).collect(),
+                suppress_stderr: false,
             })
             .collect(),
     }

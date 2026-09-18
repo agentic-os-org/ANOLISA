@@ -14,6 +14,27 @@ Switch with `/mode approval <mode>` or set `shell.approval_mode`.
 | `auto` | Default. Eligible read-only or low-risk tools can run automatically; risky, guarded, or external work asks first. |
 | `trust` | Provider tool requests run automatically for this session after explicit confirmation. |
 
+In `auto` mode, eligible simple read-only commands can suppress stderr with
+`2>/dev/null` or `2>>/dev/null` without an approval card. Spaces after the
+operator and quotes around `/dev/null` are supported, for example:
+
+```sh
+find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null
+```
+
+Stdout suppression (`>/dev/null`, `1>/dev/null`), mixed output routing,
+and redirection to regular files still require approval. The command must
+still pass the read-only and risk checks; stderr suppression does not make
+a modifying command eligible. Stdout and the exit status remain available
+in the execution result, including when the command fails.
+
+These automatic commands run in the requesting directory with a controlled
+environment. `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TZ` come from the cosh
+process; subsequent `export` changes in the interactive shell are not copied,
+and `GIT_*` variables are not passed through. Time-zone, locale, and Git
+results can therefore differ from the same command in that shell. Run commands
+that need the shell's current environment directly in the foreground shell.
+
 Enable trust mode with a second confirmation:
 
 ```text

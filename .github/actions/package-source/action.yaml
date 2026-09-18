@@ -224,6 +224,44 @@ runs:
         fi
         make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin
 
+    # The openclaw adapter's TypeScript unit suite (`make test-openclaw-plugin`
+    # -> `npx tsx --test tests/unit/*-test.ts`, 7 files / 140 tests) has no
+    # other CI entry point: the `Test agent-memory` job in ci.yaml has no Node
+    # step at all, and adding one there needs the `workflow` token scope
+    # (#3255). Wiring it here instead turns the nightly and release packaging
+    # paths into a gate, so a red adapter cannot ship inside an RPM; per-PR
+    # coverage is still tracked by #3255.
+    #
+    # Both ordering constraints come from `build-openclaw-plugin` above: it
+    # runs `sync-versions` first and manifest-config-schema-test.ts asserts on
+    # the rewritten openclaw.plugin.json, so the suite has to run after it and
+    # not before; and its `npm install` leaves this same directory warm, so the
+    # suite's own install is a no-op and the tests add ~4 s.
+    - name: Setup Node.js (agent-memory plugin tests)
+      if: inputs.component == 'agent-memory'
+      uses: actions/setup-node@v4
+      with:
+        # Not the action's Node 20: tests/unit/corpus-routing-test.ts imports
+        # real OpenClaw runtime code
+        # (`openclaw/plugin-sdk/memory-core-host-engine-storage`), and openclaw
+        # declares an engine floor Node 20 does not meet -- >=22.14.0 at the
+        # locked 2026.5.7, already >=22.19.0 at 2026.5.22. Not a paperwork
+        # violation either: on Node 20.19.5 the suite fails outright, undici
+        # throwing `TypeError: webidl.util.markAsUncloneable is not a
+        # function`, which would block nightly and release packaging. Node 20
+        # is enough for the build step, where esbuild never executes the host,
+        # but not for running it. 22.23.2 clears both floors and is the pin
+        # build-tokenless-prebuilt already uses, so runners cache it. No step
+        # after this one -- in this action or in any calling job -- uses Node,
+        # so the PATH switch stays contained.
+        node-version: '22.23.2'
+
+    - name: Test OpenClaw plugin (agent-memory)
+      if: inputs.component == 'agent-memory'
+      shell: bash
+      run: |
+        make -C /tmp/build/${ARCHIVE_NAME} test-openclaw-plugin
+
     # -----------------------------------------------------------------
     # Step 3.3: Continue Create source archive
     # -----------------------------------------------------------------

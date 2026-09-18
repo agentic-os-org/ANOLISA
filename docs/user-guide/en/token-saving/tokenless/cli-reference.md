@@ -150,6 +150,62 @@ Agent-facing `retrieve` authorizes the requested hash against `visible_markers` 
 The standalone `tokenless retrieve` command below is a separate trusted local operations path and
 does not require model-visibility context.
 
+## Bundled RTK commands
+
+Tokenless bundles RTK 0.49.0. The behavior below applies to that binary; a compatible
+`rtk` found earlier on `PATH` can be a different version. Check `rtk --version` when
+using these commands directly.
+
+### Search flags
+
+`rtk grep` forwards native search flags to `grep`: `-l` lists matching file names,
+and `-m N` limits matches per file. They no longer mean RTK's line-length or display
+limits. Use the long options `--max-len` and `--max` before the pattern to control
+those RTK display limits. The former RTK `-t` / `--file-type` option is removed;
+use `rtk rg -t rust` for ripgrep's native file-type filtering. Passing `-t` to
+`rtk grep` now exposes the underlying grep's unsupported-option error.
+
+```bash
+rtk grep -l 'TODO' src/*.rs
+rtk grep -m 3 'TODO' src/*.rs
+rtk grep --max 20 --max-len 120 'TODO' src/*.rs
+rtk rg -t rust 'TODO' src/
+```
+
+### Shell rewriting
+
+RTK handles supported commands across multiple lines and applies conservative
+rules to pipelines. It can rewrite a supported final stage, or a supported producer
+when every downstream stage is an allowed display command such as `head`, `tail`,
+or `cat`. Pipelines that count or parse raw output may remain unchanged; rewriting
+is not guaranteed for every shell expression. `sudo` commands pass through unchanged,
+so automatic rewriting does not insert RTK into a privileged command.
+
+Use `rtk rewrite 'COMMAND'` to inspect a proposed rewrite without executing the
+command. Tokenless still keeps its recognized build/test commands native for
+PostTool compression, as described above.
+
+### Output recovery
+
+With the default RTK configuration, supported filters store failure output of at
+least 500 bytes and explicitly truncated output in a local SQLite recovery store.
+When a recovery hint appears, run `rtk recall HASH` with the displayed hash;
+`rtk recall --full HASH` requests all stored output, and `--from`, `--lines`, and
+`--grep` narrow the result. `rtk recall --list` lists retained entries. Storage limits
+and expiry apply, so recall is not a permanent archive. Existing legacy tee
+configuration continues to use its file-based recovery mode.
+
+RTK recovery state is scoped to the host OS user, not to a Tokenless tenant or
+session. On Linux the default store is `$XDG_DATA_HOME/rtk/recall.db`, or
+`~/.local/share/rtk/recall.db` when `XDG_DATA_HOME` is unset. `TOKENLESS_DATA_DIR`
+does not relocate it. Sessions sharing the same OS user and RTK store can list
+and recall each other's retained output. Configure `RTK_RECALL_DB` in the command
+execution environment to select a separate store, or `RTK_RECALL=0` to disable
+recovery. Separate paths do not provide an OS permission boundary for the same user.
+
+RTK recall hashes belong to RTK's store. Use `tokenless retrieve HASH` for Tokenless
+Stash markers; the two recovery commands are not interchangeable.
+
 ## `compress-schema`
 
 Compress one OpenAI Function Calling schema:
@@ -258,7 +314,7 @@ Field matching and truncation change the response representation seen by the mod
 
 Stash applies to complete original arrays used by record reduction, truncated strings, the dropped middle segment of other truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Blacklisted fields, `null`, and empty values are removed without a retrieval marker.
 
-Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Agent integration · Adapter processing rules](framework-integration.md#adapter-processing-rules).
+Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Agent integration · Adapter processing rules](framework-integration.md#adapter-processing-rules) and [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
 
 ## `compress-toon` and `decompress-toon`
 
@@ -383,6 +439,8 @@ tokenless stats summary --compare <baseline-session> <active-session>
 ```
 
 A missing session ID fails with a non-zero exit instead of a 0% comparison, matching `stats diff --session`. `stats summary --limit` must be a positive integer; `--limit 0` is rejected at parse time, matching `stats diff --limit`.
+
+The percentage fields in `stats summary --json` (`chars_saved_percent`, `tokens_saved_percent`) and in `--compare --json` (`saved_percent`) are all computed as a saved amount divided by the original, uncompressed amount; the summary and compare fields clamp the saved amount to zero while `stats diff --json` keeps negative values. See [Measuring savings → Saving-rate field definitions](measuring-savings.md#saving-rate-field-definitions).
 
 Inspect one record or the verified stages of one tool call:
 

@@ -75,15 +75,17 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 Shell 执行前
+Enhanced Assisted 是默认模式。提示符上方的 `◇` 状态行表示 Cosh 可能在前台 Shell 执行前
 分类并路由本次输入。
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ 分析这个服务为什么反复重启
+◇
+user@host:~/project$ git status
+◇
+user@host:~/project$ 分析这个服务为什么反复重启
 ```
 
-在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌ ` 前缀表示普通
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌` 状态行表示普通
 输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
 
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
@@ -91,6 +93,10 @@ Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 She
 ```bash
 COSH_SHELL_INTEGRATION=native cosh
 ```
+
+Enhanced 不会向子进程保留已导出的 Bash `PROMPT_COMMAND` 值。
+各版本的属性限制及 Native 替代方式见
+[Bash prompt 兼容边界](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-兼容边界)。
 
 ```text
 $ hello
@@ -101,7 +107,14 @@ bash: hello: command not found
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
 统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
-`@路径`引用。
+`@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。
+需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
+普通 Shell prompt 保留原生路径补全。
+
+`cosh-core` 中的配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
+显式设置 `hooks.enabled = false` 后，即使安装了 Extension，配置 Hook 也保持禁用。
+禁用范围和 `PreToolUse` 默认阻断行为详见
+[Hooks](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/hooks.md)。
 
 `type = "aliyun"` 时，SysOM 自动优先使用可达的 VPC 端点。
 设置 `ai.providers.<id>.sysom_endpoint` 可固定端点，`COSH_SYSOM_ENDPOINT` 优先级更高，

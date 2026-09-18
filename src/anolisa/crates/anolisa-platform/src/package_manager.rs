@@ -1,9 +1,11 @@
-//! Package manager abstraction (dnf/apt/zypper).
+//! Native dependency provisioning for known RPM and DEB package families.
 
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Command, ExitStatus, Stdio};
 
+use crate::command::{CommandRunner, SystemCommandRunner};
+use crate::rpm_tool::{RpmDialect, RpmTool};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,43 +21,49 @@ pub trait PackageManager {
     fn install(&self, packages: &[&str]) -> Result<(), PkgError>;
     fn remove(&self, packages: &[&str]) -> Result<(), PkgError>;
     fn is_installed(&self, package: &str) -> bool;
+    /// Human-readable installation command for this selected executable.
+    fn install_hint(&self, packages: &[&str]) -> String {
+        format!(
+            "install {} with the host package manager",
+            packages.join(" ")
+        )
+    }
 }
 
-/// DNF/YUM backend for RPM-based distros (Anolis, ALINUX, RHEL, Fedora).
-pub struct DnfBackend;
+/// Selected RPM package manager for dependency provisioning.
+pub struct RpmBackend {
+    tool: RpmTool,
+}
 
 /// APT backend for DEB-based distros (Ubuntu, Debian).
 pub struct AptBackend;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PackageManagerKind {
-    Dnf,
-    Apt,
-}
-
-impl PackageManagerKind {
-    fn into_manager(self) -> Box<dyn PackageManager> {
-        match self {
-            Self::Dnf => Box::new(DnfBackend),
-            Self::Apt => Box::new(AptBackend),
-        }
+impl PackageManager for RpmBackend {
+    fn install_hint(&self, packages: &[&str]) -> String {
+        format!("sudo {} install {}", self.tool.program, packages.join(" "))
     }
-}
 
-impl PackageManager for DnfBackend {
     fn install(&self, packages: &[&str]) -> Result<(), PkgError> {
         if packages.is_empty() {
             return Ok(());
         }
-        let status = run_with_progress(
-            Command::new("dnf")
-                .args(["install", "-y", "--setopt=install_weak_deps=False"])
-                .args(packages),
-        )
-        .map_err(|e| PkgError::CommandFailed(format!("failed to spawn dnf: {e}")))?;
+        let mut command = Command::new(self.tool.program);
+        command.args(["install", "-y"]);
+        match self.tool.dialect {
+            RpmDialect::Dnf => {
+                command.arg("--setopt=install_weak_deps=False");
+            }
+            RpmDialect::Yum => {
+                command.arg("--setopt=skip_missing_names_on_install=false");
+            }
+        }
+        let status = run_with_progress(command.args(packages)).map_err(|e| {
+            PkgError::CommandFailed(format!("failed to spawn {}: {e}", self.tool.program))
+        })?;
         if !status.success() {
             return Err(PkgError::CommandFailed(format!(
-                "dnf install exited with {status}"
+                "{} install exited with {status}",
+                self.tool.program
             )));
         }
         Ok(())
@@ -65,11 +73,18 @@ impl PackageManager for DnfBackend {
         if packages.is_empty() {
             return Ok(());
         }
-        let status = run_with_progress(Command::new("dnf").args(["remove", "-y"]).args(packages))
-            .map_err(|e| PkgError::CommandFailed(format!("failed to spawn dnf: {e}")))?;
+        let status = run_with_progress(
+            Command::new(self.tool.program)
+                .args(["remove", "-y"])
+                .args(packages),
+        )
+        .map_err(|e| {
+            PkgError::CommandFailed(format!("failed to spawn {}: {e}", self.tool.program))
+        })?;
         if !status.success() {
             return Err(PkgError::CommandFailed(format!(
-                "dnf remove exited with {status}"
+                "{} remove exited with {status}",
+                self.tool.program
             )));
         }
         Ok(())
@@ -87,6 +102,10 @@ impl PackageManager for DnfBackend {
 }
 
 impl PackageManager for AptBackend {
+    fn install_hint(&self, packages: &[&str]) -> String {
+        format!("sudo apt-get install {}", packages.join(" "))
+    }
+
     fn install(&self, packages: &[&str]) -> Result<(), PkgError> {
         if packages.is_empty() {
             return Ok(());
@@ -149,53 +168,28 @@ fn run_with_progress_to(command: &mut Command, progress: OwnedFd) -> io::Result<
         .status()
 }
 
-/// Detect the appropriate package manager for the current system.
-///
-/// Uses `pkg_base` from `EnvFacts` to select the backend. Falls back to
-/// checking binary availability when the hint is absent or unrecognized.
+/// Select a tool only within the already classified host package family.
 pub fn detect_package_manager(pkg_base: Option<&str>) -> Result<Box<dyn PackageManager>, PkgError> {
-    if let Some(kind) = pkg_base.and_then(package_manager_kind) {
-        return Ok(kind.into_manager());
-    }
-
-    // Unknown families may still be installable when the host exposes a
-    // supported package manager under a nonstandard distro identifier.
-    if command_exists("dnf") || command_exists("yum") {
-        Ok(Box::new(DnfBackend))
-    } else if command_exists("apt-get") {
-        Ok(Box::new(AptBackend))
-    } else {
-        Err(PkgError::Unsupported(
+    match pkg_base {
+        Some("rpm") => RpmTool::detect(&SystemCommandRunner)
+            .map(|tool| Box::new(RpmBackend { tool }) as Box<dyn PackageManager>)
+            .map_err(|e| PkgError::CommandFailed(e.to_string())),
+        Some("deb") => {
+            let output = SystemCommandRunner
+                .run("apt-get", &["--version"])
+                .map_err(|e| PkgError::CommandFailed(format!("cannot use apt-get: {e}")))?;
+            if output.code != Some(0) {
+                return Err(PkgError::CommandFailed(format!(
+                    "apt-get --version failed: {}{}",
+                    output.stdout, output.stderr
+                )));
+            }
+            Ok(Box::new(AptBackend))
+        }
+        _ => Err(PkgError::Unsupported(
             pkg_base.unwrap_or("unknown").to_string(),
-        ))
+        )),
     }
-}
-
-fn package_manager_kind(pkg_base: &str) -> Option<PackageManagerKind> {
-    if pkg_base == "rpm"
-        || pkg_base.starts_with("anolis")
-        || pkg_base.starts_with("alinux")
-        || pkg_base.starts_with("rhel")
-        || pkg_base.starts_with("centos")
-        || pkg_base.starts_with("fedora")
-    {
-        Some(PackageManagerKind::Dnf)
-    } else if pkg_base == "deb" || pkg_base.starts_with("ubuntu") || pkg_base.starts_with("debian")
-    {
-        Some(PackageManagerKind::Apt)
-    } else {
-        None
-    }
-}
-
-fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -221,24 +215,12 @@ mod tests {
     }
 
     #[test]
-    fn package_family_hints_select_expected_backends() {
-        assert_eq!(package_manager_kind("rpm"), Some(PackageManagerKind::Dnf));
-        assert_eq!(package_manager_kind("deb"), Some(PackageManagerKind::Apt));
-    }
-
-    #[test]
-    fn distro_hints_keep_selecting_expected_backends() {
-        for pkg_base in ["anolis23", "alinux4", "rhel9", "centos9", "fedora42"] {
-            assert_eq!(
-                package_manager_kind(pkg_base),
-                Some(PackageManagerKind::Dnf)
-            );
-        }
-        for pkg_base in ["ubuntu24", "debian12"] {
-            assert_eq!(
-                package_manager_kind(pkg_base),
-                Some(PackageManagerKind::Apt)
-            );
+    fn unknown_family_never_selects_a_tool_from_path() {
+        for family in [None, Some("unknown"), Some("anolis23")] {
+            assert!(matches!(
+                detect_package_manager(family),
+                Err(PkgError::Unsupported(_))
+            ));
         }
     }
 

@@ -1,0 +1,45 @@
+{
+ "suite": "scenario",
+ "scenario": "python_50",
+ "display_name": "Code: Python (~50 lines)",
+ "content_type": "code",
+ "size_label": "~50 lines",
+ "source": {
+  "reference": "headroom benchmarks/bench_latency.py::generate_scenarios()",
+  "headroom_native": true,
+  "headroom_revision": "e616dcf788e29e285b5ab5c17af49585c0d60613",
+  "headroom_dirty": false
+ },
+ "model_limit": 200000,
+ "message_count": 4,
+ "tool_message_count": 1,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful assistant.\n\nCurrent date: 2025-01-06"
+  },
+  {
+   "role": "user",
+   "content": "Analyze the following data."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_bench_1",
+     "type": "function",
+     "function": {
+      "name": "get_data",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_bench_1",
+   "content": "\"\"\"Auto-generated benchmark module for code compression testing.\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport logging\nimport os\nfrom dataclasses import dataclass, field\nfrom typing import Any\n\nlogger = logging.getLogger(__name__)\n\n\n@dataclass\nclass ProcessingConfig:\n    \"\"\"Configuration for data processing.\"\"\"\n\n    batch_size: int = 100\n    max_retries: int = 3\n    timeout_seconds: float = 30.0\n    output_format: str = 'json'\n    debug: bool = False\n\n\ndef process_batch_0(data: list[dict], config: dict | None = None) -> dict:\n    \"\"\"Process process batch 0 and return results.\"\"\"\n    if config is None:\n        config = {}\n    results = {\"function\": \"process_batch_0\", \"items\": []}\n    errors = []\n\n    for item in data[0:10]:\n        value = item.get(\"field_0\", None)\n    if len(results['items']) > 10:\n        results[\"overflow\"] = True\n    try:\n        computed = sum(x.get('value', 0) for x in data[:7])\n        results[\"computed_2\"] = computed\n    except (KeyError, TypeError) as exc:\n        errors.append({\"step\": 3, \"error\": str(exc)})\n    # Step 4: aggregate intermediate results\n    results[\"step_4\"] = len(data)\n    for item in data[5:15]:\n        value = item.get(\"field_5\", None)\n    if len(results['items']) > 60:\n        results[\"overflow\"] = True\n    try:\n        computed = sum(x.get('value', 0) for x in data[:12])\n        results[\"computed_7\"] = computed\n    except (KeyError, TypeError) as exc:\n        errors.append({\"step\": 8, \"error\": str(exc)})\n    # Step 9: aggregate intermediate results\n    results[\"step_9\"] = len(data)\n    for item in data[10:20]:\n        value = item.get(\"field_10\", None)\n    if len(results['items']) > 110:\n        results[\"overflow\"] = True\n    try:\n        computed = sum(x.get('value', 0) for x in data[:17])\n        results[\"computed_12\"] = computed\n    except (KeyError, TypeError) as exc:\n        errors.append({\"step\": 13, \"error\": str(exc)})\n\n    results[\"errors\"] = errors\n    return results\n\n"
+  }
+ ]
+}
