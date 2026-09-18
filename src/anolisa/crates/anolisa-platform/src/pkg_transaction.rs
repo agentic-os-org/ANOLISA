@@ -137,7 +137,7 @@ pub trait PackageTransaction {
     ///
     /// This method is only the spawn/exit mechanism; **whether** a removal is
     /// authorized is the caller's decision. For an `rpm-observed` package
-    /// (`Ownership::owns_removal()` is `false`) the caller must require an
+    /// without removal authority, the caller must require an
     /// explicit `--remove-system-package` override before invoking this, so a
     /// preinstalled system RPM is never dropped by a default uninstall.
     ///

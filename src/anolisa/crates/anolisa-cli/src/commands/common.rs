@@ -1482,7 +1482,7 @@ mod tests {
             prefix: layout.prefix.clone(),
             ..InstalledState::default()
         };
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "sec-core".to_string(),
             version: "0.1.0".to_string(),
@@ -1507,8 +1507,7 @@ mod tests {
             provisioned_packages: Vec::new(),
         });
         std::fs::create_dir_all(state_dir).expect("mkdir state");
-        state
-            .save(&state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &state_dir.join("installed.toml"))
             .expect("save state");
 
         // Write contract under the package datadir (NOT local datadir).
@@ -1618,11 +1617,11 @@ dest = "{datadir}/adapters/sec-core/openclaw/"
         fn seed_v3_store(layout: &FsLayout, objects: Vec<InstalledObject>) -> StateStore {
             let mut state = v3_state();
             for object in objects {
-                state.upsert_object(object);
+                state.objects.push(object);
             }
             std::fs::create_dir_all(&layout.state_dir).expect("mkdir state dir");
             let path = layout.state_dir.join("installed.toml");
-            state.save(&path).expect("seed v3 state");
+            crate::test_support::write_legacy_state(&state, &path).expect("seed v3 state");
             StateStore::load(&path, 0).expect("load store")
         }
 

@@ -28,7 +28,6 @@ pub enum InstallMode {
 }
 
 impl InstallMode {
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             InstallMode::User => "user",
@@ -38,12 +37,7 @@ impl InstallMode {
 }
 
 /// Snapshot of global CLI flags, immutable for the lifetime of the process.
-///
-/// Several fields are not consumed yet by skeleton handlers; they are
-/// kept on the context so that the dispatcher contract stays stable as
-/// real implementations land.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CliContext {
     pub install_mode: InstallMode,
     pub prefix: Option<PathBuf>,

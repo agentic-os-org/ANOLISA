@@ -14,7 +14,7 @@ use crate::health::CheckSpec;
 use crate::hooks::HookPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Default schema version applied when the TOML omits it.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -1734,24 +1734,6 @@ fn read_to_string(path: &Path) -> Result<String, ManifestError> {
     std::fs::read_to_string(path).map_err(|e| ManifestError::Io(path.display().to_string(), e))
 }
 
-/// Helper used by [`Catalog`] when scanning layer directories.
-pub(crate) fn manifest_paths(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if !dir.exists() {
-        return files;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
 /// Errors raised while loading manifests.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
@@ -1766,6 +1748,35 @@ pub enum ManifestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_component_contracts_parse() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/components");
+        let mut names = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for entry in std::fs::read_dir(&root).expect("read component fixtures") {
+            let path = entry
+                .expect("component entry")
+                .path()
+                .join("component.toml");
+            if path.is_file() {
+                let manifest = ComponentManifest::from_file(&path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert!(
+                    names.insert(manifest.component.name),
+                    "duplicate identity: {}",
+                    path.display()
+                );
+                count += 1;
+            }
+        }
+        assert!(names.contains("agentsight"));
+        assert!(names.contains("tokenless"));
+        assert!(
+            count >= 6,
+            "expected at least 6 real contracts, got {count}"
+        );
+    }
 
     fn skill_names(names: &[&str]) -> Vec<AdapterSkillSpec> {
         names

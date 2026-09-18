@@ -279,27 +279,6 @@ impl JournalInventory {
     }
 }
 
-/// What to observe for one object.
-#[derive(Debug, Clone, Copy)]
-pub struct ObserveRequest<'a> {
-    /// Object vocabulary (component, adapter, osbase).
-    pub kind: ObjectKind,
-    /// Object name.
-    pub name: &'a str,
-    /// Scope the intent operates in.
-    pub scope: InstallationScope,
-    /// Native package to probe, when the intent involves the delegated
-    /// family and the name is already resolved. `None` skips the probe
-    /// (owned-only paths, user scope) and yields [`NativeProbe::NotProbed`].
-    pub native_package: Option<&'a str>,
-    /// RFC3339 UTC timestamp stamped into fresh observations.
-    pub observed_at: &'a str,
-    /// Run the integrity probe over the record's owned files (repair
-    /// paths). Skipped otherwise — hashing every file on every plan would
-    /// tax `install` for evidence only `repair` consumes.
-    pub verify_owned_files: bool,
-}
-
 /// How fact assembly failed. Only *reads* can fail here; an absent record
 /// or package is a fact, not an error.
 #[derive(Debug, Error)]
@@ -589,61 +568,6 @@ pub fn lifecycle_facts_from_snapshot(
     })
 }
 
-/// Assemble [`Facts`] for one object.
-///
-/// `provider` supplies the native probe and may be `None` only when
-/// [`ObserveRequest::native_package`] is also `None`. `layout` bounds the
-/// integrity probe; it is consulted only when
-/// [`ObserveRequest::verify_owned_files`] is set and the record is owned.
-pub fn assemble_facts(
-    req: &ObserveRequest<'_>,
-    store: &StateStore,
-    provider: Option<&DelegatedProvider<'_>>,
-    layout: &FsLayout,
-    journal_dir: &Path,
-) -> Result<Facts, FactsError> {
-    let record = store.record_facts(req.kind, req.name);
-
-    let native = match (req.native_package, provider) {
-        (Some(package), Some(provider)) => provider.observe(package, req.observed_at)?,
-        _ => NativeProbe::NotProbed,
-    };
-
-    let pending_journal = pending_journal_for(
-        JournalEvidence::new(journal_dir, &store.operations),
-        req.name,
-    )?
-    .is_some();
-
-    let active_adapter_claims: Vec<String> = store
-        .adapter_claims
-        .iter()
-        .filter(|claim| claim.component == req.name)
-        .map(|claim| claim.framework.clone())
-        .collect();
-
-    let owned_files_verified = if req.verify_owned_files {
-        observe_owned_files_for_record(&record, store, req.kind, req.name, layout).and_then(
-            |observation| match observation.verdict {
-                OwnedFilesVerdict::Verified => Some(true),
-                OwnedFilesVerdict::Drifted => Some(false),
-                OwnedFilesVerdict::Inconclusive => None,
-            },
-        )
-    } else {
-        None
-    };
-
-    Ok(Facts {
-        scope: req.scope,
-        record,
-        native,
-        pending_journal,
-        active_adapter_claims,
-        owned_files_verified,
-    })
-}
-
 /// Integrity observations over a record's owned file list. `None` means
 /// there is nothing to verify (no record, delegated binding, or empty file
 /// list); an over-budget path is retained with an inconclusive verdict.
@@ -766,15 +690,39 @@ mod tests {
 
     const NOW: &str = "2026-07-16T00:00:00Z";
 
-    fn request<'a>(name: &'a str, native_package: Option<&'a str>) -> ObserveRequest<'a> {
-        ObserveRequest {
-            kind: ObjectKind::Component,
-            name,
-            scope: InstallationScope::System,
-            native_package,
-            observed_at: NOW,
-            verify_owned_files: false,
+    fn collect_lifecycle_facts(
+        name: &str,
+        native_package: Option<&str>,
+        verify_owned_files: bool,
+        store: &StateStore,
+        provider: Option<&DelegatedProvider<'_>>,
+        layout: &FsLayout,
+        journal_dir: &Path,
+    ) -> Result<Facts, FactsError> {
+        let mut probes = vec![SnapshotProbe::State, SnapshotProbe::PendingJournal];
+        if native_package.is_some() {
+            probes.push(SnapshotProbe::NativePackage);
         }
+        if verify_owned_files {
+            probes.push(SnapshotProbe::OwnedFiles);
+        }
+        let request = ComponentSnapshotRequest::new(name, InstallationScope::System, probes);
+        let snapshot = assemble_component_snapshot(
+            request,
+            native_package,
+            NOW,
+            store,
+            provider,
+            layout,
+            journal_dir,
+        )?;
+        let claims = store
+            .adapter_claims
+            .iter()
+            .filter(|claim| claim.component == name)
+            .map(|claim| claim.framework.clone())
+            .collect();
+        lifecycle_facts_from_snapshot(&snapshot, claims, None)
     }
 
     fn layout_under(prefix: &Path) -> FsLayout {
@@ -875,8 +823,10 @@ mod tests {
         let layout = layout_under(tmp.path());
         let store = StateStore::empty();
 
-        let facts = assemble_facts(
-            &request("cosh", None),
+        let facts = collect_lifecycle_facts(
+            "cosh",
+            None,
+            false,
             &store,
             None,
             &layout,
@@ -904,8 +854,10 @@ mod tests {
         let txn = FakeTxn::default();
         let provider = DelegatedProvider::new(&query, &txn);
 
-        let facts = assemble_facts(
-            &request("cosh", Some("cosh")),
+        let facts = collect_lifecycle_facts(
+            "cosh",
+            Some("cosh"),
+            false,
             &store,
             Some(&provider),
             &layout,
@@ -1258,8 +1210,10 @@ mod tests {
         let mut store = StateStore::empty();
         store.operations.push(operation(&operation_id, "ok"));
 
-        let facts = assemble_facts(
-            &request("unrelated", None),
+        let facts = collect_lifecycle_facts(
+            "unrelated",
+            None,
+            false,
             &store,
             None,
             &layout,
@@ -1281,8 +1235,9 @@ mod tests {
         let mut store = StateStore::empty();
         store.operations.push(operation(&operation_id, "ok"));
 
-        let facts = assemble_facts(&request("cosh", None), &store, None, &layout, &journal_dir)
-            .expect("assemble facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, false, &store, None, &layout, &journal_dir)
+                .expect("assemble facts");
 
         assert!(facts.pending_journal);
     }
@@ -1562,12 +1517,9 @@ mod tests {
         let mut store = StateStore::empty();
         store.upsert(owned_installation("cosh", vec![good_file.clone()]));
 
-        let healthy_req = ObserveRequest {
-            verify_owned_files: true,
-            ..request("cosh", None)
-        };
         let facts =
-            assemble_facts(&healthy_req, &store, None, &layout, &journal_dir).expect("facts");
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert_eq!(facts.owned_files_verified, Some(true));
 
         // Add a missing file: the verdict flips to damaged.
@@ -1577,12 +1529,14 @@ mod tests {
         };
         store.upsert(owned_installation("cosh", vec![missing_file]));
         let facts =
-            assemble_facts(&healthy_req, &store, None, &layout, &journal_dir).expect("facts");
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert_eq!(facts.owned_files_verified, Some(false));
 
         // Without the flag the probe never runs.
-        let facts = assemble_facts(&request("cosh", None), &store, None, &layout, &journal_dir)
-            .expect("facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, false, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert_eq!(facts.owned_files_verified, None);
     }
 
@@ -1637,15 +1591,12 @@ mod tests {
             capabilities: Vec::new(),
         };
 
-        let req = ObserveRequest {
-            verify_owned_files: true,
-            ..request("cosh", None)
-        };
-
         // Healthy quarantined files → Some(true): the R6 evidence.
         let mut store = StateStore::empty();
         store.quarantined.push(quarantined("cosh", vec![good_file]));
-        let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert!(matches!(facts.record, RecordFacts::Quarantined(_)));
         assert_eq!(facts.owned_files_verified, Some(true));
 
@@ -1663,13 +1614,17 @@ mod tests {
         store
             .quarantined
             .push(quarantined("cosh", vec![missing_file]));
-        let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert_eq!(facts.owned_files_verified, Some(false));
 
         // No file list → nothing to verify.
         let mut store = StateStore::empty();
         store.quarantined.push(quarantined("cosh", Vec::new()));
-        let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
         assert_eq!(facts.owned_files_verified, None);
     }
 
@@ -1740,11 +1695,9 @@ mod tests {
             reason: QuarantineReason::NoEvidence,
         });
 
-        let req = ObserveRequest {
-            verify_owned_files: true,
-            ..request("cosh", None)
-        };
-        let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
+        let facts =
+            collect_lifecycle_facts("cosh", None, true, &store, None, &layout, &journal_dir)
+                .expect("facts");
 
         // "Cannot judge" — not "verified".
         assert_eq!(facts.owned_files_verified, None);
@@ -1787,8 +1740,10 @@ mod tests {
         store.adapter_claims.push(claim("cosh", "copilot"));
         store.adapter_claims.push(claim("tokenless", "gemini"));
 
-        let facts = assemble_facts(
-            &request("cosh", None),
+        let facts = collect_lifecycle_facts(
+            "cosh",
+            None,
+            false,
             &store,
             None,
             &layout,

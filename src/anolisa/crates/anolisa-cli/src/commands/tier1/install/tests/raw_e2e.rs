@@ -1346,7 +1346,7 @@ scope = "@anolisa"
         prefix: layout.prefix.clone(),
         ..Default::default()
     };
-    state.upsert_object(InstalledObject {
+    state.objects.push(InstalledObject {
         kind: ObjectKind::Component,
         name: "agentsight".to_string(),
         version: "0.2.0".to_string(),
@@ -1370,8 +1370,7 @@ scope = "@anolisa"
         health: Vec::new(),
         provisioned_packages: Vec::new(),
     });
-    state
-        .save(&layout.state_dir.join("installed.toml"))
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
         .expect("save state");
 
     let mut a = args("agentsight");
@@ -1994,7 +1993,7 @@ fn seed_installed_component(layout: &FsLayout, component: &str, version: &str) {
         prefix: layout.prefix.clone(),
         ..Default::default()
     };
-    state.upsert_object(InstalledObject {
+    state.objects.push(InstalledObject {
         kind: ObjectKind::Component,
         name: component.to_string(),
         version: version.to_string(),
@@ -2018,8 +2017,7 @@ fn seed_installed_component(layout: &FsLayout, component: &str, version: &str) {
         health: Vec::new(),
         provisioned_packages: Vec::new(),
     });
-    state
-        .save(&layout.state_dir.join("installed.toml"))
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
         .expect("save state");
 }
 

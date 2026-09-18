@@ -5128,7 +5128,7 @@ value = true
             prefix: tmp.path().to_path_buf(),
             ..InstalledState::default()
         };
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "sec-core".to_string(),
             version: "0.1.0".to_string(),
@@ -5153,8 +5153,7 @@ value = true
             provisioned_packages: Vec::new(),
         });
         std::fs::create_dir_all(&state_dir).expect("mkdir state");
-        state
-            .save(&state_dir.join("installed.toml"))
+        crate::state::write_legacy_fixture(&state, &state_dir.join("installed.toml"))
             .expect("save state");
 
         // Write a datadir contract (no state snapshot).
@@ -5238,7 +5237,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             prefix: prefix.to_path_buf(),
             ..InstalledState::default()
         };
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: component.to_string(),
             version: "0.1.0".to_string(),
@@ -5271,8 +5270,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             provisioned_packages: Vec::new(),
         });
         std::fs::create_dir_all(state_dir).expect("mkdir state");
-        state
-            .save(&state_dir.join("installed.toml"))
+        crate::state::write_legacy_fixture(&state, &state_dir.join("installed.toml"))
             .expect("save state");
     }
 
@@ -5481,10 +5479,9 @@ source = "adapters/openclaw"
             prefix: prefix.to_path_buf(),
             ..InstalledState::default()
         };
-        state.upsert_adapter_claim(claim);
+        state.adapter_claims.push(claim);
         std::fs::create_dir_all(state_dir).expect("mkdir state");
-        state
-            .save(&state_dir.join("installed.toml"))
+        crate::state::write_legacy_fixture(&state, &state_dir.join("installed.toml"))
             .expect("save state");
     }
 
@@ -5951,9 +5948,11 @@ entry = ".qoder-plugin/plugin.json"
 
         // Pure directory discovery: no installed state, no contract.
         std::fs::create_dir_all(&state_dir).expect("mkdir state");
-        InstalledState::default()
-            .save(&state_dir.join("installed.toml"))
-            .expect("save empty state");
+        crate::state::write_legacy_fixture(
+            &InstalledState::default(),
+            &state_dir.join("installed.toml"),
+        )
+        .expect("save empty state");
 
         // First root: empty skeleton. Second root: real bundle.
         std::fs::create_dir_all(first_datadir.join("adapters/tokenless/openclaw"))
@@ -6126,9 +6125,11 @@ entry = "custom-entry.json"
 
         // No installed state, no contract — just a resource directory.
         std::fs::create_dir_all(&state_dir).expect("mkdir state");
-        InstalledState::default()
-            .save(&state_dir.join("installed.toml"))
-            .expect("save empty state");
+        crate::state::write_legacy_fixture(
+            &InstalledState::default(),
+            &state_dir.join("installed.toml"),
+        )
+        .expect("save empty state");
 
         let convention = datadir.join("adapters").join("tokenless").join("openclaw");
         std::fs::create_dir_all(&convention).expect("mkdir convention");
@@ -6166,9 +6167,11 @@ entry = "custom-entry.json"
         let datadir = tmp.path().join("data");
 
         std::fs::create_dir_all(&state_dir).expect("mkdir state");
-        InstalledState::default()
-            .save(&state_dir.join("installed.toml"))
-            .expect("save empty state");
+        crate::state::write_legacy_fixture(
+            &InstalledState::default(),
+            &state_dir.join("installed.toml"),
+        )
+        .expect("save empty state");
 
         let adapters = datadir.join("adapters/tokenless");
         let openclaw = adapters.join("openclaw");

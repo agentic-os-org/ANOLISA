@@ -271,9 +271,8 @@ fn writable_state_with_mismatched_scope_is_fatal() {
     let tmp = tempdir().expect("tempdir");
     let layout = FsLayout::system(Some(tmp.path().join("system")));
     let mut state = InstalledState::default();
-    state.upsert_object(component("forged-user-record"));
-    state
-        .save(&layout.state_dir.join(INSTALLED_STATE_FILE))
+    state.objects.push(component("forged-user-record"));
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join(INSTALLED_STATE_FILE))
         .expect("save mismatched state");
 
     let err = StateView::from_layouts(

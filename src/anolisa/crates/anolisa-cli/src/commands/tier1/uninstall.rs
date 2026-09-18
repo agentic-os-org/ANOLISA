@@ -627,8 +627,7 @@ fn render_result(
     Ok(())
 }
 
-/// JSON wire wrapper for a `--dry-run` [`LifecyclePlan`] (the generic
-/// uninstall/purge plan view).
+/// JSON wire wrapper for a `--purge --dry-run` [`LifecyclePlan`].
 ///
 /// [`LifecyclePlan`] is a render-context-free planning model and deliberately
 /// carries no `dry_run` field — the plan is identical whether or not the caller
@@ -871,7 +870,7 @@ mod tests {
         std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
 
         let mut state = legacy_state_for_layout(&layout);
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Capability,
             name: "agent-observability".to_string(),
             version: "0.1.0".to_string(),
@@ -895,8 +894,7 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         });
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state save");
 
         let err = handle_with_fake_effects(
@@ -959,7 +957,7 @@ mod tests {
         std::fs::write(&owned, b"binary").expect("write owned");
 
         let mut state = legacy_state_for_layout(&layout);
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "agentsight".to_string(),
             version: "0.2.0".to_string(),
@@ -992,7 +990,7 @@ mod tests {
             provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
-        state.save(&state_path).expect("seed state save");
+        crate::test_support::write_legacy_state(&state, &state_path).expect("seed state save");
 
         handle_with_fake_effects(
             args("agentsight", false),
@@ -1083,7 +1081,7 @@ mod tests {
         .expect("write installed manifest");
 
         let mut state = legacy_state_for_layout(&layout);
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "ws-ckpt".to_string(),
             version: "0.1.0".to_string(),
@@ -1115,8 +1113,7 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         });
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state save");
 
         handle_with_fake_effects(
@@ -1156,7 +1153,7 @@ mod tests {
         std::fs::write(&owned, b"binary").expect("write owned");
 
         let mut state = legacy_state_for_layout(&layout);
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "agentsight".to_string(),
             version: "0.2.0".to_string(),
@@ -1189,7 +1186,7 @@ mod tests {
             provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
-        state.save(&state_path).expect("seed state save");
+        crate::test_support::write_legacy_state(&state, &state_path).expect("seed state save");
         let prior_bytes = std::fs::read(&state_path).expect("read prior");
 
         let err = handle_with_fake_effects(
@@ -1481,13 +1478,12 @@ mod tests {
             ..Default::default()
         };
         for obj in objs {
-            state.upsert_object(obj);
+            state.objects.push(obj);
         }
         for claim in claims {
-            state.upsert_adapter_claim(claim);
+            state.adapter_claims.push(claim);
         }
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state");
     }
 
@@ -1791,13 +1787,12 @@ mod tests {
         );
         let layout = common::resolve_layout(&ctx);
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_object(
+        state.objects.push(rpm_object(
             "copilot-shell",
             "copilot-shell",
             Ownership::RpmManaged,
         ));
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("save mismatched state");
         let rpm = FakeRpm::present("copilot-shell");
 
@@ -1922,28 +1917,63 @@ mod tests {
         );
     }
 
-    /// Acceptance ③ (decision): `owns_removal() || --remove-system-package` drives
-    /// whether the package is removed, across the matrix.
     #[test]
     fn rpm_removal_decision_matrix() {
-        // `flag` is a bound variable so the test exercises the real branch rather
-        // than a constant-folded literal.
-        let decide = |ownership: Ownership, flag: bool| ownership.owns_removal() || flag;
-        assert!(
-            !decide(Ownership::RpmObserved, false),
-            "rpm-observed default keeps the system RPM",
-        );
-        assert!(
-            decide(Ownership::RpmObserved, true),
-            "rpm-observed + flag removes the system RPM",
-        );
-        assert!(
-            decide(Ownership::RpmManaged, false),
-            "rpm-managed removes by default",
-        );
-        // NB: only RPM ownerships reach this formula. RawManaged also reports
-        // owns_removal() == true, but raw components are routed to the file-removal
-        // executor instead, never here — so it is intentionally not asserted.
+        for (ownership, remove_system_package, expected) in [
+            (
+                Ownership::RpmObserved,
+                false,
+                UninstallDisposition::StateOnly,
+            ),
+            (
+                Ownership::RpmObserved,
+                true,
+                UninstallDisposition::NativeRemove,
+            ),
+            (
+                Ownership::RpmManaged,
+                false,
+                UninstallDisposition::NativeRemove,
+            ),
+        ] {
+            let tmp = tempdir().expect("tmpdir");
+            let ctx = ctx_with_prefix(
+                false,
+                true,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            );
+            seed(
+                &ctx,
+                vec![rpm_object("copilot-shell", "copilot-shell", ownership)],
+                Vec::new(),
+            );
+            let mut args = args_rm("copilot-shell");
+            args.remove_system_package = remove_system_package;
+            let rpm = FakeRpm::present("copilot-shell");
+            let outcome = application::run_with_dependencies(
+                application::ApplicationRequest {
+                    args: &args,
+                    intent: anolisa_core::execution::ExecutionIntent::Plan,
+                },
+                &ctx,
+                &rpm,
+                &rpm,
+                true,
+                &mut RecordingProgress::default(),
+                crate::test_support::raw_effects(),
+            )
+            .expect("preview");
+            let application::ApplicationOutcome::Preview { disposition, .. } = outcome else {
+                panic!("expected preview");
+            };
+            assert_eq!(
+                disposition.label(),
+                expected.label(),
+                "{ownership:?} remove={remove_system_package}"
+            );
+            assert_eq!(rpm.remove_calls.get(), 0);
+        }
     }
 
     /// Disposition labels are the stable wire strings the `package_removal` field
@@ -2251,7 +2281,7 @@ mod tests {
         std::fs::write(&owned, b"binary").expect("write owned");
 
         let mut state = legacy_state_for_layout(&layout);
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "agentsight".to_string(),
             version: "0.2.0".to_string(),
@@ -2283,8 +2313,7 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         });
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state save");
 
         let c = ctx_with_prefix(
@@ -2673,7 +2702,7 @@ name = "copilot-shell"
     #[test]
     fn plan_dry_run_payload_flattens_plan_and_stamps_dry_run() {
         let empty = anolisa_core::state_store::StateStore::empty();
-        let plan = LifecyclePlan::for_component_uninstall("agentsight", &empty);
+        let plan = LifecyclePlan::for_component_purge("agentsight", &empty);
         let payload = PlanDryRunPayload {
             dry_run: true,
             plan: &plan,
@@ -2694,7 +2723,7 @@ name = "copilot-shell"
         );
         assert_eq!(
             obj.get("operation").and_then(|v| v.as_str()),
-            Some("uninstall"),
+            Some("purge"),
             "flattened plan field 'operation' must sit at the data top level: {value}",
         );
         assert_eq!(
@@ -2719,7 +2748,7 @@ name = "copilot-shell"
 
         let owned = PathBuf::from("/usr/local/bin/agentsight");
         let mut state = InstalledState::default();
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: "agentsight".to_string(),
             version: "0.2.0".to_string(),
@@ -2762,7 +2791,7 @@ name = "copilot-shell"
         let mut store = anolisa_core::state_store::StateStore::empty();
         store.installations = migration.active;
 
-        let plan = LifecyclePlan::for_component_uninstall("agentsight", &store);
+        let plan = LifecyclePlan::for_component_purge("agentsight", &store);
         let payload = PlanDryRunPayload {
             dry_run: true,
             plan: &plan,

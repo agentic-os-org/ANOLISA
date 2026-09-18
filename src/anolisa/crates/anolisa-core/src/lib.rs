@@ -1,18 +1,16 @@
 //! Core planning, manifest, state, and lifecycle primitives for ANOLISA.
 //!
-//! The crate is deliberately CLI-agnostic: callers provide catalogs,
+//! The crate is deliberately CLI-agnostic: callers provide manifests,
 //! distribution indexes, environment facts, and filesystem layout, then use
 //! these APIs to plan, execute, audit, and roll back lifecycle operations.
 
 pub mod adapter;
 pub mod backup;
 pub mod capability;
-pub mod catalog;
 pub mod central_log;
 pub mod component;
 pub mod component_snapshot;
 pub mod daemon_server;
-pub mod dependency;
 pub mod distribution;
 pub mod domain;
 pub mod download;
@@ -37,7 +35,6 @@ pub mod providers;
 pub mod provisioner;
 pub mod record_sink;
 pub mod register;
-pub mod registry;
 pub mod resolver;
 pub mod sandbox_manifest;
 pub mod self_update;
@@ -66,7 +63,6 @@ pub use capability::{
     FakeCapabilityManager, NotSupportedCapabilityManager, SetcapManager, apply_capabilities,
     for_install_mode as capability_for_install_mode,
 };
-pub use catalog::{Catalog, CatalogError, CatalogLayers};
 pub use central_log::{
     CentralLog, CentralLogError, LogFilter, LogKind, LogRecord, LogStatus, Severity,
 };
@@ -116,17 +112,12 @@ pub use register::{
     ConsentState, HistoryAction, HistoryEntry, RegisterRecord, RegisterSource, RegisterState,
     RegistrationManager, SubscriptionError, current_operator, generate_link_id, require_root,
 };
-pub use registry::{
-    FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
-    RegistryError, UreqFetch,
-};
 pub use resolver::{
     DependencyProbeError, DependencyResolution, DependencyResolver, DependencyStatus,
     ResolutionPlan, ResolverEnv, ResolverError,
 };
 pub use self_update::{
-    ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,
-    check_update, update_url,
+    ReleaseArtifact, ReleaseManifest, SelfUpdateError, check_update, update_url,
 };
 pub use service::{
     DeactivationOutcome, FakeServiceManager, NotSupportedServiceManager, ServiceActivation,
@@ -147,6 +138,6 @@ pub use telemetry::{
 };
 pub use transaction::{
     DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION, RollbackAction,
-    RollbackActionKind, Transaction, TransactionError, TransactionOutcome,
-    TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
+    RollbackActionKind, Transaction, TransactionError, TransactionOutcomeStatus, TransactionStep,
+    TransactionStepStatus,
 };

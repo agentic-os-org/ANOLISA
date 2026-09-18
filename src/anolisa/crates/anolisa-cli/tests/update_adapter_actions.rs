@@ -223,14 +223,17 @@ impl UpdateFixture {
             }),
         };
         std::fs::create_dir_all(&user_layout.state_dir).expect("state dir");
-        InstalledState {
-            install_mode: StateInstallMode::User,
-            prefix: user_layout.prefix.clone(),
-            objects: vec![object],
-            adapter_claims: vec![claim],
-            ..InstalledState::default()
-        }
-        .save(&user_layout.state_dir.join("installed.toml"))
+        std::fs::write(
+            user_layout.state_dir.join("installed.toml"),
+            toml::to_string_pretty(&InstalledState {
+                install_mode: StateInstallMode::User,
+                prefix: user_layout.prefix.clone(),
+                objects: vec![object],
+                adapter_claims: vec![claim],
+                ..InstalledState::default()
+            })
+            .expect("legacy fixture"),
+        )
         .expect("user state");
         write_state(&system_layout, StateInstallMode::System, Vec::new());
 
@@ -308,13 +311,16 @@ impl UpdateFixture {
 
 fn write_state(layout: &FsLayout, mode: StateInstallMode, objects: Vec<InstalledObject>) {
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
-    InstalledState {
-        install_mode: mode,
-        prefix: layout.prefix.clone(),
-        objects,
-        ..InstalledState::default()
-    }
-    .save(&layout.state_dir.join("installed.toml"))
+    std::fs::write(
+        layout.state_dir.join("installed.toml"),
+        toml::to_string_pretty(&InstalledState {
+            install_mode: mode,
+            prefix: layout.prefix.clone(),
+            objects,
+            ..InstalledState::default()
+        })
+        .expect("legacy fixture"),
+    )
     .expect("state");
 }
 

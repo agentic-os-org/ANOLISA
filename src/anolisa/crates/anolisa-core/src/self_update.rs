@@ -63,25 +63,6 @@ pub struct ReleaseArtifact {
     pub size: Option<u64>,
 }
 
-/// Outcome of a self-update attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SelfUpdateOutcome {
-    /// Local version is equal to or newer than the remote.
-    AlreadyLatest {
-        /// Version reported by the running binary.
-        version: String,
-    },
-
-    /// A newer version is available (and was applied unless in dry-run mode).
-    UpdateAvailable {
-        /// Version reported by the running binary before update.
-        from: String,
-
-        /// Version advertised by the accepted release manifest.
-        to: String,
-    },
-}
-
 /// Errors raised during self-update.
 #[derive(Debug, thiserror::Error)]
 pub enum SelfUpdateError {
@@ -747,61 +728,6 @@ fn extract_binary_from_archive(archive_file: &Path, dest: &Path) -> Result<(), S
 
     Err(SelfUpdateError::ExtractFailed {
         reason: "archive does not contain a regular file named 'anolisa'".to_string(),
-    })
-}
-
-// -- High-level entry point ------------------------------------------
-
-/// Check for update and optionally perform it.
-///
-/// When `dry_run` is true, only the version check and artifact
-/// availability are verified — the binary is never downloaded or
-/// replaced. The binary replacement phase holds an exclusive lock
-/// derived from the executable path (`{exe}.update-lock`).
-///
-/// # Errors
-///
-/// Returns any error from manifest checking, artifact selection, executable
-/// resolution, or binary replacement.
-pub fn check_and_update(
-    endpoint_url: &str,
-    current_version: &str,
-    dry_run: bool,
-    on_progress: Option<&ProgressFn>,
-) -> Result<SelfUpdateOutcome, SelfUpdateError> {
-    let manifest = match check_update(endpoint_url, current_version)? {
-        None => {
-            return Ok(SelfUpdateOutcome::AlreadyLatest {
-                version: current_version.to_string(),
-            });
-        }
-        Some(m) => m,
-    };
-
-    // Validate artifact availability before returning dry-run results,
-    // so that `--dry-run` catches missing-platform errors too.
-    let os = current_os();
-    let arch = current_arch();
-    let artifact = manifest
-        .artifact_for(os, arch)
-        .ok_or_else(|| SelfUpdateError::NoArtifact {
-            os: os.to_string(),
-            arch: arch.to_string(),
-        })?;
-
-    if dry_run {
-        return Ok(SelfUpdateOutcome::UpdateAvailable {
-            from: current_version.to_string(),
-            to: manifest.version.clone(),
-        });
-    }
-
-    let current_exe = resolve_current_exe()?;
-    perform_update(artifact, &current_exe, on_progress)?;
-
-    Ok(SelfUpdateOutcome::UpdateAvailable {
-        from: current_version.to_string(),
-        to: manifest.version.clone(),
     })
 }
 

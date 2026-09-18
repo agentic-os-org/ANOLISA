@@ -1,13 +1,7 @@
-//! Installed state tracking (`installed.toml`).
+//! Legacy installed-state wire types and shared persistence primitives.
 //!
-//! `InstalledState` is the on-disk record of every ANOLISA-managed object
-//! (component / adapter / osbase) plus the backups and
-//! operations that produced them. Persistence is TOML and save is atomic
-//! (`tmp` + `rename`) so a crash mid-write cannot leave a truncated state
-//! file.
-//!
-//! See `templates/installed-state.toml` and launch spec §8.1 for the
-//! field-level contract.
+//! Current state access uses [`crate::state_store::StateStore`]; legacy
+//! records remain readable at its migration boundary.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -21,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::adapter::claim::AdapterClaim;
 use crate::manifest::ServiceScope;
 
-/// Current `installed.toml` schema version. Bump on incompatible changes.
-/// When bumped, [`InstalledState::load`] must migrate older on-disk versions
+/// Last legacy `installed.toml` schema version; current writes use `StateStore`.
+/// Legacy versions are migrated by [`crate::state_store::StateStore::load`]
 /// into the current in-memory shape before returning.
 ///
 /// v2 added the `adapter_claims` array (adapter receipts). The field
@@ -69,7 +63,7 @@ pub enum ObjectKind {
     /// variant survives only so `installed.toml` files written by older
     /// releases still deserialize. New code must never create objects of
     /// this kind; queries are limited to legacy-migration paths (see
-    /// [`InstalledState::prune_legacy_capabilities`]).
+    /// [`crate::state_migration::migrate_object`]).
     Capability,
     /// Runtime/osbase component.
     Component,
@@ -124,43 +118,8 @@ pub enum Ownership {
     /// file transactions are owned by rpm/dnf, uninstall delegates to
     /// `dnf remove`.
     RpmManaged,
-    /// Pre-existing system RPM adopted/observed by ANOLISA. ANOLISA does
-    /// **not** own package removal: [`owns_removal`](Ownership::owns_removal)
-    /// is `false`. Per the intended lifecycle contract
-    /// (`raw_rpm_lifecycle_proposal.md` §11), `uninstall` should drop only the
-    /// ANOLISA state record unless an explicit `--remove-system-package`
-    /// override is given. That uninstall wiring is a follow-up; this change
-    /// only models the ownership, it does not implement the removal path.
+    /// Pre-existing system RPM tracked without package-removal authority.
     RpmObserved,
-}
-
-impl Ownership {
-    /// Whether ANOLISA holds removal authority for this ownership class.
-    ///
-    /// `rpm-observed` objects are tracked but not owned, so default
-    /// uninstall must not invoke `dnf remove`.
-    pub fn owns_removal(self) -> bool {
-        match self {
-            Self::RawManaged | Self::RpmManaged => true,
-            Self::RpmObserved => false,
-        }
-    }
-
-    /// Whether the object was installed via an RPM-based backend.
-    pub fn is_rpm(self) -> bool {
-        matches!(self, Self::RpmManaged | Self::RpmObserved)
-    }
-
-    /// Stable provenance label for wire output (`raw-managed`, `rpm-managed`,
-    /// `rpm-observed`). Centralized so every command renders the same string
-    /// and a future ownership class cannot be given two different labels.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RawManaged => "raw-managed",
-            Self::RpmManaged => "rpm-managed",
-            Self::RpmObserved => "rpm-observed",
-        }
-    }
 }
 
 /// RPM package metadata recorded when a component is managed or observed
@@ -402,45 +361,6 @@ pub struct InstalledObject {
     pub provisioned_packages: Vec<String>,
 }
 
-impl InstalledObject {
-    /// Effective ownership, resolving `None` (pre-v3 state) by inspecting
-    /// legacy fields `managed`, `adopted`, and `install_backend`.
-    pub fn effective_ownership(&self) -> Ownership {
-        if let Some(o) = self.ownership {
-            return o;
-        }
-        // Legacy heuristic, reached only when `ownership` is absent — i.e.
-        // pre-v3 files, since every v3 write sets `ownership` explicitly.
-        // A pre-v3 adopted RPM was recorded either via `adopted = true` or
-        // via `managed = false` (the "external, do not mutate" marker), so
-        // both imply rpm-observed when the backend is RPM. This cannot
-        // misclassify future writes: they never reach the heuristic.
-        // (adopted || !managed) + RPM → rpm-observed; managed + RPM →
-        // rpm-managed; otherwise raw-managed. `yum` is accepted only for
-        // legacy files written before the RPM backend spelling was finalized.
-        let rpm_backend = is_legacy_rpm_backend(self.install_backend.as_deref());
-        if (self.adopted || !self.managed) && rpm_backend {
-            return Ownership::RpmObserved;
-        }
-        if rpm_backend {
-            return Ownership::RpmManaged;
-        }
-        Ownership::RawManaged
-    }
-
-    /// Whether this object represents a pre-existing system RPM that
-    /// ANOLISA only observes without claiming removal authority.
-    pub fn is_rpm_observed(&self) -> bool {
-        self.effective_ownership() == Ownership::RpmObserved
-    }
-
-    /// Whether default uninstall may remove this object's backing files
-    /// or packages.
-    pub fn owns_removal(&self) -> bool {
-        self.effective_ownership().owns_removal()
-    }
-}
-
 /// Backup metadata recorded when an operation touched an external file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupRecord {
@@ -477,12 +397,12 @@ pub struct OperationRecord {
     pub parent_operation_id: Option<String>,
 }
 
-/// On-disk record of installed objects, backups, and operation history.
+/// Legacy on-disk record retained for deserialization and migration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledState {
     /// On-disk schema version for migration decisions.
     pub schema_version: u32,
-    /// RFC3339 UTC timestamp refreshed on every save.
+    /// RFC3339 UTC timestamp recorded by the legacy writer.
     pub updated_at: String,
     /// Install scope used to interpret paths in this state file.
     pub install_mode: InstallMode,
@@ -522,7 +442,7 @@ impl Default for InstalledState {
     }
 }
 
-/// Errors raised while loading or persisting [`InstalledState`].
+/// Errors raised while loading or persisting installed state.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     /// Filesystem error while reading or writing state.
@@ -571,191 +491,10 @@ pub enum StateError {
     },
 }
 
-impl InstalledState {
-    /// Load state from `path`. Returns a fresh default if the file does
-    /// not exist (first-run case).
-    ///
-    /// Refuses files with a newer `schema_version`: serde would otherwise
-    /// skip the unknown fields those schemas keep their records in and hand
-    /// back an empty state, which downstream code would treat as "nothing
-    /// installed".
-    pub fn load(path: &Path) -> Result<Self, StateError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content = fs::read_to_string(path).map_err(|source| StateError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let state: Self = toml::from_str(&content).map_err(|source| StateError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if state.schema_version > STATE_SCHEMA_VERSION {
-            return Err(StateError::NewerSchema {
-                path: path.to_path_buf(),
-                found: state.schema_version,
-                supported: STATE_SCHEMA_VERSION,
-            });
-        }
-        Ok(state)
-    }
-
-    /// Atomically write state to `path` (unique `tmp` sibling + `rename`).
-    /// Refreshes `updated_at` to the current UTC time before serialising.
-    ///
-    /// Security-critical: the tmp sibling is opened with `O_CREAT|O_EXCL`
-    /// (plus `O_NOFOLLOW` on Unix) so a pre-placed symlink at the tmp
-    /// path fails the open instead of letting us write through it to a
-    /// path outside the state directory. The tmp name itself is salted
-    /// with the writer's pid, a process-wide monotonic counter and a
-    /// nanosecond timestamp so two concurrent saves cannot collide on
-    /// the same path. Mirrors `transaction::write_atomic`.
-    pub fn save(&self, path: &Path) -> Result<(), StateError> {
-        // Keep save() non-mutating for callers while refreshing persisted
-        // updated_at and schema_version. Installed state is small, so this
-        // clone is acceptable.
-        //
-        // Legacy objects deliberately keep `ownership = None` rather than
-        // being back-filled from `effective_ownership()`: that result is a
-        // guess derived from filesystem-side fields, and persisting it would
-        // make a wrong guess permanent and indistinguishable from a verified
-        // value. Authoritative ownership is written only when known — by
-        // install (raw-managed) or by adopt/repair after an rpmdb query.
-        // Re-running the heuristic on load is a few field comparisons, not I/O.
-        let mut snapshot = self.clone();
-        snapshot.schema_version = STATE_SCHEMA_VERSION;
-        snapshot.updated_at = now_iso8601();
-
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|source| StateError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-
-        let content = toml::to_string_pretty(&snapshot)?;
-
-        write_atomic(path, content.as_bytes()).map_err(|source| StateError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
-    }
-
-    /// Insert or replace an object, deduped by `(kind, name)`.
-    pub fn upsert_object(&mut self, obj: InstalledObject) {
-        if let Some(slot) = self
-            .objects
-            .iter_mut()
-            .find(|o| o.kind == obj.kind && o.name == obj.name)
-        {
-            *slot = obj;
-        } else {
-            self.objects.push(obj);
-        }
-    }
-
-    /// Remove an object by `(kind, name)`, returning the removed value.
-    pub fn remove_object(&mut self, kind: ObjectKind, name: &str) -> Option<InstalledObject> {
-        let idx = self
-            .objects
-            .iter()
-            .position(|o| o.kind == kind && o.name == name)?;
-        Some(self.objects.remove(idx))
-    }
-
-    /// Find an object by `(kind, name)`.
-    pub fn find_object(&self, kind: ObjectKind, name: &str) -> Option<&InstalledObject> {
-        self.objects
-            .iter()
-            .find(|o| o.kind == kind && o.name == name)
-    }
-
-    /// Mutable variant of [`Self::find_object`].
-    pub fn find_object_mut(
-        &mut self,
-        kind: ObjectKind,
-        name: &str,
-    ) -> Option<&mut InstalledObject> {
-        self.objects
-            .iter_mut()
-            .find(|o| o.kind == kind && o.name == name)
-    }
-
-    /// Drop legacy `kind = "capability"` objects left by releases that
-    /// predate the capability concept's removal, returning the pruned
-    /// names so callers can audit the migration in the central log.
-    ///
-    /// Only state-writing paths (install / uninstall) may call this:
-    /// read-only commands must not rewrite `installed.toml`.
-    pub fn prune_legacy_capabilities(&mut self) -> Vec<String> {
-        let mut pruned = Vec::new();
-        self.objects.retain(|obj| {
-            if obj.kind == ObjectKind::Capability {
-                pruned.push(obj.name.clone());
-                false
-            } else {
-                true
-            }
-        });
-        pruned
-    }
-
-    /// Append a backup record.
-    pub fn append_backup(&mut self, b: BackupRecord) {
-        self.backups.push(b);
-    }
-
-    /// Append an operation record.
-    pub fn append_operation(&mut self, op: OperationRecord) {
-        self.operations.push(op);
-    }
-
-    /// Find an adapter receipt by `(component, framework)`.
-    pub fn find_adapter_claim(&self, component: &str, framework: &str) -> Option<&AdapterClaim> {
-        self.adapter_claims
-            .iter()
-            .find(|c| c.component == component && c.framework == framework)
-    }
-
-    /// Insert or replace an adapter receipt, deduped by
-    /// `(component, framework)`.
-    pub fn upsert_adapter_claim(&mut self, claim: AdapterClaim) {
-        if let Some(slot) = self
-            .adapter_claims
-            .iter_mut()
-            .find(|c| c.component == claim.component && c.framework == claim.framework)
-        {
-            *slot = claim;
-        } else {
-            self.adapter_claims.push(claim);
-        }
-    }
-
-    /// Remove an adapter receipt by `(component, framework)`, returning the
-    /// removed value.
-    pub fn remove_adapter_claim(
-        &mut self,
-        component: &str,
-        framework: &str,
-    ) -> Option<AdapterClaim> {
-        let idx = self
-            .adapter_claims
-            .iter()
-            .position(|c| c.component == component && c.framework == framework)?;
-        Some(self.adapter_claims.remove(idx))
-    }
-
-    /// All adapter receipts for a component, across frameworks.
-    pub fn adapter_claims_for_component(&self, component: &str) -> Vec<&AdapterClaim> {
-        self.adapter_claims
-            .iter()
-            .filter(|c| c.component == component)
-            .collect()
-    }
+#[cfg(test)]
+pub(crate) fn write_legacy_fixture(state: &InstalledState, path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path.parent().expect("fixture parent"))?;
+    fs::write(path, toml::to_string_pretty(state).expect("legacy fixture"))
 }
 
 pub(crate) fn now_iso8601() -> String {
@@ -915,6 +654,17 @@ sha256 = "deadbeef"
         }
     }
 
+    fn migrate_fixture(object: &InstalledObject) -> crate::domain::Installation {
+        let result = crate::state_migration::migrate_object(
+            object,
+            crate::domain::InstallationScope::System,
+        );
+        match result.outcome {
+            crate::state_migration::MigrationOutcome::Active(installation) => installation,
+            other => panic!("expected active installation, got {other:?}"),
+        }
+    }
+
     fn sample_backup(id: &str, op: &str) -> BackupRecord {
         BackupRecord {
             id: id.to_string(),
@@ -942,9 +692,11 @@ sha256 = "deadbeef"
         let path = dir.path().join("installed.toml");
 
         let state = InstalledState::default();
-        state.save(&path).expect("save default");
+        write_legacy_fixture(&state, &path).expect("save default");
 
-        let loaded = InstalledState::load(&path).expect("load default");
+        let loaded =
+            toml::from_str::<InstalledState>(&fs::read_to_string(&path).expect("read fixture"))
+                .expect("load default");
         assert_eq!(loaded.schema_version, STATE_SCHEMA_VERSION);
         assert_eq!(loaded.install_mode, InstallMode::User);
         assert_eq!(loaded.anolisa_version, env!("CARGO_PKG_VERSION"));
@@ -968,7 +720,7 @@ sha256 = "deadbeef"
             parent_operation_id: Some("op-batch-1".to_string()),
             ..sample_operation("op-member-1")
         });
-        state.save(&path).expect("save");
+        write_legacy_fixture(&state, &path).expect("save");
 
         let raw = fs::read_to_string(&path).expect("read raw toml");
         assert_eq!(
@@ -977,7 +729,9 @@ sha256 = "deadbeef"
             "only the member serializes the key:\n{raw}"
         );
 
-        let loaded = InstalledState::load(&path).expect("load");
+        let loaded =
+            toml::from_str::<InstalledState>(&fs::read_to_string(&path).expect("read fixture"))
+                .expect("load");
         assert_eq!(loaded.operations[0].parent_operation_id, None);
         assert_eq!(
             loaded.operations[1].parent_operation_id.as_deref(),
@@ -1041,9 +795,7 @@ sha256 = "deadbeef"
         assert_eq!(state.objects[0].kind, ObjectKind::Capability);
     }
 
-    /// A v5 store file keeps its records under fields this schema does not
-    /// know; serde would drop them and report an empty state. The loader
-    /// must refuse instead of going blind.
+    /// Future schemas must not be read as an empty store and overwritten.
     #[test]
     fn load_rejects_newer_schema_instead_of_reading_it_as_empty() {
         let dir = tempfile::tempdir().expect("tmpdir");
@@ -1051,7 +803,7 @@ sha256 = "deadbeef"
         fs::write(
             &path,
             r#"
-            schema_version = 5
+            schema_version = 999
             updated_at = "2026-07-16T10:00:00Z"
             install_mode = "user"
             prefix = "~/.local"
@@ -1060,90 +812,108 @@ sha256 = "deadbeef"
         )
         .expect("write state");
 
-        let err = InstalledState::load(&path).unwrap_err();
+        let err = crate::state_store::StateStore::load(&path, 1000).unwrap_err();
 
         match err {
             StateError::NewerSchema {
                 found, supported, ..
             } => {
-                assert_eq!(found, 5);
-                assert_eq!(supported, STATE_SCHEMA_VERSION);
+                assert_eq!(found, 999);
+                assert_eq!(supported, crate::state_store::STORE_SCHEMA_VERSION_ANCHORED);
             }
             other => panic!("expected NewerSchema, got {other:?}"),
         }
     }
 
     #[test]
-    fn prune_legacy_capabilities_drops_only_capability_objects() {
+    fn load_boundary_drops_only_legacy_capability_objects() {
         let mut state = InstalledState::default();
-        state.upsert_object(sample_object(
+        state.objects.push(sample_object(
             ObjectKind::Capability,
             "agent-observability",
             "0.1.0",
         ));
-        state.upsert_object(sample_object(ObjectKind::Component, "agentsight", "0.2.0"));
+        state
+            .objects
+            .push(sample_object(ObjectKind::Component, "agentsight", "0.2.0"));
 
-        let pruned = state.prune_legacy_capabilities();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+        write_legacy_fixture(&state, &path).expect("save legacy fixture");
+        let before = fs::read(&path).expect("read fixture");
+        let migrated = crate::state_store::StateStore::load(&path, 1000).expect("migrate");
 
-        assert_eq!(pruned, vec!["agent-observability".to_string()]);
-        assert_eq!(state.objects.len(), 1);
-        assert_eq!(state.objects[0].kind, ObjectKind::Component);
+        assert_eq!(
+            migrated.dropped_capabilities,
+            vec!["agent-observability".to_string()]
+        );
+        assert_eq!(migrated.installations.len(), 1);
+        assert_eq!(migrated.installations[0].kind, ObjectKind::Component);
+        assert_eq!(migrated.installations[0].name, "agentsight");
+        assert!(migrated.quarantined.is_empty());
+        assert_eq!(fs::read(&path).expect("read after load"), before);
 
-        // Idempotent on a clean state.
-        assert!(state.prune_legacy_capabilities().is_empty());
+        migrated.save(&path).expect("persist migrated state");
+        let reloaded = crate::state_store::StateStore::load(&path, 1000).expect("reload");
+        assert!(reloaded.dropped_capabilities.is_empty());
+        assert_eq!(reloaded.installations, migrated.installations);
     }
 
     #[test]
-    fn upsert_then_find_object() {
-        let mut state = InstalledState::default();
+    fn upsert_then_find_installation() {
+        let mut state = crate::state_store::StateStore::empty();
         let first = sample_object(ObjectKind::Component, "agentsight", "0.1.0");
-        state.upsert_object(first);
-
-        let found = state
-            .find_object(ObjectKind::Component, "agentsight")
-            .expect("present after upsert");
-        assert_eq!(found.version, "0.1.0");
-
-        let second = sample_object(ObjectKind::Component, "agentsight", "0.2.0");
-        state.upsert_object(second);
-        assert_eq!(state.objects.len(), 1, "upsert dedupes by (kind, name)");
+        state.upsert(migrate_fixture(&first));
         assert_eq!(
             state
-                .find_object(ObjectKind::Component, "agentsight")
+                .find(ObjectKind::Component, "agentsight")
                 .expect("present")
-                .version,
-            "0.2.0"
+                .binding
+                .version(),
+            Some("0.1.0")
         );
-    }
-
-    #[test]
-    fn remove_object_returns_removed() {
-        let mut state = InstalledState::default();
-        state.upsert_object(sample_object(ObjectKind::Component, "agentsight", "0.1.0"));
-
-        let removed = state.remove_object(ObjectKind::Component, "agentsight");
-        assert!(removed.is_some());
-        assert_eq!(removed.expect("just checked").name, "agentsight");
-
-        assert!(
+        let second = sample_object(ObjectKind::Component, "agentsight", "0.2.0");
+        state.upsert(migrate_fixture(&second));
+        assert_eq!(state.installations.len(), 1, "upsert dedupes by identity");
+        assert_eq!(
             state
-                .remove_object(ObjectKind::Component, "agentsight")
-                .is_none()
+                .find(ObjectKind::Component, "agentsight")
+                .expect("present")
+                .binding
+                .version(),
+            Some("0.2.0")
         );
     }
 
     #[test]
-    fn append_backup_and_operation() {
+    fn remove_installation_reports_removal() {
+        let mut state = crate::state_store::StateStore::empty();
+        state.upsert(migrate_fixture(&sample_object(
+            ObjectKind::Component,
+            "agentsight",
+            "0.1.0",
+        )));
+        assert!(state.remove(ObjectKind::Component, "agentsight"));
+        assert!(state.find(ObjectKind::Component, "agentsight").is_none());
+        assert!(!state.remove(ObjectKind::Component, "agentsight"));
+    }
+
+    #[test]
+    fn legacy_backup_and_operation_records_round_trip() {
         let mut state = InstalledState::default();
         assert_eq!(state.backups.len(), 0);
         assert_eq!(state.operations.len(), 0);
 
-        state.append_backup(sample_backup("backup-op-1", "op-1"));
-        state.append_operation(sample_operation("op-1"));
-        state.append_operation(sample_operation("op-2"));
+        state.backups.push(sample_backup("backup-op-1", "op-1"));
+        state.operations.push(sample_operation("op-1"));
+        state.operations.push(sample_operation("op-2"));
 
-        assert_eq!(state.backups.len(), 1);
-        assert_eq!(state.operations.len(), 2);
+        let encoded = toml::to_string(&state).expect("serialize legacy state");
+        let loaded: InstalledState = toml::from_str(&encoded).expect("read legacy state");
+        assert_eq!(loaded.backups, state.backups);
+        assert_eq!(loaded.operations, state.operations);
+        assert_eq!(loaded.backups.len(), 1);
+        assert_eq!(loaded.operations.len(), 2);
     }
 
     #[test]
@@ -1160,15 +930,19 @@ sha256 = "deadbeef"
             sha256_before: Some("before".to_string()),
             sha256_after: Some("after".to_string()),
         });
-        state.upsert_object(obj);
-        state.append_backup(sample_backup("backup-op-1", "op-1"));
-        state.append_operation(sample_operation("op-1"));
+        state.objects.push(obj);
+        state.backups.push(sample_backup("backup-op-1", "op-1"));
+        state.operations.push(sample_operation("op-1"));
 
-        state.save(&path).expect("save");
-        let loaded = InstalledState::load(&path).expect("load");
+        write_legacy_fixture(&state, &path).expect("save");
+        let loaded =
+            toml::from_str::<InstalledState>(&fs::read_to_string(&path).expect("read fixture"))
+                .expect("load");
 
         let adapter = loaded
-            .find_object(ObjectKind::Adapter, "openclaw")
+            .objects
+            .iter()
+            .find(|object| object.kind == ObjectKind::Adapter && object.name == "openclaw")
             .expect("adapter present");
         assert_eq!(adapter.external_modified_files.len(), 1);
         assert_eq!(
@@ -1230,10 +1004,18 @@ sha256 = "deadbeef"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
 
-        let mut state = InstalledState::default();
-        state.upsert_object(sample_object(ObjectKind::Component, "agentsight", "0.1.0"));
+        let mut state = crate::state_store::StateStore::empty();
+        state.upsert(migrate_fixture(&sample_object(
+            ObjectKind::Component,
+            "agentsight",
+            "0.1.0",
+        )));
         state.save(&path).expect("first save");
-        state.upsert_object(sample_object(ObjectKind::Component, "tokenless", "0.1.0"));
+        state.upsert(migrate_fixture(&sample_object(
+            ObjectKind::Component,
+            "tokenless",
+            "0.1.0",
+        )));
         state.save(&path).expect("second save");
 
         let leftovers: Vec<_> = fs::read_dir(dir.path())
@@ -1246,8 +1028,8 @@ sha256 = "deadbeef"
             "save must not leak tmp siblings: {leftovers:?}"
         );
 
-        let loaded = InstalledState::load(&path).expect("load");
-        assert_eq!(loaded.objects.len(), 2);
+        let loaded = crate::state_store::StateStore::load(&path, 1000).expect("load");
+        assert_eq!(loaded.installations.len(), 2);
     }
 
     #[test]
@@ -1257,8 +1039,12 @@ sha256 = "deadbeef"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
 
-        let mut state = InstalledState::default();
-        state.upsert_object(sample_object(ObjectKind::Component, "agentsight", "0.1.0"));
+        let mut state = crate::state_store::StateStore::empty();
+        state.upsert(migrate_fixture(&sample_object(
+            ObjectKind::Component,
+            "agentsight",
+            "0.1.0",
+        )));
         state.save(&path).expect("seed save");
         let prior = fs::read(&path).expect("read prior");
 
@@ -1269,7 +1055,11 @@ sha256 = "deadbeef"
         let blocked_path = cleanly_isolated.join("installed.toml");
 
         let mut blocked_state = state.clone();
-        blocked_state.upsert_object(sample_object(ObjectKind::Component, "tokenless", "0.1.0"));
+        blocked_state.upsert(migrate_fixture(&sample_object(
+            ObjectKind::Component,
+            "tokenless",
+            "0.1.0",
+        )));
         let err = blocked_state.save(&blocked_path).expect_err("must fail");
         match err {
             StateError::Io { .. } => {}
@@ -1295,7 +1085,7 @@ sha256 = "deadbeef"
         let path = dir.path().join("installed.toml");
         std::os::unix::fs::symlink(&victim, &path).expect("plant symlink at target");
 
-        let state = InstalledState::default();
+        let state = crate::state_store::StateStore::empty();
         state.save(&path).expect("save over symlink");
 
         let meta = fs::symlink_metadata(&path).expect("stat target");
@@ -1317,7 +1107,7 @@ sha256 = "deadbeef"
         obj.last_operation_id = None;
         obj.ownership = None;
         obj.rpm_metadata = None;
-        state.upsert_object(obj);
+        state.objects.push(obj);
 
         let rendered = toml::to_string_pretty(&state).expect("serialize");
         assert!(
@@ -1346,80 +1136,48 @@ sha256 = "deadbeef"
         );
     }
 
-    // ── Ownership model tests ───────────────────────────────────────────
-
     #[test]
-    fn ownership_owns_removal() {
-        assert!(Ownership::RawManaged.owns_removal());
-        assert!(Ownership::RpmManaged.owns_removal());
-        assert!(!Ownership::RpmObserved.owns_removal());
-    }
-
-    #[test]
-    fn ownership_is_rpm() {
-        assert!(!Ownership::RawManaged.is_rpm());
-        assert!(Ownership::RpmManaged.is_rpm());
-        assert!(Ownership::RpmObserved.is_rpm());
-    }
-
-    #[test]
-    fn effective_ownership_uses_explicit_field() {
-        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
-        obj.ownership = Some(Ownership::RpmObserved);
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-        assert!(obj.is_rpm_observed());
-        assert!(!obj.owns_removal());
-    }
-
-    #[test]
-    fn effective_ownership_legacy_raw_managed() {
-        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
-        obj.ownership = None;
-        obj.managed = true;
-        obj.adopted = false;
-        obj.install_backend = Some("raw".to_string());
-        assert_eq!(obj.effective_ownership(), Ownership::RawManaged);
-        assert!(obj.owns_removal());
-    }
-
-    #[test]
-    fn effective_ownership_legacy_rpm_managed() {
-        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
-        obj.ownership = None;
-        obj.managed = true;
-        obj.adopted = false;
-        obj.install_backend = Some("rpm".to_string());
-        assert_eq!(obj.effective_ownership(), Ownership::RpmManaged);
-        assert!(obj.owns_removal());
-    }
-
-    #[test]
-    fn effective_ownership_legacy_rpm_observed() {
-        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
-        obj.ownership = None;
-        obj.managed = false;
-        obj.adopted = true;
-        obj.install_backend = Some("rpm".to_string());
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-        assert!(obj.is_rpm_observed());
-        assert!(!obj.owns_removal());
-    }
-
-    #[test]
-    fn effective_ownership_legacy_yum_backend_maps_to_rpm() {
-        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
-        obj.ownership = None;
-        obj.managed = true;
-        obj.adopted = false;
-        obj.install_backend = Some("yum".to_string());
-        assert_eq!(obj.effective_ownership(), Ownership::RpmManaged);
-        assert!(obj.owns_removal());
-
-        obj.managed = false;
-        obj.adopted = true;
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-        assert!(obj.is_rpm_observed());
-        assert!(!obj.owns_removal());
+    fn legacy_ownership_migrates_to_current_authority() {
+        use crate::domain::{ManagementRelation, ProviderBinding};
+        for (ownership, backend, managed, adopted, delegated, removable) in [
+            (Some(Ownership::RawManaged), "raw", true, false, false, true),
+            (Some(Ownership::RpmManaged), "rpm", true, false, true, true),
+            (
+                Some(Ownership::RpmObserved),
+                "rpm",
+                false,
+                true,
+                true,
+                false,
+            ),
+            (None, "raw", true, false, false, true),
+            (None, "rpm", true, false, true, true),
+            (None, "rpm", false, true, true, false),
+            (None, "rpm", false, false, true, false),
+            (None, "yum", true, false, true, true),
+            (None, "yum", false, true, true, false),
+        ] {
+            let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+            obj.ownership = ownership;
+            obj.install_backend = Some(backend.to_string());
+            obj.managed = managed;
+            obj.adopted = adopted;
+            let binding = migrate_fixture(&obj).binding;
+            assert_eq!(binding.is_delegated(), delegated, "{obj:?}");
+            assert_eq!(binding.owns_removal(), removable, "{obj:?}");
+            if let ProviderBinding::Delegated { relation, .. } = binding {
+                assert!(matches!(
+                    (adopted, removable, relation),
+                    (true, false, ManagementRelation::Adopted { .. })
+                        | (false, true, ManagementRelation::Managed { .. })
+                        | (false, false, ManagementRelation::Observed)
+                ));
+            }
+            assert_eq!(
+                obj.ownership, ownership,
+                "migration must not backfill legacy authority"
+            );
+        }
     }
 
     #[test]
@@ -1441,17 +1199,21 @@ sha256 = "deadbeef"
             source_repo: Some("@System".to_string()),
         });
         obj.files = Vec::new();
-        state.upsert_object(obj);
+        state.objects.push(obj);
 
-        state.save(&path).expect("save");
-        let loaded = InstalledState::load(&path).expect("load");
+        write_legacy_fixture(&state, &path).expect("save");
+        let loaded =
+            toml::from_str::<InstalledState>(&fs::read_to_string(&path).expect("read fixture"))
+                .expect("load");
 
         let comp = loaded
-            .find_object(ObjectKind::Component, "copilot-shell")
+            .objects
+            .iter()
+            .find(|object| object.kind == ObjectKind::Component && object.name == "copilot-shell")
             .expect("present");
         assert_eq!(comp.ownership, Some(Ownership::RpmObserved));
-        assert!(comp.is_rpm_observed());
-        assert!(!comp.owns_removal());
+        assert!(migrate_fixture(comp).binding.is_delegated());
+        assert!(!migrate_fixture(comp).binding.owns_removal());
 
         let rpm = comp.rpm_metadata.as_ref().expect("rpm_metadata present");
         assert_eq!(rpm.package_name, "copilot-shell");
@@ -1475,17 +1237,21 @@ sha256 = "deadbeef"
             arch: Some("x86_64".to_string()),
             source_repo: Some("anolisa-release".to_string()),
         });
-        state.upsert_object(obj);
+        state.objects.push(obj);
 
-        state.save(&path).expect("save");
-        let loaded = InstalledState::load(&path).expect("load");
+        write_legacy_fixture(&state, &path).expect("save");
+        let loaded =
+            toml::from_str::<InstalledState>(&fs::read_to_string(&path).expect("read fixture"))
+                .expect("load");
 
         let comp = loaded
-            .find_object(ObjectKind::Component, "copilot-shell")
+            .objects
+            .iter()
+            .find(|object| object.kind == ObjectKind::Component && object.name == "copilot-shell")
             .expect("present");
         assert_eq!(comp.ownership, Some(Ownership::RpmManaged));
-        assert!(!comp.is_rpm_observed());
-        assert!(comp.owns_removal());
+        assert!(migrate_fixture(comp).binding.is_delegated());
+        assert!(migrate_fixture(comp).binding.owns_removal());
     }
 
     /// Pre-v3 state files omit `ownership` and `rpm_metadata`; loading
@@ -1511,13 +1277,16 @@ sha256 = "deadbeef"
         "#;
         let state: InstalledState = toml::from_str(toml_text).expect("pre-v3 state parses");
         let obj = state
-            .find_object(ObjectKind::Component, "copilot-shell")
+            .objects
+            .iter()
+            .find(|object| object.kind == ObjectKind::Component && object.name == "copilot-shell")
             .expect("present");
         assert_eq!(obj.ownership, None);
         assert_eq!(obj.rpm_metadata, None);
-        // Legacy fallback resolves to rpm-observed.
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-        assert!(obj.is_rpm_observed());
+        let migrated = migrate_fixture(obj);
+        assert!(migrated.binding.is_delegated());
+        assert!(!migrated.binding.owns_removal());
+        assert_eq!(obj.ownership, None);
     }
 
     /// Loading an older state file and saving it must stamp the current
@@ -1547,19 +1316,22 @@ sha256 = "deadbeef"
         "#;
         fs::write(&path, v2_text).expect("seed v2 file");
 
-        let state = InstalledState::load(&path).expect("load v2");
-        assert_eq!(state.schema_version, 2, "loaded value reflects the file");
+        let state = crate::state_store::StateStore::load(&path, 1000).expect("load v2");
+        assert_eq!(state.installations.len(), 1);
 
         state.save(&path).expect("save");
 
-        let upgraded = InstalledState::load(&path).expect("reload");
+        let upgraded = crate::state_store::StateStore::load(&path, 1000).expect("reload");
+        let saved: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
         assert_eq!(
-            upgraded.schema_version, STATE_SCHEMA_VERSION,
-            "save must stamp the current schema version"
+            saved["schema_version"].as_integer(),
+            Some(i64::from(crate::state_store::STORE_SCHEMA_VERSION))
         );
+        assert_eq!(upgraded.installations, state.installations);
         assert!(
             upgraded
-                .find_object(ObjectKind::Component, "copilot-shell")
+                .find(ObjectKind::Component, "copilot-shell")
                 .is_some(),
             "object payload survives the upgrade"
         );
@@ -1573,8 +1345,8 @@ sha256 = "deadbeef"
         let mut state = InstalledState::default();
         let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
         obj.ownership = Some(Ownership::RpmObserved);
-        state.upsert_object(obj);
-        state.save(&path).expect("save");
+        state.objects.push(obj);
+        write_legacy_fixture(&state, &path).expect("save");
 
         let content = fs::read_to_string(&path).expect("read");
         assert!(

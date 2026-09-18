@@ -311,36 +311,6 @@ pub enum TransactionOutcomeStatus {
     Partial,
 }
 
-/// Snapshot summary of a finished or in-flight transaction. Designed to
-/// be cheap to compute and trivially serialisable so CentralLog (and the
-/// upcoming `LifecycleJournal` trait in the C worktree) can persist
-/// `started / phase / succeeded / failed / rolled_back` entries without
-/// having to walk the journal themselves.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TransactionOutcome {
-    /// Operation id shared by the journal, installed state, and central log.
-    pub operation_id: String,
-    /// Operation verb originally passed to [`Transaction::begin`].
-    pub operation: String,
-    /// RFC3339 UTC start timestamp.
-    pub started_at: String,
-    /// RFC3339 UTC finish timestamp, absent for in-flight transactions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<String>,
-    /// Terminal classification for the whole transaction.
-    pub status: TransactionOutcomeStatus,
-    /// Number of recorded journal steps.
-    pub steps_total: usize,
-    /// Steps marked [`TransactionStepStatus::Done`].
-    pub steps_done: usize,
-    /// Steps marked [`TransactionStepStatus::Failed`].
-    pub steps_failed: usize,
-    /// Steps that were done and later rolled back.
-    pub steps_rolled_back: usize,
-    /// Steps skipped intentionally.
-    pub steps_skipped: usize,
-}
-
 /// What [`Transaction::begin`] observed at `state_path`, recorded
 /// explicitly in every v2 journal.
 ///
@@ -845,36 +815,6 @@ impl Transaction {
         Ok(tx)
     }
 
-    /// Summary view aligned with the upcoming CentralLog operation
-    /// records. Cheap; safe to call from a `Drop` guard.
-    pub fn outcome_record(&self) -> TransactionOutcome {
-        let mut steps_done = 0usize;
-        let mut steps_failed = 0usize;
-        let mut steps_rolled_back = 0usize;
-        let mut steps_skipped = 0usize;
-        for s in &self.steps {
-            match s.status {
-                TransactionStepStatus::Done => steps_done += 1,
-                TransactionStepStatus::Failed => steps_failed += 1,
-                TransactionStepStatus::RolledBack => steps_rolled_back += 1,
-                TransactionStepStatus::Skipped => steps_skipped += 1,
-                TransactionStepStatus::Planned => {}
-            }
-        }
-        TransactionOutcome {
-            operation_id: self.operation_id.clone(),
-            operation: self.operation.clone(),
-            started_at: self.started_at.clone(),
-            finished_at: self.finished_at.clone(),
-            status: self.status,
-            steps_total: self.steps.len(),
-            steps_done,
-            steps_failed,
-            steps_rolled_back,
-            steps_skipped,
-        }
-    }
-
     fn set_step_status(
         &mut self,
         idx: usize,
@@ -1043,7 +983,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// `tmp` + `rename` write so a crash mid-write cannot leave a truncated
-/// file. Mirrors `InstalledState::save` in `state.rs`.
+/// file. Uses the same atomic-write guarantees as `StateStore::save`.
 ///
 /// Security-critical: the tmp sibling is opened with `O_CREAT|O_EXCL`
 /// (plus `O_NOFOLLOW` on Unix) by [`open_excl_nofollow`] so a pre-placed
@@ -2037,7 +1977,7 @@ journal_path = "/tmp/x.journal.toml"
     }
 
     #[test]
-    fn outcome_record_counts_step_statuses() {
+    fn journal_preserves_step_statuses() {
         let tmp = tempdir().expect("tempdir");
         let (state_path, journal_dir) = fresh(&tmp);
         let mut tx = Transaction::begin("install", state_path, &journal_dir).expect("begin");
@@ -2052,16 +1992,25 @@ journal_path = "/tmp/x.journal.toml"
         tx.finish(TransactionOutcomeStatus::Partial)
             .expect("finish");
 
-        let outcome = tx.outcome_record();
-        assert_eq!(outcome.operation_id, tx.operation_id);
-        assert_eq!(outcome.operation, "install");
-        assert_eq!(outcome.steps_total, 4);
-        assert_eq!(outcome.steps_done, 2);
-        assert_eq!(outcome.steps_failed, 1);
-        assert_eq!(outcome.steps_skipped, 1);
-        assert_eq!(outcome.steps_rolled_back, 0);
-        assert_eq!(outcome.status, TransactionOutcomeStatus::Partial);
-        assert!(outcome.finished_at.is_some());
+        let loaded = Transaction::load_journal(&tx.journal_path).expect("load journal");
+        assert_eq!(loaded.operation_id, tx.operation_id);
+        assert_eq!(loaded.operation, "install");
+        assert_eq!(
+            loaded
+                .steps
+                .iter()
+                .map(|step| step.status)
+                .collect::<Vec<_>>(),
+            vec![
+                TransactionStepStatus::Done,
+                TransactionStepStatus::Done,
+                TransactionStepStatus::Failed,
+                TransactionStepStatus::Skipped,
+            ]
+        );
+        assert_eq!(loaded.status, TransactionOutcomeStatus::Partial);
+        assert_eq!(loaded.finished_at, tx.finished_at);
+        assert!(loaded.finished_at.is_some());
     }
 
     #[test]

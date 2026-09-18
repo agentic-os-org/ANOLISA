@@ -452,8 +452,8 @@ pub(crate) fn load_dry_run_install_contract(
 /// `meta.toml` URLs to try for a resolved artifact, in preference order.
 ///
 /// The metadata published beside the artifact wins. Replacing the final
-/// artifact URL segment is the same-directory convention already frozen by
-/// [`anolisa_core::registry`], and it is the only form that can describe a
+/// artifact URL segment follows the same-directory publication convention,
+/// and it is the only form that can describe a
 /// single target: `…/0.10.1/macos/aarch64/meta.toml` documents the macOS
 /// payload, while `…/0.10.1/meta.toml` documents whatever target the
 /// publisher happened to make version-wide.

@@ -1,35 +1,11 @@
-//! Lifecycle plan for `uninstall` / `purge` of components.
+//! Purge previews and shared lifecycle backup primitives.
 //!
-//! Both teardown verbs share a single data model — [`LifecyclePlan`] —
-//! built from the questions every destructive verb must answer before
-//! touching the system:
+//! [`LifecyclePlan`] is the data-only purge preview. Uninstall planning and
+//! execution use the typed planner/executor pipeline; purge remains plan-only
+//! until manifest-driven config/cache/state discovery lands.
 //!
-//!   1. What files / services does this component own?
-//!   2. Which of those files are ANOLISA-owned (safe to remove) vs.
-//!      external (must be preserved)?
-//!   3. What service-stop / hook phases would run, and which ones are
-//!      shipped today vs. deferred?
-//!   4. What is the blast radius — privilege, risk level, irreversible
-//!      operations — and what rollback advice can we give if the user
-//!      cancels mid-flight?
-//!
-//! The plan is *data-only*: callers can render it for `--dry-run` /
-//! `--json` without performing any IO. Execution lives in the new
-//! planner/executor pipeline (`planner` + `owned_executor` /
-//! `executor`); `purge` remains plan-only until manifest-driven
-//! config/cache/state discovery lands.
-//!
-//! # Scope guarantees (hard rules)
-//!
-//! * `Uninstall` — removes only files where `owner ==
-//!   FileOwner::Anolisa`; everything else is skipped or refused.
-//! * `Purge` — `Uninstall` semantics + drops ANOLISA-owned config / cache
-//!   fragments. `external_modified_files` always
-//!   [`FileActionKind::Refuse`].
-//!
-//! This module also hosts [`prepare_backup`], the hardened
-//! backup-to-rollback primitive shared with the owned executor's port
-//! implementations.
+//! Only ANOLISA-owned files are removable; external modifications are refused.
+//! [`prepare_backup`] is shared with the owned executor's port implementations.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,8 +29,6 @@ use crate::state_store::StateStore;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleOperation {
-    /// Remove ANOLISA-owned files for the component.
-    Uninstall,
     /// Uninstall + drop ANOLISA-owned config / cache / state fragments.
     Purge,
 }
@@ -63,7 +37,6 @@ impl LifecycleOperation {
     /// Wire label for the verb, used in audit-log records and JSON.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Uninstall => "uninstall",
             Self::Purge => "purge",
         }
     }
@@ -73,10 +46,6 @@ impl LifecycleOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
-    /// Logical or read-only change with no file removal.
-    Low,
-    /// Removes ANOLISA-owned files with transaction rollback support.
-    Medium,
     /// Destructive cleanup with incomplete rollback coverage.
     High,
 }
@@ -89,16 +58,11 @@ pub enum LifecycleMode {
     Execute,
     /// Intentionally skipped (e.g. nothing to do, or scope-gated off).
     Skip,
-    /// Recognized but not shipped yet — the plan records the intent so
-    /// audit / preview is honest, but execute does not perform it.
-    NotImplemented,
 }
 
 /// Whether a file is ANOLISA-owned (safe to remove) or external.
 ///
-/// Mirrors [`crate::state::FileOwner`] but adds an `Unknown` variant for
-/// plan-time files that the state file did not annotate (e.g. a future
-/// manifest-only path that has not yet been recorded as installed).
+/// Mirrors the ownership recorded by [`crate::state::FileOwner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOwner {
@@ -106,9 +70,6 @@ pub enum FileOwner {
     Anolisa,
     /// Path belongs to the user or another package and must be preserved.
     External,
-    /// Ownership was not recorded; destructive verbs treat this
-    /// conservatively.
-    Unknown,
 }
 
 impl From<StateFileOwner> for FileOwner {
@@ -124,16 +85,9 @@ impl From<StateFileOwner> for FileOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileActionKind {
-    /// Leave the file on disk (the default for non-ANOLISA files in
-    /// `Uninstall` / `Purge`).
-    Keep,
     /// Delete the file. Only valid when `owner ==
     /// FileOwner::Anolisa`.
     Remove,
-    /// Move the file aside under the backup tree. Reserved for future
-    /// use (e.g. on-error rollback recovery); the alpha executor never
-    /// emits this variant.
-    Backup,
     /// External modification that cannot be safely removed — the plan
     /// MUST surface it so operators understand the residue.
     Refuse,
@@ -158,14 +112,8 @@ pub struct FileAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceActionKind {
-    /// `systemctl stop`. Not shipped in alpha.
+    /// Stop the service before removing its files.
     Stop,
-    /// `systemctl disable`. Not shipped in alpha.
-    Disable,
-    /// Recorded but explicitly skipped (e.g. unit never installed).
-    Skip,
-    /// Recognized but not shipped yet (current alpha for stop/disable).
-    NotImplemented,
 }
 
 /// Service-unit action surfaced in a lifecycle plan.
@@ -189,7 +137,7 @@ pub struct ServiceAction {
 pub struct HookAction {
     /// Hook phase name shown in the plan.
     pub name: String,
-    /// Whether this hook would run, skip, or remain deferred.
+    /// Whether this hook would run or be skipped.
     pub mode: LifecycleMode,
     /// Explanation when the hook does not execute.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,7 +170,7 @@ pub struct LifecyclePhase {
     pub action: String,
     /// What the phase is acting on (component name, file path, etc.).
     pub target: String,
-    /// Whether the executor will run, skip, or defer the phase.
+    /// Whether the executor will run or skip the phase.
     pub mode: LifecycleMode,
     /// Operator guidance for recovery if this phase fails mid-flight.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,38 +214,12 @@ pub struct LifecyclePlan {
 // ---------------------------------------------------------------------------
 
 impl LifecyclePlan {
-    /// Build an `Uninstall` plan for a component installed through
-    /// `anolisa install`: every `OwnedFile` whose owner is ANOLISA
-    /// becomes [`FileActionKind::Remove`]; external residue is surfaced
-    /// as [`FileActionKind::Refuse`].
-    pub fn for_component_uninstall(component: &str, store: &StateStore) -> Self {
-        Self::build(
-            LifecycleOperation::Uninstall,
-            LifecycleTargetKind::Component,
-            component,
-            store,
-        )
-    }
-
     /// Build a `Purge` plan: `Uninstall` + remove ANOLISA-owned
     /// `etc_dir` / `cache_dir` / `state_dir` fragments. External
     /// modifications stay [`FileActionKind::Refuse`]. Execution remains
     /// gated by the purge guard.
     pub fn for_component_purge(component: &str, store: &StateStore) -> Self {
-        Self::build(
-            LifecycleOperation::Purge,
-            LifecycleTargetKind::Component,
-            component,
-            store,
-        )
-    }
-
-    fn build(
-        operation: LifecycleOperation,
-        target_kind: LifecycleTargetKind,
-        target: &str,
-        store: &StateStore,
-    ) -> Self {
+        let target = component;
         let target_obj = store.find(ObjectKind::Component, target);
         let target_scope = target_obj.map(|installation| installation.scope);
 
@@ -321,11 +243,7 @@ impl LifecyclePlan {
             };
             let mut files: Vec<FileAction> = plan_owned_files(owned_files);
             files.extend(plan_external_files(external_files));
-            let configs = if operation == LifecycleOperation::Purge {
-                plan_purge_configs(owned_files)
-            } else {
-                Vec::new()
-            };
+            let configs = plan_purge_configs(owned_files);
             components.push(ComponentLifecyclePlan {
                 name: target.to_string(),
                 services: plan_services(service_refs),
@@ -333,7 +251,7 @@ impl LifecyclePlan {
                 configs,
                 // Hook execution is deferred to lifecycle teardown; record
                 // the intent so audit / preview is honest.
-                hooks: default_hooks_for(operation),
+                hooks: purge_hooks(),
             });
         } else {
             warnings.push(format!(
@@ -341,24 +259,19 @@ impl LifecyclePlan {
             ));
         }
 
-        let phases = build_phases(operation, target, target_scope, &components);
+        let phases = build_phases(target, target_scope, &components);
 
         let requires_privilege = components
             .iter()
             .any(|c| c.files.iter().any(|f| f.action == FileActionKind::Remove));
 
-        let risk = match operation {
-            LifecycleOperation::Uninstall => RiskLevel::Medium,
-            LifecycleOperation::Purge => RiskLevel::High,
-        };
-
         Self {
-            operation,
-            target_kind,
+            operation: LifecycleOperation::Purge,
+            target_kind: LifecycleTargetKind::Component,
             component: target.to_string(),
             components,
             phases,
-            risk,
+            risk: RiskLevel::High,
             requires_privilege,
             warnings,
         }
@@ -375,10 +288,6 @@ fn plan_owned_files(files: &[OwnedFile]) -> Vec<FileAction> {
                 FileOwner::External => (
                     FileActionKind::Refuse,
                     Some("file marked external in state".to_string()),
-                ),
-                FileOwner::Unknown => (
-                    FileActionKind::Keep,
-                    Some("owner unknown — refusing to delete".to_string()),
                 ),
             };
             FileAction {
@@ -451,16 +360,12 @@ fn is_config_or_state_path(p: &Path) -> bool {
         || s.contains("/.cache/anolisa")
 }
 
-fn default_hooks_for(operation: LifecycleOperation) -> Vec<HookAction> {
-    let names: &[&str] = match operation {
-        LifecycleOperation::Uninstall => &["pre_uninstall", "post_uninstall"],
-        LifecycleOperation::Purge => &["pre_uninstall", "post_uninstall", "post_purge"],
-    };
-    names
+fn purge_hooks() -> Vec<HookAction> {
+    ["pre_uninstall", "post_uninstall", "post_purge"]
         .iter()
         .map(|n| HookAction {
             // The plan is built from installed state, which does not carry
-            // the component contract, so build() cannot tell here whether a
+            // the component contract, so the plan cannot tell whether a
             // script is declared for this phase — the executor resolves that
             // from the installed manifest at run time. Preview it as Execute
             // with a reason that names the condition.
@@ -475,7 +380,6 @@ fn default_hooks_for(operation: LifecycleOperation) -> Vec<HookAction> {
 }
 
 fn build_phases(
-    operation: LifecycleOperation,
     component: &str,
     scope: Option<InstallationScope>,
     components: &[ComponentLifecyclePlan],
@@ -495,24 +399,17 @@ fn build_phases(
         }
     }
 
-    // Service stop / disable phases (NotImplemented in alpha).
+    // Service phases retain their existing preview labels.
     for c in components {
         for s in &c.services {
             phases.push(LifecyclePhase {
                 name: "stop_service".to_string(),
                 action: match s.action {
                     ServiceActionKind::Stop => "stop",
-                    ServiceActionKind::Disable => "disable",
-                    ServiceActionKind::Skip => "skip",
-                    ServiceActionKind::NotImplemented => "stop",
                 }
                 .to_string(),
                 target: s.name.clone(),
-                mode: match s.action {
-                    ServiceActionKind::Skip => LifecycleMode::Skip,
-                    ServiceActionKind::NotImplemented => LifecycleMode::NotImplemented,
-                    _ => LifecycleMode::Execute,
-                },
+                mode: LifecycleMode::Execute,
                 rollback_hint: None,
             });
         }
@@ -525,8 +422,6 @@ fn build_phases(
                 name: "remove_file".to_string(),
                 action: match f.action {
                     FileActionKind::Remove => "remove",
-                    FileActionKind::Keep => "keep",
-                    FileActionKind::Backup => "backup",
                     FileActionKind::Refuse => "refuse",
                 }
                 .to_string(),
@@ -543,22 +438,20 @@ fn build_phases(
                 },
             });
         }
-        if operation == LifecycleOperation::Purge {
-            for f in &c.configs {
-                phases.push(LifecyclePhase {
-                    name: "remove_config".to_string(),
-                    action: "remove".to_string(),
-                    target: f.path.display().to_string(),
-                    mode: LifecycleMode::Execute,
-                    rollback_hint: None,
-                });
-            }
+        for f in &c.configs {
+            phases.push(LifecyclePhase {
+                name: "remove_config".to_string(),
+                action: "remove".to_string(),
+                target: f.path.display().to_string(),
+                mode: LifecycleMode::Execute,
+                rollback_hint: None,
+            });
         }
     }
     // State-record removal is the one phase every *installed* target ends
     // with. When the target is absent, `components` is empty and the plan is
     // genuinely empty (see the "not installed — plan is empty" warning in
-    // `build`); appending `remove_state` here would report a phantom removal
+    // the planner); appending `remove_state` here would report a phantom removal
     // that contradicts that warning, so gate it on a present component.
     if !components.is_empty() {
         phases.push(LifecyclePhase {
@@ -583,17 +476,6 @@ fn scoped_lifecycle_command(scope: InstallationScope, operation: &str, component
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Journal (transaction soft dependency)
-// ---------------------------------------------------------------------------
-//
-// Earlier revisions defined a `LifecycleJournal` trait + `NoopJournal` /
-// `TransactionJournal` shims so the D-worktree could land in any order
-// with this module. With `crate::transaction::Transaction` now stable
-// the executor calls it directly instead — see [`execute_uninstall_or_purge`].
-// The trait/impls were removed once the wiring landed; tests inspect
-// transaction behaviour by reading the journal file from `journal_dir`.
 
 /// Failure surface for lifecycle planning and backup primitives.
 #[derive(Debug, thiserror::Error)]
@@ -909,7 +791,7 @@ mod tests {
     ) -> StateStore {
         std_fs::create_dir_all(&layout.state_dir).expect("mkdir state");
         let mut state = InstalledState::default();
-        state.upsert_object(InstalledObject {
+        state.objects.push(InstalledObject {
             kind: ObjectKind::Component,
             name: component.to_string(),
             version: "0.2.0".to_string(),
@@ -953,8 +835,7 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         });
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::state::write_legacy_fixture(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state save");
         let migration =
             crate::state_migration::migrate_state(&state.objects, InstallationScope::System);
@@ -991,16 +872,24 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_plan_remove_anolisa_refuse_external() {
+    fn purge_plan_remove_anolisa_refuse_external() {
         let root = tempdir().expect("tempdir");
         let layout = fixture_layout(root.path());
         let owned = layout.bin_dir.join("agentsight");
         let external = layout.etc_dir.join("third-party.toml");
         let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
-        assert_eq!(plan.operation, LifecycleOperation::Uninstall);
-        assert_eq!(plan.risk, RiskLevel::Medium);
+        let plan = LifecyclePlan::for_component_purge("agentsight", &state);
+        assert_eq!(plan.operation, LifecycleOperation::Purge);
+        assert_eq!(plan.risk, RiskLevel::High);
+        assert_eq!(
+            plan.components[0]
+                .hooks
+                .iter()
+                .map(|hook| hook.name.as_str())
+                .collect::<Vec<_>>(),
+            ["pre_uninstall", "post_uninstall", "post_purge"],
+        );
         // Service phases recorded as Stop (executed best-effort by the
         // ServiceManager; degrades to a quiet skip on unsupported hosts).
         for s in &plan.components[0].services {
@@ -1021,6 +910,34 @@ mod tests {
             .expect("external file in plan");
         assert_eq!(ext_action.action, FileActionKind::Refuse);
         assert_eq!(ext_action.owner, FileOwner::External);
+
+        let wire = serde_json::to_value(&plan).expect("serialize purge plan");
+        assert_eq!(wire["operation"], "purge");
+        assert_eq!(wire["target_kind"], "component");
+        assert_eq!(wire["risk"], "high");
+        assert_eq!(wire["components"][0]["services"][0]["action"], "stop");
+        assert_eq!(wire["components"][0]["files"][0]["owner"], "anolisa");
+        assert_eq!(wire["components"][0]["files"][0]["action"], "remove");
+        assert_eq!(wire["components"][0]["files"][1]["owner"], "external");
+        assert_eq!(wire["components"][0]["files"][1]["action"], "refuse");
+        let phases: Vec<_> = wire["phases"]
+            .as_array()
+            .expect("phases")
+            .iter()
+            .map(|phase| (phase["action"].as_str(), phase["mode"].as_str()))
+            .collect();
+        assert_eq!(
+            phases,
+            vec![
+                (Some("run_hook"), Some("execute")),
+                (Some("run_hook"), Some("execute")),
+                (Some("run_hook"), Some("execute")),
+                (Some("stop"), Some("execute")),
+                (Some("remove"), Some("execute")),
+                (Some("refuse"), Some("skip")),
+                (Some("remove_object"), Some("execute")),
+            ],
+        );
 
         let remove_file = plan
             .phases
@@ -1051,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_dry_run_does_not_mutate_anything() {
+    fn purge_dry_run_does_not_mutate_anything() {
         // "dry-run" is a CLI-level concept: the executor is never
         // invoked. Here we exercise the planner-only path and confirm
         // no IO occurs.
@@ -1063,7 +980,7 @@ mod tests {
         let external = layout.etc_dir.join("third.toml");
         let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
+        let plan = LifecyclePlan::for_component_purge("agentsight", &state);
         assert!(!plan.components.is_empty());
         assert!(
             owned.exists(),
@@ -1077,9 +994,9 @@ mod tests {
     /// any phase emitted. Guards the self-contradiction where the warning
     /// said "plan is empty" while a phantom `remove_state` phase remained.
     #[test]
-    fn uninstall_absent_component_yields_empty_components_and_phases() {
+    fn purge_absent_component_yields_empty_components_and_phases() {
         let empty = StateStore::empty();
-        let plan = LifecyclePlan::for_component_uninstall("agentsight", &empty);
+        let plan = LifecyclePlan::for_component_purge("agentsight", &empty);
 
         assert!(
             plan.components.is_empty(),

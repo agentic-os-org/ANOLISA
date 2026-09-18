@@ -295,23 +295,6 @@ pub fn render_json_with_status<T: Serialize>(
     })
 }
 
-/// Print an empty success envelope (no data payload).
-#[allow(dead_code)]
-pub fn render_ok(command: &str) -> Result<(), CliError> {
-    let response: CliResponse<()> = CliResponse {
-        ok: true,
-        schema_version: SCHEMA_VERSION,
-        command: command.to_string(),
-        data: None,
-        warnings: Vec::new(),
-        error: None,
-    };
-    write_json(&response).map_err(|e| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to serialize JSON response: {e}"),
-    })
-}
-
 /// Render an error and return the process exit code to surface.
 ///
 /// On `--json` we emit a `CliResponse` envelope on stdout (so machine

@@ -346,10 +346,9 @@ fn seed_state(layout: &FsLayout, objects: Vec<InstalledObject>) {
         ..Default::default()
     };
     for obj in objects {
-        state.upsert_object(obj);
+        state.objects.push(obj);
     }
-    state
-        .save(&layout.state_dir.join("installed.toml"))
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
         .expect("seed state");
 }
 

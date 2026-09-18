@@ -117,8 +117,7 @@ pub enum MigrationOutcome {
     Active(Installation),
     /// Preserved but inert until `repair` or `forget` resolves it.
     Quarantined(QuarantinedObject),
-    /// Legacy capability object; the concept is removed (see
-    /// `InstalledState::prune_legacy_capabilities`).
+    /// Legacy capability object dropped at the state migration boundary.
     DroppedLegacyCapability,
 }
 
@@ -169,8 +168,7 @@ pub fn migrate_state(objects: &[InstalledObject], scope: InstallationScope) -> S
 /// for every field combination, that the fired rule's guard holds and no
 /// earlier rule's guard does.
 pub fn migrate_object(legacy: &InstalledObject, scope: InstallationScope) -> MigrationResult {
-    // R0: the capability concept is removed; old records are dropped the
-    // same way `prune_legacy_capabilities` already does.
+    // R0: preserve compatibility with old files without retaining obsolete objects.
     if matches!(legacy.kind, ObjectKind::Capability) {
         return MigrationResult {
             rule: MigrationRule::R0,

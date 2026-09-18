@@ -21,8 +21,7 @@ pub(super) fn write_state(layout: &FsLayout, objects: Vec<InstalledObject>) {
         objects,
         ..InstalledState::default()
     };
-    state
-        .save(&layout.state_dir.join(INSTALLED_STATE_FILE))
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join(INSTALLED_STATE_FILE))
         .expect("save state");
 }
 

@@ -112,15 +112,10 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
         .component
         .clone()
         .expect("clap ArgGroup ensures component is set when --all is absent");
-    handle_one(component, args, ctx).map(|_| ())
+    handle_one(component, args, ctx)
 }
 
-/// Run and render one component while preserving the legacy batch classification.
-pub(crate) fn handle_one(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-) -> Result<InstallOutcome, CliError> {
+fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     let outcome = application::run(
         application::InstallRequest {
             component: &component,
@@ -129,9 +124,7 @@ pub(crate) fn handle_one(
         },
         ctx,
     )?;
-    let batch_outcome = outcome.batch_outcome();
-    render_outcome(ctx, outcome)?;
-    Ok(batch_outcome)
+    render_outcome(ctx, outcome)
 }
 
 fn execution_intent(ctx: &CliContext) -> ExecutionIntent {

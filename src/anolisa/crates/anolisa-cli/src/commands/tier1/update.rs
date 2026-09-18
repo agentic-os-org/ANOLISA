@@ -1308,7 +1308,7 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
 
     use anolisa_core::execution::{CommandOutcomeStatus, ExecutionIntent};
-    use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
+    use anolisa_core::self_update::{self, ProgressFn};
     use anolisa_platform::pkg_query::PackageVersion;
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
@@ -1318,17 +1318,6 @@ pub(crate) mod tests {
         append_self_update_log as append_self_update_log_with_intent, redact_known_urls,
         run_application_with_deps, run_self_update_with_deps as run_self_update_with_intent,
     };
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum SelfUpdateApplyMode {
-        None,
-        Binary,
-        RpmPackage {
-            package: String,
-            before_version: Option<String>,
-            after_version: Option<String>,
-        },
-    }
 
     #[allow(clippy::too_many_arguments)]
     fn run_self_update_with_deps(
@@ -1391,13 +1380,10 @@ pub(crate) mod tests {
     fn binary_self_update_records_the_version_transition() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = self_ctx(tmp.path().to_path_buf(), false);
-        let run = self_run(
-            SelfUpdateOutcome::UpdateAvailable {
-                from: "0.1.0".into(),
-                to: "0.2.0".into(),
-            },
-            SelfUpdateApplyMode::Binary,
-        );
+        let run = SelfUpdateExecution::Applied(SelfUpdateApplied::Binary {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+        });
 
         append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
@@ -1436,17 +1422,13 @@ pub(crate) mod tests {
     fn rpm_self_update_records_package_and_observed_versions() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = self_ctx(tmp.path().to_path_buf(), false);
-        let run = self_run(
-            SelfUpdateOutcome::UpdateAvailable {
-                from: "0.1.0".into(),
-                to: "0.2.0".into(),
-            },
-            SelfUpdateApplyMode::RpmPackage {
-                package: "anolisa".to_string(),
-                before_version: Some("0.1.0".to_string()),
-                after_version: Some("0.2.0".to_string()),
-            },
-        );
+        let run = SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+            package: "anolisa".to_string(),
+            before_version: Some("0.1.0".to_string()),
+            after_version: Some("0.2.0".to_string()),
+        });
 
         append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
@@ -1469,17 +1451,13 @@ pub(crate) mod tests {
     fn rpm_self_update_that_did_not_move_the_version_is_ok_not_a_warning() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = self_ctx(tmp.path().to_path_buf(), false);
-        let run = self_run(
-            SelfUpdateOutcome::UpdateAvailable {
-                from: "0.1.0".into(),
-                to: "0.2.0".into(),
-            },
-            SelfUpdateApplyMode::RpmPackage {
-                package: "anolisa".to_string(),
-                before_version: Some("0.1.0".to_string()),
-                after_version: Some("0.1.0".to_string()),
-            },
-        );
+        let run = SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+            package: "anolisa".to_string(),
+            before_version: Some("0.1.0".to_string()),
+            after_version: Some("0.1.0".to_string()),
+        });
 
         append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
@@ -1860,12 +1838,9 @@ pub(crate) mod tests {
     fn already_latest_self_update_writes_no_record() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = self_ctx(tmp.path().to_path_buf(), false);
-        let run = self_run(
-            SelfUpdateOutcome::AlreadyLatest {
-                version: "0.2.0".into(),
-            },
-            SelfUpdateApplyMode::None,
-        );
+        let run = SelfUpdateExecution::AlreadyLatest {
+            version: "0.2.0".into(),
+        };
 
         append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
@@ -1878,13 +1853,10 @@ pub(crate) mod tests {
     fn dry_run_self_update_writes_no_record() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = self_ctx(tmp.path().to_path_buf(), true);
-        let run = self_run(
-            SelfUpdateOutcome::UpdateAvailable {
-                from: "0.1.0".into(),
-                to: "0.2.0".into(),
-            },
-            SelfUpdateApplyMode::None,
-        );
+        let run = SelfUpdateExecution::Preview {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+        };
         let failure = SelfUpdateFailure {
             error: CliError::Runtime {
                 command: "update self".to_string(),
@@ -1913,40 +1885,6 @@ pub(crate) mod tests {
                 sha256: "0".repeat(64),
                 size: Some(1),
             }],
-        }
-    }
-
-    fn self_run(
-        outcome: SelfUpdateOutcome,
-        apply_mode: SelfUpdateApplyMode,
-    ) -> SelfUpdateExecution {
-        match (outcome, apply_mode) {
-            (SelfUpdateOutcome::AlreadyLatest { version }, SelfUpdateApplyMode::None) => {
-                SelfUpdateExecution::AlreadyLatest { version }
-            }
-            (SelfUpdateOutcome::UpdateAvailable { from, to }, SelfUpdateApplyMode::None) => {
-                SelfUpdateExecution::Preview { from, to }
-            }
-            (SelfUpdateOutcome::UpdateAvailable { from, to }, SelfUpdateApplyMode::Binary) => {
-                SelfUpdateExecution::Applied(SelfUpdateApplied::Binary { from, to })
-            }
-            (
-                SelfUpdateOutcome::UpdateAvailable { from, to },
-                SelfUpdateApplyMode::RpmPackage {
-                    package,
-                    before_version,
-                    after_version,
-                },
-            ) => SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
-                from,
-                to,
-                package,
-                before_version,
-                after_version,
-            }),
-            (SelfUpdateOutcome::AlreadyLatest { .. }, _) => {
-                panic!("already-latest test fixture cannot carry an apply mode")
-            }
         }
     }
 
@@ -2935,9 +2873,8 @@ pub(crate) mod tests {
             prefix: layout.prefix.clone(),
             ..Default::default()
         };
-        state.upsert_object(obj);
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        state.objects.push(obj);
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state");
     }
 
@@ -4624,9 +4561,14 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         {
             let layout = common::resolve_layout(&c);
             let path = layout.state_dir.join("installed.toml");
-            let mut state = InstalledState::load(&path).expect("load state");
+            let mut state = toml::from_str::<InstalledState>(
+                &std::fs::read_to_string(&path).expect("read legacy fixture"),
+            )
+            .expect("load state");
             let obj = state
-                .find_object_mut(ObjectKind::Component, "foo")
+                .objects
+                .iter_mut()
+                .find(|object| object.kind == ObjectKind::Component && object.name == "foo")
                 .expect("seeded object");
             obj.status = ObjectStatus::Failed;
             obj.services = vec![ServiceRef {
@@ -4636,7 +4578,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
                 enabled: false,
                 scope: anolisa_core::ServiceScope::System,
             }];
-            state.save(&path).expect("save poisoned state");
+            crate::test_support::write_legacy_state(&state, &path).expect("save poisoned state");
         }
         publish_raw_repo(
             &tmp.path().join("repo"),
@@ -4813,12 +4755,17 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         {
             let layout = common::resolve_layout(&c);
             let path = layout.state_dir.join("installed.toml");
-            let mut state = InstalledState::load(&path).expect("load state");
+            let mut state = toml::from_str::<InstalledState>(
+                &std::fs::read_to_string(&path).expect("read legacy fixture"),
+            )
+            .expect("load state");
             state
-                .find_object_mut(ObjectKind::Component, "foo")
+                .objects
+                .iter_mut()
+                .find(|object| object.kind == ObjectKind::Component && object.name == "foo")
                 .expect("seeded object")
                 .raw_package = Some("altpkg".to_string());
-            state.save(&path).expect("save state");
+            crate::test_support::write_legacy_state(&state, &path).expect("save state");
         }
         let new_body: &[u8] = b"new foo fetched via altpkg\n";
         publish_raw_repo(
@@ -5115,9 +5062,14 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         // must stay a v4 write: seeding the claim below migrates the file
         // to v5.
         let state_path = layout.state_dir.join("installed.toml");
-        let mut state = InstalledState::load(&state_path).expect("load seeded state");
+        let mut state = toml::from_str::<InstalledState>(
+            &std::fs::read_to_string(&state_path).expect("read legacy fixture"),
+        )
+        .expect("load seeded state");
         let obj = state
-            .find_object_mut(ObjectKind::Component, component)
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == ObjectKind::Component && object.name == component)
             .expect("seeded object");
         obj.files.push(OwnedFile {
             path: bundle_root.join("plugin.json"),
@@ -5128,7 +5080,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             mode: None,
             capabilities: Vec::new(),
         });
-        state.save(&state_path).expect("save state");
+        crate::test_support::write_legacy_state(&state, &state_path).expect("save state");
 
         seed_claim(ctx, enabled_claim(component, "openclaw", &bundle_root));
         bundle_root

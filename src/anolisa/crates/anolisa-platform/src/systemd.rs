@@ -224,16 +224,6 @@ impl<R: CommandRunner> Systemd<R> {
         self.run_unit_operation("enable", &["enable", "--now", unit], unit)
     }
 
-    /// Stop and disable a systemd unit (`systemctl disable --now <unit>`).
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed systemd error when the unit is empty, missing, or the
-    /// command cannot complete.
-    pub fn disable_unit(&self, unit: &str) -> Result<(), SystemdError> {
-        self.run_unit_operation("disable", &["disable", "--now", unit], unit)
-    }
-
     /// Disable a unit without blocking on its stop sequence.
     ///
     /// `stop --no-block` is best-effort; the following `disable` determines the
@@ -381,10 +371,6 @@ mod tests {
         ));
         assert!(matches!(
             systemd.enable_unit(" "),
-            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
-        ));
-        assert!(matches!(
-            systemd.disable_unit(" "),
             Err(SystemdError::NotFound(unit)) if unit == "<empty>"
         ));
         assert!(matches!(
@@ -616,14 +602,14 @@ mod tests {
     #[test]
     fn generic_non_zero_exit_keeps_status_and_streams() {
         let systemd = systemd(vec![call(
-            &["disable", "--now", "anolisa.service"],
+            &["disable", "anolisa.service"],
             Some(4),
             "out\n",
             "permission denied\n",
         )]);
 
         let err = systemd
-            .disable_unit("anolisa.service")
+            .disable_unit_file("anolisa.service")
             .expect_err("disable should fail");
         assert!(matches!(
             &err,

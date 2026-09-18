@@ -296,13 +296,12 @@ mod tests {
             ..Default::default()
         };
         for obj in objs {
-            state.upsert_object(obj);
+            state.objects.push(obj);
         }
         for claim in claims {
-            state.upsert_adapter_claim(claim);
+            state.adapter_claims.push(claim);
         }
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state");
     }
 

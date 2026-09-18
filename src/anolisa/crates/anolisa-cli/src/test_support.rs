@@ -7,6 +7,14 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::context::{CliContext, InstallMode, ResolvedLayouts};
 use crate::packaged::PackagedDataProbe;
 
+pub(crate) fn write_legacy_state(
+    state: &anolisa_core::InstalledState,
+    path: &Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(path.parent().expect("fixture parent"))?;
+    std::fs::write(path, toml::to_string_pretty(state).expect("legacy fixture"))
+}
+
 /// Explicit fake effect factories for lifecycle tests that do not inspect calls.
 pub(crate) fn raw_effects() -> crate::commands::tier1::install::RawEffectFactories<'static> {
     crate::commands::tier1::install::RawEffectFactories {

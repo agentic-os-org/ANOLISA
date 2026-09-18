@@ -373,15 +373,6 @@ impl FsLayout {
             .join(COMPONENT_MANIFEST_FILE)
     }
 
-    /// Provenance sidecar path for a state snapshot under an arbitrary
-    /// state root. Lives alongside the snapshot `component.toml`.
-    pub fn component_manifest_provenance_path(state_root: &Path, component: &str) -> PathBuf {
-        state_root
-            .join(COMPONENT_MANIFESTS_SUBDIR)
-            .join(component)
-            .join(PROVENANCE_FILE)
-    }
-
     /// Provenance sidecar path derived from an existing snapshot path.
     /// Replaces the filename with `provenance.toml`.
     pub fn provenance_path_for_snapshot(snapshot_path: &Path) -> PathBuf {

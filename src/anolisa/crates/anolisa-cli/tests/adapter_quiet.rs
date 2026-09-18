@@ -143,38 +143,41 @@ fn plant_entries(prefix: &std::path::Path, home: &std::path::Path) {
         capabilities: Vec::new(),
     });
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
-    InstalledState {
-        install_mode: StateInstallMode::System,
-        prefix: layout.prefix.clone(),
-        objects: vec![installed],
-        adapter_claims: vec![AdapterClaim {
-            claim_schema: CLAIM_SCHEMA_VERSION,
-            component: COMPONENT.to_string(),
-            framework: FRAMEWORK.to_string(),
-            plugin_id: Some(COMPONENT.to_string()),
-            adapter_type: Some("extension".to_string()),
-            enabled_at: "2026-01-01T00:00:00Z".to_string(),
-            resource_root,
-            bundle_digest: None,
-            source_revision: None,
-            materialized_files: Vec::new(),
-            driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            notices: Vec::new(),
-            resources: vec![ClaimResource {
-                id: "cosh_extension_dir".to_string(),
-                purpose: "cosh_extension_dir".to_string(),
-                kind: ClaimResourceKind::ExternalPath {
-                    path: extension_dir,
-                },
+    std::fs::write(
+        layout.state_dir.join("installed.toml"),
+        toml::to_string_pretty(&InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            objects: vec![installed],
+            adapter_claims: vec![AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: COMPONENT.to_string(),
+                framework: FRAMEWORK.to_string(),
+                plugin_id: Some(COMPONENT.to_string()),
+                adapter_type: Some("extension".to_string()),
+                enabled_at: "2026-01-01T00:00:00Z".to_string(),
+                resource_root,
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                notices: Vec::new(),
+                resources: vec![ClaimResource {
+                    id: "cosh_extension_dir".to_string(),
+                    purpose: "cosh_extension_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: extension_dir,
+                    },
+                }],
+                driver_payload: DriverPayload::Cosh(CoshClaim {
+                    extension_dir_resource: "cosh_extension_dir".to_string(),
+                }),
             }],
-            driver_payload: DriverPayload::Cosh(CoshClaim {
-                extension_dir_resource: "cosh_extension_dir".to_string(),
-            }),
-        }],
-        ..InstalledState::default()
-    }
-    .save(&layout.state_dir.join("installed.toml"))
+            ..InstalledState::default()
+        })
+        .expect("legacy fixture"),
+    )
     .expect("state");
 }
 

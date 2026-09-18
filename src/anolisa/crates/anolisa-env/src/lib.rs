@@ -5,12 +5,6 @@
 //! container runtime, and current user identity. Every probe degrades
 //! gracefully: detection never panics and unknown values fall back to
 //! `None` or safe defaults.
-//!
-//! The legacy probe / cache / gate scaffolding that lived in this crate
-//! during the skeleton phase is preserved on disk (see `cache.rs`,
-//! `gate.rs`, `probes/`) but is no longer wired into the crate while we
-//! consolidate around this simpler `EnvFacts` contract — later milestones
-//! will re-integrate it on top of the new shape.
 
 use std::path::PathBuf;
 use std::process::Command;

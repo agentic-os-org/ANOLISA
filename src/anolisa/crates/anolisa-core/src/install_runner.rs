@@ -46,12 +46,12 @@ const STAGING_LOCK_PENDING_FILE: &str = ".lock.pending";
 
 /// Wire-form `artifact_type` strings accepted by the raw install runner.
 ///
-/// Keep this in sync with [`InstallRunner::install_files`]; the CLI resolver
+/// Keep this in sync with [`InstallRunner::prepare_files`]; the CLI resolver
 /// uses the same list to reject unsupported artifacts before downloading them.
 pub const SUPPORTED_ARTIFACT_TYPES: &[&str] = &["tar_gz"];
 
 /// One destination file written by the runner, with the sha256 of the
-/// installed bytes. Sub-C records these in `InstalledState`.
+/// installed bytes, recorded in the owned installation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledFile {
     /// Absolute destination path actually written.
@@ -90,20 +90,6 @@ pub struct ResolvedInstallFile {
     pub render: Option<RenderSpec>,
 }
 
-impl ResolvedInstallFile {
-    /// Build a destination-only mapping used by legacy callers that do
-    /// not distinguish archive source paths.
-    pub fn dest_only(dest: PathBuf) -> Self {
-        Self {
-            source: None,
-            dest,
-            mode: None,
-            kind: FileKind::Data,
-            render: None,
-        }
-    }
-}
-
 /// Content-rendering request carried on a [`ResolvedInstallFile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSpec {
@@ -135,14 +121,14 @@ impl RenderMode {
     }
 }
 
-/// Aggregate result of a single [`InstallRunner::install`] call.
+/// Aggregate result of a single [`InstallRunner::install_prepared`] call.
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
-    /// One entry per destination written, in `resolved_dests` order.
+    /// One entry per destination written, in prepared-file order.
     pub files: Vec<InstalledFile>,
 }
 
-/// Failure modes for [`InstallRunner::install`].
+/// Failure modes for artifact preparation and installation.
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     /// Artifact backend is not implemented by this milestone's runner.
@@ -268,34 +254,6 @@ pub enum InstallError {
     },
 }
 
-/// Extract and parse the published install contract embedded in a tar.gz
-/// artifact at `.anolisa/component.toml`.
-///
-/// Returns `Ok(None)` when the archive has no such entry. Entry paths are
-/// compared after stripping any leading `./` (tar created with `-C dir .`
-/// prefixes every path that way).
-///
-/// This manifest is byte-identical to the registry `meta.toml` (contract
-/// I3). Adapter install reads it so the `source`/`dest`/`version` it acts on
-/// come from the *published* artifact rather than the dev-tree catalog,
-/// which may carry stale build-path sources and lagging versions.
-///
-/// # Errors
-/// [`InstallError::Io`] when the archive cannot be opened or read;
-/// [`InstallError::Archive`] when gzip/tar decoding fails;
-/// [`InstallError::EmbeddedManifestParse`] when the entry is not valid
-/// component-manifest TOML.
-pub fn read_embedded_component_manifest(
-    artifact: &Path,
-) -> Result<Option<crate::manifest::ComponentManifest>, InstallError> {
-    let Some(text) = read_embedded_component_manifest_text(artifact)? else {
-        return Ok(None);
-    };
-    let manifest = crate::manifest::ComponentManifest::from_toml_str(&text)
-        .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
-    Ok(Some(manifest))
-}
-
 /// Extract the embedded `.anolisa/component.toml` text from a tar.gz
 /// artifact.
 ///
@@ -349,51 +307,6 @@ impl<'a> InstallRunner<'a> {
     /// destination resolves under an ANOLISA-owned root.
     pub fn new(layout: &'a FsLayout) -> Self {
         Self { layout }
-    }
-
-    /// Install `cached_artifact` to the destinations in `resolved_dests`,
-    /// which must be absolute paths already substituted against the layout
-    /// (Sub-C will pass the planner's `ComponentPlan.resolved_files`).
-    ///
-    /// `artifact_type` is the wire string from the install plan (`"tar_gz"`).
-    ///
-    /// On success returns one `InstalledFile` per written path with the
-    /// final sha256 — Sub-C will copy these into `InstalledState.objects[].files`.
-    pub fn install(
-        &self,
-        artifact_type: &str,
-        cached_artifact: &Path,
-        resolved_dests: &[PathBuf],
-    ) -> Result<InstallOutcome, InstallError> {
-        let files: Vec<ResolvedInstallFile> = resolved_dests
-            .iter()
-            .cloned()
-            .map(ResolvedInstallFile::dest_only)
-            .collect();
-        self.install_files(artifact_type, cached_artifact, &files)
-    }
-
-    /// Install files using explicit source-to-destination mappings.
-    ///
-    /// Source paths identify entries in the archive. All destinations are
-    /// validated before any file is written so a rejected path cannot leave
-    /// a partial install behind.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the artifact type is unsupported, any destination is
-    /// unsafe or already exists, the cache cannot be read, or an archive
-    /// lacks a requested entry. If a later write step fails after earlier
-    /// paths were created, the runner best-effort removes the paths it
-    /// created before returning the original error.
-    pub fn install_files(
-        &self,
-        artifact_type: &str,
-        cached_artifact: &Path,
-        files: &[ResolvedInstallFile],
-    ) -> Result<InstallOutcome, InstallError> {
-        let prepared = self.prepare_files(artifact_type, cached_artifact, files)?;
-        self.install_prepared(prepared)
     }
 
     /// Install a file set previously returned by [`Self::prepare_files`].
@@ -463,31 +376,14 @@ impl<'a> InstallRunner<'a> {
         Ok(InstallOutcome { files: installed })
     }
 
-    /// Resolve the exact regular files, symlinks, and digests an install
-    /// would create without writing them.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same artifact, mapping, path-safety, and destination
-    /// errors as [`Self::install_files`].
-    pub fn inspect_files(
-        &self,
-        artifact_type: &str,
-        cached_artifact: &Path,
-        files: &[ResolvedInstallFile],
-    ) -> Result<InstallOutcome, InstallError> {
-        let prepared = self.prepare_files(artifact_type, cached_artifact, files)?;
-        Ok(prepared.preview())
-    }
-
     /// Read and validate an artifact once, spooling the exact payloads that a
     /// later [`Self::install_prepared`] call will place into a private staging
     /// directory owned by the returned [`PreparedFileSet`].
     ///
     /// # Errors
     ///
-    /// Returns the same artifact, mapping, path-safety, and destination
-    /// errors as [`Self::install_files`].
+    /// Fails when the artifact type is unsupported, a destination is unsafe or
+    /// already exists, the cache cannot be read, or a requested entry is missing.
     pub fn prepare_files(
         &self,
         artifact_type: &str,
@@ -1599,6 +1495,43 @@ mod tests {
     use tar::{Builder, Header};
     use tempfile::tempdir;
 
+    impl ResolvedInstallFile {
+        fn dest_only(dest: PathBuf) -> Self {
+            Self {
+                source: None,
+                dest,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            }
+        }
+    }
+
+    impl InstallRunner<'_> {
+        fn install_fixture(
+            &self,
+            artifact_type: &str,
+            cached_artifact: &Path,
+            destinations: &[PathBuf],
+        ) -> Result<InstallOutcome, InstallError> {
+            let files: Vec<_> = destinations
+                .iter()
+                .cloned()
+                .map(ResolvedInstallFile::dest_only)
+                .collect();
+            self.install_mapped_fixture(artifact_type, cached_artifact, &files)
+        }
+
+        fn install_mapped_fixture(
+            &self,
+            artifact_type: &str,
+            cached_artifact: &Path,
+            files: &[ResolvedInstallFile],
+        ) -> Result<InstallOutcome, InstallError> {
+            let prepared = self.prepare_files(artifact_type, cached_artifact, files)?;
+            self.install_prepared(prepared)
+        }
+    }
     fn layout_for(home: &Path) -> FsLayout {
         FsLayout::user_with_overrides(home.to_path_buf(), None, None, None, None, None)
     }
@@ -1736,7 +1669,7 @@ mod tests {
 
         let dest = PathBuf::from("{bindir}/foo");
         let err = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install_fixture("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must error");
         match err {
             InstallError::UnresolvedTemplate { path } => assert_eq!(path, dest),
@@ -1755,7 +1688,7 @@ mod tests {
 
         let dest = PathBuf::from("/tmp/escape/foo");
         let err = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install_fixture("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must error");
         match err {
             InstallError::ExternalPath { path } => assert_eq!(path, dest),
@@ -1774,7 +1707,7 @@ mod tests {
 
         let dest = layout.state_dir.join("sub").join("deep").join("file.bin");
         let outcome = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install_fixture("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect("install ok");
         assert!(dest.exists());
         assert_eq!(outcome.files[0].sha256, sha256_of(b"deep"));
@@ -1799,7 +1732,7 @@ mod tests {
         let dest_bin = layout.bin_dir.join("agentsight");
         let dest_data = layout.datadir.join("data.toml");
         let outcome = runner
-            .install("tar_gz", &cached, &[dest_bin.clone(), dest_data.clone()])
+            .install_fixture("tar_gz", &cached, &[dest_bin.clone(), dest_data.clone()])
             .expect("install ok");
 
         assert_eq!(outcome.files.len(), 2);
@@ -1810,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn inspected_files_match_the_install_outcome() {
+    fn prepared_preview_matches_the_install_outcome() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
@@ -1821,12 +1754,11 @@ mod tests {
         let dest = layout.bin_dir.join("skillfs");
         let files = [ResolvedInstallFile::dest_only(dest)];
 
-        let inspected = runner
-            .inspect_files("tar_gz", &cached, &files)
-            .expect("inspect files");
-        let installed = runner
-            .install_files("tar_gz", &cached, &files)
-            .expect("install files");
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+        let inspected = prepared.preview();
+        let installed = runner.install_prepared(prepared).expect("install files");
 
         assert_eq!(inspected.files, installed.files);
     }
@@ -1905,7 +1837,7 @@ mod tests {
 
         let dest = layout.bin_dir.join("dest-name");
         let outcome = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -1942,7 +1874,7 @@ mod tests {
 
         let dest_root = layout.datadir.join("adapters/tokenless/openclaw");
         let outcome = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -1988,7 +1920,7 @@ mod tests {
 
         let dest = layout.datadir.join("config.toml");
         runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -2032,7 +1964,7 @@ mod tests {
 
         let dest_root = layout.datadir.join("adapters/tokenless/codex");
         runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -2070,7 +2002,7 @@ mod tests {
 
         let dest = layout.bin_dir.join("tool");
         let err = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -2103,7 +2035,7 @@ mod tests {
 
         let dest = layout.bin_dir.join("missing");
         let err = runner
-            .install("tar_gz", &cached, &[dest])
+            .install_fixture("tar_gz", &cached, &[dest])
             .expect_err("must error");
         match err {
             InstallError::MissingArchiveEntry { basename } => assert_eq!(basename, "missing"),
@@ -2121,7 +2053,7 @@ mod tests {
 
         let dest = layout.bin_dir.join("a");
         let err = runner
-            .install("binary", &cached, &[dest])
+            .install_fixture("binary", &cached, &[dest])
             .expect_err("must error");
         match err {
             InstallError::UnsupportedArtifactType(s) => assert_eq!(s, "binary"),
@@ -2138,7 +2070,7 @@ mod tests {
         let cached = write_cached(cache.path(), "x", b"x");
 
         let err = runner
-            .install("tar_gz", &cached, &[])
+            .install_fixture("tar_gz", &cached, &[])
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
     }
@@ -2167,7 +2099,7 @@ mod tests {
         std::fs::write(&dest_data, b"existing-data").unwrap();
 
         let err = runner
-            .install("tar_gz", &cached, &[dest_bin.clone(), dest_data.clone()])
+            .install_fixture("tar_gz", &cached, &[dest_bin.clone(), dest_data.clone()])
             .expect_err("must refuse");
         match err {
             InstallError::DestExists { path } => assert_eq!(path, dest_data),
@@ -2190,7 +2122,7 @@ mod tests {
         // starts_with check but would write outside bin_dir.
         let dest = layout.bin_dir.join("..").join("escape").join("file");
         let err = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -2222,7 +2154,7 @@ mod tests {
 
         let dest = layout.bin_dir.join("sub").join("..");
         let err = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
@@ -2264,7 +2196,7 @@ mod tests {
         );
 
         let err = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install_fixture("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must refuse");
         match err {
             InstallError::DestExists { path } => assert_eq!(path, dest),
@@ -2295,7 +2227,7 @@ mod tests {
 
         let dest = escape_link.join("file");
         let err = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install_fixture("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must reject");
         assert!(
             matches!(err, InstallError::ExternalPath { ref path } if path == &dest),
@@ -2341,7 +2273,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_target, &tmp_plant).unwrap();
 
         let err = runner
-            .install("tar_gz", &cached, &[first_dest.clone(), dest.clone()])
+            .install_fixture("tar_gz", &cached, &[first_dest.clone(), dest.clone()])
             .expect_err("must refuse to write through symlinked tmp");
         match err {
             InstallError::Io { path, .. } => assert_eq!(path, tmp_plant),
@@ -2370,7 +2302,7 @@ mod tests {
 
         let dest = PathBuf::from("/tmp/escape/foo");
         let err = runner
-            .install("tar_gz", &cached, &[dest])
+            .install_fixture("tar_gz", &cached, &[dest])
             .expect_err("must error");
         assert!(matches!(err, InstallError::ExternalPath { .. }));
         let leaked = layout.bin_dir.join("foo");
@@ -2413,7 +2345,7 @@ mod tests {
         ];
 
         let outcome = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect("install ok");
 
         assert!(fs::symlink_metadata(&link_dest).unwrap().is_symlink());
@@ -2453,7 +2385,7 @@ mod tests {
         ];
 
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must error");
         match err {
             InstallError::SymlinkMissingSource { path } => assert_eq!(path, link_dest),
@@ -2484,7 +2416,7 @@ mod tests {
             symlink_entry(&layout.bin_dir.join("foo"), link_dest.clone()),
         ];
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must error");
         match err {
             InstallError::DestExists { path } => assert_eq!(path, link_dest),
@@ -2510,7 +2442,7 @@ mod tests {
             symlink_entry(&external, layout.bin_dir.join("foo-link")),
         ];
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must error");
         match err {
             InstallError::ExternalPath { path } => assert_eq!(path, external),
@@ -2538,7 +2470,7 @@ mod tests {
             symlink_entry(&referent, link_dest.clone()),
         ];
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must error");
         match err {
             InstallError::Io { path, .. } => assert_eq!(path, referent),
@@ -2567,7 +2499,7 @@ mod tests {
             layout.bin_dir.join("foo-link"),
         )];
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
     }
@@ -2600,7 +2532,7 @@ mod tests {
 
         let dest = layout.datadir.join("agent-sec-core.service");
         let outcome = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[render_entry(
@@ -2636,7 +2568,7 @@ mod tests {
 
         let dest = layout.etc_dir.join("conf");
         runner
-            .install_files("tar_gz", &cached, &[render_entry("conf.in", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("conf.in", dest.clone())])
             .expect("install ok");
         assert_eq!(
             fs::read_to_string(&dest).unwrap(),
@@ -2663,7 +2595,7 @@ mod tests {
 
         let dest = layout.datadir.join("cosh-gateway@.service");
         runner
-            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
             .expect("install ok");
 
         assert_eq!(
@@ -2689,7 +2621,7 @@ mod tests {
 
         let dest = layout.datadir.join("unit");
         let err = runner
-            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
             .expect_err("must reject unknown placeholder inside an env default");
         match err {
             InstallError::Render { reason, .. } => assert!(
@@ -2713,7 +2645,7 @@ mod tests {
 
         let dest = layout.datadir.join("unit");
         let err = runner
-            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
             .expect_err("must reject unknown placeholder");
         match err {
             InstallError::Render { path, reason } => {
@@ -2740,7 +2672,7 @@ mod tests {
 
         let dest = layout.datadir.join("blob");
         let err = runner
-            .install_files("tar_gz", &cached, &[render_entry("blob.in", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("blob.in", dest.clone())])
             .expect_err("must reject non-UTF-8 content");
         match err {
             InstallError::Render { path, reason } => {
@@ -2763,7 +2695,7 @@ mod tests {
 
         let dest = layout.datadir.join("tree");
         let err = runner
-            .install_files("tar_gz", &cached, &[render_entry("tree/", dest.clone())])
+            .install_mapped_fixture("tar_gz", &cached, &[render_entry("tree/", dest.clone())])
             .expect_err("must reject render on a directory source");
         match err {
             InstallError::Render { path, .. } => assert_eq!(path, dest),
@@ -2799,7 +2731,7 @@ mod tests {
             link,
         ];
         let err = runner
-            .install_files("tar_gz", &cached, &files)
+            .install_mapped_fixture("tar_gz", &cached, &files)
             .expect_err("must reject render on a symlink");
         match err {
             InstallError::Render { path, .. } => assert_eq!(path, link_dest),
@@ -3227,7 +3159,7 @@ mod tests {
         };
 
         let outcome = runner
-            .install_files(
+            .install_mapped_fixture(
                 "tar_gz",
                 &cached,
                 &[entry(bin_dest.clone()), entry(libexec_dest.clone())],

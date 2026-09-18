@@ -810,7 +810,7 @@ fn historical_state_evidence_does_not_authorize_install_identity() {
                     prefix: layout.prefix.clone(),
                     ..Default::default()
                 };
-                state.upsert_object(InstalledObject {
+                state.objects.push(InstalledObject {
                     kind: ObjectKind::Capability,
                     name: "ghost".to_string(),
                     version: "0.1.0".to_string(),
@@ -834,7 +834,8 @@ fn historical_state_evidence_does_not_authorize_install_identity() {
                     health: Vec::new(),
                     provisioned_packages: Vec::new(),
                 });
-                state.save(&state_path).expect("seed legacy state");
+                crate::test_support::write_legacy_state(&state, &state_path)
+                    .expect("seed legacy state");
             }
         }
 
@@ -1174,7 +1175,7 @@ fn explicit_rpm_on_raw_installed_component_is_rejected() {
         prefix: common::resolve_layout(&ctx).prefix.clone(),
         ..Default::default()
     };
-    state.upsert_object(InstalledObject {
+    state.objects.push(InstalledObject {
         kind: ObjectKind::Component,
         name: "copilot-shell".to_string(),
         version: "1.0.0".to_string(),
@@ -1198,13 +1199,13 @@ fn explicit_rpm_on_raw_installed_component_is_rejected() {
         health: Vec::new(),
         provisioned_packages: Vec::new(),
     });
-    state
-        .save(
-            &common::resolve_layout(&ctx)
-                .state_dir
-                .join("installed.toml"),
-        )
-        .expect("seed state");
+    crate::test_support::write_legacy_state(
+        &state,
+        &common::resolve_layout(&ctx)
+            .state_dir
+            .join("installed.toml"),
+    )
+    .expect("seed state");
 
     let q = FakeQuery {
         installed: vec![(
@@ -1267,9 +1268,8 @@ fn seed_tracked_rpm(ctx: &CliContext, component: &str, ownership: Ownership) -> 
         prefix: layout.prefix.clone(),
         ..Default::default()
     };
-    state.upsert_object(object.clone());
-    state
-        .save(&layout.state_dir.join("installed.toml"))
+    state.objects.push(object.clone());
+    crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
         .expect("seed tracked RPM state");
     object
 }

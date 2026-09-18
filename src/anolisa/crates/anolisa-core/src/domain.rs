@@ -164,7 +164,6 @@ pub enum ProviderBinding {
 
 impl ProviderBinding {
     /// Whether default uninstall may remove backing files or packages.
-    /// Replaces the legacy `Ownership::owns_removal`.
     pub fn owns_removal(&self) -> bool {
         match self {
             Self::Owned { .. } => true,

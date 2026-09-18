@@ -88,14 +88,17 @@ fn seed_index(prefix: &std::path::Path, components: &[&str]) {
 fn plant_state(prefix: &std::path::Path, claimed_component: &str) {
     let layout = FsLayout::system(Some(prefix.to_path_buf()));
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
-    InstalledState {
-        install_mode: StateInstallMode::System,
-        prefix: layout.prefix.clone(),
-        objects: vec![rpm_object(TARGET), rpm_object(OTHER)],
-        adapter_claims: vec![sample_claim(claimed_component)],
-        ..InstalledState::default()
-    }
-    .save(&layout.state_dir.join("installed.toml"))
+    std::fs::write(
+        layout.state_dir.join("installed.toml"),
+        toml::to_string_pretty(&InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            objects: vec![rpm_object(TARGET), rpm_object(OTHER)],
+            adapter_claims: vec![sample_claim(claimed_component)],
+            ..InstalledState::default()
+        })
+        .expect("legacy fixture"),
+    )
     .expect("state");
 }
 

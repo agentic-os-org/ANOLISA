@@ -1388,7 +1388,7 @@ mod tests {
     #[test]
     fn exact_stored_component_identity_wins_over_management_redirect() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "anolisa-telemetry",
             "1.0.0",
             ObjectStatus::Installed,
@@ -1614,7 +1614,7 @@ name = "copilot-shell"
     fn user_status_view_includes_system_component() {
         let user_state = InstalledState::default();
         let mut system_state = InstalledState::default();
-        system_state.upsert_object(component_object(
+        system_state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1765,7 +1765,7 @@ name = "copilot-shell"
             state: StateStore::empty(),
         };
         let mut system_state = InstalledState::default();
-        system_state.upsert_object(component_object(
+        system_state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1800,13 +1800,13 @@ name = "copilot-shell"
     #[test]
     fn named_status_view_reports_shadowed_system_record() {
         let mut user_state = InstalledState::default();
-        user_state.upsert_object(component_object(
+        user_state.objects.push(component_object(
             "agentsight",
             "0.2.0",
             ObjectStatus::Installed,
         ));
         let mut system_state = InstalledState::default();
-        system_state.upsert_object(component_object(
+        system_state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1826,13 +1826,13 @@ name = "copilot-shell"
     #[test]
     fn unnamed_status_view_reports_shadowed_system_record() {
         let mut user_state = InstalledState::default();
-        user_state.upsert_object(component_object(
+        user_state.objects.push(component_object(
             "agentsight",
             "0.2.0",
             ObjectStatus::Installed,
         ));
         let mut system_state = InstalledState::default();
-        system_state.upsert_object(component_object(
+        system_state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1852,7 +1852,7 @@ name = "copilot-shell"
     #[test]
     fn system_status_view_projects_only_visible_system_root() {
         let mut system_state = InstalledState::default();
-        system_state.upsert_object(component_object(
+        system_state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1894,12 +1894,12 @@ name = "copilot-shell"
     #[test]
     fn unfiltered_listing_returns_all_components() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
         ));
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "tokenless",
             "0.2.0",
             ObjectStatus::Partial,
@@ -1921,7 +1921,7 @@ name = "copilot-shell"
     #[test]
     fn filter_miss_yields_synthetic_not_installed_record() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -1956,7 +1956,7 @@ name = "copilot-shell"
             checked_at: "2026-06-01T10:01:00Z".to_string(),
             reason: None,
         }];
-        state.upsert_object(obj);
+        state.objects.push(obj);
 
         let records = select_components(
             &store_with(&state),
@@ -2002,7 +2002,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2045,7 +2045,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2087,7 +2087,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2128,7 +2128,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2167,7 +2167,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2211,7 +2211,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2264,7 +2264,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2309,7 +2309,9 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_observed_object("cosh-ng", "cosh-ng", "0.13.0-1.al8"));
+        state
+            .objects
+            .push(rpm_observed_object("cosh-ng", "cosh-ng", "0.13.0-1.al8"));
 
         let records = select_components(
             &store_with(&state),
@@ -2354,7 +2356,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2414,7 +2416,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agent-memory",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2480,7 +2482,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agent-memory",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2543,7 +2545,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2593,7 +2595,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2624,7 +2626,7 @@ name = "copilot-shell"
         let layout = test_layout(dir.path());
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2657,7 +2659,7 @@ name = "copilot-shell"
         write_manifest_snapshot(&layout, "agentsight", "not = [valid toml");
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2697,7 +2699,7 @@ name = "copilot-shell"
         );
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2751,7 +2753,7 @@ name = "copilot-shell"
             mode: None,
             capabilities: Vec::new(),
         }];
-        state.upsert_object(comp);
+        state.objects.push(comp);
 
         let records = select_components(
             &store_with(&state),
@@ -2799,7 +2801,7 @@ name = "copilot-shell"
     #[test]
     fn component_record_has_no_adapters_by_default() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2817,7 +2819,7 @@ name = "copilot-shell"
     #[test]
     fn adapter_scan_failure_is_unavailable_and_keeps_output_empty() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2853,12 +2855,12 @@ name = "copilot-shell"
     #[test]
     fn adapter_summaries_filtered_to_requested_component() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "tokenless",
             "0.1.0",
             ObjectStatus::Installed,
         ));
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -2889,7 +2891,7 @@ name = "copilot-shell"
     #[test]
     fn adapter_summaries_included_in_unfiltered_listing() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "tokenless",
             "0.1.0",
             ObjectStatus::Installed,
@@ -3118,7 +3120,7 @@ name = "copilot-shell"
 
         // Control: a raw install with the same failing check escalates.
         let mut raw_state = InstalledState::default();
-        raw_state.upsert_object(component_object(
+        raw_state.objects.push(component_object(
             "copilot-shell",
             "2.3.0",
             ObjectStatus::Installed,
@@ -3135,7 +3137,7 @@ name = "copilot-shell"
         // rpm-observed with the same snapshot stays adopted and surfaces the
         // RPM provenance fields.
         let mut obs_state = InstalledState::default();
-        obs_state.upsert_object(rpm_observed_object(
+        obs_state.objects.push(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.3.0-1.al8",
@@ -3160,7 +3162,7 @@ name = "copilot-shell"
         managed.ownership = Some(Ownership::RpmManaged);
         managed.managed = true;
         managed.adopted = false;
-        managed_state.upsert_object(managed);
+        managed_state.objects.push(managed);
         let rows = select_components(
             &store_with(&managed_state),
             &layout,
@@ -3256,7 +3258,7 @@ name = "copilot-shell"
         .expect("component index");
 
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "cosh",
             "2.6.0-1.alnx4",
             ObjectStatus::Installed,
@@ -3350,7 +3352,7 @@ name = "copilot-shell"
     #[test]
     fn native_query_failure_is_unavailable_and_keeps_recorded_status() {
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_observed_object(
+        state.objects.push(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.2.0-1.al8",
@@ -3452,7 +3454,7 @@ name = "copilot-shell"
     #[test]
     fn select_components_from_view_overrides_rpm_status_to_drifted() {
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_observed_object(
+        state.objects.push(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.2.0-1.al8",
@@ -3483,7 +3485,7 @@ name = "copilot-shell"
     #[test]
     fn select_components_from_view_overrides_rpm_status_to_missing() {
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_observed_object(
+        state.objects.push(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.2.0-1.al8",
@@ -3507,7 +3509,7 @@ name = "copilot-shell"
     #[test]
     fn select_components_from_view_leaves_non_rpm_component_untouched() {
         let mut state = InstalledState::default();
-        state.upsert_object(component_object(
+        state.objects.push(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
@@ -3531,7 +3533,7 @@ name = "copilot-shell"
         let mut state = InstalledState::default();
         let mut object = rpm_observed_object("copilot-shell", "copilot-shell", "2.2.0-1.al8");
         object.status = ObjectStatus::Failed;
-        state.upsert_object(object);
+        state.objects.push(object);
         // rpmdb has drifted, but the failed status must survive untouched.
         let q = FakeQuery {
             installed: vec![(
@@ -3670,8 +3672,7 @@ dest = "{datadir}/adapters/{component}/cosh/"
             });
         }
         std::fs::create_dir_all(&layout.state_dir).expect("state dir");
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("save state");
 
         let manager = AdapterManager::new(layout.clone(), Some(home), "tester".to_string());

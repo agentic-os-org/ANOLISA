@@ -358,7 +358,7 @@ mod tests {
     /// state; loading it exercises the migration into the v5 store. `adopted`
     /// splits `RpmObserved` into the Adopted vs Observed relations.
     fn component_object(name: &str, ownership: Ownership, adopted: bool) -> InstalledObject {
-        let is_rpm = ownership.is_rpm();
+        let is_rpm = matches!(ownership, Ownership::RpmManaged | Ownership::RpmObserved);
         InstalledObject {
             kind: ObjectKind::Component,
             name: name.to_string(),
@@ -405,10 +405,9 @@ mod tests {
             ..Default::default()
         };
         for obj in objs {
-            state.upsert_object(obj);
+            state.objects.push(obj);
         }
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("seed state");
     }
 

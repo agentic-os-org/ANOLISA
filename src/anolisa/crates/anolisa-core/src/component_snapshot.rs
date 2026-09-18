@@ -311,34 +311,13 @@ pub struct ComponentSnapshotObservations {
 }
 
 impl ComponentSnapshot {
-    /// Builds a snapshot after checking evidence against the requested probes.
+    /// Builds a snapshot that may include owned-file integrity evidence.
     ///
     /// # Errors
     ///
     /// Returns [`SnapshotContractError`] when a probe is unsupported in the
     /// requested scope, evidence disagrees with the request, or active state
     /// belongs to a different component identity.
-    pub fn from_parts(
-        request: ComponentSnapshotRequest,
-        state: ProbeEvidence<StateSnapshot, StateProvenance>,
-        native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
-        pending_journal: ProbeEvidence<PendingJournalSnapshot, JournalProvenance>,
-    ) -> Result<Self, SnapshotContractError> {
-        Self::from_parts_with_owned_files(
-            request,
-            state,
-            ProbeEvidence::NotRequested,
-            native_package,
-            pending_journal,
-        )
-    }
-
-    /// Builds a snapshot that may include owned-file integrity evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SnapshotContractError`] under the same conditions as
-    /// [`Self::from_parts`], including mismatched owned-file probe evidence.
     pub fn from_parts_with_owned_files(
         request: ComponentSnapshotRequest,
         state: ProbeEvidence<StateSnapshot, StateProvenance>,
@@ -681,12 +660,13 @@ mod tests {
             source_repo: Some("anolisa".to_string()),
             observed_at: "2026-08-19T00:00:00Z".to_string(),
         };
-        let snapshot = ComponentSnapshot::from_parts(
+        let snapshot = ComponentSnapshot::from_parts_with_owned_files(
             all_probes_request(),
             ProbeEvidence::Present {
                 provenance: state_source(),
                 value: StateSnapshot::Active(Box::new(installation.clone())),
             },
+            ProbeEvidence::NotRequested,
             ProbeEvidence::Present {
                 provenance: native_source(),
                 value: NativePackageSnapshot::Installed(observation.clone()),
@@ -732,12 +712,13 @@ mod tests {
             InstallationScope::System,
             [SnapshotProbe::State, SnapshotProbe::NativePackage],
         );
-        let snapshot = ComponentSnapshot::from_parts(
+        let snapshot = ComponentSnapshot::from_parts_with_owned_files(
             request,
             ProbeEvidence::Unavailable {
                 provenance: state_source(),
                 reason: "permission denied".to_string(),
             },
+            ProbeEvidence::NotRequested,
             ProbeEvidence::Absent {
                 provenance: native_source(),
             },
@@ -764,8 +745,9 @@ mod tests {
             [SnapshotProbe::State],
         );
 
-        let error = ComponentSnapshot::from_parts(
+        let error = ComponentSnapshot::from_parts_with_owned_files(
             request,
+            ProbeEvidence::NotRequested,
             ProbeEvidence::NotRequested,
             ProbeEvidence::NotRequested,
             ProbeEvidence::NotRequested,
@@ -788,11 +770,12 @@ mod tests {
             [SnapshotProbe::State],
         );
 
-        let error = ComponentSnapshot::from_parts(
+        let error = ComponentSnapshot::from_parts_with_owned_files(
             request,
             ProbeEvidence::Absent {
                 provenance: state_source(),
             },
+            ProbeEvidence::NotRequested,
             ProbeEvidence::Absent {
                 provenance: native_source(),
             },
@@ -834,7 +817,7 @@ mod tests {
             installation.name.clone_from(&name);
             installation.scope = scope;
 
-            let error = ComponentSnapshot::from_parts(
+            let error = ComponentSnapshot::from_parts_with_owned_files(
                 ComponentSnapshotRequest::new(
                     "tokenless",
                     InstallationScope::System,
@@ -844,6 +827,7 @@ mod tests {
                     provenance: state_source(),
                     value: StateSnapshot::Active(Box::new(installation)),
                 },
+                ProbeEvidence::NotRequested,
                 ProbeEvidence::NotRequested,
                 ProbeEvidence::NotRequested,
             )
@@ -864,12 +848,13 @@ mod tests {
 
     #[test]
     fn snapshot_rejects_native_package_probe_in_user_scope() {
-        let error = ComponentSnapshot::from_parts(
+        let error = ComponentSnapshot::from_parts_with_owned_files(
             ComponentSnapshotRequest::new(
                 "tokenless",
                 InstallationScope::User { uid: 1000 },
                 [SnapshotProbe::NativePackage],
             ),
+            ProbeEvidence::NotRequested,
             ProbeEvidence::NotRequested,
             ProbeEvidence::Absent {
                 provenance: native_source(),
