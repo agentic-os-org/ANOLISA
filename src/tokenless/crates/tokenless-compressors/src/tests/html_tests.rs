@@ -31,7 +31,7 @@ fn header_lists_every_removal_and_page_identity() {
     assert_eq!(view.title.as_deref(), Some("Example Domain"));
     assert_eq!(view.canonical.as_deref(), Some("https://example.com/page"));
     // Head styles and scripts are counted with the body removals.
-    assert_eq!(view.removed, [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    assert_eq!(view.removed, [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]);
     assert_eq!(view.root, "body");
     assert_eq!(view.outside_root, 0);
     assert!(view.output.starts_with(
@@ -57,7 +57,7 @@ fn elements_outside_the_rendered_root_are_counted_not_categorized() {
     let view = HtmlExtractor.render(&html).unwrap();
     assert_eq!(view.root, "main");
     assert_eq!(view.outside_root, 6);
-    assert_eq!(view.removed, [2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(view.removed, [2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(view.output.starts_with(
         "[HTML page rendered as Markdown; <main> only, 6 nodes outside it omitted; \
          removed 2 script, 1 style. Retrieve original for the full page.]\n"
@@ -185,7 +185,7 @@ fn tables_keep_header_cells_and_escape_pipes() {
         body_of(&view),
         format!(
             "{PARAGRAPH}\n\n**Params**\n\n| Name | Type |\n| --- | --- |\n\
-             | timeout | int \\| null |\n| retries |  |\n\n|  |  |\n| --- | --- |\n| a | b |"
+             | timeout | int \\| null |\n| retries |\n\n|  |  |\n| --- | --- |\n| a | b |"
         )
     );
 }
@@ -380,5 +380,137 @@ fn code_language_comes_from_sphinx_and_mdn_class_conventions() {
         format!(
             "{PARAGRAPH}\n\n```python3\nprint(1)\n```\n\n```css\na {{}}\n```\n\n```\nnone\n```\n\n```\nx\n```"
         )
+    );
+}
+
+#[test]
+fn form_controls_media_dialogs_and_menus_are_removed_and_counted() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><button>Copy</button><input value=\"x\"><select><option>a</option>\
+         </select><textarea>t</textarea><progress></progress><meter></meter>\
+         <datalist><option>b</option></datalist><video>v</video><audio>a</audio>\
+         <canvas>c</canvas><object>o</object><embed><map><area></map><dialog>d</dialog>\
+         <menu><li>m</li></menu><label>Latest</label><fieldset><legend>Options</legend>\
+         <p>keep {PARAGRAPH}</p></fieldset>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(&view.removed[15..], [7, 6, 1, 1]);
+    assert!(view.output.starts_with(
+        "[HTML page rendered as Markdown; removed 1 script, 1 style, 7 form control, 6 media, \
+         1 dialog, 1 menu. Retrieve original for the full page.]\n"
+    ));
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\nLatest\n\nOptions\n\nkeep {PARAGRAPH}")
+    );
+}
+
+#[test]
+fn the_outermost_sole_article_is_the_root_despite_nested_articles() {
+    let html = page(&format!(
+        "<div>outer {PARAGRAPH}</div><div><article><h1>Post</h1><p>post {PARAGRAPH}</p>\
+         <article><p>comment {PARAGRAPH}</p></article></article></div>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(view.root, "article");
+    assert_eq!(view.outside_root, 1);
+    assert_eq!(
+        body_of(&view),
+        format!("# Post\n\npost {PARAGRAPH}\n\ncomment {PARAGRAPH}")
+    );
+}
+
+#[test]
+fn paragraph_lines_that_start_like_markdown_blocks_are_escaped() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>- item<br># heading<br>###### six<br>&gt; quote<br>1. step<br>\
+         2) step<br>+ plus<br>* star<br>---<br>===<br>```<br>~~~<br>#hashtag<br>####### seven<br>\
+         -1 degrees<br>1.5 seconds<br>*emph* text<br>10) ten<br>[End page]</p>\
+         <span>lead<h3>Sub</h3>- tail</span>\
+         <p>#\tfoo<br>-\nitem<br>1.\tstep<br>-\t-\t-<br>*\r\n*\r\n*<br>#\x0bvt</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    // A heading rendered inside an inline run keeps its own marker.
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n\\- item\n\\# heading\n\\###### six\n\\> quote\n1\\. step\n2\\) step\n\
+             \\+ plus\n\\* star\n\\---\n\\===\n\\```\n\\~~~\n#hashtag\n####### seven\n-1 degrees\n\
+             1.5 seconds\n*emph* text\n10\\) ten\n\\[End page]\n\nlead\n### Sub\n\\- tail\n\n\
+             \\# foo\n\\- item\n1\\. step\n\\- - -\n\\* * *\n#\x0bvt"
+        )
+    );
+}
+
+#[test]
+fn link_targets_with_spaces_or_parentheses_are_wrapped() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH} <a href=\"https://x.test/a b(c)\">t</a> <a href=\"/plain\">u</a> \
+         <img alt=\"i\" src=\"/p (1).png\"></p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH} [t](<https://x.test/a b(c)>) [u](/plain) ![i](</p (1).png>)")
+    );
+}
+
+#[test]
+fn spanned_table_cells_pad_the_grid_and_are_clipped() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table><tr><th colspan=\"2\">Pair</th><th>C</th></tr>\
+         <tr><td rowspan=\"2\">r</td><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr>\
+         <tr><td>5</td><td>6</td><td rowspan=\"2\">s</td></tr><tr><td>7</td><td>8</td></tr></table>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n| Pair |  | C |\n| --- | --- | --- |\n| r | 1 | 2 |\n|  | 3 | 4 |\n\
+             | 5 | 6 | s |\n| 7 | 8 |"
+        )
+    );
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table><tr><td colspan=\"1000\" rowspan=\"0\">wide</td></tr></table>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    let row = body_of(&view).lines().last().unwrap();
+    assert_eq!(row, "| wide |");
+    // Placeholders stop at the column limit and short rows are never padded,
+    // so a wide row cannot make the table quadratic in the input: 400 spanned
+    // cells plus 40 short rows, then a row of wide row spans over 40 rows.
+    let wide: String = (0..400).map(|_| "<td colspan=\"100\">x</td>").collect();
+    let short: String = (0..40).map(|_| "<tr><td>y</td></tr>").collect();
+    let html = page(&format!("<p>{PARAGRAPH}</p><table><tr>{wide}</tr>{short}</table>"));
+    let view = HtmlExtractor.render(&html).unwrap();
+    let lines: Vec<&str> = body_of(&view).lines().collect();
+    // The first span is padded up to the column limit; the other 399 cells
+    // follow unpadded, and the header row matches the widest row.
+    assert_eq!(lines[2].matches('|').count(), 464, "{}", lines[2]);
+    assert_eq!(lines[4].matches('|').count(), 464, "{}", lines[4]);
+    assert_eq!(lines[5], "| y |");
+    assert!(view.output.len() < html.len(), "{} vs {}", view.output.len(), html.len());
+    let wide: String = (0..400)
+        .map(|_| "<td colspan=\"100\" rowspan=\"40\">x</td>")
+        .collect();
+    let html = page(&format!("<p>{PARAGRAPH}</p><table><tr>{wide}</tr>{short}</table>"));
+    let view = HtmlExtractor.render(&html).unwrap();
+    let lines: Vec<&str> = body_of(&view).lines().collect();
+    assert_eq!(lines[5].matches('|').count(), 66, "{}", lines[5]);
+    assert!(view.output.len() < html.len(), "{} vs {}", view.output.len(), html.len());
+}
+
+#[test]
+fn mathml_renders_its_tex_annotation_or_alttext() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH} Area is <math alttext=\" \\pi r^2 \"><mi>π</mi></math> and \
+         <math><semantics><mi>x</mi><!-- c --><annotation encoding=\"application/x-tex\">x^{{2}}\
+         </annotation></semantics></math> and <math><mi>y</mi></math>.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(view.removed[6], 1, "comments inside a replaced formula are still counted");
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH} Area is $\\pi r^2$ and $x^{{2}}$ and y.")
     );
 }

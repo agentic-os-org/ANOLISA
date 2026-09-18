@@ -118,12 +118,20 @@ The compressor handles complete HTML documents (starting with `<!doctype html` o
 fetched with `curl` or returned by an MCP tool. It requires a text replacement slot,
 an available Stash, and a supported recovery method. The page is rendered as a
 Markdown subset: headings, paragraphs, lists, tables, fenced code with its language,
-links with targets, image alt text, quotes, and admonitions. The content root is
-`<main>`, an element with `role=main`, or the only `<article>`; otherwise the whole
-body. Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
-page-level `header`/`footer`, and elements with navigation, banner, contentinfo, or
-complementary roles are removed. The first line of the view names the root, the
-number of nodes omitted outside it, and every removal count by category. Pages whose
+links with targets, image alt text, quotes, and admonitions. MathML formulas render
+as their TeX annotation or `alttext` between `$` signs; cells spanning rows or columns
+pad the table grid with empty cells; paragraph lines that start like a Markdown
+heading, list item, quote, rule or code fence are escaped. The content root is
+`<main>`, an element with `role=main`, or the only outermost `<article>` (articles
+nested inside it, such as comments, do not count); otherwise the whole body.
+Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
+page-level `header`/`footer`, elements with navigation, banner, contentinfo, or
+complementary roles, form controls (`button`, `input`, `select`, `textarea`,
+`datalist`, `progress`, `meter`), media embeds (`audio`, `video`, `canvas`, `object`,
+`embed`, `map`), `dialog`, and `menu` are removed; `label`, `legend`, and `fieldset`
+stay because content tabs keep their titles there. The first line of the view names
+the root, the number of nodes omitted outside it, and every removal count by
+category. Pages whose
 rendered body is shorter than 64 characters, such as application shells, pass through,
 and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
 quadratically with nesting depth, so such pages are not parsed at all.

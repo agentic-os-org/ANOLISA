@@ -43,8 +43,11 @@ const SELF_CLOSING_RUN: [&str; 14] = [
 /// too, so counting its tags overestimates depth, which is the safe side.
 const RAW_TEXT: [&str; 6] = ["script", "style", "textarea", "title", "xmp", "plaintext"];
 
-/// Removed element categories, in header order.
-const REMOVED_LABELS: [&str; 15] = [
+/// Removed element categories, in header order. `form control` covers
+/// button, input, select, textarea, datalist, progress and meter; `media`
+/// covers audio, video, canvas, object, embed and map. Labels, legends and
+/// fieldsets stay: MkDocs content tabs carry their titles in labels.
+const REMOVED_LABELS: [&str; 19] = [
     "script",
     "style",
     "noscript",
@@ -60,7 +63,20 @@ const REMOVED_LABELS: [&str; 15] = [
     "role=banner",
     "role=contentinfo",
     "role=complementary",
+    "form control",
+    "media",
+    "dialog",
+    "menu",
 ];
+
+const REMOVED_CATEGORIES: usize = REMOVED_LABELS.len();
+
+const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
+
+/// Placeholder cells for `colspan`/`rowspan` are only inserted up to this
+/// column, so one row of wide spans cannot multiply the rows below it.
+/// Real cells beyond it are still emitted, only never aligned.
+const MAX_TABLE_COLUMNS: usize = 64;
 
 /// One Markdown view of a complete HTML document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,10 +89,11 @@ pub struct HtmlView {
     pub canonical: Option<String>,
     /// Removed element counts by category, in the order of the header labels:
     /// script, style, noscript, template, svg, iframe, comment, nav, header,
-    /// footer, aside, role=navigation, role=banner, role=contentinfo, role=complementary.
-    pub removed: [usize; 15],
+    /// footer, aside, role=navigation, role=banner, role=contentinfo,
+    /// role=complementary, form control, media, dialog, menu.
+    pub removed: [usize; REMOVED_CATEGORIES],
     /// Local name of the rendered root: `main`, the element carrying
-    /// `role=main`, the sole `article`, or `body`.
+    /// `role=main`, the sole outermost `article`, or `body`.
     pub root: String,
     /// Elements and non-blank text nodes outside the rendered root that were
     /// omitted uncounted by category.
@@ -133,7 +150,8 @@ impl HtmlExtractor {
         });
 
         // An explicit `role=main` outranks a bare `article`, and an `article`
-        // is the root only when it is the sole one: index pages list many.
+        // is the root only when it is the sole outermost one: index pages
+        // list many, while a post's comment articles nest inside it.
         let root = find_element(&nodes, body, "main")
             .or_else(|| find_element_by_role(&nodes, body, "main"))
             .or_else(|| sole_element(&nodes, body, "article"))
@@ -157,7 +175,7 @@ impl HtmlExtractor {
         }
         let mut renderer = Renderer {
             nodes: &nodes,
-            removed: [0; 15],
+            removed: [0; REMOVED_CATEGORIES],
             depth: 0,
         };
         if let Some(head) = head {
@@ -227,10 +245,13 @@ struct Node {
 
 impl Node {
     fn local_name(&self) -> &str {
+        self.name_in("http://www.w3.org/1999/xhtml")
+    }
+
+    /// Local name when the element is in namespace `ns`, else empty.
+    fn name_in(&self, ns: &str) -> &str {
         match &self.kind {
-            NodeKind::Element { name, .. } if *name.ns == *"http://www.w3.org/1999/xhtml" => {
-                &name.local
-            }
+            NodeKind::Element { name, .. } if *name.ns == *ns => &name.local,
             _ => "",
         }
     }
@@ -519,10 +540,9 @@ fn find_element_by_role(nodes: &[Node], from: usize, role: &str) -> Option<usize
     None
 }
 
-/// The only element with this name under `from`, or `None` when there are
-/// several or none. Counts the whole subtree, so an article that nests
-/// another (a post with comment articles) also yields `None` and the body
-/// stays the root.
+/// The only outermost element with this name under `from`, or `None` when
+/// there are several or none. Matches are not searched inside, so a post
+/// whose comments are nested articles still yields the post.
 fn sole_element(nodes: &[Node], from: usize, local: &str) -> Option<usize> {
     let mut found = None;
     let mut stack = vec![from];
@@ -532,6 +552,7 @@ fn sole_element(nodes: &[Node], from: usize, local: &str) -> Option<usize> {
                 return None;
             }
             found = Some(id);
+            continue;
         }
         stack.extend(nodes[id].children.iter().rev());
     }
@@ -588,7 +609,7 @@ const ADMONITION_LABELS: [&str; 10] = [
 
 struct Renderer<'a> {
     nodes: &'a [Node],
-    removed: [usize; 15],
+    removed: [usize; REMOVED_CATEGORIES],
     depth: usize,
 }
 
@@ -608,6 +629,12 @@ impl Renderer<'_> {
             "header" if !in_sectioning => return Some(8),
             "footer" if !in_sectioning => return Some(9),
             "aside" => return Some(10),
+            "button" | "input" | "select" | "textarea" | "datalist" | "progress" | "meter" => {
+                return Some(15);
+            }
+            "audio" | "video" | "canvas" | "object" | "embed" | "map" => return Some(16),
+            "dialog" => return Some(17),
+            "menu" => return Some(18),
             _ => {}
         }
         if let NodeKind::Element { name, .. } = &node.kind
@@ -751,10 +778,8 @@ impl Renderer<'_> {
             "dd" => indent(&self.blocks(id, in_sectioning), "  "),
             local => {
                 let inner = self.blocks(id, in_sectioning);
-                let container = matches!(
-                    local,
-                    "div" | "section" | "details" | "dialog" | "fieldset" | "figure"
-                );
+                let container =
+                    matches!(local, "div" | "section" | "details" | "fieldset" | "figure");
                 match admonition_label(node).filter(|_| container) {
                     Some(label) => quote(&inner, Some(label)),
                     None => inner,
@@ -814,6 +839,8 @@ impl Renderer<'_> {
     fn table(&mut self, id: usize, in_sectioning: bool) -> String {
         let mut rows: Vec<(bool, Vec<String>)> = Vec::new();
         let mut caption = None;
+        // Rows still covered by a `rowspan` above, per column.
+        let mut pending: Vec<usize> = Vec::new();
         let mut stack: Vec<usize> = self.nodes[id].children.iter().rev().copied().collect();
         while let Some(child) = stack.pop() {
             let node = &self.nodes[child];
@@ -832,23 +859,52 @@ impl Renderer<'_> {
                 }
                 "tr" => {
                     // Only an all-`th` row is a header: `th scope=row` labels data rows.
+                    // Spanned cells insert empty cells so later cells stay in their
+                    // columns; trailing empties are dropped, since GFM pads short rows
+                    // itself and padding every row to the widest would be quadratic.
                     let mut header = true;
+                    let mut real_cells = 0;
                     let mut cells = Vec::new();
+                    let mut column = 0;
                     for &cell in &node.children {
                         let cell_node = &self.nodes[cell];
                         if let Some(category) = self.removal(cell_node, in_sectioning) {
                             self.removed[category] += 1;
                             continue;
                         }
-                        match cell_node.local_name() {
-                            "th" | "td" => {
-                                header &= cell_node.is_element("th");
-                                cells.push(self.blocks(cell, in_sectioning));
-                            }
-                            _ => {}
+                        if !matches!(cell_node.local_name(), "th" | "td") {
+                            continue;
                         }
+                        while column < MAX_TABLE_COLUMNS
+                            && pending.get(column).is_some_and(|&rows| rows > 0)
+                        {
+                            pending[column] -= 1;
+                            cells.push(String::new());
+                            column += 1;
+                        }
+                        header &= cell_node.is_element("th");
+                        real_cells += 1;
+                        cells.push(self.blocks(cell, in_sectioning));
+                        let columns = span(cell_node, "colspan")
+                            .min(MAX_TABLE_COLUMNS.saturating_sub(column))
+                            .max(1);
+                        let rows_below = span(cell_node, "rowspan") - 1;
+                        let end = (column + columns).min(MAX_TABLE_COLUMNS);
+                        if pending.len() < end {
+                            pending.resize(end, 0);
+                        }
+                        pending[column.min(end)..end].fill(rows_below);
+                        cells.extend(std::iter::repeat_n(String::new(), columns - 1));
+                        column += columns;
                     }
-                    rows.push((header && !cells.is_empty(), cells));
+                    // Columns still covered below this row's last cell consume a row too.
+                    for slot in pending.iter_mut().skip(column) {
+                        *slot = slot.saturating_sub(1);
+                    }
+                    while cells.last().is_some_and(String::is_empty) {
+                        cells.pop();
+                    }
+                    rows.push((header && real_cells > 0, cells));
                 }
                 _ => {}
             }
@@ -904,8 +960,6 @@ impl Renderer<'_> {
         let _ = writeln!(out, "| {} |", header.join(" | "));
         let _ = writeln!(out, "|{}", " --- |".repeat(width));
         for (_, cells) in body {
-            let mut cells = cells.clone();
-            cells.resize(width, String::new());
             let _ = writeln!(out, "| {} |", cells.join(" | "));
         }
         out.trim_end().to_owned()
@@ -936,6 +990,15 @@ impl Renderer<'_> {
         let node = &self.nodes[id];
         match &node.kind {
             NodeKind::Text(text) => push_collapsed(out, text),
+            NodeKind::Element { .. } if node.name_in(MATHML_NS) == "math" => {
+                match self.tex_of(id) {
+                    Some(tex) => {
+                        self.count_removals(id);
+                        let _ = write!(out, "${tex}$");
+                    }
+                    None => self.inline_children(id, out, in_sectioning),
+                }
+            }
             NodeKind::Element { .. } => match node.local_name() {
                 "br" => out.push('\n'),
                 "img" => {
@@ -945,7 +1008,7 @@ impl Renderer<'_> {
                     }
                     match node.attr("src").map(str::trim) {
                         Some(src) if !src.is_empty() && !src.starts_with("data:") => {
-                            let _ = write!(out, "![{alt}]({src})");
+                            let _ = write!(out, "![{alt}]({})", link_target(src));
                         }
                         _ => {
                             let _ = write!(out, "![{alt}]");
@@ -962,7 +1025,7 @@ impl Renderer<'_> {
                         .filter(|href| !href.is_empty() && !href.starts_with("javascript:"));
                     match href {
                         Some(href) if !text.is_empty() => {
-                            let _ = write!(out, "[{text}]({href})");
+                            let _ = write!(out, "[{text}]({})", link_target(href));
                         }
                         _ => out.push_str(text),
                     }
@@ -990,6 +1053,28 @@ impl Renderer<'_> {
             },
             _ => {}
         }
+    }
+
+    /// TeX source of a MathML formula: its `application/x-tex` annotation,
+    /// else the `alttext` attribute.
+    fn tex_of(&self, id: usize) -> Option<String> {
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            let node = &self.nodes[current];
+            if node.name_in(MATHML_NS) == "annotation"
+                && node.attr("encoding") == Some("application/x-tex")
+            {
+                let tex = collapse(&text_of(self.nodes, current));
+                if !tex.is_empty() {
+                    return Some(tex);
+                }
+            }
+            stack.extend(node.children.iter().rev());
+        }
+        self.nodes[id]
+            .attr("alttext")
+            .map(collapse)
+            .filter(|tex| !tex.is_empty())
     }
 
     fn wrapped(&mut self, id: usize, out: &mut String, marker: &str, in_sectioning: bool) {
@@ -1072,17 +1157,80 @@ fn flush_inline(blocks: &mut Vec<String>, inline: &mut String, open: &mut bool) 
     }
 }
 
+/// Where to insert a backslash so a line of page text is not read as a
+/// Markdown block: an ATX heading, block quote, list item, thematic break,
+/// setext underline or code fence. Only the forms CommonMark recognises
+/// count, so `#hashtag`, `-1` and `1.5 s` stay as written. An ordered-list
+/// marker is escaped at its delimiter, since a digit cannot be escaped.
+fn block_marker_escape(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let &first = bytes.first()?;
+    let run = bytes.iter().take_while(|&&b| b == first).count();
+    // Blank means any ASCII whitespace: that is what `push_collapsed`
+    // folds into the space CommonMark then reads after the marker.
+    let blank_after = |index: usize| bytes.get(index).is_none_or(u8::is_ascii_whitespace);
+    let only_marker = || bytes.iter().all(|&b| b == first || b.is_ascii_whitespace());
+    let escaped = match first {
+        b'>' => true,
+        b'#' => run <= 6 && blank_after(run),
+        b'-' | b'+' | b'*' => blank_after(1) || only_marker(),
+        b'=' | b'_' => only_marker(),
+        b'`' | b'~' => run >= 3,
+        b'0'..=b'9' => {
+            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            return (digits <= 9
+                && matches!(bytes.get(digits), Some(b'.' | b')'))
+                && blank_after(digits + 1))
+            .then_some(digits);
+        }
+        _ => false,
+    };
+    escaped.then_some(0)
+}
+
+/// A link destination CommonMark cannot read bare is wrapped in angle brackets.
+fn link_target(target: &str) -> std::borrow::Cow<'_, str> {
+    if target.contains(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        format!("<{target}>").into()
+    } else {
+        target.into()
+    }
+}
+
+/// A `colspan`/`rowspan` value; missing, unparsable and zero mean 1.
+fn span(node: &Node, attr: &str) -> usize {
+    node.attr(attr)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1)
+}
+
 /// Appends text with HTML whitespace collapsing; a run of whitespace becomes
-/// one space unless the output already ends with whitespace.
+/// one space unless the output already ends with whitespace. Text that
+/// opens a line and starts like a Markdown block is escaped, so block
+/// structure can only come from the renderer's own markup. An inline run
+/// rendered into its own buffer (emphasis, link text, a heading) counts as
+/// a line start too; the extra backslash there is harmless.
 fn push_collapsed(out: &mut String, text: &str) {
-    for c in text.chars() {
+    let mut escape_at = None;
+    let mut seen_visible = false;
+    for (index, c) in text.char_indices() {
         if c.is_ascii_whitespace() {
             if !out.ends_with([' ', '\n']) {
                 out.push(' ');
             }
-        } else {
-            out.push(c);
+            continue;
         }
+        if !seen_visible {
+            seen_visible = true;
+            if out.ends_with('\n') || out.trim_start_matches(' ').is_empty() {
+                escape_at = block_marker_escape(&text[index..]).map(|at| index + at);
+            }
+        }
+        if escape_at == Some(index) {
+            out.push('\\');
+        }
+        out.push(c);
     }
 }
 
