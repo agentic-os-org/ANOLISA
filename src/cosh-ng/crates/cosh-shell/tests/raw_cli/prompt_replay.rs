@@ -1040,12 +1040,7 @@ fn raw_cli_bash_slash_intercept_does_not_replay_user_command_echo() {
     let normalized = strip_ansi_escape(&output);
     let echoed_lines = normalized
         .lines()
-        .filter(|line| {
-            line.strip_prefix("◇ ")
-                .unwrap_or(line)
-                .starts_with(PROMPT.trim_end())
-                && line.contains("/skills detail")
-        })
+        .filter(|line| line.starts_with(PROMPT.trim_end()) && line.contains("/skills detail"))
         .count();
     assert_eq!(
         echoed_lines, 1,

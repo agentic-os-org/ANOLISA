@@ -373,7 +373,7 @@ where
     session
         .parser
         .set_shell_path_command_names(input_classifier.shell_path_command_names());
-    let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
+    let mut prompt_presentation = PromptPresentation::new();
     // Attach the gate before startup output consumes the first prompt_ready marker.
     let main_prompt_gate = MainPromptGate::default();
     session
@@ -385,7 +385,6 @@ where
         .set_prompt_epoch_exchange(input_generation.prompt_epoch_exchange());
     if let Some(control) = assistance_control.as_ref() {
         session.parser.set_assistance_control(control.clone());
-        prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
     }
     if config.integration.uses_markers() {
         read_until_streaming_with_presentation(

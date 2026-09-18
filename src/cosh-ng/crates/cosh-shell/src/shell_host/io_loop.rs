@@ -60,7 +60,7 @@ pub(super) fn read_until_streaming<W: Write>(
         child,
         parser,
         output,
-        &mut PromptPresentation::new(false),
+        &mut PromptPresentation::new(),
         timeout,
         condition,
     )

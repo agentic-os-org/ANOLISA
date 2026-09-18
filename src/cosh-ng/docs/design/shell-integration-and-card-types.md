@@ -51,32 +51,30 @@ infer routing from the first character of user text.
 | Symbol | State | Owner | Behavior |
 |---|---|---|---|
 | None | Native | Child Shell | Every byte goes directly to the PTY. Cosh does not decorate the user's original prompt or observe command events. |
-| `◌` | Enhanced Shell-only | Child Shell, observed by Cosh | Ordinary input, including `hello`, `/`, and `??`, remains Shell input. Enhanced marker integration stays loaded so post-command insights and safe switching remain available. |
-| `◇` | Enhanced Assisted | Shell executes, Cosh may route | Cosh may observe, classify, or route the submitted line before Shell execution. |
+| None | Enhanced Shell-only | Child Shell, observed by Cosh | Ordinary input, including `hello`, `/`, and `??`, remains Shell input. Enhanced marker integration stays loaded so post-command insights and safe switching remain available. |
+| None | Enhanced Assisted | Shell executes, Cosh may route | Cosh may observe, classify, or route the submitted line before Shell execution. |
 | `◆` | Agent | Agent runtime | `/agent` opens a borderless inline Composer that continuously shows `◆ ` before editable text. Ordinary text, including `ls`, is an Agent request; leading slash controls dispatch locally. |
 | `/` | Cosh Command | Cosh control plane | Explicit slash command, intercepted only in Enhanced Assisted. |
 
-`◇` and `◌` occupy a separate outer-terminal status line before PS1/PROMPT.
-The Enhanced hook's `prompt_ready` boundary publishes that line. Returning
-from an Agent or panel and changing routing also publish the current state;
-ordinary candidate, ghost, and authenticated slash-guard redraws repaint only
-the original prompt and input. These redraws must not append another status
-line. Status lines scroll with output, and an explicit routing change leaves
-the earlier state in terminal history rather than guessing its screen row.
+Enhanced shell-owned states publish no outer-terminal status line: the
+Enhanced hook's `prompt_ready` boundary drives observation and routing only,
+and the child shell's prompt bytes pass through verbatim. Returning from an
+Agent or panel and changing routing repaint the original prompt in place;
+ordinary candidate, ghost, and authenticated slash-guard redraws likewise
+repaint only the original prompt and input. These redraws must not append any
+extra line.
 
 PS1/PROMPT and PTY dimensions remain unchanged. The child Shell starts its
 prompt at column zero, so its own Readline/ZLE model accounts for every cell
 of the prompt and input, including ANSI, CJK, combining and multiline text.
-The status is not a reserved terminal row: a Shell-owned clear-screen/redraw
-may remove it until the next publication or control return.
 
 Bash's existing private-history submission guard still inserts one leading
 blank when accepting a cursor-edited draft whose mirror cannot prove it is
 non-secret. This is an accept-line display change, separate from editable
 geometry; argument bytes and the privacy guard remain intact.
 
-At an empty Enhanced main prompt, `Shift+Tab` publishes a `◌` status line and
-disables Cosh input interception. Pressing it again publishes `◇` and restores
+At an empty Enhanced main prompt, `Shift+Tab` switches to Shell-only and
+disables Cosh input interception. Pressing it again restores Assisted
 routing, without submitting an empty command or restarting the child Shell.
 A non-empty
 Shell line receives the key sequence unchanged, and an active prompt ghost or

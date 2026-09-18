@@ -36,7 +36,7 @@ fn reconstructed_prompt_publishes_virtual_presentation_start() {
     parser
         .resolve_pending_slash_guard_echo("/cancel")
         .expect("resolve guard redraw");
-    let mut presentation = PromptPresentation::new(true);
+    let mut presentation = PromptPresentation::new();
     presentation.observe(&mut parser);
     let mut output = Vec::new();
     presentation
@@ -75,7 +75,7 @@ fn bash44_wrapped_guard_reconstructs_owned_prompt_without_internal_text() {
         parser
             .resolve_pending_slash_guard_echo("/cancel")
             .expect("resolve Bash 4.4 guard redraw");
-        let mut presentation = PromptPresentation::new(true);
+        let mut presentation = PromptPresentation::new();
         presentation.observe(&mut parser);
         let mut output = Vec::new();
         presentation
@@ -113,7 +113,7 @@ fn unrelated_guard_prefix_does_not_publish_prompt_start() {
         parser
             .resolve_pending_slash_guard_echo("/cancel")
             .expect("resolve guard redraw");
-        let mut presentation = PromptPresentation::new(true);
+        let mut presentation = PromptPresentation::new();
         presentation.observe(&mut parser);
         let mut output = Vec::new();
         presentation
@@ -185,7 +185,7 @@ fn stable_prompt_snapshot_does_not_mark_background_prefixes() {
         parser
             .resolve_pending_slash_guard_echo("/cancel")
             .expect("resolve background redraw");
-        let mut presentation = PromptPresentation::new(true);
+        let mut presentation = PromptPresentation::new();
         presentation.observe(&mut parser);
         let mut output = Vec::new();
         presentation

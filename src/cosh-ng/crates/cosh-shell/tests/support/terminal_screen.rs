@@ -25,7 +25,6 @@ pub(crate) struct TerminalSession {
     raw: Vec<u8>,
     action_start: usize,
     last_output: Instant,
-    integration: String,
     root: tempfile::TempDir,
     _gate: RawCliRunGuard,
 }
@@ -131,7 +130,6 @@ impl TerminalSession {
             raw: Vec::new(),
             action_start: 0,
             last_output: Instant::now(),
-            integration: integration.to_string(),
             root,
             _gate: gate,
         };
@@ -155,11 +153,7 @@ impl TerminalSession {
     }
 
     pub(crate) fn published_prompt(&self) -> String {
-        if self.integration == "enhanced" {
-            "◇ \r\nscreen$ ".into()
-        } else {
-            "screen$ ".into()
-        }
+        "screen$ ".into()
     }
 
     pub(crate) fn screen(&self) -> &vt100::Screen {
