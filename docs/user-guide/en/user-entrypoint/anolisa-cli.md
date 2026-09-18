@@ -232,6 +232,20 @@ anolisa bug
 
 `--level` is an alias for `--severity`.
 
+With `--component cosh-ng`, `anolisa bug` also asks the installed
+`cosh-shell` binary to export its sanitized diagnostic bundle to a fresh
+private path (`0600`, never overwritten) and summarizes the bundle's health
+finding IDs and manifest in the report. The binary is resolved from the
+cosh-ng installation's private libexec locations (the raw contract's
+directory and the RPM's `/usr/libexec` path), with `COSH_SHELL_BIN` as an
+override and PATH as a development fallback; the printed manual and
+reproduction commands use the resolved absolute path so they stay runnable.
+The bundle is written below the calling user's own state root —
+even when diagnosing a system-scope installation — and is never uploaded;
+review it locally before attaching it to an issue. If no bundle can be
+produced, the report says so explicitly and prints the manual
+`cosh-shell diagnostics export` command instead.
+
 ---
 
 ## Recovery Behavior

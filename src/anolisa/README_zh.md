@@ -53,7 +53,7 @@ anolisa update all
 | `system` | 系统辅助守护进程生命周期 |
 | `register` | 加入/离开 Agentic OS Co-Build Program |
 | `env` | 显示环境检测结果 |
-| `bug` | 生成 bug 报告 |
+| `bug` | 生成 bug 报告（`--component cosh-ng` 时附加 cosh-shell 诊断包摘要；`COSH_SHELL_BIN` 可覆盖二进制路径） |
 
 执行 `anolisa adapter enable <component> openclaw` 即同意插件声明的能力，
 CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
