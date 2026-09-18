@@ -2804,16 +2804,31 @@ impl OpenClawDriver {
             // which is a fact about the past and is destroyed by this disable's own
             // `plugins uninstall`. This one asks whether handing the plugin back
             // would take the slot from somebody who owns it *now* — and after the
-            // uninstall the answer really has changed: the host reset the slot to
-            // its default, an operator may have moved or closed it inside the
-            // window, and `plugins enable` re-runs slot selection over whatever it
-            // finds. Reasoning from the capture here would step over all three.
+            // uninstall the answer really has changed: an operator may have moved
+            // or closed the slot inside the window, and `plugins enable` re-runs
+            // slot selection over whatever it finds. Reasoning from the capture
+            // alone would step over both.
             //
-            // For a displacement of the slot's own default plugin — the shape this
-            // driver ships — the two readings agree anyway, because the reset
-            // target *is* the displaced plugin and `slot_restore_decision` reads
-            // that as `Proceed`.
-            let answer = self.read_slot_owner(slot, home, ctx);
+            // One of the writers that changed the answer is not somebody else,
+            // though, and reading it raw costs a host its memory backend. The
+            // uninstall resets a slot this adapter's own plugin owned to that
+            // slot's default, and for a displacement that is *not* the default the
+            // reset lands on a plugin this receipt never displaced — which
+            // `slot_restore_decision` then classifies as a third owner. The restore
+            // is declined, the entry released, `cleanup_complete` reported and the
+            // receipt removed over a host with nothing behind the slot at all: the
+            // displaced plugin is still off, and the default the reset just named is
+            // off too, because this adapter's own selection turned it off at enable.
+            // The preview promised the hand-back, because it reads the slot before
+            // the uninstall rewrites it. A displacement *of* the default never
+            // showed it, since there the reset target and the displaced plugin are
+            // the same id and `slot_restore_decision` reads that as `Proceed`.
+            //
+            // [`Self::slot_veto_owner`] discounts exactly that value, on the
+            // capture's evidence that this adapter's own plugin was what the
+            // uninstall removed, and leaves every other disagreement between the
+            // two readings to decide as before.
+            let answer = self.slot_veto_owner(slot, host, home, ctx);
             return match slot_restore_decision(
                 answer.as_deref(),
                 host.own_plugin_id,
@@ -3163,28 +3178,28 @@ impl OpenClawDriver {
         Some(config_answer_token(&output))
     }
 
-    /// Read the slots of the displacements whose hand-off was never *marked*,
-    /// before anything this operation runs can rewrite them. See
-    /// [`SlotReadings::Captured`].
+    /// Read the slots of every slotful displacement before anything this operation
+    /// runs can rewrite them. See [`SlotReadings::Captured`].
     ///
-    /// Only unapplied entries, because only they have a question to ask about the
-    /// past: [`Self::handoff_attribution`] is the one decision that
-    /// reads the slot as evidence of who turned the plugin off, and everything else
-    /// reads it as a statement about right now. An applied entry's slot veto keeps
-    /// its live read on purpose — see the branch in [`Self::restore_decision`].
+    /// Two decisions consume the capture and ask different questions of the same
+    /// key. [`Self::handoff_attribution`] reads the slot as evidence of who turned a
+    /// plugin off, which only an *unapplied* entry has to ask and which the
+    /// uninstall destroys outright. [`Self::slot_veto_owner`] reads it as the owner
+    /// the uninstall moved the slot *off*, which is how it tells that plugin's own
+    /// reset from a choice an operator made — and every entry needs that, applied
+    /// ones included, because an applied entry is the ordinary case and precisely the
+    /// one whose owed restore a misread reset declines.
+    /// [`Self::record_recovered_slot_selection_handoffs`] is the attribution's other
+    /// consumer and asks it over the same readings, after which `disable` re-resolves
+    /// the receipt and the restore reads the mark instead of re-attributing it.
     ///
     /// One read per distinct slot, not per entry. Two entries cannot *own* one slot
     /// (`claim_displaced_plugins` rejects that), but they can consult one: the
     /// slotless half of a same-slot replacement guards on the key the declared half
-    /// owns, and both are read here when neither hand-off was marked. Probe count is
-    /// unchanged overall, because an unapplied entry that gets restored used to read
-    /// its slot twice — once for the attribution and once for the veto — and now
-    /// reads it once here and once there.
-    /// [`Self::record_recovered_slot_selection_handoffs`] is the
-    /// capture's other consumer and asks the same question over the same readings,
-    /// after which `disable` re-resolves the receipt and the restore reads the mark
-    /// instead of re-attributing it; only an entry nothing can attribute is probed
-    /// twice, and it is on the path that restores nothing.
+    /// owns. An entry that reaches the veto therefore reads its slot twice — once
+    /// here and once live — which is what makes the correction possible at all:
+    /// the two readings are the two sides of the uninstall, and only their
+    /// disagreement is evidence about what happened between them.
     fn capture_slot_readings(
         &self,
         displaced: &[DisplacedPlugin],
@@ -3193,11 +3208,8 @@ impl OpenClawDriver {
     ) -> CapturedSlots {
         let mut readings = CapturedSlots::new();
         for entry in displaced {
-            if entry.applied {
-                continue;
-            }
-            // The key the attribution will be asked against, which is the one the
-            // entry competes for whether or not the receipt still owns it.
+            // The key the attribution and the veto are asked against, which is the
+            // one the entry competes for whether or not the receipt still owns it.
             let Some(slot) = entry.slot_key() else {
                 continue;
             };
@@ -3430,6 +3442,67 @@ impl OpenClawDriver {
                 Some(reading) => reading.clone(),
                 None => self.read_slot_owner(slot, home, ctx),
             },
+        }
+    }
+
+    /// The `plugins.slots.<slot>` token the restore *veto* reasons from: the live
+    /// owner, minus the one value this operation's own cleanup wrote.
+    ///
+    /// The veto asks who would lose the slot to a `plugins enable` issued right now,
+    /// so it reads the host live rather than from the capture — an operator who
+    /// moved or closed the slot inside the window is exactly what it exists to
+    /// respect. But `disable` mutates before it asks, and `removePluginFromConfig`
+    /// resets a slot the uninstalled plugin owned to that slot's default
+    /// ([`default_slot_plugin`]). That value is this cleanup's own footprint, not a
+    /// selection anybody made, and it is only harmless while the displaced plugin
+    /// *is* the default: for any other displacement — a shape the contract
+    /// language has always allowed — it names a plugin the receipt never
+    /// displaced, classifies as [`SlotRestore::OwnedByThird`], and releases a
+    /// restore the receipt still owes.
+    ///
+    /// So the reset is discounted, and nothing else is. It takes both halves of the
+    /// evidence: the capture has to name this adapter's own plugin, because that is
+    /// the sole condition under which OpenClaw resets the slot at all, and the live
+    /// answer has to be exactly the slot's default, because that is the sole value
+    /// it resets to. A capture the host could not answer, a live read that is not
+    /// the default, or a slot the capture already showed somebody else owning all
+    /// decide on the live answer, which keeps an operator's choice — including
+    /// one made inside the window, and including one that moved the slot *to* the
+    /// default before this disable ran — the thing that decides.
+    ///
+    /// Callers reading the host through [`SlotReadings::Live`] have mutated nothing
+    /// ahead of the read, so their live answer already is the pre-operation one and
+    /// there is nothing to discount. That is every preview, `status`, the
+    /// write-ahead mark and the same-home re-enable cleanup, whose restore runs
+    /// without an uninstall; `disable` is the only caller on the other side.
+    fn slot_veto_owner(
+        &self,
+        slot: &str,
+        host: &RestoreHost<'_>,
+        home: &Path,
+        ctx: &DriverCtx,
+    ) -> Option<String> {
+        let live = self.read_slot_owner(slot, home, ctx);
+        let SlotReadings::Captured(readings) = host.slots else {
+            return live;
+        };
+        let (Some(live_token), Some(captured)) = (
+            live.as_deref(),
+            readings.get(slot).and_then(Option::as_deref),
+        ) else {
+            // Either the host cannot answer now or it could not answer before the
+            // mutation, and neither is evidence about who moved the slot.
+            return live;
+        };
+        let self_inflicted =
+            host.own_plugin_id == Some(captured) && default_slot_plugin(slot) == Some(live_token);
+        if live_token == captured || self_inflicted {
+            // Unchanged, so the two readings agree; or changed only by this
+            // operation's own uninstall, so the pre-uninstall owner is still the
+            // answer to the question the veto asks.
+            Some(captured.to_string())
+        } else {
+            live
         }
     }
 
@@ -6815,24 +6888,30 @@ type CapturedSlots = BTreeMap<String, Option<String>>;
 /// owns `plugins.slots.memory` for the whole life of the receipt, the slot the
 /// restore reasons about three steps later is one this disable just wrote.
 ///
-/// One decision reads the slot as evidence about the *past*, and it comes out
-/// wrong on the rewritten value: the hand-off attribution behind
+/// Two decisions read the slot as evidence the rewrite falsifies, and each comes out
+/// wrong on the value it leaves behind. The hand-off attribution behind
 /// [`RestoreDecision::SkipNotApplied`] needs the slot as it was when the hand-off
 /// was formed — naming this adapter's own plugin — and instead finds
 /// `memory-core`, reads that as somebody else's selection, and drops the only
 /// receipt for a plugin this adapter really turned off, reporting a complete
-/// cleanup over a backend it just left switched off.
+/// cleanup over a backend it just left switched off. The slot veto needs to know
+/// what the uninstall moved the slot *off* before it can discount what the
+/// uninstall moved it *to*, and without that it reads the same `memory-core` as a
+/// third owner — harmless while the displaced plugin is the default, and a
+/// declined restore over a host with no backend left when it is not.
 ///
-/// So `disable` captures the readings of its *unapplied* entries before it mutates,
-/// hands them to the attribution, and writes the ownership they establish back into
-/// the receipt — a retry has no capture that can see it, so the record is the only
-/// place it can survive. Everything else keeps its live read, and the split is the
-/// question each is asking rather than an oversight: the slot veto wants the owner
-/// as it stands when the `plugins enable` would run, and the policy
-/// keys want the allowlist as the uninstall left it — `removePluginFromConfig` also
-/// drops the uninstalled plugin from `plugins.allow` (v2026.4.14
-/// `src/plugins/uninstall.ts:126-133`), and whether a restriction survives that is
-/// exactly what decides if the host would refuse the restore.
+/// So `disable` captures the readings of every slotful entry before it mutates and
+/// hands them to both: to the attribution, which writes the ownership they establish
+/// back into the receipt — a retry has no capture that can see it, so the record
+/// is the only place it can survive — and to [`OpenClawDriver::slot_veto_owner`],
+/// which corrects its own live read with them. Everything else keeps its live read,
+/// and the split is the question each is asking rather than an oversight: the slot
+/// veto wants the owner as it stands when the `plugins enable` would run, minus the
+/// one writer that is not an owner, and the policy keys want the allowlist as the
+/// uninstall left it — `removePluginFromConfig` also drops the uninstalled plugin
+/// from `plugins.allow` (v2026.4.14 `src/plugins/uninstall.ts:126-133`), and whether
+/// a restriction survives that is exactly what decides if the host would refuse the
+/// restore.
 #[derive(Debug, Clone, Copy)]
 enum SlotReadings<'a> {
     /// Ask the host now.
@@ -6963,6 +7042,29 @@ fn slot_restore_decision(
         SlotRestore::Proceed
     } else {
         SlotRestore::OwnedByThird(token.to_string())
+    }
+}
+
+/// The plugin OpenClaw's `plugins uninstall` puts back into an exclusive slot the
+/// plugin it removed had owned — `DEFAULT_SLOT_BY_KEY` (v2026.4.14
+/// `src/plugins/slots.ts:17-20`, unchanged at v2026.9.2 `src/plugins/slots.ts:22-25`).
+///
+/// `None` for any other key, and that is the point of returning an option rather
+/// than a string: a slot the host has no default for is a slot no uninstall can be
+/// blamed for rewriting, so a value found in it is somebody's choice.
+///
+/// Both keys are carried even though the reset they are the target of is narrower
+/// than the table. v2026.4.14 resets only `memory` (`src/plugins/uninstall.ts:147-155`),
+/// while the v2026.9.2 line resets `memory` and `contextEngine` alike
+/// (`formatUninstallSlotResetPreview`, `src/plugins/uninstall.ts:76-79`). The newer
+/// behaviour is a superset of the older, so knowing only `memory` would read a
+/// current host's `contextEngine` reset as an operator's selection — the same
+/// misreading this exists to prevent, one slot over.
+fn default_slot_plugin(slot: &str) -> Option<&'static str> {
+    match slot {
+        "memory" => Some("memory-core"),
+        "contextEngine" => Some("legacy"),
+        _ => None,
     }
 }
 
@@ -8820,6 +8922,28 @@ mod tests {
             SlotRestore::Proceed,
             "a plugin really named 'none' still holds its own slot"
         );
+    }
+
+    /// The reset targets a `plugins uninstall` writes, which is what lets
+    /// `slot_veto_owner` tell this cleanup's own footprint from an operator's
+    /// selection. A key with no default has nothing to be confused with.
+    #[test]
+    fn slot_defaults_are_the_uninstall_reset_targets() {
+        assert_eq!(default_slot_plugin("memory"), Some("memory-core"));
+        assert_eq!(default_slot_plugin("contextEngine"), Some("legacy"));
+        for slot in [
+            "",
+            "memory2",
+            "Memory",
+            "context-engine",
+            "plugins.slots.memory",
+        ] {
+            assert_eq!(
+                default_slot_plugin(slot),
+                None,
+                "'{slot}' is not a slot key OpenClaw resets"
+            );
+        }
     }
 
     /// Build a CLI output whose stdout is exactly `body`.

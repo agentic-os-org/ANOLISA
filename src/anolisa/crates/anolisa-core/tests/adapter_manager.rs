@@ -7838,10 +7838,13 @@ fn disable_hands_the_plugin_back_once_the_uninstall_drops_the_allowlist_entry() 
 /// same state through an unreadable probe and covers the lifecycle, since the fake
 /// now models the reset. This pins the ordering, which is the substance of the fix:
 /// a lifecycle assertion can also be satisfied by a driver that happens to read the
-/// slot at a lucky moment, and this one cannot. The slot *veto* keeps its live read
-/// on purpose — it asks who owns the slot when the `plugins enable` would run, which
-/// the uninstall really does change — so the capture is asserted only for the
-/// unapplied entry that needs it.
+/// slot at a lucky moment, and this one cannot.
+///
+/// The slot *veto* reads live as well, and is entitled to — it asks who owns the
+/// slot when the `plugins enable` would run, which the uninstall really does change.
+/// It corrects that live read against this same capture, though, so the value the
+/// uninstall wrote is not charged to an operator; `independent_nondefault_memory_restore`
+/// is the displacement where charging it costs the host its memory backend.
 #[test]
 fn disable_attributes_an_unmarked_handoff_from_the_pre_uninstall_slot() {
     let guard = OpenClawEnvGuard::acquire();
@@ -7928,6 +7931,181 @@ fn disable_attributes_an_unmarked_handoff_from_the_pre_uninstall_slot() {
         config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
         Some("true"),
         "the bundled backend must really be back on"
+    );
+}
+
+/// A displacement of a plugin that is *not* its slot's default must be handed back
+/// too, and the preview must promise what the operation then does.
+///
+/// The reported shape: `displaces = memory-lancedb` with `slot = "memory"`, this
+/// adapter's own plugin, `memory-lancedb` and `memory-core` all declaring
+/// `kind = "memory"`, and the host starting on `memory-lancedb`. Enable selects this
+/// adapter's own plugin; disable then uninstalls it, and `removePluginFromConfig`
+/// resets the slot that plugin owned to the slot's default — `memory-core`, from
+/// `DEFAULT_SLOT_BY_KEY` (v2026.4.14 `src/plugins/uninstall.ts:147-155` with
+/// `src/plugins/slots.ts:17-20`). The slot veto read that value live and classified
+/// it as a third owner, which is only wrong for a displacement that is *not* the
+/// default: for `memory-core` the reset target and the displaced plugin are the same
+/// id and the veto reads `Proceed`, so the shape this driver ships never showed it.
+/// For this one the restore was declined, `memory-lancedb` stayed off, `memory-core`
+/// was off as well (this adapter's own slot selection turned it off at enable), and
+/// the host was left with no memory backend at all — while the cleanup still
+/// reported complete and removed the only receipt that recorded the ownership.
+///
+/// The dry-run reads the slot before the uninstall rewrites it, so it promised the
+/// restore: the preview and the operation contradicted each other, and because a
+/// veto leaves `cleanup_complete` alone and drops the receipt, nothing durable
+/// recorded the contradiction.
+///
+/// No fault injection and no forged receipt — this is the plain lifecycle on a
+/// contract the Manager accepts, which is what makes it a hole rather than a corner.
+#[test]
+fn independent_nondefault_memory_restore() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(
+        &world.layout,
+        &plugin_adapter_block_with_displacement("memory-lancedb", Some("memory")),
+    );
+    declare_bundle_plugin_kind(&world, "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-lancedb", "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-core", "memory");
+    // The host starts on the non-default backend, which is what makes the reset
+    // target a plugin this receipt never displaced.
+    set_config_answer(&world, "plugins.slots.memory", "memory-lancedb");
+    world.apply_env(&guard, None);
+    guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+    let manager = world.manager();
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable with a non-default same-kind displacement");
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some(COMPONENT),
+        "fixture: the host's own slot selection gave the slot to this adapter's plugin"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-lancedb.enabled").as_deref(),
+        Some("false"),
+        "fixture: and turned the declared displacement off"
+    );
+    assert!(
+        persisted_displacement(&world).applied,
+        "fixture: a clean enable marks the hand-off"
+    );
+
+    let preview = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("disable plan");
+    assert!(preview.dry_run);
+    assert!(
+        preview
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("would re-enable openclaw plugin 'memory-lancedb'")),
+        "the preview reads the slot before the uninstall rewrites it, so it promises \
+         the hand-back: {:?}",
+        preview.report.messages
+    );
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        argv_contains(&appended, "plugins enable memory-lancedb"),
+        "a slot value this disable's own `plugins uninstall` wrote is not a third \
+         owner's selection, so the operation has to do what the preview promised: \
+         {appended:?}"
+    );
+    assert_eq!(
+        config_answer(&world, "plugins.entries.memory-lancedb.enabled").as_deref(),
+        Some("true"),
+        "and the host must be left with a memory backend that is actually on"
+    );
+    assert!(
+        !outcome
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("now belongs to")),
+        "there is no third owner to step aside for: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert!(!world.has_claim());
+}
+
+/// Discounting the reset must not become discounting the default.
+///
+/// The other half of `independent_nondefault_memory_restore`, and the reason the
+/// correction is keyed to the capture rather than to the value alone. An operator who
+/// moves `plugins.slots.memory` to `memory-core` themselves — the very id the
+/// uninstall resets to — has made a choice, and the two situations are only
+/// distinguishable by what the slot named *before* this disable ran: the reset is
+/// attributable because the capture names this adapter's own plugin, and a selection
+/// is not, because the capture already names the operator's.
+#[test]
+fn disable_still_steps_aside_for_an_operator_who_moved_the_slot_to_the_default() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(
+        &world.layout,
+        &plugin_adapter_block_with_displacement("memory-lancedb", Some("memory")),
+    );
+    declare_bundle_plugin_kind(&world, "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-lancedb", "memory");
+    seed_bundled_plugin_with_kind(&world, "memory-core", "memory");
+    set_config_answer(&world, "plugins.slots.memory", "memory-lancedb");
+    world.apply_env(&guard, None);
+    guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable with a non-default same-kind displacement");
+
+    // The operator hands the slot to the bundled default, spelling out what an
+    // unset slot would already have meant to the host.
+    set_config_answer(&world, "plugins.slots.memory", "memory-core");
+
+    let logged_before = argv_lines(&world.argv_log()).len();
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let appended = argv_appended(&world, logged_before);
+    assert!(
+        !argv_contains(&appended, "plugins enable memory-lancedb"),
+        "the capture named the operator's plugin, not this adapter's, so nothing this \
+         cleanup wrote explains the reading and the choice stands: {appended:?}"
+    );
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-lancedb")
+                && message.contains("plugins.slots.memory now belongs to 'memory-core'")),
+        "and the report must name the owner the restore stepped aside for: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "{:?}",
+        outcome.report.messages
+    );
+    assert!(outcome.claim_removed);
+    assert_eq!(
+        config_answer(&world, "plugins.slots.memory").as_deref(),
+        Some("memory-core"),
+        "the operator's selection is what the host still says"
     );
 }
 
@@ -11241,6 +11419,14 @@ fn review_dropped_handoff_is_not_claimed_when_the_install_never_mutated() {
 /// [`review_same_slot_replacement_restore_keeps_a_third_plugin_selection`] are the
 /// two choices that guard protects. The plugin id and the ownership of the
 /// transition are what a restore acts on, and both survive.
+///
+/// The disable below is therefore a contest one of the two has to lose, and losing
+/// it is not losing the backend: the owning entry is restored first, its
+/// `plugins enable` re-selects the slot, and the guard entry then steps aside for an
+/// owner that really is there. What the guard entry must not be is *disowned* —
+/// an entry the attribution cannot place reads as a hand-off this adapter never
+/// performed, which is a different claim about the past and the one
+/// [`disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns`] pins.
 #[test]
 fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
     let guard = OpenClawEnvGuard::acquire();
@@ -11309,8 +11495,9 @@ fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
         .expect("disable");
     let appended = argv_appended(&world, logged_before);
     assert!(
-        argv_contains(&appended, "plugins enable memory-core"),
-        "the restore the retained entry makes possible: {appended:?}"
+        argv_contains(&appended, "plugins enable memory-lancedb"),
+        "the entry the current contract declares owns the slot, so it is the one the \
+         restore hands back: {appended:?}"
     );
     assert!(
         outcome.report.cleanup_complete,
@@ -11320,10 +11507,26 @@ fn review_same_slot_replacement_keeps_old_recovery_responsibility() {
     assert!(outcome.claim_removed);
     assert!(!world.has_claim());
     assert_eq!(
-        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        config_answer(&world, "plugins.entries.memory-lancedb.enabled").as_deref(),
         Some("true"),
         "and the host ends with a backend behind the slot, not with every plugin of \
          that kind switched off"
+    );
+    // The retained entry owes no *second* backend on the same exclusive slot: the
+    // restore above re-ran the host's selection, so the slot genuinely belongs to
+    // `memory-lancedb` by the time this entry is decided and stepping aside is the
+    // guard doing its job. What it may not say is that this adapter never turned the
+    // plugin off.
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("plugins.slots.memory now belongs to 'memory-lancedb'")),
+        "the older entry steps aside for the plugin the newer restore re-selected, \
+         and names it: {:?}",
+        outcome.report.messages
     );
 }
 
@@ -11568,6 +11771,14 @@ fn a_second_replacement_keeps_the_guard_the_first_one_recorded() {
 ///
 /// Forged rather than fault-injected: the receipt is the state under test, and an enable
 /// that cannot read the slot fails before it can stage anything.
+///
+/// What the recovery buys is a *veto* rather than a disowning, and that is the
+/// assertion below. The entry still cannot be restored: the entry ahead of it in the
+/// receipt owns the same exclusive slot, its restore re-selects that slot, and the
+/// guard then steps aside for an owner that is really there. An entry the capture
+/// could not attribute never gets that far — it is reported as a hand-off this
+/// adapter never performed, which is a claim about the past rather than about the
+/// slot, and the difference in the report is what this test reads.
 #[test]
 fn disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns() {
     let guard = OpenClawEnvGuard::acquire();
@@ -11599,8 +11810,10 @@ fn disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns() {
         .expect("disable");
     let appended = argv_appended(&world, logged_before);
     assert!(
-        argv_contains(&appended, "plugins enable memory-core"),
-        "the capture must have recovered the hand-off the mark missed: {appended:?}"
+        argv_contains(&appended, "plugins enable memory-lancedb"),
+        "the entry that owns the slot is the one the restore hands back, and the \
+         reset this disable's own uninstall wrote is not a third owner standing in \
+         its way: {appended:?}"
     );
     assert!(
         !outcome
@@ -11609,7 +11822,18 @@ fn disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns() {
             .iter()
             .any(|message| message.contains("memory-core")
                 && message.contains("never disabled it")),
-        "and must not disown it in the same breath: {:?}",
+        "and the unapplied entry must not be disowned in the same breath: {:?}",
+        outcome.report.messages
+    );
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("memory-core")
+                && message.contains("plugins.slots.memory now belongs to 'memory-lancedb'")),
+        "the capture must have recovered the hand-off the mark missed, because only a \
+         recovered entry reaches the slot veto that reports this: {:?}",
         outcome.report.messages
     );
     assert!(
@@ -11620,9 +11844,9 @@ fn disable_recovers_an_unmarked_handoff_whose_slot_another_entry_owns() {
     assert!(outcome.claim_removed);
     assert!(!world.has_claim());
     assert_eq!(
-        config_answer(&world, "plugins.entries.memory-core.enabled").as_deref(),
+        config_answer(&world, "plugins.entries.memory-lancedb.enabled").as_deref(),
         Some("true"),
-        "the bundled backend must really be back on"
+        "and a backend must really be back on behind the slot"
     );
 }
 
