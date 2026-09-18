@@ -421,9 +421,8 @@ impl ExternalRootTrust {
     /// actually depends on external symlink-target trust
     /// ([`AdapterClaim::requires_external_symlink_trust`]): a receipt
     /// whose targets all re-validate from the static boundary on every
-    /// run — or one with no symlink resources at all (every driver but
-    /// Codex today) — never reads its anchor back, and a redundant
-    /// anchor would bump the state schema to v6 for nothing, locking
+    /// run — or one with no symlink resources — never reads its anchor back.
+    /// A redundant anchor would bump the state schema to v6 for nothing, locking
     /// released 0.2.16 CLIs out of all state commands on a path that
     /// never needed trust migration.
     fn sync_anchor(
@@ -432,7 +431,7 @@ impl ExternalRootTrust {
         layout: &FsLayout,
         claim: &AdapterClaim,
         trusted_owned_roots: &[PathBuf],
-    ) {
+    ) -> Result<(), AdapterError> {
         if claim.framework == "dsh" {
             if let Some(root) = dsh_home_anchor(claim) {
                 state.upsert_adapter_trust_root(
@@ -443,19 +442,26 @@ impl ExternalRootTrust {
             } else {
                 state.remove_adapter_trust_root(&claim.component, &claim.framework);
             }
-            return;
+            return Ok(());
         }
         if self.anchor_eligible
             && claim.requires_external_symlink_trust(layout, trusted_owned_roots)
         {
+            // OpenCode links an entry file rather than the whole bundle.
+            // Preserve only that exact target when the RPM contract disappears.
+            let target = match &claim.driver_payload {
+                DriverPayload::OpenCode(_) => super::opencode::claimed_link(claim)?.1,
+                _ => claim.resource_root.as_path(),
+            };
             state.upsert_adapter_trust_root(
                 &claim.component,
                 &claim.framework,
-                claim.resource_root.clone(),
+                target.to_path_buf(),
             );
         } else {
             state.remove_adapter_trust_root(&claim.component, &claim.framework);
         }
+        Ok(())
     }
 }
 
@@ -1194,7 +1200,7 @@ impl AdapterManager {
         // Anchor lifecycle shares the trust decision above: it is recorded
         // exactly when the validated claim depends on an externally-targeted
         // symlink, anything else clears a stale anchor.
-        trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots);
+        trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots)?;
         state.save(&self.state_path)?;
         let apply_result = {
             let mut progress = ManagerEnableProgress {
@@ -2957,6 +2963,49 @@ impl AdapterOps for ManagerOps {
         })
     }
 
+    fn create_symlink_new(&self, link: &Path, target: &Path) -> Result<(), AdapterError> {
+        super::claim::validate_external_link_location(link, &self.allowed_roots).map_err(
+            |source| super::claim::ClaimValidationError::ExternalPath {
+                id: format!("ops:{}", link.display()),
+                source,
+            },
+        )?;
+        validate_ops_path(target, &self.allowed_roots)?;
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        symlink_file(target, link).map_err(|source| AdapterError::Io {
+            path: link.to_path_buf(),
+            source,
+        })
+    }
+
+    fn remove_matching_symlink(&self, link: &Path, target: &Path) -> Result<bool, AdapterError> {
+        // Validate the link location, not its referent: cleanup must still work
+        // after an upgrade removes or relocates the package-owned source.
+        super::claim::validate_external_link_location(link, &self.allowed_roots).map_err(
+            |source| super::claim::ClaimValidationError::ExternalPath {
+                id: format!("ops:{}", link.display()),
+                source,
+            },
+        )?;
+        #[cfg(unix)]
+        {
+            remove_matching_symlink(link, target, || {}, || {})
+        }
+        #[cfg(not(unix))]
+        Err(AdapterError::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "matching symlink removal requires Unix",
+            ),
+        })
+    }
+
     fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
         validate_ops_path(path, &self.allowed_roots)?;
         // Refuse to follow a symlink at `path`: reading through it could
@@ -2976,6 +3025,89 @@ impl AdapterOps for ManagerOps {
 /// Create a symlink at `link` pointing to `target`. Unix-only; on other
 /// platforms this returns an unsupported error so the boundary never
 /// silently degrades.
+// Detach before the authoritative check: the public pathname can be replaced
+// by another installer between any two filesystem calls. Hooks let tests stop
+// at both race boundaries without relying on scheduler timing.
+#[cfg(unix)]
+fn remove_matching_symlink(
+    link: &Path,
+    target: &Path,
+    before_detach: impl FnOnce(),
+    after_detach: impl FnOnce(),
+) -> Result<bool, AdapterError> {
+    if !super::util::symlink_matches(link, target)? {
+        return match std::fs::symlink_metadata(link) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(source) => Err(AdapterError::Io {
+                path: link.to_path_buf(),
+                source,
+            }),
+            Ok(_) => Ok(false),
+        };
+    }
+    before_detach();
+    let parent = link.parent().ok_or_else(|| AdapterError::Io {
+        path: link.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plugin link has no parent directory",
+        ),
+    })?;
+    // Never let TempDir's recursive destructor delete an unverified entry,
+    // including on errors or unwinding after the rename.
+    let staging = tempfile::Builder::new()
+        .prefix(".anolisa-unlink-")
+        .tempdir_in(parent)
+        .map_err(|source| AdapterError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?
+        .keep();
+    let captured = staging.join("entry");
+    if let Err(source) = std::fs::rename(link, &captured) {
+        let _ = std::fs::remove_dir(&staging);
+        return if source.kind() == std::io::ErrorKind::NotFound {
+            Ok(true)
+        } else {
+            Err(AdapterError::Io {
+                path: link.to_path_buf(),
+                source,
+            })
+        };
+    }
+    after_detach();
+    let matches = super::util::symlink_matches_at(&captured, link, target);
+    if !matches.as_ref().is_ok_and(|matched| *matched) {
+        // linkat without AT_SYMLINK_FOLLOW restores the captured inode and
+        // fails if another entry now occupies link. Never overwrite that entry.
+        if let Err(source) = nix::unistd::linkat(
+            None,
+            captured.as_path(),
+            None,
+            link,
+            nix::fcntl::AtFlags::empty(),
+        ) {
+            return Err(AdapterError::Io {
+                path: captured.clone(),
+                source: std::io::Error::other(format!(
+                    "preserved changed entry at {}; could not restore {} without overwriting: {source}; restore it manually before retrying",
+                    captured.display(),
+                    link.display()
+                )),
+            });
+        }
+    }
+    std::fs::remove_file(&captured).map_err(|source| AdapterError::Io {
+        path: captured,
+        source,
+    })?;
+    std::fs::remove_dir(&staging).map_err(|source| AdapterError::Io {
+        path: staging,
+        source,
+    })?;
+    matches
+}
+
 #[cfg(unix)]
 fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -3663,6 +3795,8 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "openclaw" | "hermes" => Some(&["plugin", "skill_bundle"]),
         // Marketplace-plugin frameworks: plugin only.
         "codex" | "claude-code" => Some(&["plugin"]),
+        // OpenCode loads local JavaScript/TypeScript plugins from symlinks.
+        "opencode" => Some(&["plugin"]),
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
         "qoder" => Some(&["plugin"]),
@@ -4027,6 +4161,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
     let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
+        DriverPayload::OpenCode(payload) => {
+            cleanup_ids.push(&payload.symlink_resource);
+            None
+        }
         DriverPayload::OpenClaw(oc) => {
             cleanup_ids.extend(oc.skill_resources.iter().map(String::as_str));
             if !oc.plugin_resource.is_empty() {
@@ -4367,7 +4505,9 @@ mod tests {
             anchor_eligible: false,
         };
 
-        initial.sync_anchor(&mut state, &layout, &claim, &[]);
+        initial
+            .sync_anchor(&mut state, &layout, &claim, &[])
+            .unwrap();
 
         let anchored = ExternalRootTrust {
             target_roots: Vec::new(),
@@ -4957,6 +5097,8 @@ mod tests {
         assert!(ok("openclaw", Some("plugin")));
         assert!(ok("openclaw", Some("skill_bundle")));
         assert!(ok("openclaw", None), "openclaw defaults to plugin");
+        assert!(ok("opencode", Some("plugin")));
+        assert!(ok("opencode", None), "opencode defaults to plugin");
         assert!(ok("hermes", Some("skill_bundle")));
         assert!(ok("codex", Some("plugin")));
         assert!(ok("codex", None), "codex defaults to plugin");
@@ -4976,6 +5118,7 @@ mod tests {
     fn framework_type_matrix_rejects_extension_on_plugin_frameworks() {
         for fw in [
             "openclaw",
+            "opencode",
             "hermes",
             "codex",
             "claude-code",
@@ -5008,8 +5151,8 @@ mod tests {
     }
 
     #[test]
-    fn framework_type_matrix_rejects_skill_bundle_on_marketplace_frameworks() {
-        for fw in ["codex", "claude-code"] {
+    fn framework_type_matrix_rejects_skill_bundle_on_plugin_only_frameworks() {
+        for fw in ["codex", "claude-code", "opencode"] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("skill_bundle"))
                 .expect_err(&format!("{fw} + skill_bundle must be rejected"));
             assert!(matches!(err, AdapterError::InvalidAdapterInput { .. }));
@@ -7437,6 +7580,118 @@ source = "{datadir}/skills/code-scanner/"
             matches!(err, AdapterError::ClaimValidation(_)),
             "expected ClaimValidation, got {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_preserves_replacement_after_check() {
+        use std::sync::Barrier;
+        for replacement_is_symlink in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let link = tmp.path().join("plugin.js");
+            let target = tmp.path().join("source.js");
+            std::fs::write(&target, "managed").unwrap();
+            symlink_file(&target, &link).unwrap();
+            let barrier = Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    std::fs::remove_file(&link).unwrap();
+                    if replacement_is_symlink {
+                        symlink_file(Path::new("missing-user.js"), &link).unwrap();
+                    } else {
+                        std::fs::write(&link, "user plugin").unwrap();
+                    }
+                    barrier.wait();
+                });
+                assert!(
+                    !remove_matching_symlink(
+                        &link,
+                        &target,
+                        || {
+                            barrier.wait();
+                            barrier.wait();
+                        },
+                        || {}
+                    )
+                    .unwrap()
+                );
+            });
+            if replacement_is_symlink {
+                assert_eq!(
+                    std::fs::read_link(&link).unwrap(),
+                    Path::new("missing-user.js")
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(&link).unwrap(), "user plugin");
+            }
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "managed");
+            assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_does_not_unlink_recreated_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("plugin.js");
+        let target = tmp.path().join("missing-source.js");
+        symlink_file(Path::new("missing-source.js"), &link).unwrap();
+        assert!(
+            remove_matching_symlink(
+                &link,
+                &target,
+                || {},
+                || {
+                    std::fs::write(&link, "new user plugin").unwrap();
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new user plugin");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_preserves_unrestorable_entry() {
+        for replacement_is_directory in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let link = tmp.path().join("plugin.js");
+            let target = tmp.path().join("missing-source.js");
+            symlink_file(&target, &link).unwrap();
+            let error = remove_matching_symlink(
+                &link,
+                &target,
+                || {
+                    std::fs::remove_file(&link).unwrap();
+                    if replacement_is_directory {
+                        std::fs::create_dir(&link).unwrap();
+                        std::fs::write(link.join("user.js"), "captured user plugin").unwrap();
+                    } else {
+                        std::fs::write(&link, "captured user plugin").unwrap();
+                    }
+                },
+                || {
+                    std::fs::write(&link, "new user plugin").unwrap();
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("restore it manually"));
+            let AdapterError::Io { path, .. } = error else {
+                panic!("expected Io error")
+            };
+            let preserved = if replacement_is_directory {
+                path.join("user.js")
+            } else {
+                path
+            };
+            assert_eq!(
+                std::fs::read_to_string(preserved).unwrap(),
+                "captured user plugin"
+            );
+            assert_eq!(std::fs::read_to_string(&link).unwrap(), "new user plugin");
+        }
     }
 
     #[test]

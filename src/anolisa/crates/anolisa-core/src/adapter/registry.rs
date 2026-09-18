@@ -11,6 +11,7 @@ use super::driver::FrameworkDriver;
 use super::dsh::DshDriver;
 use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
+use super::opencode::OpenCodeDriver;
 use super::qoder::QoderDriver;
 use super::qwencode::QwenCodeDriver;
 use super::qwenpaw::QwenPawDriver;
@@ -26,6 +27,7 @@ impl DriverRegistry {
         Self {
             drivers: vec![
                 Box::new(OpenClawDriver::new()),
+                Box::new(OpenCodeDriver::new()),
                 Box::new(HermesDriver::new()),
                 Box::new(CoshDriver::new()),
                 Box::new(DshDriver::new()),
@@ -71,6 +73,7 @@ mod tests {
     fn builtin_registers_all_shipped_drivers() {
         let reg = DriverRegistry::builtin();
         assert!(reg.contains("openclaw"));
+        assert!(reg.contains("opencode"));
         assert!(reg.contains("hermes"));
         assert!(reg.contains("cosh"));
         assert!(reg.contains("dsh"));
@@ -83,6 +86,7 @@ mod tests {
             reg.names(),
             vec![
                 "openclaw",
+                "opencode",
                 "hermes",
                 "cosh",
                 "dsh",
