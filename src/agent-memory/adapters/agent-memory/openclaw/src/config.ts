@@ -137,7 +137,7 @@ export const CONTRACT_TOOLS_HIDDEN_BY_EXPERT = [
  *  search, observe and get_context tools fail every call, whose auto-recall
  *  fails on every prompt, and whose corpus supplement silently answers
  *  nothing — the only hint is an error string inside each tool result. The
- *  adapter exposes exactly one Tier A tool (`memory_get` → `mem_read`) and
+ *  adapter exposes exactly one Tier A tool (`anolisa_memory_get` → `mem_read`) and
  *  cannot expose the rest without breaking the host's memory contract, so
  *  `expert` stays a setting for direct MCP clients that drive Tier A
  *  themselves. Refusing at boot is this module's standing contract for a
@@ -152,7 +152,7 @@ function resolveProfile(value: unknown): AgentMemoryProfile {
     throw new Error(
       `profile 'expert' cannot run the OpenClaw adapter: the agent-memory child hides ` +
         `${CONTRACT_TOOLS_HIDDEN_BY_EXPERT.join(", ")} under that profile, and those are ` +
-        `three of the four tools this plugin registers for the host's memory contract ` +
+        `the MCP operations behind anolisa_memory_search, memory_observe and memory_get_context ` +
         `(auto-recall and the corpus=all supplement call memory_search too). Use ` +
         `'advanced' (the default) or 'basic'; 'expert' is for direct MCP clients that ` +
         `drive the Tier A file tools themselves.`,

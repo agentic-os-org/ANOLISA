@@ -9,11 +9,25 @@
   "kind": "memory",
   "contracts": {
     "tools": [
-      "memory_search",
-      "memory_get",
+      "anolisa_memory_search",
+      "anolisa_memory_get",
       "memory_observe",
       "memory_get_context"
     ]
+  },
+  "toolMetadata": {
+    "anolisa_memory_search": {
+      "profiles": ["coding"]
+    },
+    "anolisa_memory_get": {
+      "profiles": ["coding"]
+    },
+    "memory_observe": {
+      "profiles": ["coding"]
+    },
+    "memory_get_context": {
+      "profiles": ["coding"]
+    }
   },
   "configSchema": {
     "type": "object",

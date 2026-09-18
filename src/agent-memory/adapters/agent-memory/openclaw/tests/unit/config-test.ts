@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveMcpToolName } from "../../src/mcp-client.js";
 
 const {
   resolveConfig,
@@ -279,6 +280,7 @@ describe("resolveConfig profile gate", () => {
         for (const tool of ["memory_search", "memory_observe", "memory_get_context"]) {
           assert.ok(err.message.includes(tool), `message should name ${tool}: ${err.message}`);
         }
+        assert.match(err.message, /MCP operations behind anolisa_memory_search/);
         assert.match(err.message, /'advanced'/);
         assert.match(err.message, /'basic'/);
         return true;
@@ -385,7 +387,10 @@ describe("the profile gate's premise, derived from the child", () => {
       "openclaw.plugin.json declares no contracts.tools; this guard needs the " +
         "host-facing tool list to intersect with the child's gate",
     );
-    const hidden = contractTools.filter((tool) => rustTierB().includes(tool)).sort();
+    const hidden = contractTools
+      .map(resolveMcpToolName)
+      .filter((tool) => rustTierB().includes(tool))
+      .sort();
     assert.ok(
       hidden.length > 0,
       "expert hides nothing this plugin registers, so refusing it is no longer " +

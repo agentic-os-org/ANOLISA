@@ -68,14 +68,14 @@ describe("agent-memory MCP smoke test", { skip }, () => {
     sessionDir,
   });
 
-  it("calls memory_search and returns a result", async () => {
-    const result = await client.callTool("memory_search", { query: "test query", top_k: 3 });
+  it("calls anolisa_memory_search (memory_search) and returns a result", async () => {
+    const result = await client.callTool("anolisa_memory_search", { query: "test query", top_k: 3 });
     assert.ok(typeof result === "string");
     assert.ok(result.length > 0);
   });
 
-  it("calls memory_get (mem_read) and returns a result", async () => {
-    const result = await client.callTool("memory_get", { path: "README.md" });
+  it("calls anolisa_memory_get (mem_read) and returns a result", async () => {
+    const result = await client.callTool("anolisa_memory_get", { path: "README.md" });
     // mem_read may return file content or an error string; both are valid responses.
     assert.ok(typeof result === "string");
   });

@@ -21,6 +21,7 @@
     "build:check": "tsc --project tsconfig.json --noEmit",
     "smoke": "npx tsx tests/smoke-test.ts",
     "test": "npx tsx --test tests/unit/*-test.ts",
+    "test:host-policy": "node tests/host-policy-test.mjs",
     "test:coverage": "npx c8 --reporter=cobertura --reporter=text --reports-dir=coverage tsx --test tests/unit/*-test.ts"
   },
   "peerDependencies": {
