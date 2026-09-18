@@ -17,44 +17,14 @@ import { LoginPage } from './pages/LoginPage';
 import { useI18n } from './i18n';
 import { fetchAuthStatus, fetchAuthVerify, login } from './utils/apiClient';
 import type { AppCapability, AuthStatusResponse } from './utils/apiClient';
+import { ALL_CAPABILITIES, HEALTH_PATH, OBSERVABILITY_PATH, defaultPath, pathAllowed } from './utils/navigation';
 
-const DEFAULT_CAPABILITIES: AppCapability[] = [
-  'agent_observability',
-  'sessions',
-  'token_savings',
-  'optimization',
-  'skills',
-  'security',
-  'system_audit',
-  'enforcement',
-  'atif',
-  'settings',
-  'agent_health',
-];
-
-const LOCAL_DEFAULT_PATH = '/sessions';
+// Used when /api/auth/status is unreachable, so an offline dashboard still
+// offers every page it ships. Derived from the nav model to stay complete.
+const DEFAULT_CAPABILITIES: AppCapability[] = [...ALL_CAPABILITIES];
 
 function capabilitiesFromStatus(status: AuthStatusResponse | null): AppCapability[] {
   return Array.isArray(status?.capabilities) ? status.capabilities : DEFAULT_CAPABILITIES;
-}
-
-function pathAllowed(pathname: string, capabilities: AppCapability[]): boolean {
-  if (pathname === '/') return capabilities.includes('agent_observability');
-  if (pathname.startsWith('/sessions')) return capabilities.includes('sessions');
-  if (pathname.startsWith('/savings')) return capabilities.includes('token_savings');
-  if (pathname.startsWith('/optimization')) return capabilities.includes('optimization');
-  if (pathname.startsWith('/skills')) return capabilities.includes('skills');
-  if (pathname.startsWith('/security')) return capabilities.includes('security');
-  if (pathname.startsWith('/audit')) return capabilities.includes('system_audit');
-  if (pathname.startsWith('/enforcement')) return capabilities.includes('enforcement');
-  if (pathname.startsWith('/atif')) return capabilities.includes('atif');
-  if (pathname.startsWith('/settings')) return capabilities.includes('settings');
-  if (pathname.startsWith('/health')) return capabilities.includes('agent_health');
-  return true;
-}
-
-function defaultPath(capabilities: AppCapability[]): string {
-  return capabilities.includes('agent_observability') ? '/' : LOCAL_DEFAULT_PATH;
 }
 
 /** Auth gate: checks auth status and renders LoginPage when needed. */
@@ -156,14 +126,11 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
       <div className="flex flex-1 overflow-hidden">
         <main className="flex-1 overflow-auto">
           <Routes>
-            <Route
-              path="/"
-              element={
-                capabilities.includes('agent_observability')
-                  ? <ConversationList />
-                  : <Navigate to={fallbackPath} replace />
-              }
-            />
+            {/* The bare root renders no page: a fresh visit lands on the
+                Agent dashboard (#2723). `/observability` keeps serving the
+                conversation list, so the nav entry still has an address. */}
+            <Route path="/" element={<Navigate to={fallbackPath} replace />} />
+            <Route path={OBSERVABILITY_PATH} element={<ConversationList />} />
             <Route path="/sessions" element={<AgentSessionsPage />} />
             <Route path="/savings" element={<TokenSavingsPage />} />
             <Route path="/optimization" element={<OptimizationPage />} />
@@ -174,7 +141,7 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
             <Route path="/enforcement" element={<RiskEnforcementPage />} />
             <Route path="/atif" element={<AtifViewerPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/health" element={<AgentHealthPage />} />
+            <Route path={HEALTH_PATH} element={<AgentHealthPage />} />
             <Route path="*" element={<Navigate to={fallbackPath} replace />} />
           </Routes>
         </main>

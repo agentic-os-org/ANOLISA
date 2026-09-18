@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test:api-client": "node tests/run-api-client-regression.cjs",
     "test:i18n": "node tests/run-i18n-regression.cjs",
+    "test:navigation": "node tests/run-navigation-regression.cjs",
     "test:product-branding": "node --test tests/product-branding-regression.test.cjs"
   },
   "dependencies": {
