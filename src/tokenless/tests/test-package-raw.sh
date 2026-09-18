@@ -251,6 +251,9 @@ grep -Fq 'source = "bin/tokenless"' "$ROOT/.anolisa/component.toml.in"
 grep -Fq 'source = "extensions/tokenless"' "$ROOT/.anolisa/component.toml.in"
 test "$(grep -o '@VERSION@' "$ROOT/.anolisa/component.toml.in" | wc -l)" = 1
 grep -Fq 'framework = "opencode"' "$ROOT/.anolisa/component.toml.in"
+OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/.anolisa/component.toml.in")"
+grep -Fq 'when = "post_enable"' <<< "$OPENCODE_CONTRACT"
+grep -Fq 'when = "post_disable"' <<< "$OPENCODE_CONTRACT"
 grep -Fq 'source = "adapters/manifest.json"' "$ROOT/.anolisa/component.toml.in"
 
 # Every adapter target the manifest ships needs a matching [[adapters]] entry,

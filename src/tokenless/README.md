@@ -691,16 +691,29 @@ replaces the original model-visible response instead of being appended to it.
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
 | Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
 
-Install the plugin globally, then restart OpenCode:
+Enable the installed plugin through ANOLISA, then restart OpenCode:
+
+```bash
+anolisa adapter enable tokenless opencode
+```
+
+The driver creates `plugins/tokenless.js` under `OPENCODE_CONFIG_DIR`,
+`XDG_CONFIG_HOME/opencode`, or `~/.config/opencode`, in that order. It ignores
+`TOKENLESS_OPENCODE_CONFIG_DIR`; use `OPENCODE_CONFIG_DIR` for a shared custom directory.
+Enable adopts an existing link to the same source path without directory aliases;
+`anolisa adapter disable tokenless opencode` removes that link. Restart OpenCode after either operation.
+
+For standalone source installs, use:
 
 ```bash
 make opencode-install
 ```
 
-The installer creates a `tokenless.js` symbolic link in OpenCode's global
-`plugins/` directory and never overwrites an existing unmanaged file. It honors
-`OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
-`TOKENLESS_OPENCODE_CONFIG_DIR` override.
+The bundled lifecycle scripts additionally honor `TOKENLESS_OPENCODE_CONFIG_DIR` as the
+highest-priority override. Both methods refuse conflicting files or links. To return to standalone
+management after ANOLISA disable, rerun `make opencode-install` or the bundled `scripts/install.sh`.
+See [framework integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#opencode)
+for the complete lifecycle.
 
 If a response contains a Retrieve Marker, OpenCode can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter sends

@@ -74,6 +74,8 @@ struct StateFileV5 {
 /// Without it, an RPM update or later environment drift could make the
 /// authoritative receipt impossible to verify or clean up. Only the Manager
 /// writes this record (enable upserts, disable removes); drivers never see it.
+/// OpenCode migrations can retain multiple exact targets for one component and
+/// framework until both the replacement activation and prior cleanup complete.
 ///
 /// Symlink validation consumes the anchor as an **exact-equality** target
 /// allowance. Drivers whose native CLI owns a persisted framework home may

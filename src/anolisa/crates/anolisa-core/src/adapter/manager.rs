@@ -377,16 +377,16 @@ struct ExternalRootTrust {
     /// roots authorize subtrees, and a state-resident value must never
     /// authorize more than itself.
     target_roots: Vec<PathBuf>,
-    /// Enable-time anchor from state, honoured as an *exact-equality*
+    /// Enable-time anchors from state, honoured as *exact-equality*
     /// symlink-target allowance (see
     /// [`AdapterClaim::validate_with_trust`]): it keeps the receipt of a
     /// since-moved or since-removed external root reportable and
     /// cleanable, while a forged anchor authorizes nothing beneath it and
     /// no write outside anolisa's own layout.
-    anchor: Option<PathBuf>,
-    /// The two-source condition held. The enable-time anchor is
-    /// (re)written on enable exactly when this is true: a forged state
-    /// entry alone must not become durable.
+    anchors: Vec<PathBuf>,
+    /// The two-source condition held, permitting newly declared external
+    /// targets. OpenCode also retains previously validated exact anchors
+    /// while a migration still owns their links.
     anchor_eligible: bool,
 }
 
@@ -394,7 +394,7 @@ impl ExternalRootTrust {
     /// The anchor as an exact-target allowance slice for
     /// [`AdapterClaim::validate_with_trust`].
     fn exact_targets(&self) -> &[PathBuf] {
-        self.anchor.as_slice()
+        &self.anchors
     }
 
     /// Restore a Manager-written dsh home anchor as an allowed external
@@ -403,27 +403,23 @@ impl ExternalRootTrust {
     /// drift cannot redirect later reads or cleanup commands.
     fn extend_allowed_roots(&self, framework: &str, roots: &mut Vec<PathBuf>) {
         if framework == "dsh"
-            && let Some(anchor) = &self.anchor
+            && let Some(anchor) = self.anchors.first()
             && !roots.contains(anchor)
         {
             roots.push(anchor.clone());
         }
     }
 
-    /// Persist or clear the enable-time anchor under the same
-    /// eligibility that governs anchor consumption — by construction the
-    /// write condition and the read condition can never diverge. The
-    /// anchor keeps a prior receipt validatable after an RPM update
-    /// moves the contract root, so re-enable can migrate it instead of
-    /// wedging on `OwnedPath`.
+    /// Persist anchors for the just-validated receipt. OpenCode keeps each
+    /// retained migration target until its link is released, including targets
+    /// validated through prior exact anchors after the RPM contract moves.
     ///
     /// An anchor is worth remembering only when the just-validated claim
     /// actually depends on external symlink-target trust
     /// ([`AdapterClaim::requires_external_symlink_trust`]): a receipt
     /// whose targets all re-validate from the static boundary on every
-    /// run — or one with no symlink resources at all (every driver but
-    /// Codex today) — never reads its anchor back, and a redundant
-    /// anchor would bump the state schema to v6 for nothing, locking
+    /// run — or one with no symlink resources — never reads its anchor back.
+    /// A redundant anchor would bump the state schema to v6 for nothing, locking
     /// released 0.2.16 CLIs out of all state commands on a path that
     /// never needed trust migration.
     fn sync_anchor(
@@ -445,7 +441,25 @@ impl ExternalRootTrust {
             }
             return;
         }
-        if self.anchor_eligible
+        if matches!(claim.driver_payload, DriverPayload::OpenCode(_)) {
+            // A migration receipt owns both entry targets until activation and
+            // cleanup finish. Each was validated before this write; retain
+            // exact targets, never a parent directory's subtree authority.
+            state.remove_adapter_trust_root(&claim.component, &claim.framework);
+            if claim.requires_external_symlink_trust(layout, trusted_owned_roots) {
+                for resource in &claim.resources {
+                    if let ClaimResourceKind::Symlink { target, .. } = &resource.kind {
+                        state
+                            .adapter_trust_roots
+                            .push(crate::state_store::AdapterTrustRoot {
+                                component: claim.component.clone(),
+                                framework: claim.framework.clone(),
+                                root: target.clone(),
+                            });
+                    }
+                }
+            }
+        } else if self.anchor_eligible
             && claim.requires_external_symlink_trust(layout, trusted_owned_roots)
         {
             state.upsert_adapter_trust_root(
@@ -510,6 +524,8 @@ pub struct AdapterManager {
     /// Read-only native package file inventory. Kept separate from lifecycle
     /// version queries so adapter status can be tested without rpmdb.
     package_files: Box<dyn PackageFileQuery>,
+    #[cfg(test)]
+    before_apply: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl AdapterManager {
@@ -534,6 +550,8 @@ impl AdapterManager {
             user_home,
             actor,
             package_files: Box::new(RpmPackageQuery::system()),
+            #[cfg(test)]
+            before_apply: None,
         }
     }
 
@@ -1196,6 +1214,10 @@ impl AdapterManager {
         // symlink, anything else clears a stale anchor.
         trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots);
         state.save(&self.state_path)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.before_apply {
+            hook();
+        }
         let apply_result = {
             let mut progress = ManagerEnableProgress {
                 state: &mut state,
@@ -1238,6 +1260,7 @@ impl AdapterManager {
             trust.exact_targets(),
         )?;
         state.upsert_adapter_claim(claim.clone());
+        trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots);
         state.save(&self.state_path)?;
         self.log_operation(&label, component, LogStatus::Ok, "adapter enabled", None);
 
@@ -2133,21 +2156,24 @@ impl AdapterManager {
         // The anchor is read regardless of the two-source outcome: as an
         // exact-equality allowance it is what keeps a stale external-root
         // receipt reportable and cleanable after the RPM (or the whole
-        // contract) went away — while `anchor_eligible` below still gates
-        // whether enable may persist one.
-        let anchor = state
-            .find_adapter_trust_root(component, framework)
-            .map(Path::to_path_buf);
+        // contract) went away. New external targets still require contract
+        // provenance; migration receipts may retain these exact prior targets.
+        let anchors = state
+            .adapter_trust_roots
+            .iter()
+            .filter(|anchor| anchor.component == component && anchor.framework == framework)
+            .map(|anchor| anchor.root.clone())
+            .collect();
         let template = match (rpm_provenance, rpm_root_decl(manifest, framework)) {
             (true, RpmRootDecl::Declared(template)) => template,
             // No RPM provenance, or no usable declared root (absent,
             // blank, or an unsupported placeholder): validation stays
             // exactly as strict as before the unified contract, and
-            // enable will clear any stale anchor.
+            // only exact prior targets remain available for migration cleanup.
             _ => {
                 return ExternalRootTrust {
                     target_roots,
-                    anchor,
+                    anchors,
                     anchor_eligible: false,
                 };
             }
@@ -2167,7 +2193,7 @@ impl AdapterManager {
         }
         ExternalRootTrust {
             target_roots,
-            anchor,
+            anchors,
             anchor_eligible: true,
         }
     }
@@ -2203,9 +2229,12 @@ impl AdapterManager {
                 // exact allowance is what lets status report it and
                 // disable clean it up instead of wedging on
                 // `ClaimValidation` forever.
-                anchor: state
-                    .find_adapter_trust_root(component, framework)
-                    .map(Path::to_path_buf),
+                anchors: state
+                    .adapter_trust_roots
+                    .iter()
+                    .filter(|anchor| anchor.component == component && anchor.framework == framework)
+                    .map(|anchor| anchor.root.clone())
+                    .collect(),
                 anchor_eligible: false,
             },
         }
@@ -2957,6 +2986,37 @@ impl AdapterOps for ManagerOps {
         })
     }
 
+    fn reconcile_symlink(
+        &self,
+        link: &Path,
+        targets: &[&Path],
+        replacement: Option<&Path>,
+    ) -> Result<bool, AdapterError> {
+        // Cleanup validates the location, not the referent, so missing package
+        // sources do not prevent replay of a persisted receipt's journal.
+        super::claim::validate_external_link_location(link, &self.allowed_roots).map_err(
+            |source| super::claim::ClaimValidationError::ExternalPath {
+                id: format!("ops:{}", link.display()),
+                source,
+            },
+        )?;
+        if let Some(target) = replacement {
+            validate_ops_path(target, &self.allowed_roots)?;
+        }
+        #[cfg(unix)]
+        {
+            super::link_transaction::reconcile(link, targets, replacement, || {}, || {})
+        }
+        #[cfg(not(unix))]
+        Err(AdapterError::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlink transactions require Unix",
+            ),
+        })
+    }
+
     fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
         validate_ops_path(path, &self.allowed_roots)?;
         // Refuse to follow a symlink at `path`: reading through it could
@@ -2973,9 +3033,6 @@ impl AdapterOps for ManagerOps {
     }
 }
 
-/// Create a symlink at `link` pointing to `target`. Unix-only; on other
-/// platforms this returns an unsupported error so the boundary never
-/// silently degrades.
 #[cfg(unix)]
 fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -3663,6 +3720,8 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "openclaw" | "hermes" => Some(&["plugin", "skill_bundle"]),
         // Marketplace-plugin frameworks: plugin only.
         "codex" | "claude-code" => Some(&["plugin"]),
+        // OpenCode loads local JavaScript/TypeScript plugins from symlinks.
+        "opencode" => Some(&["plugin"]),
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
         "qoder" => Some(&["plugin"]),
@@ -4027,6 +4086,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
     let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
+        DriverPayload::OpenCode(_) => {
+            cleanup_ids.extend(claim.resources.iter().map(|resource| resource.id.as_str()));
+            None
+        }
         DriverPayload::OpenClaw(oc) => {
             cleanup_ids.extend(oc.skill_resources.iter().map(String::as_str));
             if !oc.plugin_resource.is_empty() {
@@ -4311,6 +4374,543 @@ mod tests {
         (layout, home)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn opencode_migration_keeps_old_entry_when_destination_is_raced() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        // Run in a child so framework detection/configuration never mutate the
+        // environment shared by other unit tests.
+        if std::env::var_os("ANOLISA_TEST_OPENCODE_CHILD").is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            let binary = tmp.path().join("opencode");
+            std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "adapter::manager::tests::opencode_migration_keeps_old_entry_when_destination_is_raced", "--nocapture"])
+                .env("ANOLISA_TEST_OPENCODE_CHILD", "1")
+                .env("OPENCODE_BIN", &binary)
+                .env_remove("OPENCODE_CONFIG_DIR")
+                .env_remove("XDG_CONFIG_HOME")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        if let Some(root) = std::env::var_os("ANOLISA_TEST_OPENCODE_INTERRUPTED_ROOT") {
+            let (layout, home) = test_user_layout(Path::new(&root));
+            let target = layout.datadir.join("adapters/tokenless/opencode/plugin.ts");
+            let link = home.join(".config/opencode/plugins/tokenless.ts");
+            let mut manager = AdapterManager::new(layout, Some(home), "test".into());
+            manager.before_apply = Some(Box::new(move || {
+                super::super::link_transaction::reconcile(
+                    &link,
+                    &[&target],
+                    Some(&target),
+                    || {},
+                    || {},
+                )
+                .unwrap();
+                // Bypass unwinding and Manager's error handler, as with process
+                // termination between installing the new entry and retiring the old.
+                std::process::exit(73);
+            }));
+            manager
+                .enable("tokenless", Some("opencode"), false)
+                .unwrap();
+            panic!("migration child must exit before cleanup");
+        }
+        for scenario in [
+            "conflict_retry",
+            "conflict_disable",
+            "interrupted_disable",
+            "inplace_enable",
+            "inplace_interrupted_disable",
+            "inplace_journal_disable",
+            "inplace_journal_retry",
+            "journal_remove_disable",
+            "journal_directory_disable",
+            "retired_conflict_status",
+            "process_exit_status_retry",
+            "process_exit_status_disable",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (layout, home) = test_user_layout(tmp.path());
+            let root = layout.datadir.join("adapters/tokenless/opencode");
+            std::fs::create_dir_all(&root).unwrap();
+            for entry in ["plugin.js", "plugin.ts", "custom.js"] {
+                std::fs::write(root.join(entry), "export const Plugin = async () => ({});")
+                    .unwrap();
+            }
+            seed_installed_state(
+                &layout.state_dir,
+                crate::state::InstallMode::User,
+                &layout.prefix,
+                "tokenless",
+                ObjectStatus::Installed,
+            );
+            let state_path = layout.state_dir.join("installed.toml");
+            let mut state = load_written_state(&state_path);
+            let installation = state.find_mut(ObjectKind::Component, "tokenless").unwrap();
+            let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+                panic!("raw fixture")
+            };
+            artifact.files = ["plugin.js", "plugin.ts", "custom.js"]
+                .into_iter()
+                .map(|entry| crate::state::OwnedFile {
+                    path: root.join(entry),
+                    owner: crate::state::FileOwner::Anolisa,
+                    kind: crate::state::OwnedFileKind::File,
+                    sha256: Some(format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(root.join(entry)).unwrap())
+                    )),
+                    referent: None,
+                    mode: None,
+                    capabilities: Vec::new(),
+                })
+                .collect();
+            state.save(&state_path).unwrap();
+            let manifest_path = layout.snapshot_path("tokenless");
+            std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+            let manifest = "[component]\nname = \"tokenless\"\nversion = \"0.1.0\"\n[[adapters]]\nframework = \"opencode\"\nadapter_type = \"plugin\"\nplugin_id = \"tokenless\"\nsource = \"adapters/opencode\"\ndest = \"{datadir}/adapters/{component}/opencode/\"\n[adapters.bundle]\nentry = \"plugin.js\"\n";
+            std::fs::write(&manifest_path, manifest).unwrap();
+            let old_link = home.join(".config/opencode/plugins/tokenless.js");
+            let in_place = scenario.starts_with("inplace_");
+            let next_link = if in_place {
+                old_link.clone()
+            } else {
+                old_link.with_extension("ts")
+            };
+            let next_entry = if in_place { "custom.js" } else { "plugin.ts" };
+            let mut manager = AdapterManager::new(layout.clone(), Some(home), "test".into());
+            manager
+                .enable("tokenless", Some("opencode"), false)
+                .unwrap();
+            std::fs::write(&manifest_path, manifest.replace("plugin.js", next_entry)).unwrap();
+            if scenario.starts_with("process_exit_status") {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "adapter::manager::tests::opencode_migration_keeps_old_entry_when_destination_is_raced", "--nocapture"])
+                    .env("ANOLISA_TEST_OPENCODE_INTERRUPTED_ROOT", tmp.path())
+                    .output().unwrap();
+                assert_eq!(output.status.code(), Some(73), "{output:?}");
+                assert_eq!(
+                    std::fs::read_link(&old_link).unwrap(),
+                    root.join("plugin.js")
+                );
+                assert_eq!(
+                    std::fs::read_link(&next_link).unwrap(),
+                    root.join("plugin.ts")
+                );
+                let status = manager.status(Some("tokenless")).unwrap();
+                let report = &status.entries[0].report;
+                assert!(report.conditions.iter().any(|condition| {
+                    condition.kind == AdapterConditionKind::SymlinkPresent
+                        && condition.status == ConditionStatus::True
+                }));
+                assert_eq!(report.summary, AdapterSummary::CleanupFailed);
+                let state = load_written_state(&state_path);
+                let claim = state.find_adapter_claim("tokenless", "opencode").unwrap();
+                assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+                assert_eq!(claim.resources.len(), 2);
+                if scenario.ends_with("retry") {
+                    manager
+                        .enable("tokenless", Some("opencode"), false)
+                        .unwrap();
+                    let state = load_written_state(&state_path);
+                    let claim = state.find_adapter_claim("tokenless", "opencode").unwrap();
+                    assert_eq!(claim.status, ClaimStatus::Enabled);
+                    assert_eq!(claim.resources.len(), 1);
+                    assert!(!old_link.is_symlink());
+                    assert_eq!(
+                        manager.status(Some("tokenless")).unwrap().entries[0]
+                            .report
+                            .summary,
+                        AdapterSummary::Unknown
+                    );
+                }
+                assert!(
+                    manager
+                        .disable("tokenless", Some("opencode"), false)
+                        .unwrap()
+                        .claim_removed
+                );
+                assert!(!old_link.is_symlink());
+                assert!(!next_link.is_symlink());
+                continue;
+            }
+            if scenario == "retired_conflict_status" {
+                let retired = old_link.clone();
+                manager.before_apply = Some(Box::new(move || {
+                    // Replace the retired entry after validation but before the
+                    // new entry is installed and cleanup runs.
+                    std::fs::remove_file(&retired).unwrap();
+                    std::fs::write(&retired, "user plugin").unwrap();
+                }));
+                assert!(matches!(
+                    manager.enable("tokenless", Some("opencode"), false),
+                    Err(AdapterError::ReenableCleanupIncomplete { .. })
+                ));
+                manager.before_apply = None;
+                assert_eq!(
+                    std::fs::read_link(&next_link).unwrap(),
+                    root.join(next_entry)
+                );
+                let state = load_written_state(&state_path);
+                let claim = state.find_adapter_claim("tokenless", "opencode").unwrap();
+                assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+                assert_eq!(claim.resources.len(), 2);
+                let status = manager.status(Some("tokenless")).unwrap();
+                let report = &status.entries[0].report;
+                assert!(report.conditions.iter().any(|condition| {
+                    condition.kind == AdapterConditionKind::SymlinkPresent
+                        && condition.status == ConditionStatus::True
+                }));
+                assert_eq!(report.summary, AdapterSummary::CleanupFailed);
+                assert_eq!(std::fs::read_to_string(&old_link).unwrap(), "user plugin");
+                std::fs::remove_file(&old_link).unwrap();
+                manager
+                    .enable("tokenless", Some("opencode"), false)
+                    .unwrap();
+                assert_eq!(
+                    manager.status(Some("tokenless")).unwrap().entries[0]
+                        .report
+                        .summary,
+                    AdapterSummary::Unknown
+                );
+                assert_eq!(
+                    load_written_state(&state_path)
+                        .find_adapter_claim("tokenless", "opencode")
+                        .unwrap()
+                        .resources
+                        .len(),
+                    1
+                );
+                assert!(
+                    manager
+                        .disable("tokenless", Some("opencode"), false)
+                        .unwrap()
+                        .claim_removed
+                );
+                continue;
+            }
+            if scenario.contains("journal") {
+                let captured_link = old_link.clone();
+                let old_target = root.join("plugin.js");
+                let next_target = root.join(next_entry);
+                let directory = scenario == "journal_directory_disable";
+                manager.before_apply = Some(Box::new(move || {
+                    super::super::link_transaction::reconcile(
+                        &captured_link,
+                        &[&old_target, &next_target],
+                        in_place.then_some(next_target.as_path()),
+                        || {
+                            if directory {
+                                std::fs::remove_file(&captured_link).unwrap();
+                                std::fs::create_dir(&captured_link).unwrap();
+                                std::fs::write(captured_link.join("user.js"), "user data").unwrap();
+                            }
+                        },
+                        || panic!("interrupted after detaching the entry"),
+                    )
+                    .unwrap();
+                }));
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        manager.enable("tokenless", Some("opencode"), false)
+                    }))
+                    .is_err()
+                );
+                manager.before_apply = None;
+                assert_eq!(
+                    load_written_state(&state_path)
+                        .find_adapter_claim("tokenless", "opencode")
+                        .unwrap()
+                        .resources
+                        .len(),
+                    2
+                );
+                assert_eq!(
+                    load_written_state(&state_path)
+                        .find_adapter_claim("tokenless", "opencode")
+                        .unwrap()
+                        .status,
+                    ClaimStatus::CleanupFailed,
+                );
+                assert_eq!(
+                    manager.status(Some("tokenless")).unwrap().entries[0]
+                        .report
+                        .summary,
+                    AdapterSummary::CleanupFailed,
+                );
+                if scenario.ends_with("retry") {
+                    manager
+                        .enable("tokenless", Some("opencode"), false)
+                        .unwrap();
+                    assert_eq!(
+                        std::fs::read_link(&old_link).unwrap(),
+                        root.join(next_entry)
+                    );
+                    assert_eq!(
+                        load_written_state(&state_path)
+                            .find_adapter_claim("tokenless", "opencode")
+                            .unwrap()
+                            .resources
+                            .len(),
+                        1
+                    );
+                }
+                std::fs::remove_file(&manifest_path).unwrap();
+                std::fs::remove_dir_all(&root).unwrap();
+                let report = manager
+                    .disable("tokenless", Some("opencode"), false)
+                    .unwrap();
+                if directory {
+                    assert!(!report.claim_removed);
+                    assert!(
+                        load_written_state(&state_path)
+                            .find_adapter_claim("tokenless", "opencode")
+                            .is_some()
+                    );
+                    assert_eq!(
+                        std::fs::read_to_string(old_link.join("user.js")).unwrap(),
+                        "user data"
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(old_link.parent().unwrap())
+                            .unwrap()
+                            .count(),
+                        1
+                    );
+                    std::fs::remove_dir_all(&old_link).unwrap();
+                    assert!(
+                        manager
+                            .disable("tokenless", Some("opencode"), false)
+                            .unwrap()
+                            .claim_removed
+                    );
+                } else {
+                    assert!(report.claim_removed);
+                }
+                assert_eq!(
+                    std::fs::read_dir(old_link.parent().unwrap())
+                        .unwrap()
+                        .count(),
+                    0
+                );
+                continue;
+            }
+            if scenario == "inplace_enable" {
+                manager
+                    .enable("tokenless", Some("opencode"), false)
+                    .unwrap();
+                assert_eq!(
+                    std::fs::read_link(&next_link).unwrap(),
+                    root.join(next_entry)
+                );
+                assert_eq!(
+                    load_written_state(&state_path)
+                        .find_adapter_claim("tokenless", "opencode")
+                        .unwrap()
+                        .resources
+                        .len(),
+                    1
+                );
+                assert!(
+                    manager
+                        .disable("tokenless", Some("opencode"), false)
+                        .unwrap()
+                        .claim_removed
+                );
+                continue;
+            }
+            if scenario.ends_with("interrupted_disable") {
+                let next_link = next_link.clone();
+                let target = root.join("plugin.ts");
+                manager.before_apply = Some(Box::new(move || {
+                    // Simulate termination after creating the replacement but
+                    // before releasing the prior link or finalizing its receipt.
+                    if !in_place {
+                        symlink_file(&target, &next_link).unwrap();
+                    }
+                    panic!("simulated interrupted activation");
+                }));
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| manager.enable(
+                        "tokenless",
+                        Some("opencode"),
+                        false
+                    )))
+                    .is_err()
+                );
+            } else {
+                let barrier = Arc::new(Barrier::new(2));
+                let hook_barrier = barrier.clone();
+                manager.before_apply = Some(Box::new(move || {
+                    hook_barrier.wait();
+                    hook_barrier.wait();
+                }));
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        std::fs::write(&next_link, "racing installer").unwrap();
+                        barrier.wait();
+                    });
+                    assert!(
+                        manager
+                            .enable("tokenless", Some("opencode"), false)
+                            .is_err()
+                    );
+                });
+                assert_eq!(
+                    std::fs::read_to_string(&next_link).unwrap(),
+                    "racing installer"
+                );
+            }
+            manager.before_apply = None;
+            assert_eq!(
+                std::fs::read_link(&old_link).unwrap(),
+                root.join("plugin.js")
+            );
+            let state = load_written_state(&state_path);
+            let pending = state.find_adapter_claim("tokenless", "opencode").unwrap();
+            assert_eq!(
+                pending.resources.len(),
+                2,
+                "both entry targets must remain durable"
+            );
+            if scenario == "conflict_retry" {
+                std::fs::remove_file(&next_link).unwrap();
+                manager
+                    .enable("tokenless", Some("opencode"), false)
+                    .unwrap();
+                assert!(!old_link.is_symlink());
+                assert_eq!(
+                    std::fs::read_link(&next_link).unwrap(),
+                    root.join("plugin.ts")
+                );
+                assert_eq!(
+                    load_written_state(&state_path)
+                        .find_adapter_claim("tokenless", "opencode")
+                        .unwrap()
+                        .resources
+                        .len(),
+                    1
+                );
+            } else {
+                std::fs::remove_file(&manifest_path).unwrap();
+                std::fs::remove_dir_all(&root).unwrap();
+                if scenario == "conflict_disable" {
+                    assert!(
+                        !manager
+                            .disable("tokenless", Some("opencode"), false)
+                            .unwrap()
+                            .claim_removed
+                    );
+                    assert_eq!(
+                        std::fs::read_to_string(&next_link).unwrap(),
+                        "racing installer"
+                    );
+                    std::fs::remove_file(&next_link).unwrap();
+                }
+            }
+            assert!(
+                manager
+                    .disable("tokenless", Some("opencode"), false)
+                    .unwrap()
+                    .claim_removed
+            );
+            assert!(!old_link.is_symlink());
+            assert!(!next_link.is_symlink());
+        }
+    }
+
+    #[test]
+    fn opencode_migration_retains_each_exact_external_target() {
+        use crate::adapter::claim::{ClaimResource, OpenCodeClaim};
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, home) = test_user_layout(tmp.path());
+        let external = tmp.path().join("external-package");
+        let config = home.join(".config/opencode");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::create_dir_all(config.join("plugins")).unwrap();
+        let mut claim = openclaw_claim("tokenless", external.clone());
+        claim.framework = "opencode".to_string();
+        claim.driver_payload = DriverPayload::OpenCode(OpenCodeClaim {
+            symlink_resource: "opencode_plugin_link".to_string(),
+        });
+        claim.resources = [("opencode_plugin_link", "ts"), ("opencode_retired_1", "js")]
+            .into_iter()
+            .map(|(id, extension)| ClaimResource {
+                id: id.to_string(),
+                purpose: "opencode_local_plugin".to_string(),
+                kind: ClaimResourceKind::Symlink {
+                    link: config.join(format!("plugins/tokenless.{extension}")),
+                    target: external.join(format!("plugin.{extension}")),
+                },
+            })
+            .collect();
+        let trust = ExternalRootTrust {
+            target_roots: vec![external.clone()],
+            anchors: Vec::new(),
+            anchor_eligible: true,
+        };
+        claim
+            .validate_with_trust(
+                &layout,
+                std::slice::from_ref(&config),
+                &trust.target_roots,
+                trust.exact_targets(),
+            )
+            .unwrap();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut state = StateStore::empty_for_layout(&layout);
+        state.upsert_adapter_claim(claim.clone());
+        trust.sync_anchor(&mut state, &layout, &claim, &[]);
+        state.save(&state_path).unwrap();
+        std::fs::remove_dir_all(&external).unwrap();
+        let state = load_written_state(&state_path);
+        let manager = AdapterManager::new(layout.clone(), Some(home), "test".into());
+        let recovered = manager.external_root_trust_from_state("tokenless", "opencode", &state);
+        assert_eq!(recovered.exact_targets().len(), 2);
+        claim
+            .validate_with_trust(
+                &layout,
+                std::slice::from_ref(&config),
+                &recovered.target_roots,
+                recovered.exact_targets(),
+            )
+            .unwrap();
+        let mut forged = claim.clone();
+        if let ClaimResourceKind::Symlink { target, .. } = &mut forged.resources[1].kind {
+            *target = external.join("plugin.js/child");
+        }
+        assert!(
+            forged
+                .validate_with_trust(
+                    &layout,
+                    std::slice::from_ref(&config),
+                    &recovered.target_roots,
+                    recovered.exact_targets()
+                )
+                .is_err()
+        );
+        let mut finalized = claim;
+        finalized.resources.truncate(1);
+        let mut state = state;
+        recovered.sync_anchor(&mut state, &layout, &finalized, &[]);
+        assert_eq!(state.adapter_trust_roots.len(), 1);
+        assert_eq!(
+            state.adapter_trust_roots[0].root,
+            external.join("plugin.ts")
+        );
+    }
+
     #[test]
     fn dsh_home_anchor_survives_environment_root_drift() {
         use crate::adapter::claim::{
@@ -4363,7 +4963,7 @@ mod tests {
         let mut state = StateStore::empty();
         let initial = ExternalRootTrust {
             target_roots: Vec::new(),
-            anchor: None,
+            anchors: Vec::new(),
             anchor_eligible: false,
         };
 
@@ -4371,9 +4971,11 @@ mod tests {
 
         let anchored = ExternalRootTrust {
             target_roots: Vec::new(),
-            anchor: state
+            anchors: state
                 .find_adapter_trust_root("tokenless", "dsh")
-                .map(Path::to_path_buf),
+                .map(Path::to_path_buf)
+                .into_iter()
+                .collect(),
             anchor_eligible: false,
         };
         let mut later_roots = vec![tmp.path().join("second-dsh-home")];
@@ -4957,6 +5559,8 @@ mod tests {
         assert!(ok("openclaw", Some("plugin")));
         assert!(ok("openclaw", Some("skill_bundle")));
         assert!(ok("openclaw", None), "openclaw defaults to plugin");
+        assert!(ok("opencode", Some("plugin")));
+        assert!(ok("opencode", None), "opencode defaults to plugin");
         assert!(ok("hermes", Some("skill_bundle")));
         assert!(ok("codex", Some("plugin")));
         assert!(ok("codex", None), "codex defaults to plugin");
@@ -4976,6 +5580,7 @@ mod tests {
     fn framework_type_matrix_rejects_extension_on_plugin_frameworks() {
         for fw in [
             "openclaw",
+            "opencode",
             "hermes",
             "codex",
             "claude-code",
@@ -5008,8 +5613,8 @@ mod tests {
     }
 
     #[test]
-    fn framework_type_matrix_rejects_skill_bundle_on_marketplace_frameworks() {
-        for fw in ["codex", "claude-code"] {
+    fn framework_type_matrix_rejects_skill_bundle_on_plugin_only_frameworks() {
+        for fw in ["codex", "claude-code", "opencode"] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("skill_bundle"))
                 .expect_err(&format!("{fw} + skill_bundle must be rejected"));
             assert!(matches!(err, AdapterError::InvalidAdapterInput { .. }));
@@ -7437,6 +8042,128 @@ source = "{datadir}/skills/code-scanner/"
             matches!(err, AdapterError::ClaimValidation(_)),
             "expected ClaimValidation, got {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    fn remove_matching_symlink(
+        link: &Path,
+        target: &Path,
+        before: impl FnOnce(),
+        after: impl FnOnce(),
+    ) -> Result<bool, AdapterError> {
+        super::super::link_transaction::reconcile(link, &[target], None, before, after)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_preserves_replacement_after_check() {
+        use std::sync::Barrier;
+        for replacement_is_symlink in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let link = tmp.path().join("plugin.js");
+            let target = tmp.path().join("source.js");
+            std::fs::write(&target, "managed").unwrap();
+            symlink_file(&target, &link).unwrap();
+            let barrier = Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    std::fs::remove_file(&link).unwrap();
+                    if replacement_is_symlink {
+                        symlink_file(Path::new("missing-user.js"), &link).unwrap();
+                    } else {
+                        std::fs::write(&link, "user plugin").unwrap();
+                    }
+                    barrier.wait();
+                });
+                assert!(
+                    !remove_matching_symlink(
+                        &link,
+                        &target,
+                        || {
+                            barrier.wait();
+                            barrier.wait();
+                        },
+                        || {}
+                    )
+                    .unwrap()
+                );
+            });
+            if replacement_is_symlink {
+                assert_eq!(
+                    std::fs::read_link(&link).unwrap(),
+                    Path::new("missing-user.js")
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(&link).unwrap(), "user plugin");
+            }
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "managed");
+            assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_does_not_unlink_recreated_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("plugin.js");
+        let target = tmp.path().join("missing-source.js");
+        symlink_file(Path::new("missing-source.js"), &link).unwrap();
+        assert!(
+            remove_matching_symlink(
+                &link,
+                &target,
+                || {},
+                || {
+                    std::fs::write(&link, "new user plugin").unwrap();
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new user plugin");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_symlink_removal_preserves_unrestorable_entry() {
+        for replacement_is_directory in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let link = tmp.path().join("plugin.js");
+            let target = tmp.path().join("missing-source.js");
+            symlink_file(&target, &link).unwrap();
+            let error = remove_matching_symlink(
+                &link,
+                &target,
+                || {
+                    std::fs::remove_file(&link).unwrap();
+                    if replacement_is_directory {
+                        std::fs::create_dir(&link).unwrap();
+                        std::fs::write(link.join("user.js"), "captured user plugin").unwrap();
+                    } else {
+                        std::fs::write(&link, "captured user plugin").unwrap();
+                    }
+                },
+                || {
+                    std::fs::write(&link, "new user plugin").unwrap();
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("retry enable or disable"));
+            let AdapterError::Io { path, .. } = error else {
+                panic!("expected Io error")
+            };
+            let preserved = if replacement_is_directory {
+                path.join("removed/user.js")
+            } else {
+                path.join("removed")
+            };
+            assert_eq!(
+                std::fs::read_to_string(preserved).unwrap(),
+                "captured user plugin"
+            );
+            assert_eq!(std::fs::read_to_string(&link).unwrap(), "new user plugin");
+        }
     }
 
     #[test]

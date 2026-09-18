@@ -26,8 +26,8 @@ that `~/.local/bin` is not available in the current Shell.
 
 Using another Agent? Follow the matching setup path in
 [Use another Agent](#use-another-agent); the remaining steps stay the same.
-Most Agents use an `anolisa adapter enable` command, while OpenCode uses its
-linked lifecycle script.
+The Agents listed below use `anolisa adapter enable`, including OpenCode.
+OpenCode also provides a bundled lifecycle script for npm or manual installations.
 
 ## 2. Run one real task
 

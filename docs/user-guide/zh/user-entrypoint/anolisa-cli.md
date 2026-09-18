@@ -201,6 +201,38 @@ anolisa adapter status [component]
 遵循相同规则。Capability consent 不授予 `--allow-unsafe-plugin-install`
 权限；同意被拒绝时会单独诊断，不归为插件安全扫描拒绝。
 
+对于 OpenCode，可用以下命令管理已安装的 Tokenless 插件：
+
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
+
+driver 从 PATH 查找 `opencode`，也可通过 `OPENCODE_BIN` 指定。它将 manifest 中的
+`.js` 或 `.ts` 入口注册为 `plugins/<plugin_id>.<扩展名>`，配置目录依次取
+`OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`。
+自定义目录必须是绝对路径。后续 status 和 disable 应使用相同的目录配置；若配置
+发生变化，需恢复原环境后重试清理。本 driver 不管理项目级插件安装或 npm 插件。
+
+enable 会接管指向同一插件源的已有符号链接，包括 Tokenless 独立安装脚本创建的
+链接；相对链接展开后必须与记录的源路径一致。目录别名链接会被拒绝，以确保包卸载后
+仍能清理。接管后 disable 可以删除该链接。同名文件、目录或指向不同目标的链接会被保留；
+清理失败时保留 receipt，解决冲突后可以重试。同路径升级以原子操作替换入口。
+若 enable 或 disable 中断，保持相同配置重试命令即可恢复未完成的变更。如果错误
+提示保留了某个条目，请保留其恢复目录，解决公开路径上的冲突后重试；恢复也支持
+被移走的目录。切回独立安装脚本前，请先完成 ANOLISA disable 和恢复操作；独立脚本不会
+处理这些 journal。配置目录所在的文件系统必须支持原子交换和不覆盖的 rename，才能完成
+替换和清理；不支持时操作会失败，仅解决路径冲突不能补足文件系统能力。如果原安装脚本使用了
+`TOKENLESS_OPENCODE_CONFIG_DIR`，通过 ANOLISA 启用前需将
+`OPENCODE_CONFIG_DIR` 设置为相同目录。
+
+启用或禁用后需重启 OpenCode。status 检查链接和安装源；若启用中断或清理仍需重试，即使
+当前链接匹配也会保留 `cleanup_failed`，需重试 enable 或完成 disable 才能解除。
+运行时加载状态报告为
+`unknown`；链接存在不代表运行中的 OpenCode 已加载插件。`--dry-run` 仅预览操作，
+不修改插件文件或 receipt。
+
 ### logs 与 bug report
 
 查看组件日志或生成诊断包：

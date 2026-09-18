@@ -343,7 +343,52 @@ records the profile names, so disable does not accept another `--profile`.
 
 ### OpenCode
 
-OpenCode discovers global local plugins at startup. Use the bundled Tokenless lifecycle script described above, restart OpenCode after installation or removal, then run a tool call and inspect `tokenless stats list`. The script resolves the configuration directory from `TOKENLESS_OPENCODE_CONFIG_DIR`, then `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME/opencode`, and finally `~/.config/opencode`. Installation creates only `plugins/tokenless.js` as a managed symlink and refuses to replace an unrelated file at that path.
+OpenCode discovers global local plugins at startup. For an ANOLISA-managed installation, use:
+
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
+
+The built-in driver resolves the configuration directory from `OPENCODE_CONFIG_DIR`, then
+`XDG_CONFIG_HOME/opencode`, and finally `~/.config/opencode`. It does not read
+`TOKENLESS_OPENCODE_CONFIG_DIR`; use `OPENCODE_CONFIG_DIR` for a custom directory shared with
+the standalone scripts. Keep the same directory setting when disabling the adapter.
+
+The bundled lifecycle scripts described above remain available for npm and manual installs;
+source builds can use `make opencode-install`. These scripts additionally accept
+`TOKENLESS_OPENCODE_CONFIG_DIR` as their highest-priority override. Both paths create
+`plugins/tokenless.js` and refuse conflicting files or links. ANOLISA enable adopts an existing
+link to the same plugin source into its receipt, and subsequent disable removes that link.
+Relative links are resolved from their original directory and must match the recorded source
+path lexically; links through directory aliases or a different installation prefix are preserved
+as conflicts. This keeps cleanup possible after the source directory is removed.
+
+Before enabling through ANOLISA, uninstall a conflicting standalone link using its original
+installation profile and any original `PREFIX` or `SHARE_DIR` overrides. For example, from the
+Tokenless source checkout, remove a link installed with the default system prefix:
+
+```bash
+make opencode-uninstall INSTALL_PROFILE=system PREFIX=/usr
+anolisa adapter enable tokenless opencode
+```
+
+Keep the original configuration-directory settings for both commands. If using the bundled
+`scripts/uninstall.sh`, run the copy in the original adapter bundle with a matching
+`ANOLISA_ADAPTER_DIR` if that variable is set. Uninstalling from another prefix leaves the link
+in place and exits 0 with a warning; check that the link was removed before enabling. If the
+original bundle is unavailable, inspect `plugins/tokenless.js` with `readlink` and manually
+remove only the confirmed stale symlink; preserve unrelated files and directories.
+
+To return to standalone management, first complete `anolisa adapter disable tokenless opencode`,
+including any pending recovery. Keep reported recovery directories until cleanup succeeds;
+standalone scripts do not recover ANOLISA receipts or journals. Then rerun
+`make opencode-install` or the bundled `scripts/install.sh`.
+
+Restart OpenCode after enabling or disabling the plugin: an existing process keeps its loaded
+plugin, including tool-output replacement, until restart. After enabling and restarting, run a
+tool call and inspect `tokenless stats list`.
 
 ### Qwen Code
 

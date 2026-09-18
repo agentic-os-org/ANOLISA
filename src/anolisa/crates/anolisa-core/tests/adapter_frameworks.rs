@@ -40,6 +40,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Env keys every test clears on entry and restores on drop, so a test
 /// never observes another test's half-applied contract.
 const MANAGED_ENV: &[&str] = &[
+    "OPENCODE_BIN",
+    "OPENCODE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
     "CODEX_BIN",
     "CLAUDE_BIN",
     "COSH_BIN",
@@ -4250,4 +4253,478 @@ fn qwenpaw_status_degraded_when_plugin_removed_externally() {
     std::fs::write(plugin_dir.join("plugin.json"), br#"{"id":"someone-else"}"#).expect("other");
     let status = manager.status(Some(COMPONENT)).expect("status");
     assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+}
+
+fn stage_opencode_bundle(root: &Path) {
+    std::fs::write(
+        root.join("plugin.js"),
+        "export const Plugin = async () => ({});\n",
+    )
+    .unwrap();
+}
+
+fn stage_opencode() -> World {
+    stage(
+        "opencode",
+        "plugin",
+        "{datadir}/adapters/{component}/opencode/",
+        stage_opencode_bundle,
+    )
+}
+
+fn apply_opencode_env(guard: &EnvGuard, world: &World) -> PathBuf {
+    let binary = world.prefix.join("opencode");
+    std::fs::write(&binary, "#!/bin/sh\nexit 99\n").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    guard.set("OPENCODE_BIN", &binary);
+    world
+        .user_home
+        .join(".config/opencode/plugins/tokenless.js")
+}
+
+#[test]
+fn opencode_scan_enable_status_disable_and_receipt_roundtrip() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    let scan = manager.scan().unwrap();
+    let row = scan
+        .entries
+        .iter()
+        .find(|r| r.framework == "opencode")
+        .unwrap();
+    assert!(row.declared && row.driver_available && row.framework_detected);
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        world.resource_root.join("plugin.js")
+    );
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    let state = world.load_state();
+    let claim = state.find_adapter_claim(COMPONENT, "opencode").unwrap();
+    let json = serde_json::to_string(claim).unwrap();
+    assert_eq!(*claim, serde_json::from_str(&json).unwrap());
+    assert!(matches!(claim.driver_payload, DriverPayload::OpenCode(_)));
+    let status = manager.status(Some(COMPONENT)).unwrap();
+    let report = &status.entries[0].report;
+    assert_eq!(report.summary, AdapterSummary::Unknown);
+    assert!(report.conditions.iter().any(
+        |c| c.kind == AdapterConditionKind::SymlinkPresent && c.status == ConditionStatus::True
+    ));
+    assert!(
+        report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::PluginResourcesLoaded
+                && c.status == ConditionStatus::Unknown)
+    );
+    let result = manager.disable(COMPONENT, Some("opencode"), false).unwrap();
+    assert!(result.claim_removed);
+    assert!(link.symlink_metadata().is_err());
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .report
+            .cleanup_complete
+    );
+}
+
+#[test]
+fn opencode_adopts_existing_link_and_cleans_after_source_and_cli_disappear() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(world.resource_root.join("plugin.js"), &link).unwrap();
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    std::fs::remove_dir_all(&world.resource_root).unwrap();
+    guard.set("OPENCODE_BIN", &world.prefix.join("missing"));
+    let status = manager.status(Some(COMPONENT)).unwrap();
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    assert!(std::fs::symlink_metadata(link).is_err());
+}
+
+#[test]
+fn opencode_initial_conflicts_do_not_claim_user_entries() {
+    let guard = EnvGuard::acquire();
+    for kind in ["file", "directory", "symlink"] {
+        let world = stage_opencode();
+        let link = apply_opencode_env(&guard, &world);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        match kind {
+            "file" => std::fs::write(&link, "user plugin").unwrap(),
+            "directory" => std::fs::create_dir(&link).unwrap(),
+            _ => std::os::unix::fs::symlink("user-plugin.js", &link).unwrap(),
+        }
+        let manager = world.manager();
+        assert!(manager.enable(COMPONENT, Some("opencode"), false).is_err());
+        assert!(
+            !manager
+                .disable(COMPONENT, Some("opencode"), false)
+                .unwrap()
+                .claim_removed
+        );
+        assert!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, "opencode")
+                .is_none()
+        );
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        if kind == "directory" {
+            std::fs::remove_dir(&link).unwrap();
+        } else {
+            std::fs::remove_file(&link).unwrap();
+        }
+        manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+        assert!(
+            manager
+                .disable(COMPONENT, Some("opencode"), false)
+                .unwrap()
+                .claim_removed
+        );
+    }
+}
+
+#[test]
+fn opencode_drift_is_reported_and_disable_preserves_user_file() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::fs::write(&link, "user replacement").unwrap();
+    assert_eq!(
+        manager.status(Some(COMPONENT)).unwrap().entries[0]
+            .report
+            .summary,
+        AdapterSummary::Degraded
+    );
+    assert!(
+        !manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), "user replacement");
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "opencode")
+            .unwrap()
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+    std::fs::remove_file(&link).unwrap();
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+}
+
+#[test]
+fn opencode_dry_runs_do_not_change_links_or_receipts() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    let before = std::fs::read(world.layout.state_dir.join("installed.toml")).unwrap();
+    let EnableOutcome::Planned { plan, .. } =
+        manager.enable(COMPONENT, Some("opencode"), true).unwrap()
+    else {
+        panic!("expected plan")
+    };
+    assert!(plan.actions[0].contains(&link.display().to_string()));
+    assert!(!link.parent().unwrap().exists());
+    assert_eq!(
+        before,
+        std::fs::read(world.layout.state_dir.join("installed.toml")).unwrap()
+    );
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    let before = std::fs::read(world.layout.state_dir.join("installed.toml")).unwrap();
+    let report = manager.disable(COMPONENT, Some("opencode"), true).unwrap();
+    assert!(
+        report
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains(&link.display().to_string()))
+    );
+    assert!(link.is_symlink());
+    assert_eq!(
+        before,
+        std::fs::read(world.layout.state_dir.join("installed.toml")).unwrap()
+    );
+}
+
+#[test]
+fn opencode_config_priority_and_changed_environment_boundary() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    apply_opencode_env(&guard, &world);
+    let xdg = world.prefix.join("xdg config");
+    let custom = world.prefix.join("custom config");
+    guard.set("XDG_CONFIG_HOME", &xdg);
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    assert!(xdg.join("opencode/plugins/tokenless.js").is_symlink());
+    manager.disable(COMPONENT, Some("opencode"), false).unwrap();
+    guard.set("OPENCODE_CONFIG_DIR", &custom);
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    let link = custom.join("plugins/tokenless.js");
+    assert!(link.is_symlink());
+    guard.set("OPENCODE_CONFIG_DIR", &world.prefix.join("other"));
+    assert!(manager.disable(COMPONENT, Some("opencode"), false).is_err());
+    assert!(link.is_symlink());
+    guard.set("OPENCODE_CONFIG_DIR", &custom);
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    guard.set("OPENCODE_CONFIG_DIR", Path::new("relative"));
+    assert!(manager.enable(COMPONENT, Some("opencode"), false).is_err());
+}
+
+#[test]
+fn opencode_forged_link_and_target_are_rejected() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    let mut state = world.load_state();
+    let original = state
+        .find_adapter_claim(COMPONENT, "opencode")
+        .unwrap()
+        .clone();
+    for forge_target in [false, true] {
+        let mut claim = original.clone();
+        let ClaimResourceKind::Symlink { link, target } = &mut claim.resources[0].kind else {
+            panic!("symlink")
+        };
+        if forge_target {
+            *target = world.user_home.join(".ssh/id_rsa");
+        } else {
+            *link = world.user_home.join(".ssh/authorized_keys");
+        }
+        state.upsert_adapter_claim(claim);
+        state
+            .save(&world.layout.state_dir.join("installed.toml"))
+            .unwrap();
+        assert!(manager.disable(COMPONENT, Some("opencode"), false).is_err());
+    }
+}
+
+#[test]
+fn opencode_custom_entry_and_upgrade_migrate_owned_link() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let old_link = apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    let manifest = world
+        .layout
+        .state_dir
+        .join("component-manifests/tokenless/component.toml");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{original}\n[adapters.bundle]\nentry = \"custom.ts\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        world.resource_root.join("custom.ts"),
+        "export const Plugin = async () => ({});\n",
+    )
+    .unwrap();
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    assert!(!old_link.is_symlink());
+    assert_eq!(
+        std::fs::read_link(old_link.with_extension("ts")).unwrap(),
+        world.resource_root.join("custom.ts")
+    );
+    manager.disable(COMPONENT, Some("opencode"), false).unwrap();
+    for entry in [
+        "../outside.js",
+        "/tmp/outside.js",
+        "script.sh",
+        "missing.js",
+    ] {
+        std::fs::write(
+            &manifest,
+            format!("{original}\n[adapters.bundle]\nentry = \"{entry}\"\n"),
+        )
+        .unwrap();
+        assert!(manager.enable(COMPONENT, Some("opencode"), false).is_err());
+    }
+}
+
+#[test]
+fn opencode_migration_conflict_preserves_prior_link_and_receipt() {
+    let guard = EnvGuard::acquire();
+    for conflict_is_link in [false, true] {
+        let world = stage_opencode();
+        let old_link = apply_opencode_env(&guard, &world);
+        let manager = world.manager();
+        manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+        let prior = world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "opencode")
+            .unwrap()
+            .clone();
+        let manifest = world
+            .layout
+            .state_dir
+            .join("component-manifests/tokenless/component.toml");
+        let original = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            format!("{original}\n[adapters.bundle]\nentry = \"plugin.ts\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            world.resource_root.join("plugin.ts"),
+            "export const Plugin = async () => ({});\n",
+        )
+        .unwrap();
+        record_owned_adapter_files(&world.layout, &world.resource_root);
+        let new_link = old_link.with_extension("ts");
+        let user_file = world.prefix.join("user.ts");
+        std::fs::write(&user_file, "user plugin").unwrap();
+        if conflict_is_link {
+            std::os::unix::fs::symlink(&user_file, &new_link).unwrap();
+        } else {
+            std::fs::write(&new_link, "user plugin").unwrap();
+        }
+        assert!(manager.enable(COMPONENT, Some("opencode"), false).is_err());
+        assert_eq!(
+            std::fs::read_link(&old_link).unwrap(),
+            world.resource_root.join("plugin.js")
+        );
+        assert_eq!(std::fs::read_to_string(&new_link).unwrap(), "user plugin");
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, "opencode")
+                .unwrap(),
+            &prior
+        );
+        std::fs::remove_file(&new_link).unwrap();
+        manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+        assert!(!old_link.is_symlink());
+        assert_eq!(
+            std::fs::read_link(&new_link).unwrap(),
+            world.resource_root.join("plugin.ts")
+        );
+        assert!(
+            manager
+                .disable(COMPONENT, Some("opencode"), false)
+                .unwrap()
+                .claim_removed
+        );
+    }
+}
+
+#[test]
+fn opencode_external_rpm_entry_can_be_cleaned_after_contract_removal() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "opencode",
+        "plugin",
+        "{datadir}/adapters/{component}/opencode/",
+        stage_opencode_bundle,
+    );
+    let link = apply_opencode_env(&guard, &world);
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests/tokenless/component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components/tokenless/component.toml"),
+    ] {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::remove_dir_all(&world.resource_root).unwrap();
+    manager.status(Some(COMPONENT)).unwrap();
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    assert!(std::fs::symlink_metadata(link).is_err());
+}
+
+#[test]
+fn opencode_relative_link_adoption_survives_source_removal() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    let relative_target = Path::new("../../../../")
+        .join(world.resource_root.strip_prefix(&world.prefix).unwrap())
+        .join("plugin.js");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(relative_target, &link).unwrap();
+    assert!(link.is_file());
+    let manager = world.manager();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    std::fs::remove_dir_all(&world.resource_root).unwrap();
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    assert!(std::fs::symlink_metadata(link).is_err());
+}
+
+#[test]
+fn opencode_rejects_alias_links_that_cannot_survive_source_removal() {
+    let guard = EnvGuard::acquire();
+    let world = stage_opencode();
+    let link = apply_opencode_env(&guard, &world);
+    let alias = world.prefix.join("bundle-alias");
+    std::os::unix::fs::symlink(&world.resource_root, &alias).unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(alias.join("plugin.js"), &link).unwrap();
+    let manager = world.manager();
+    assert!(manager.enable(COMPONENT, Some("opencode"), false).is_err());
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "opencode")
+            .is_none()
+    );
+    assert_eq!(std::fs::read_link(&link).unwrap(), alias.join("plugin.js"));
+    // Explicitly replace the standalone alias with the stable managed entry.
+    std::fs::remove_file(&link).unwrap();
+    manager.enable(COMPONENT, Some("opencode"), false).unwrap();
+    std::fs::remove_dir_all(&world.resource_root).unwrap();
+    assert!(
+        manager
+            .disable(COMPONENT, Some("opencode"), false)
+            .unwrap()
+            .claim_removed
+    );
+    assert!(!link.is_symlink());
 }

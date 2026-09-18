@@ -9,6 +9,8 @@ repository = "https://github.com/alibaba/anolisa"
 
 [component.contract]
 schema_version = "1.0"
+# Adapter notices (ANOLISA 0.2.10+) are optional UI hints; older CLIs may ignore
+# them without affecting Tokenless installation, so they do not raise this minimum.
 min_anolisa_version = "0.1.16"
 
 [component.platform]
@@ -159,9 +161,10 @@ dest = "{datadir}/adapters/{component}/codex/"
 [adapters.bundle]
 entry = ".codex-plugin/plugin.json"
 
-# OpenCode local-plugin adapter. ANOLISA ships no built-in opencode driver, so
-# install only lays the bundle under the conventional adapter root; enabling it
-# stays with the adapter's own scripts, exactly as on the RPM channel.
+# ANOLISA manages the local-plugin link through receipts. Bundled lifecycle
+# scripts remain available for standalone installs across distribution channels.
+# Keep plugin_id and the entry extension aligned with plugins/tokenless.js in
+# the standalone scripts and documentation when changing this contract.
 [[adapters]]
 framework = "opencode"
 adapter_type = "plugin"
@@ -171,6 +174,16 @@ dest = "{datadir}/adapters/{component}/opencode/"
 
 [adapters.bundle]
 entry = "plugin.js"
+
+[[adapters.notices]]
+when = "post_enable"
+level = "info"
+text = "Restart OpenCode to load the Tokenless plugin."
+
+[[adapters.notices]]
+when = "post_disable"
+level = "warning"
+text = "Restart OpenCode to unload the Tokenless plugin."
 
 [[adapters]]
 framework = "cosh"

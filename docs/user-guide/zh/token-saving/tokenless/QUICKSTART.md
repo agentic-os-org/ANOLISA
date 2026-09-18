@@ -24,8 +24,8 @@ anolisa adapter enable tokenless claude-code
 安装提示当前 Shell 找不到 `~/.local/bin` 时，才需要执行 PATH 设置。
 
 使用其他 Agent？按照[使用其他 Agent](#使用其他-agent)中的对应接入方式操作，后续
-步骤保持不变。大多数 Agent 使用 `anolisa adapter enable` 命令，OpenCode 则使用
-链接指向的生命周期脚本。
+步骤保持不变。下方列出的 Agent（包括 OpenCode）都支持 `anolisa adapter enable`。
+OpenCode 还提供自带的生命周期脚本，供 npm 或手工安装使用。
 
 ## 2. 运行一次真实任务
 

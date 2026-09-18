@@ -319,17 +319,45 @@ receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 ### OpenCode
 
-OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenless 生命周期脚本
-完成安装或卸载后，请重启 OpenCode。重启后执行一次工具调用，再运行
-`tokenless stats list`，确认已生成统计记录。
+OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 
-脚本会优先使用 `TOKENLESS_OPENCODE_CONFIG_DIR`，其次使用
-`OPENCODE_CONFIG_DIR`。如果两者均未设置，则使用
-`${XDG_CONFIG_HOME}/opencode`；如果 `XDG_CONFIG_HOME` 也未设置，则回退到
-`~/.config/opencode`。
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
 
-安装过程中，脚本只会创建由 Tokenless 管理的 `plugins/tokenless.js` 符号链接。
-如果目标路径已经存在但不由 Tokenless 管理，安装会停止，原有内容不会被覆盖。
+内置 driver 按 `OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`
+的顺序解析配置目录。它不读取 `TOKENLESS_OPENCODE_CONFIG_DIR`；如需与独立脚本共用自定义目录，
+请设置 `OPENCODE_CONFIG_DIR`，禁用时也保持相同的目录设置。
+
+上述 Bundle 生命周期脚本仍可用于 npm 和手工安装，源码构建可使用 `make opencode-install`。
+这些脚本额外支持 `TOKENLESS_OPENCODE_CONFIG_DIR`，其优先级最高。两种方式都会创建
+`plugins/tokenless.js`，并拒绝覆盖冲突的文件或链接。ANOLISA enable 会将已存在且指向同一
+插件源文件的链接纳入 receipt 管理，之后 disable 会删除该链接。链接按原目录展开相对路径后，
+必须与记录的源路径一致；通过目录别名或不同安装前缀指向源文件的链接会作为冲突保留。
+这样可以确保源目录删除后仍能清理。
+
+通过 ANOLISA 启用前，请使用原安装 profile 以及原有的 `PREFIX` 或 `SHARE_DIR` 覆盖值
+卸载冲突的独立链接。例如，在 Tokenless 源码目录中移除使用默认 system 前缀安装的链接：
+
+```bash
+make opencode-uninstall INSTALL_PROFILE=system PREFIX=/usr
+anolisa adapter enable tokenless opencode
+```
+
+两条命令都应保持原配置目录设置。如果使用 Bundle 中的 `scripts/uninstall.sh`，请运行
+原 adapter Bundle 内的脚本；若设置了 `ANOLISA_ADAPTER_DIR`，它也必须与原目录匹配。
+从其他前缀卸载会保留链接，输出 warning 并以 0 退出；启用前请确认链接已移除。如果原 Bundle
+已不可用，请用 `readlink` 检查 `plugins/tokenless.js`，仅手动移除确认过的旧符号链接，
+保留无关文件和目录。
+
+若要恢复独立脚本管理，请先完成 `anolisa adapter disable tokenless opencode`，包括所有
+待恢复的操作。清理成功前应保留错误中报告的恢复目录；独立脚本不会恢复 ANOLISA 的 receipt
+或 journal。之后再运行 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
+
+启用或禁用后请重启 OpenCode：已有进程会保留加载的插件及其工具输出替换行为，直到重启。
+启用并重启后，执行一次工具调用，再运行 `tokenless stats list` 检查统计记录。
 
 ### Qwen Code
 

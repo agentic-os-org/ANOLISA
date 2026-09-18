@@ -343,8 +343,9 @@ pub struct MaterializedFile {
 pub enum ClaimStatus {
     /// Adapter is enabled and the receipt is authoritative.
     Enabled,
-    /// A prior `disable` could not fully clean up; the receipt is kept so
-    /// the cleanup can be retried.
+    /// Enable or disable needs a retry; the receipt retains cleanup authority.
+    /// Drivers may persist this before apply and clear it only after success
+    /// so interruption cannot leave an incomplete operation marked enabled.
     CleanupFailed,
 }
 
@@ -568,6 +569,9 @@ pub enum ClaimResourceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverPayload {
+    /// OpenCode local-plugin payload; the spelling is the persisted discriminator.
+    #[serde(rename = "opencode")]
+    OpenCode(OpenCodeClaim),
     /// OpenClaw driver payload.
     #[serde(rename = "openclaw")]
     OpenClaw(OpenClawClaim),
@@ -595,6 +599,14 @@ pub enum DriverPayload {
     /// DeepSeek Harness (`dsh`) native plugin payload.
     #[serde(rename = "dsh")]
     Dsh(DshClaim),
+}
+
+/// OpenCode ownership refers to a validated symlink resource, never a second path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenCodeClaim {
+    /// Active entry resource id. Other symlink resources retain prior entries
+    /// until a migration installs the replacement and finishes cleanup.
+    pub symlink_resource: String,
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —

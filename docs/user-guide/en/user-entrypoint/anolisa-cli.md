@@ -220,6 +220,45 @@ help advertises it, including in the dry-run plan. Capability consent does
 not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
 separately from a plugin-safety rejection.
 
+For OpenCode, manage an installed Tokenless plugin with:
+
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
+
+The driver finds `opencode` on PATH, or uses `OPENCODE_BIN`. It registers the
+manifest's `.js` or `.ts` entry as `plugins/<plugin_id>.<extension>` under
+`OPENCODE_CONFIG_DIR`, otherwise `XDG_CONFIG_HOME/opencode`, otherwise
+`~/.config/opencode`. Custom directory values must be absolute. Keep the same
+directory configuration for later status and disable commands; if it changes,
+restore the original environment before retrying cleanup. Project-local plugin
+installation and npm plugin management are outside this driver's scope.
+
+Enable adopts an existing symlink to the same plugin source, including one
+created by Tokenless's standalone installer. Relative links must resolve lexically to the
+recorded source path; directory aliases are rejected so cleanup remains possible after
+package removal. After adoption, disable removes
+that link. A conflicting file, directory, or different symlink is preserved;
+failed cleanup keeps the receipt so it can be retried after resolving the conflict.
+Same-path upgrades replace the entry atomically. If enable or disable is interrupted,
+retry the command with the same configuration to recover pending changes. If an error
+reports a preserved entry, keep its recovery directory, resolve the conflicting public
+path, and retry; recovery also restores displaced directories. Complete ANOLISA disable and
+recovery before switching back to a standalone installer, which does not process these journals.
+The configuration directory's filesystem must support atomic exchange and non-overwriting
+rename for replacement and cleanup. If it does not, the operation fails; resolving a pathname
+conflict alone will not add the missing filesystem support.
+If the old installer used `TOKENLESS_OPENCODE_CONFIG_DIR`, set
+`OPENCODE_CONFIG_DIR` to that same directory before enabling through ANOLISA.
+
+Restart OpenCode after enabling or disabling. Status verifies the link and
+package source and preserves `cleanup_failed` when enable was interrupted or cleanup still
+needs a retry, even if the active link matches. Retry enable or complete disable to resolve it. Runtime loading is reported as `unknown`; an existing link
+does not prove a running OpenCode process loaded it. `--dry-run` previews the
+operation without modifying plugin files or receipts.
+
 ### logs and bug reports
 
 Inspect component logs or generate a diagnostic bundle:

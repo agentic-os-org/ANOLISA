@@ -529,6 +529,30 @@ pub trait AdapterOps {
     /// fails boundary check.
     fn create_symlink(&self, link: &Path, target: &Path) -> Result<(), AdapterError>;
 
+    /// Reconcile a receipt-owned symlink and replay its pending filesystem journal.
+    /// `targets` contains every target authorized by the persisted receipt.
+    /// With `replacement`, install that target atomically; otherwise remove the link.
+    /// Returns false for a preserved conflicting entry. Interrupted operations keep
+    /// their captured entries at a deterministic location derived from `link`.
+    ///
+    /// # Errors
+    /// Returns boundary, filesystem, or unsupported-operation errors. A blocked
+    /// restoration retains its journal for the next enable or disable attempt.
+    fn reconcile_symlink(
+        &self,
+        link: &Path,
+        _targets: &[&Path],
+        _replacement: Option<&Path>,
+    ) -> Result<bool, AdapterError> {
+        Err(AdapterError::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation provider does not support receipt-owned symlink transactions",
+            ),
+        })
+    }
+
     /// Read `path`, returning `Ok(None)` when it does not exist (so a
     /// caller merging into a possibly-absent config file can treat "absent"
     /// distinctly from "unreadable"). The Manager validates that `path` is

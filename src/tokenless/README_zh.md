@@ -287,14 +287,27 @@ RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
 
+通过 ANOLISA 启用已安装的插件，然后重启 OpenCode：
+
+```bash
+anolisa adapter enable tokenless opencode
+```
+
+driver 按 `OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`
+的顺序选择目录并创建 `plugins/tokenless.js`。它不读取 `TOKENLESS_OPENCODE_CONFIG_DIR`；
+如需共用自定义目录，请设置 `OPENCODE_CONFIG_DIR`。enable 会接管指向同一源路径且不经过目录别名的现有链接，
+`anolisa adapter disable tokenless opencode` 会删除该链接。两种操作后都应重启 OpenCode。
+
+独立源码安装可使用：
+
 ```bash
 make opencode-install
 ```
 
-安装器会在 OpenCode 全局 `plugins/` 目录中创建 `tokenless.js` 符号链接，
-不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
-`XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
-安装后重启 OpenCode 即可加载插件。
+Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
+两种方式都会拒绝冲突的文件或链接。在 ANOLISA disable 后若要恢复独立管理，重新运行
+`make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
+完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
 ### QwenPaw 安装
 

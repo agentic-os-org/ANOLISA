@@ -28,9 +28,12 @@ pub mod cosh;
 pub mod driver;
 pub mod dsh;
 pub mod hermes;
+#[cfg(unix)]
+mod link_transaction;
 pub mod managed_files;
 pub mod manager;
 pub mod openclaw;
+pub mod opencode;
 pub mod qoder;
 pub mod qwencode;
 pub mod qwenpaw;
