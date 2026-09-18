@@ -47,7 +47,7 @@ const RAW_TEXT: [&str; 6] = ["script", "style", "textarea", "title", "xmp", "pla
 /// button, input, select, textarea, datalist, progress and meter; `media`
 /// covers audio, video, canvas, object, embed and map. Labels, legends and
 /// fieldsets stay: MkDocs content tabs carry their titles in labels.
-const REMOVED_LABELS: [&str; 19] = [
+const REMOVED_LABELS: [&str; 18] = [
     "script",
     "style",
     "noscript",
@@ -66,10 +66,32 @@ const REMOVED_LABELS: [&str; 19] = [
     "form control",
     "media",
     "dialog",
-    "menu",
 ];
 
 const REMOVED_CATEGORIES: usize = REMOVED_LABELS.len();
+
+/// Index into `REMOVED_LABELS` and `HtmlView::removed`, in label order.
+#[derive(Clone, Copy)]
+enum Removed {
+    Script,
+    Style,
+    Noscript,
+    Template,
+    Svg,
+    Iframe,
+    Comment,
+    Nav,
+    Header,
+    Footer,
+    Aside,
+    RoleNavigation,
+    RoleBanner,
+    RoleContentinfo,
+    RoleComplementary,
+    FormControl,
+    Media,
+    Dialog,
+}
 
 const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
 
@@ -85,12 +107,13 @@ pub struct HtmlView {
     pub output: String,
     /// `<title>` text, collapsed.
     pub title: Option<String>,
-    /// `<link rel="canonical">` target.
+    /// `<link rel="canonical">` target, trimmed, with tabs and newlines
+    /// dropped as the URL parser drops them.
     pub canonical: Option<String>,
     /// Removed element counts by category, in the order of the header labels:
     /// script, style, noscript, template, svg, iframe, comment, nav, header,
     /// footer, aside, role=navigation, role=banner, role=contentinfo,
-    /// role=complementary, form control, media, dialog, menu.
+    /// role=complementary, form control, media, dialog.
     pub removed: [usize; REMOVED_CATEGORIES],
     /// Local name of the rendered root: `main`, the element carrying
     /// `role=main`, the sole outermost `article`, or `body`.
@@ -143,9 +166,12 @@ impl HtmlExtractor {
                     && node
                         .attr("rel")
                         .is_some_and(|rel| rel.split_ascii_whitespace().any(|r| r == "canonical")))
-                .then(|| node.attr("href").map(str::trim).filter(|h| !h.is_empty()))
+                .then(|| {
+                    node.attr("href")
+                        .map(|href| url_text(href.trim()).into_owned())
+                })
                 .flatten()
-                .map(str::to_owned)
+                .filter(|href| !href.is_empty())
             })
         });
 
@@ -179,9 +205,12 @@ impl HtmlExtractor {
             depth: 0,
         };
         if let Some(head) = head {
-            renderer.count_removals(head);
+            renderer.count_removals(head, false);
         }
-        let body_markdown = renderer.blocks(root, is_sectioning(&nodes[root]));
+        // Escaped once here, where every rendering path ends up, so the
+        // view boundary can only come from the renderer.
+        let body_markdown =
+            escape_wrapper_lines(&renderer.blocks(root, is_sectioning(&nodes[root])));
         if body_markdown.chars().count() < MIN_BODY_CHARS {
             return None;
         }
@@ -615,50 +644,44 @@ struct Renderer<'a> {
 
 impl Renderer<'_> {
     /// Returns the removal category for a node, or `None` when it is content.
-    fn removal(&self, node: &Node, in_sectioning: bool) -> Option<usize> {
+    fn removal(&self, node: &Node, in_sectioning: bool) -> Option<Removed> {
         if matches!(node.kind, NodeKind::Comment) {
-            return Some(6);
+            return Some(Removed::Comment);
         }
-        match node.local_name() {
-            "script" => return Some(0),
-            "style" => return Some(1),
-            "noscript" => return Some(2),
-            "template" => return Some(3),
-            "iframe" => return Some(5),
-            "nav" => return Some(7),
-            "header" if !in_sectioning => return Some(8),
-            "footer" if !in_sectioning => return Some(9),
-            "aside" => return Some(10),
+        let category = match node.local_name() {
+            "script" => Removed::Script,
+            "style" => Removed::Style,
+            "noscript" => Removed::Noscript,
+            "template" => Removed::Template,
+            "iframe" => Removed::Iframe,
+            "nav" => Removed::Nav,
+            "header" if !in_sectioning => Removed::Header,
+            "footer" if !in_sectioning => Removed::Footer,
+            "aside" => Removed::Aside,
             "button" | "input" | "select" | "textarea" | "datalist" | "progress" | "meter" => {
-                return Some(15);
+                Removed::FormControl
             }
-            "audio" | "video" | "canvas" | "object" | "embed" | "map" => return Some(16),
-            "dialog" => return Some(17),
-            "menu" => return Some(18),
-            _ => {}
-        }
-        if let NodeKind::Element { name, .. } = &node.kind
-            && *name.ns == *"http://www.w3.org/2000/svg"
-        {
-            return Some(4);
-        }
-        for (offset, role) in ["navigation", "banner", "contentinfo", "complementary"]
-            .iter()
-            .enumerate()
-        {
-            if has_role(node, role) {
-                return Some(11 + offset);
-            }
-        }
-        None
+            "audio" | "video" | "canvas" | "object" | "embed" | "map" => Removed::Media,
+            "dialog" => Removed::Dialog,
+            _ if !node.name_in("http://www.w3.org/2000/svg").is_empty() => Removed::Svg,
+            _ if has_role(node, "navigation") => Removed::RoleNavigation,
+            _ if has_role(node, "banner") => Removed::RoleBanner,
+            _ if has_role(node, "contentinfo") => Removed::RoleContentinfo,
+            _ if has_role(node, "complementary") => Removed::RoleComplementary,
+            _ => return None,
+        };
+        Some(category)
     }
 
-    /// Counts removable nodes in a subtree that is never rendered (the head).
-    fn count_removals(&mut self, id: usize) {
+    /// Counts removable nodes in a subtree that is never rendered: the head,
+    /// or a formula replaced by its TeX. Content nodes in such a subtree are
+    /// dropped with it and never counted: they were not removed, just not
+    /// rendered.
+    fn count_removals(&mut self, id: usize, in_sectioning: bool) {
         let mut stack = vec![id];
         while let Some(id) = stack.pop() {
-            if let Some(category) = self.removal(&self.nodes[id], false) {
-                self.removed[category] += 1;
+            if let Some(category) = self.removal(&self.nodes[id], in_sectioning) {
+                self.removed[category as usize] += 1;
                 continue;
             }
             stack.extend(self.nodes[id].children.iter().rev());
@@ -674,7 +697,7 @@ impl Renderer<'_> {
         while let Some(id) = stack.pop() {
             let node = &self.nodes[id];
             if let Some(category) = self.removal(node, in_sectioning) {
-                self.removed[category] += 1;
+                self.removed[category as usize] += 1;
                 continue;
             }
             if let NodeKind::Text(value) = &node.kind {
@@ -696,7 +719,7 @@ impl Renderer<'_> {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
-                self.removed[category] += 1;
+                self.removed[category as usize] += 1;
                 continue;
             }
             if is_block(node) {
@@ -766,7 +789,7 @@ impl Renderer<'_> {
                 }
                 format!("{fence}{language}\n{code}\n{fence}")
             }
-            "ul" | "ol" => self.list(id, in_sectioning),
+            "ul" | "ol" | "menu" => self.list(id, in_sectioning),
             "table" => self.table(id, in_sectioning),
             "blockquote" => quote(&self.blocks(id, in_sectioning), None),
             "hr" => "---".to_owned(),
@@ -799,7 +822,7 @@ impl Renderer<'_> {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
-                self.removed[category] += 1;
+                self.removed[category as usize] += 1;
                 continue;
             }
             // Stray inline content between items renders as its own item.
@@ -845,7 +868,7 @@ impl Renderer<'_> {
         while let Some(child) = stack.pop() {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
-                self.removed[category] += 1;
+                self.removed[category as usize] += 1;
                 continue;
             }
             match node.local_name() {
@@ -869,7 +892,7 @@ impl Renderer<'_> {
                     for &cell in &node.children {
                         let cell_node = &self.nodes[cell];
                         if let Some(category) = self.removal(cell_node, in_sectioning) {
-                            self.removed[category] += 1;
+                            self.removed[category as usize] += 1;
                             continue;
                         }
                         if !matches!(cell_node.local_name(), "th" | "td") {
@@ -909,16 +932,13 @@ impl Renderer<'_> {
                 _ => {}
             }
         }
-        if rows.is_empty() {
-            return String::new();
-        }
         let width = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
-        if width == 0 {
-            return String::new();
-        }
         let mut out = String::new();
         if let Some(caption) = caption.filter(|c| !c.is_empty()) {
             let _ = writeln!(out, "**{caption}**\n");
+        }
+        if width == 0 {
+            return out.trim_end().to_owned();
         }
         // A cell holding block content (a nested table, a list, several
         // paragraphs) cannot sit on one GFM line: the table is a layout grid,
@@ -937,15 +957,10 @@ impl Renderer<'_> {
             out.push_str(&blocks.join("\n\n"));
             return out.trim_end().to_owned();
         }
-        let rows: Vec<(bool, Vec<String>)> = rows
-            .into_iter()
-            .map(|(header, cells)| {
-                (
-                    header,
-                    cells.iter().map(|cell| cell.replace('|', "\\|")).collect(),
-                )
-            })
-            .collect();
+        let line = |cells: &[String]| {
+            let cells: Vec<String> = cells.iter().map(|cell| cell.replace('|', "\\|")).collect();
+            format!("| {} |", cells.join(" | "))
+        };
         let mut body = rows.iter();
         let header: Vec<String> = if rows[0].0 {
             let mut cells = body
@@ -957,10 +972,10 @@ impl Renderer<'_> {
         } else {
             vec![String::new(); width]
         };
-        let _ = writeln!(out, "| {} |", header.join(" | "));
+        let _ = writeln!(out, "{}", line(&header));
         let _ = writeln!(out, "|{}", " --- |".repeat(width));
         for (_, cells) in body {
-            let _ = writeln!(out, "| {} |", cells.join(" | "));
+            let _ = writeln!(out, "{}", line(cells));
         }
         out.trim_end().to_owned()
     }
@@ -969,7 +984,7 @@ impl Renderer<'_> {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
-                self.removed[category] += 1;
+                self.removed[category as usize] += 1;
                 continue;
             }
             self.inline(child, out, in_sectioning);
@@ -993,7 +1008,7 @@ impl Renderer<'_> {
             NodeKind::Element { .. } if node.name_in(MATHML_NS) == "math" => {
                 match self.tex_of(id) {
                     Some(tex) => {
-                        self.count_removals(id);
+                        self.count_removals(id, in_sectioning);
                         let _ = write!(out, "${tex}$");
                     }
                     None => self.inline_children(id, out, in_sectioning),
@@ -1038,6 +1053,16 @@ impl Renderer<'_> {
                     let ticks = if text.contains('`') { "``" } else { "`" };
                     let _ = write!(out, "{ticks}{text}{ticks}");
                 }
+                "label" => {
+                    // Adjacent labels (content-tab titles) must not run together.
+                    if !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                    self.inline_children(id, out, in_sectioning);
+                    if !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                }
                 "strong" | "b" => self.wrapped(id, out, "**", in_sectioning),
                 "em" | "i" => self.wrapped(id, out, "*", in_sectioning),
                 _ if is_block(node) => {
@@ -1056,25 +1081,26 @@ impl Renderer<'_> {
     }
 
     /// TeX source of a MathML formula: its `application/x-tex` annotation,
-    /// else the `alttext` attribute.
+    /// else the `alttext` attribute. Source containing `$` (even as `\$`)
+    /// is rejected and the formula falls back to its rendered children: a
+    /// missing formula is safer than a mispaired delimiter.
     fn tex_of(&self, id: usize) -> Option<String> {
+        let usable = |tex: String| (!tex.is_empty() && !tex.contains('$')).then_some(tex);
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let node = &self.nodes[current];
             if node.name_in(MATHML_NS) == "annotation"
                 && node.attr("encoding") == Some("application/x-tex")
+                && let Some(tex) = usable(collapse(&text_of(self.nodes, current)))
             {
-                let tex = collapse(&text_of(self.nodes, current));
-                if !tex.is_empty() {
-                    return Some(tex);
-                }
+                return Some(tex);
             }
             stack.extend(node.children.iter().rev());
         }
         self.nodes[id]
             .attr("alttext")
             .map(collapse)
-            .filter(|tex| !tex.is_empty())
+            .and_then(usable)
     }
 
     fn wrapped(&mut self, id: usize, out: &mut String, marker: &str, in_sectioning: bool) {
@@ -1103,7 +1129,6 @@ fn is_block(node: &Node) -> bool {
             | "body"
             | "dd"
             | "details"
-            | "dialog"
             | "div"
             | "dl"
             | "dt"
@@ -1122,6 +1147,7 @@ fn is_block(node: &Node) -> bool {
             | "hr"
             | "li"
             | "main"
+            | "menu"
             | "ol"
             | "p"
             | "pre"
@@ -1136,25 +1162,28 @@ fn flush_inline(blocks: &mut Vec<String>, inline: &mut String, open: &mut bool) 
     if *open {
         let text = inline.trim();
         if !text.is_empty() {
-            // Page text that imitates the view's own wrapper lines is escaped
-            // so the view boundary can only come from the renderer.
-            let lines: Vec<String> = text
-                .lines()
-                .map(|line| {
-                    if line.starts_with("[End page]")
-                        || line.starts_with("[HTML page rendered as Markdown")
-                    {
-                        format!("\\{line}")
-                    } else {
-                        line.to_owned()
-                    }
-                })
-                .collect();
-            blocks.push(lines.join("\n"));
+            blocks.push(text.to_owned());
         }
         inline.clear();
         *open = false;
     }
+}
+
+/// Escapes body lines that imitate the view's own wrapper lines. Applied
+/// once to the whole rendered body, so paragraphs, code, table cells and
+/// flattened deep nesting are all covered; an escaped line stays escaped.
+fn escape_wrapper_lines(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("[End page]") || line.starts_with("[HTML page rendered as Markdown")
+            {
+                format!("\\{line}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Where to insert a backslash so a line of page text is not read as a
@@ -1188,12 +1217,26 @@ fn block_marker_escape(line: &str) -> Option<usize> {
     escaped.then_some(0)
 }
 
-/// A link destination CommonMark cannot read bare is wrapped in angle brackets.
-fn link_target(target: &str) -> std::borrow::Cow<'_, str> {
-    if target.contains(|c: char| c.is_whitespace() || c == '(' || c == ')') {
-        format!("<{target}>").into()
+/// A URL from page markup with tabs and newlines dropped, as the URL parser
+/// drops them. Every URL the view prints goes through here, so none of them
+/// can start a new line.
+fn url_text(url: &str) -> std::borrow::Cow<'_, str> {
+    if url.contains(['\t', '\n', '\r']) {
+        url.replace(['\t', '\n', '\r'], "").into()
     } else {
-        target.into()
+        url.into()
+    }
+}
+
+/// A link destination as Markdown can carry it: a target with whitespace,
+/// parentheses or angle brackets is wrapped in `<…>`, inside which angle
+/// brackets are backslash-escaped.
+fn link_target(target: &str) -> std::borrow::Cow<'_, str> {
+    let target = url_text(target);
+    if target.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>')) {
+        format!("<{}>", target.replace('<', "\\<").replace('>', "\\>")).into()
+    } else {
+        target
     }
 }
 

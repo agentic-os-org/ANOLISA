@@ -120,7 +120,8 @@ an available Stash, and a supported recovery method. The page is rendered as a
 Markdown subset: headings, paragraphs, lists, tables, fenced code with its language,
 links with targets, image alt text, quotes, and admonitions. MathML formulas render
 as their TeX annotation or `alttext` between `$` signs; cells spanning rows or columns
-pad the table grid with empty cells; paragraph lines that start like a Markdown
+leave empty cells in the slots they cover, and rows are not padded to the widest
+row; paragraph lines that start like a Markdown
 heading, list item, quote, rule or code fence are escaped. The content root is
 `<main>`, an element with `role=main`, or the only outermost `<article>` (articles
 nested inside it, such as comments, do not count); otherwise the whole body.
@@ -128,8 +129,8 @@ Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
 page-level `header`/`footer`, elements with navigation, banner, contentinfo, or
 complementary roles, form controls (`button`, `input`, `select`, `textarea`,
 `datalist`, `progress`, `meter`), media embeds (`audio`, `video`, `canvas`, `object`,
-`embed`, `map`), `dialog`, and `menu` are removed; `label`, `legend`, and `fieldset`
-stay because content tabs keep their titles there. The first line of the view names
+`embed`, `map`), and `dialog` are removed; `menu` renders as a list, and `label`,
+`legend`, and `fieldset` stay because content tabs keep their titles there. The first line of the view names
 the root, the number of nodes omitted outside it, and every removal count by
 category. Pages whose
 rendered body is shorter than 64 characters, such as application shells, pass through,
