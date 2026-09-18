@@ -104,7 +104,12 @@ describe("register() stale-client teardown", () => {
 
     assert.deepEqual(
       [...host.tools].sort(),
-      ["memory_get", "memory_get_context", "memory_observe", "memory_search"].sort(),
+      [
+        "anolisa_memory_get",
+        "anolisa_memory_search",
+        "memory_get_context",
+        "memory_observe",
+      ].sort(),
     );
     assert.deepEqual(host.hooks, ["before_prompt_build", "gateway_stop", "agent_end"]);
     assert.deepEqual(stopped, []);

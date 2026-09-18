@@ -88,8 +88,8 @@ const STDERR_FLUSH_INTERVAL_MS = 5_000;
 
 // OpenClaw contract name → agent-memory MCP tool name mapping.
 const TOOL_NAME_MAP: Record<string, string> = {
-  memory_search: "memory_search",
-  memory_get: "mem_read",
+  anolisa_memory_search: "memory_search",
+  anolisa_memory_get: "mem_read",
   memory_observe: "memory_observe",
   memory_get_context: "memory_get_context",
 };
