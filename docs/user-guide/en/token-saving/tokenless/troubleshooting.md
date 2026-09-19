@@ -428,6 +428,63 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 
 Run this only after confirming that the directory belongs to this Tokenless npm installation. A manually installed cosh Extension must be separately confirmed and removed from `~/.copilot-shell/extensions/tokenless`.
 
+The package postinstall makes that confirmation for you: `~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI, so when it already belongs to a managed component install the postinstall keeps it unchanged and prints where the resources inside the package are instead of replacing a tree that a component record and framework registrations still point at. Pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway, in which case re-run `anolisa adapter scan` afterwards so the component record matches what is on disk.
+
+Ownership there has to be proven rather than assumed. The postinstall only refreshes a tree carrying the marker it or the standalone installer wrote (`.tokenless-owner`); a tree left by a release from before the marker existed, or one somebody copied by hand, carries none and is kept as well — nothing about its content says who put it there, and the framework registrations pointing into it would dangle otherwise. The one-time cost is that upgrading from such a version keeps the older resources until the directory is removed or the override is used.
+
+The uninstaller also stops short rather than half-finishing. When a framework registration cannot be removed, the adapter resources *and* the receipt are both kept and the script exits non-zero, so no registration is left pointing at a deleted directory and the script the warning names still exists; fix the framework and re-run to complete the removal. The installer is fail-closed the same way: it moves the previous install aside before replacing it, and if that copy cannot be made — no staging directory, or a recorded file it cannot read — it stops before writing anything.
+
+### curl standalone installation
+
+The standalone installer records every path it created in a receipt at `~/.local/share/tokenless/install-receipt`: the method it ended up taking (npm or source build), the version, the install directory, the npm prefix, the adapter directory, the rc file it appended a PATH line to, and each installed file together with its sha256.
+
+Upgrade by re-running the installer. It overwrites the recorded paths and rewrites the receipt, so the record stays accurate:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
+
+An npm-to-npm upgrade is covered the same way. It replaces the package payload in place and the launcher links resolve into that payload, so a copy of the previous module directory, its `@anolisa` platform package and the prefix's own bin links is kept until the new CLI has been verified; a broken new binary is put back rather than left behind a launcher that still resolves to it.
+
+The new receipt is what makes the retirement safe, so it is written first: to a temporary in the same directory, moved into place, then flushed. If it cannot be written and the previous receipt cannot be removed either, the run fails and puts the previous install back — a stale receipt describing an install that was already replaced would let a later `scripts/uninstall.sh` delete the new one, because a same-version reinstall reproduces the recorded digests and link targets. When the stale receipt *can* be removed the install still succeeds, with a warning that scripted uninstall is unavailable.
+
+Where the previous npm prefix and the install directory overlap — `npm install -g --prefix ~/.local` puts its bin links in `~/.local/bin`, the installer's default install directory — that package is retired by hand instead of through `npm uninstall --prefix ~/.local`, which would remove the CLI the new install just placed there. An npm attempt that fails part-way is rolled back the same way, so the source-build fallback never inherits an unowned package, launcher link or adapter tree.
+
+Ownership is checked, not just content. A newer anolisa or npm install of the same version reproduces byte-identical binaries and manifests, so the receipt also records this install's id, the link target each launcher resolves to, and an ownership marker (`.tokenless-owner`) inside the adapter tree and the npm module directory. The uninstaller keeps anything whose recorded identity or marker no longer matches — files, adapter resources, framework registrations and the npm package alike.
+
+The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS has no published npm package either, so it currently has no supported route — see the platform table in the [Quick Start](QUICKSTART.md#platform-support).
+
+`~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI and with a direct `npm install -g`. When that directory already belongs to one of them, the npm postinstall leaves it untouched, the installer compares it against the snapshot it took beforehand and only puts the snapshot back if something really did replace it, records no adapter directory, and says so. The uninstaller then leaves those resources and the framework registrations pointing at them alone. A snapshot that cannot be taken at all stops the run before `npm install -g` replaces anything.
+
+Restart the agent afterwards. When the run took the npm path, the plugin registered with a framework may still be an older copy — run that framework's `scripts/install.sh` again as described in [npm installation](#npm-installation).
+
+Uninstall with the matching script, which removes only what the receipt records:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+```
+
+Preview the plan first, or also drop the collected statistics:
+
+```bash
+bash src/tokenless/scripts/uninstall.sh --dry-run
+bash src/tokenless/scripts/uninstall.sh --purge
+```
+
+`--dry-run` prints what would be removed and changes nothing. `--purge` additionally deletes the runtime data directory `~/.tokenless`, which holds `stats.db` and `stash.db`; without it that data is kept. `--receipt <path>` reads a non-default receipt and mirrors `TOKENLESS_RECEIPT`.
+
+The uninstaller stops short rather than half-finishing, and says so by exiting non-zero. A framework registration it could not remove keeps the adapter resources *and* the receipt, because deleting the resources would leave that registration pointing at nothing. A global npm package it could not remove — because npm is not on PATH — keeps the package, the launcher links under the recorded prefix and the receipt: Tokenless still runs from that prefix, and without the receipt there would be no record of the prefix or its owner, so a re-run could not finish the job. Fix the cause and re-run; the receipt is what makes the retry possible.
+
+Re-installing into a different `TOKENLESS_INSTALL_DIR` also retires the PATH entry the installer appended for the previous directory. The receipt names one rc file and one directory, so without that the block for the old directory would survive every uninstall.
+
+What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it — running each bundled framework's own `scripts/uninstall.sh` first, so an enabled OpenClaw, Hermes or Qwen Code registration is removed instead of being left pointing at a deleted directory. After a source build it removes only the `tokenless` CLI, because that path installs no `rtk` and no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
+
+Do not substitute a fixed `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` list. It misses a custom `TOKENLESS_INSTALL_DIR` and the npm global package, and after a source-build install it deletes `rtk` and adapter resources that install path never created.
+
+Without a receipt the uninstaller refuses to guess and prints the per-method manual steps instead. Uninstall through the method you actually used: [anolisa installation](#anolisa-installation), [npm installation](#npm-installation), or the YUM/RPM sequence below.
+
 ### YUM/RPM installation
 
 Prefer management through the anolisa system scope. If anolisa does not own the installation record, disable adapters first, then run:

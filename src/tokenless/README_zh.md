@@ -146,11 +146,43 @@ sudo anolisa --install-mode system adopt tokenless
 从同一 YUM 源安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel
-Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建发布产物，
-目前不能通过公开的 `anolisa-tokenless` npm 包安装。源码中保留的
-`@anolisa/tokenless-darwin-x64` optional dependency 只是发布构建目标，
-不代表 registry 中已有可安装的软件包。
+另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
+提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
+curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
+
+```bash
+npm install -g anolisa-tokenless
+
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+由于两者都不注册组件，`anolisa adapter enable` 对它们不适用；请改用
+`~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
+下对应框架的脚本启用。curl 安装脚本会把它创建的内容记录到
+`~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
+回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
+adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
+完整的方式对照见 `docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md`。
+
+`~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
+公开路径都不会盲目接管它。所有权必须被证明：npm 的 postinstall 只刷新带有它
+自己或 curl 安装脚本写下的标记的目录，其余一律保留——受管组件安装、旧版本留
+下的目录、手工拷贝的目录都一样——并提示包内资源的位置。
+`ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` 可强制接管。curl 安装
+脚本会把其他所有者放置的目录恢复回去、不为它记录 Adapter 目录，并且用「每次安装
+专属的标记」（`.tokenless-owner`）而不只是内容哈希来证明自己记录的内容归自己所有
+——anolisa 或直接 npm
+安装同一版本会留下逐字相同的字节，此时它的文件、Adapter 资源、框架注册与 npm
+全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
+机器上没有可用 CLI。
+
+当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
+仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
+optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
+因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
+回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
+受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用

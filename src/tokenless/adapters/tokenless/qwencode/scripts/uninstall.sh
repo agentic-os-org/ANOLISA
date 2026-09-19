@@ -19,6 +19,14 @@ fi
 
 if [ -n "$QWEN_BIN" ] && [ -x "$QWEN_BIN" ]; then
     "$QWEN_BIN" extensions uninstall "$EXTENSION_NAME" 2>&1 || true
+    # Verify rather than trust: the status above is swallowed because "was not
+    # installed" and "refused" are indistinguishable by exit code alone, and the
+    # caller deletes the adapter resources as soon as this script returns 0.
+    if [ -e "${HOME}/.qwen/extensions/${EXTENSION_NAME}" ]; then
+        echo "[${COMPONENT}] ERROR: ${HOME}/.qwen/extensions/${EXTENSION_NAME} is still there after 'extensions uninstall'." >&2
+        echo "[${COMPONENT}] ${AGENT} plugin removal is incomplete; re-run this script once the CLI succeeds." >&2
+        exit 1
+    fi
     echo "[${COMPONENT}] ${AGENT} plugin removed via qwen CLI."
     exit 0
 fi

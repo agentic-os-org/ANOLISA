@@ -71,6 +71,12 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         test-agentscope-integration test-hooks test-claude-code-detect \
         test-hook-parity test-rtk-integration test-benchmark-rtk-probe
 
+# Declared separately from the list above on purpose: that one is extended by
+# other components' targets as well, and a shared line is a merge conflict
+# waiting to happen.
+.PHONY: test-install-methods test-install-script test-install-docs \
+        test-npm-postinstall test-npm-postinstall-strict
+
 # Default target
 all: build
 
@@ -465,6 +471,40 @@ test-npm-package: build-openclaw-plugin build-dsh-plugin
 test-toon-cleanup:
 	@bash tests/test-toon-cleanup.sh
 
+# Standalone curl installer/uninstaller behaviour plus the install-method docs
+# that describe it. Offline: curl, npm and cargo are stubbed by the test.
+# test-npm-postinstall runs the real npm/scripts/postinstall.js and skips when no
+# interpreter can run it.
+test-install-methods: test-npm-postinstall test-install-script test-install-docs
+
+# Joined to the `test` aggregate by a second, prerequisite-only rule instead of by
+# editing its own line: that line is extended by several components at once and is
+# a recurring merge conflict, while GNU make unions the prerequisites of rules
+# that carry no recipe.
+test: test-install-methods
+
+test-install-script:
+	@echo "==> Testing standalone install/uninstall scripts..."
+	@bash tests/test-install-script.sh
+
+test-install-docs:
+	@echo "==> Testing install-method documentation consistency..."
+	@bash tests/test-install-docs.sh
+
+# The npm package postinstall shares ~/.local/share/anolisa/adapters/tokenless
+# with the anolisa CLI, so it has to identify the current owner before replacing
+# the tree. Needs node; skips when no interpreter can run the script.
+test-npm-postinstall:
+	@echo "==> Testing npm postinstall adapter ownership..."
+	@bash tests/test-npm-postinstall.sh
+
+# Strict variant: an interpreter that cannot run postinstall.js is a failure, not
+# a skip. This is the one npm-package depends on, because that target already
+# needs a working node.
+test-npm-postinstall-strict:
+	@echo "==> Testing npm postinstall adapter ownership (a usable node is required)..."
+	@TOKENLESS_REQUIRE_NODE=1 bash tests/test-npm-postinstall.sh
+
 # Lint (rtk excluded — vendored third-party source)
 lint:
 	@echo "==> Linting tokenless..."
@@ -679,7 +719,14 @@ prepare-npm-native-binaries: build-tokenless
 		"$(NATIVE_NPM_INPUT_DIR)/"
 
 # Build and package the current host.
-npm-package: prepare-npm-native-binaries
+# The package this target produces ships scripts/postinstall.js, and in CI
+# `make npm-package` is the step of the tokenless job that runs after
+# actions/setup-node — the one place a supported Node is guaranteed. Gating
+# packaging on the install-method suite is what keeps the postinstall ownership
+# test executing in CI, in strict mode, so an interpreter that cannot load the
+# script fails the build instead of reporting a skip.
+npm-package: prepare-npm-native-binaries \
+	test-install-script test-install-docs test-npm-postinstall-strict
 	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
 	node npm/scripts/package-npm.js
 

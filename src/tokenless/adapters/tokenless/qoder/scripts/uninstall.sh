@@ -26,8 +26,31 @@ find_qodercli() {
 QODERCLI="$(find_qodercli || true)"
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
 
+# Whether a user-scope tokenless registration is still on disk. Qoder keeps it in
+# its own store under ~/.qoder, and it references this adapter directory, so the
+# CLI is the only way to remove it — but its absence is not evidence about it.
+qoder_registration_present() {
+    local qoder_home="${HOME}/.qoder"
+    [ -d "$qoder_home" ] || return 1
+    # bin/ holds the CLI itself, never a plugin registration.
+    grep -rq --exclude-dir=bin "tokenless@local" "$qoder_home" 2>/dev/null
+}
+
 if [ -z "$QODERCLI" ]; then
-    echo "[${COMPONENT}] WARNING: qodercli not found, cannot unregister plugin" >&2
+    # qodercli being unresolvable right now does not mean Qoder is gone, and the
+    # caller deletes the shared adapter resources as soon as this script returns 0.
+    # Reporting success while a registration survives would leave it aimed at a
+    # path that no longer exists, and take the receipt — the only way back — with
+    # it. Fail closed instead, and keep the plugin files so this can be retried.
+    if qoder_registration_present; then
+        echo "[${COMPONENT}] ERROR: qodercli not found and a tokenless@local registration is still" >&2
+        echo "[${COMPONENT}] ERROR: present under ${HOME}/.qoder, so it cannot be confirmed removed." >&2
+        echo "[${COMPONENT}] Plugin files were left in place; put qodercli back on PATH and re-run:" >&2
+        echo "[${COMPONENT}]   qodercli plugins uninstall tokenless --scope user" >&2
+        exit 1
+    fi
+    echo "[${COMPONENT}] qodercli not found and no tokenless registration is present under"
+    echo "[${COMPONENT}] ${HOME}/.qoder; nothing to unregister."
     exit 0
 fi
 for subcommand in list uninstall; do

@@ -40,6 +40,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch, homedir } from 'node:os';
+// Separate statement on purpose: the ownership marker and the verified swap
+// below need these, and the import block above is edited by other changes.
+import { renameSync, readFileSync, writeFileSync } from 'node:fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -48,6 +51,19 @@ const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
 const BINARIES = ['tokenless', 'rtk'];
+
+// Ownership marker inside the shared adapter directory. Content cannot prove
+// ownership — every copy of the same release is byte-identical — so whoever
+// places the tree stamps it with who placed it, and a foreign reinstall removes
+// the stamp along with the tree it replaces.
+const OWNER_MARKER_FILE = '.tokenless-owner';
+const NPM_OWNER_PREFIX = 'npm:';
+// Written by src/tokenless/scripts/install.sh, which runs this postinstall and
+// then claims the tree for its receipt. Same family, so it is replaceable here.
+const CURL_OWNER_PREFIX = 'curl-installer:';
+// Env escape hatch for a user who really does want this package to take the
+// shared directory over.
+const FORCE_ADAPTERS_ENV = 'ANOLISA_TOKENLESS_FORCE_ADAPTERS';
 
 // Map Node.js platform/arch to package names
 const PLATFORM_MAP = {
@@ -93,6 +109,60 @@ function isMusl() {
   } catch {
     return false;
   }
+}
+
+/**
+ * The contract anolisa writes next to the adapter resources when it installs or
+ * adopts a component: {datadir}/components/<component>/component.toml, where in
+ * user mode {datadir} is the parent of the adapters directory (~/.local/share/
+ * anolisa). Its presence means the tree in `dest` belongs to a managed component
+ * installation, not to this package.
+ */
+function anolisaComponentContract(destParent) {
+  const dataDir = dirname(destParent);
+  const contract = join(dataDir, 'components', 'tokenless', 'component.toml');
+  return existsSync(contract) ? contract : null;
+}
+
+function readOwnerMarker(dest) {
+  try {
+    return readFileSync(join(dest, OWNER_MARKER_FILE), 'utf8').split('\n')[0].trim();
+  } catch {
+    return '';
+  }
+}
+
+function writeOwnerMarker(dest, pkgVersion) {
+  try {
+    writeFileSync(join(dest, OWNER_MARKER_FILE), `${NPM_OWNER_PREFIX}anolisa-tokenless@${pkgVersion}\n`);
+  } catch {
+    // The tree is usable without the marker; the next run then treats it as
+    // unowned rather than failing the install over a bookkeeping file.
+  }
+}
+
+/**
+ * Returns a human-readable description of the installation that owns `dest`, or
+ * null when this package may replace it.
+ *
+ * Ownership has to be *proven*, not assumed: only a marker this package or the
+ * standalone curl installer wrote says the tree is ours to refresh. An unmarked
+ * directory is a copy left by an older release, a manual copy, or another tool —
+ * nothing about its content identifies who put it there, and replacing it would
+ * delete resources that a component record and every framework registration
+ * (hook entries, plugin directories, symlinks) still point at. Treating "no
+ * marker" as replaceable is what let a plain `npm install -g` destroy them.
+ */
+function foreignAdapterOwner(dest, destParent) {
+  if (!existsSync(dest)) return null;
+  const contract = anolisaComponentContract(destParent);
+  if (contract) return `an anolisa component installation (${contract})`;
+  const marker = readOwnerMarker(dest);
+  if (!marker) return 'an installation that left no ownership marker';
+  if (!marker.startsWith(NPM_OWNER_PREFIX) && !marker.startsWith(CURL_OWNER_PREFIX)) {
+    return `another installation (owner marker '${marker}')`;
+  }
+  return null;
 }
 
 function main() {
@@ -225,6 +295,12 @@ function enableClaudeAdapter(adapterDir) {
  * the hook dispatcher (common/hooks/run-hook.sh) already searches:
  *   ~/.local/share/anolisa/adapters/tokenless
  *
+ * That directory is shared. Replacing a tree another installation put there
+ * would leave its component record and every framework registration (hook
+ * entries, plugin directories, symlinks) pointing at resources it no longer has,
+ * and nothing about the new copy identifies the owner that was overwritten. So
+ * identify the current owner first and preserve a foreign one.
+ *
  * Fail-open: adapter installation is supplementary — a failure here warns
  * but never fails the npm install, and the files remain available inside
  * the package under adapters/.
@@ -235,15 +311,77 @@ function installAdapters() {
 
   const destParent = join(homedir(), '.local', 'share', 'anolisa', 'adapters');
   const dest = join(destParent, 'tokenless');
+
+  const foreignOwner = foreignAdapterOwner(dest, destParent);
+  if (foreignOwner && process.env[FORCE_ADAPTERS_ENV] !== '1') {
+    console.warn(`anolisa-tokenless: ${dest} belongs to ${foreignOwner}.`);
+    console.warn('anolisa-tokenless: Keeping it unchanged. Replacing it would leave that');
+    console.warn("anolisa-tokenless: installation's component record and its framework");
+    console.warn('anolisa-tokenless: registrations pointing at resources it no longer has.');
+    console.log(`anolisa-tokenless: The adapter resources this package ships are at ${adaptersSrc}`);
+    console.log(`anolisa-tokenless: Set ${FORCE_ADAPTERS_ENV}=1 to replace them anyway.`);
+    return;
+  }
+  if (foreignOwner) {
+    console.warn(`anolisa-tokenless: ${FORCE_ADAPTERS_ENV}=1 — replacing ${dest},`);
+    console.warn(`anolisa-tokenless: which belonged to ${foreignOwner}.`);
+  }
+
+  // Swap, do not overwrite. Deleting the existing tree first means a cpSync that
+  // fails half way — ENOSPC on an upgrade is the realistic case — leaves the
+  // shared directory empty or partial while every framework registration still
+  // points into it, and the install itself reports success. Copy into a unique
+  // sibling first and only move the old tree out of the way once the new one is
+  // complete.
+  //
+  // The sibling names carry a per-run stamp: a fixed name would collide with
+  // whatever a previous failed run left behind, and copying into an existing
+  // directory nests the payload one level down instead of failing.
+  const stamp = `${process.pid}-${Date.now()}`;
+  const staged = `${dest}.tokenless-new-${stamp}`;
+  const previous = `${dest}.tokenless-old-${stamp}`;
+  let movedAside = false;
   try {
-    rmSync(dest, { recursive: true, force: true });
     mkdirSync(destParent, { recursive: true });
-    cpSync(adaptersSrc, dest, { recursive: true });
+    rmSync(staged, { recursive: true, force: true });
+    cpSync(adaptersSrc, staged, { recursive: true });
+    writeOwnerMarker(staged, readPackageVersion());
+    if (existsSync(dest)) {
+      rmSync(previous, { recursive: true, force: true });
+      renameSync(dest, previous);
+      movedAside = true;
+    }
+    try {
+      renameSync(staged, dest);
+    } catch (err) {
+      // Put the old tree back before reporting anything: a rename between
+      // siblings cannot fail for lack of space, but it can for permissions, and
+      // an empty shared directory is worse than a stale one.
+      if (movedAside) renameSync(previous, dest);
+      movedAside = false;
+      throw err;
+    }
+    if (movedAside) rmSync(previous, { recursive: true, force: true });
     console.log(`anolisa-tokenless: Installed Agent adapters to ${dest}`);
     enableClaudeAdapter(dest);
   } catch (err) {
+    rmSync(staged, { recursive: true, force: true });
     console.warn(`anolisa-tokenless: Could not install adapters to ${dest}: ${err.message}`);
+    if (existsSync(dest)) {
+      console.warn(`anolisa-tokenless: The adapter resources already in ${dest} were left in place.`);
+    } else if (existsSync(previous)) {
+      console.warn(`anolisa-tokenless: The previous adapter resources are kept at ${previous};`);
+      console.warn(`anolisa-tokenless: move them back with: mv ${previous} ${dest}`);
+    }
     console.warn(`anolisa-tokenless: Adapter files remain available at ${adaptersSrc}`);
+  }
+}
+
+function readPackageVersion() {
+  try {
+    return JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).version || 'unknown';
+  } catch {
+    return 'unknown';
   }
 }
 

@@ -17,7 +17,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
+This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](QUICKSTART.md).
 
 ## Build the Python SDK from source
 
@@ -75,13 +75,18 @@ current host contracts. See
 
 ### Installation does not enable every adapter
 
-`anolisa install tokenless` installs the component and its adapter resources. To make an agent use Tokenless automatically, also run:
+Whichever method you used — anolisa CLI, npm, curl, or Skill — installation only puts the component and its adapter resources on disk. It never registers Tokenless with an agent. The enable step differs per install method, because the three production paths leave different things behind:
 
-```bash
-anolisa adapter enable tokenless <framework>
-```
+| Install method | Adapter resources | Enable step |
+|----------------|-------------------|-------------|
+| anolisa CLI | installed with the component, plus an anolisa component record | `anolisa adapter enable tokenless <framework>` |
+| npm, or curl through its npm path | copied by the package postinstall to `~/.local/share/anolisa/adapters/tokenless/`; no anolisa component record exists | run the framework's bundled script, for example `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`. `anolisa adapter enable` cannot be used here |
+| curl through its source-build path | none — the build installs the `tokenless` CLI only | not applicable. This is a CLI-only install; use the `tokenless` subcommands directly, or reinstall through the anolisa CLI or npm for agent integration |
+| Skill | whichever of the above the Skill ran | follow that method's row |
 
 CLI-only use does not require an adapter.
+
+Disabling follows the same split: `anolisa adapter disable tokenless <framework>` applies to anolisa CLI installs, while an npm-based install is disabled through the framework's own uninstall script or by removing the hook registration the install script created.
 
 ### “Compression off” affects only compression operations
 
@@ -256,6 +261,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | I want to | Document |
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
+| Install via npm, curl, or Skill | [Quick Start · Install Tokenless](QUICKSTART.md#install-tokenless) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
 | Use the in-process Python SDK | [Python SDK](sdk.md) |
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |

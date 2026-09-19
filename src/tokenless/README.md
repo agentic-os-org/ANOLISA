@@ -179,12 +179,54 @@ Installing the CLI from the same YUM repository makes it available on sudo's
 system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
-Current public packages support Linux x86_64/aarch64 and macOS Apple Silicon.
-Intel macOS does not currently have a published package. The repository's npm
-packaging sources are for release construction and are not a public
-`anolisa-tokenless` installation route. The retained
-`@anolisa/tokenless-darwin-x64` optional-dependency entry describes a release
-build target; it does not indicate registry availability.
+Two further public routes install the CLI on their own, without an anolisa
+component record. The npm route ships the prebuilt `tokenless` and `rtk`
+binaries plus the bundled Agent adapters and needs Node.js 16.7+, the release
+`fs.cpSync` arrived in and the one the package postinstall requires. The curl route
+is a standalone installer that prefers npm and builds from source instead. The
+method is chosen before npm runs (npm missing, musl Linux, or
+`TOKENLESS_FORCE_BUILD=1`); once `npm install` has been invoked the installer does
+not switch method automatically, because npm's exit status cannot prove its
+postinstall left no framework registration behind:
+
+```bash
+npm install -g anolisa-tokenless
+
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Because neither registers the component, `anolisa adapter enable` does not
+apply to them; enable a framework with its bundled script under
+`~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
+instead. The curl installer records what it created in
+`~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
+consumes to remove exactly those paths; its source-build path is CLI-only
+(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+`install-tokenless` OS Skill. The full method matrix lives in
+`docs/user-guide/en/token-saving/tokenless/QUICKSTART.md`.
+
+`~/.local/share/anolisa/adapters/tokenless` is shared with anolisa-managed
+installs, so neither public route takes it over blindly. Ownership has to be
+proven: the npm postinstall only refreshes a tree carrying the marker it or the
+curl installer wrote, and keeps anything else — a managed component install, a
+tree from an older release, a manual copy — reporting where the resources inside
+the package are. `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` overrides that. The curl installer restores a tree another owner placed there, records no
+adapter directory for it, and proves ownership of everything it does record with
+a per-install marker (`.tokenless-owner`) rather than a content hash alone — a
+later anolisa or npm
+install of the same version reproduces the same bytes, and its files, adapter
+resources, framework registrations and npm package are left alone. A replacement
+that fails halfway (a missing tag, a build error) puts the previous install back
+instead of leaving the machine without a CLI.
+
+Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
+macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
+optional-dependency entry describes a release build target, not a registry
+artifact, so the npm route cannot deliver a binary there. The standalone
+installer does not fall back to a source build on macOS either — it exits with
+an error instead of running `cargo` — so Intel macOS currently has no supported
+install route. Use Linux or Apple Silicon macOS until that package is
+published.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands
