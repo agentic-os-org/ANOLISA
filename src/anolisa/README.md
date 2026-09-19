@@ -59,6 +59,11 @@ Running `anolisa adapter enable <component> openclaw` accepts the plugin's
 declared capabilities when the host supports capability consent. This does
 not authorize an unsafe-install bypass.
 
+Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
+ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.
+See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
+for custom configuration directories and existing-installation ownership.
+
 ## Install Modes
 
 | Mode | Prefix | When |

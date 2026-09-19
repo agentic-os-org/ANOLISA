@@ -568,6 +568,9 @@ pub enum ClaimResourceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverPayload {
+    /// OpenCode local-plugin payload; the spelling is the persisted discriminator.
+    #[serde(rename = "opencode")]
+    OpenCode(OpenCodeClaim),
     /// OpenClaw driver payload.
     #[serde(rename = "openclaw")]
     OpenClaw(OpenClawClaim),
@@ -595,6 +598,13 @@ pub enum DriverPayload {
     /// DeepSeek Harness (`dsh`) native plugin payload.
     #[serde(rename = "dsh")]
     Dsh(DshClaim),
+}
+
+/// OpenCode ownership refers to a validated symlink resource, never a second path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenCodeClaim {
+    /// Resource id of the local plugin link that disable may remove.
+    pub symlink_resource: String,
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —

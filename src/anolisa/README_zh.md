@@ -59,6 +59,11 @@ anolisa update all
 CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
 unsafe-install 覆盖权限。
 
+通过 `anolisa adapter enable tokenless opencode` 启用 Tokenless 本地插件。
+ANOLISA 管理插件链接；启用或禁用后需重启 OpenCode。
+自定义配置目录及已有安装的接管规则见
+[adapter 参考](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md#adapter)。
+
 ## 安装模式
 
 | 模式 | 前缀 | 使用场景 |

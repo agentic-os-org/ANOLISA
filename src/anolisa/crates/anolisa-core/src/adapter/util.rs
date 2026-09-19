@@ -7,6 +7,63 @@
 
 use super::driver::{CliOutput, ConditionStatus, FrameworkCommand};
 
+/// Compare link targets without requiring the source to survive package removal.
+pub(crate) fn symlink_matches(
+    link: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool, super::AdapterError> {
+    symlink_matches_at(link, link, target)
+}
+
+/// Resolve a detached symlink relative to its original location.
+pub(crate) fn symlink_matches_at(
+    link: &std::path::Path,
+    original: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool, super::AdapterError> {
+    use std::path::{Component, PathBuf};
+    let referent = match std::fs::read_link(link) {
+        Ok(path) => path,
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(source) => {
+            return Err(super::AdapterError::Io {
+                path: link.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let absolute = original
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""))
+        .join(referent);
+    let mut normalized = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    // Prefer real paths while both exist; lexical comparison also recognizes
+    // broken links after uninstall, including relative links adopted at enable.
+    match (
+        std::fs::canonicalize(&absolute),
+        std::fs::canonicalize(target),
+    ) {
+        (Ok(actual), Ok(expected)) => Ok(actual == expected),
+        _ => Ok(normalized == target),
+    }
+}
+
 /// ISO 8601 UTC timestamp, second precision.
 pub(crate) fn now_iso8601() -> String {
     use chrono::{SecondsFormat, Utc};

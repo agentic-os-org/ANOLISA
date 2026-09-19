@@ -529,6 +529,37 @@ pub trait AdapterOps {
     /// fails boundary check.
     fn create_symlink(&self, link: &Path, target: &Path) -> Result<(), AdapterError>;
 
+    /// Create a symlink without replacing any existing directory entry.
+    ///
+    /// # Errors
+    /// Returns boundary, filesystem, or unsupported-operation errors.
+    fn create_symlink_new(&self, link: &Path, _target: &Path) -> Result<(), AdapterError> {
+        Err(AdapterError::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation provider does not support non-replacing symlink creation",
+            ),
+        })
+    }
+
+    /// Remove only a symlink whose resolved target still matches `target`.
+    /// Returns true when removed or already absent, false for a conflicting entry.
+    /// A raced replacement is restored without overwriting another entry; if
+    /// restoration fails, the error identifies where it remains preserved.
+    ///
+    /// # Errors
+    /// Returns boundary, filesystem, or unsupported-operation errors.
+    fn remove_matching_symlink(&self, link: &Path, _target: &Path) -> Result<bool, AdapterError> {
+        Err(AdapterError::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation provider does not support matching symlink removal",
+            ),
+        })
+    }
+
     /// Read `path`, returning `Ok(None)` when it does not exist (so a
     /// caller merging into a possibly-absent config file can treat "absent"
     /// distinctly from "unreadable"). The Manager validates that `path` is

@@ -220,6 +220,34 @@ help advertises it, including in the dry-run plan. Capability consent does
 not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
 separately from a plugin-safety rejection.
 
+For OpenCode, manage an installed Tokenless plugin with:
+
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
+
+The driver finds `opencode` on PATH, or uses `OPENCODE_BIN`. It registers the
+manifest's `.js` or `.ts` entry as `plugins/<plugin_id>.<extension>` under
+`OPENCODE_CONFIG_DIR`, otherwise `XDG_CONFIG_HOME/opencode`, otherwise
+`~/.config/opencode`. Custom directory values must be absolute. Keep the same
+directory configuration for later status and disable commands; if it changes,
+restore the original environment before retrying cleanup. Project-local plugin
+installation and npm plugin management are outside this driver's scope.
+
+Enable adopts an existing symlink to the same plugin source, including one
+created by Tokenless's standalone installer. After adoption, disable removes
+that link. A conflicting file, directory, or different symlink is preserved;
+failed cleanup keeps the receipt so it can be retried after resolving the conflict.
+If the old installer used `TOKENLESS_OPENCODE_CONFIG_DIR`, set
+`OPENCODE_CONFIG_DIR` to that same directory before enabling through ANOLISA.
+
+Restart OpenCode after enabling or disabling. Status verifies the link and
+package source, but reports runtime loading as `unknown`; an existing link
+does not prove a running OpenCode process loaded it. `--dry-run` previews the
+operation without modifying plugin files or receipts.
+
 ### logs and bug reports
 
 Inspect component logs or generate a diagnostic bundle:
