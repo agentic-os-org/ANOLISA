@@ -51,6 +51,37 @@ pub fn convert_qoder_events(
             continue;
         }
 
+        // --- System prompt ---
+        if t == "system" {
+            let content = e
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            step_id += 1;
+            let text = extract_text_from_content(&content);
+            steps.push(Step {
+                step_id,
+                timestamp: e
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                source: StepSource::System,
+                message: text,
+                model_name: None,
+                reasoning_effort: None,
+                reasoning_content: None,
+                tool_calls: None,
+                observation: None,
+                metrics: None,
+                extra: None,
+                llm_call_count: None,
+                is_copied_context: None,
+            });
+            i += 1;
+            continue;
+        }
+
         // --- User message ---
         if t == "user" {
             let content = e

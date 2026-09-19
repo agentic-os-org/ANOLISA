@@ -82,15 +82,30 @@ pub struct DiscoveredSession {
 
 /// Discover all supported local sessions.
 ///
-/// `scan_dirs` overrides the default scan roots. Each entry is interpreted by
-/// path (`.qoderwork`, `.qoder`, `.claude`, `.codex`, `.cursor`) to choose the
-/// source label and layout. When `None`, the current user's home directory is
-/// probed for all known roots.
+/// `scan_dirs` is **appended** to the default scan roots (home directories of
+/// all local users). Each entry is interpreted by path (`.qoderwork`, `.qoder`,
+/// `.claude`, `.codex`, `.cursor`) to choose the source label and layout.
+/// When `None`, only the default roots are probed.
+///
+/// Duplicate directories (by canonical path) are removed so configuring a path
+/// that is already covered by the defaults does not cause double-scanning.
 pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession> {
-    let roots = match scan_dirs {
-        Some(list) => list.iter().map(|dir| root_from_path(dir)).collect(),
-        None => default_scan_roots(),
-    };
+    let mut roots = default_scan_roots();
+    if let Some(list) = scan_dirs {
+        let mut existing: std::collections::HashSet<PathBuf> = roots
+            .iter()
+            .filter_map(|r| r.dir.canonicalize().ok())
+            .collect();
+        for dir in list {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if existing.contains(&canonical) {
+                log::debug!("Trajectory scan: skipping duplicate dir {}", dir.display());
+                continue;
+            }
+            existing.insert(canonical);
+            roots.push(root_from_path(dir));
+        }
+    }
 
     let mut sessions = Vec::new();
     for root in roots {
@@ -172,20 +187,15 @@ fn root_from_path(dir: &Path) -> ScanRoot {
         };
     }
 
-    // Backward-compatible default: existing configs passed Qoder projects dirs.
+    // Backward-compatible default: recursively scan for .jsonl files.
+    // Known layouts (PerProject) are only used when the path matches a
+    // SESSION_ROOTS entry above; unknown dirs get Flat (recursive) so any
+    // directory structure works without special-casing.
     ScanRoot {
         dir: dir.to_path_buf(),
         source: source_from_path(dir),
-        layout: if path.contains(".codex") {
-            Layout::Flat
-        } else {
-            Layout::PerProject
-        },
-        scan_subdirs: if path.contains(".codex") {
-            &[]
-        } else {
-            &["transcript"]
-        },
+        layout: Layout::Flat,
+        scan_subdirs: &[],
     }
 }
 
@@ -202,6 +212,10 @@ fn source_from_path(dir: &Path) -> String {
         "codex".to_string()
     } else if path.contains(".cursor") {
         "cursor".to_string()
+    } else if path.contains(".agentsight") {
+        "agentsight".to_string()
+    } else if path.contains(".pi") {
+        "pi".to_string()
     } else {
         "qoder".to_string()
     }
@@ -331,11 +345,11 @@ fn discover_in_project_dir(
             continue;
         }
 
-        // Main session files: <uuid>.jsonl
+        // Main session files: *.jsonl (any non-agent file)
         if !is_dir && name.ends_with(".jsonl") {
             let stem = name.trim_end_matches(".jsonl");
             // Skip agent-* files (sub-agents are stored under subagents/)
-            if stem.starts_with("agent-") || !is_valid_session_id(stem) {
+            if stem.is_empty() || stem.starts_with("agent-") {
                 continue;
             }
             sessions.push(DiscoveredSession {
@@ -478,6 +492,18 @@ mod tests {
         dir
     }
 
+    /// Temp dir whose path contains `.qoder/projects` so `root_from_path`
+    /// matches a known SESSION_ROOTS entry and yields PerProject layout.
+    fn tmp_known_projects_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("traj-disc-{tag}-{}", std::process::id()))
+            .join(".qoder")
+            .join("projects");
+        let _ = std::fs::remove_dir_all(dir.ancestors().nth(2).unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn test_decode_project_dir() {
         assert_eq!(decode_project_dir("-data-skillopt"), "data-skillopt");
@@ -507,17 +533,30 @@ mod tests {
         assert!(!is_valid_subagent_stem("has space"));
     }
 
+    /// Helper: discover sessions and keep only those under `base`.
+    ///
+    /// Since `scan_dirs` is now append-mode (default roots + custom), the
+    /// result may include sessions from real home directories. Tests filter
+    /// to the temp dir so assertions stay deterministic.
+    fn discover_under(base: &Path) -> Vec<DiscoveredSession> {
+        discover_sessions(Some(std::slice::from_ref(&base.to_path_buf())))
+            .into_iter()
+            .filter(|s| s.path.starts_with(base))
+            .collect()
+    }
+
     #[test]
     fn test_discover_filters_and_subagents() {
-        let projects = tmp_projects_dir("main");
+        let projects = tmp_known_projects_dir("main");
         let proj = projects.join("-data-myapp");
         std::fs::create_dir_all(&proj).unwrap();
 
         // Valid main session
         std::fs::write(proj.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
-        // Invalid names must be skipped
-        std::fs::write(proj.join("notes.jsonl"), "{}\n").unwrap();
+        // agent-* files must be skipped (subagents handled separately)
         std::fs::write(proj.join(format!("agent-{UUID_B}.jsonl")), "{}\n").unwrap();
+        // Non-UUID names are now accepted as valid sessions
+        std::fs::write(proj.join("notes.jsonl"), "{}\n").unwrap();
         // Sub-agent session under <uuid>/subagents/ (legacy UUID name)
         let sub = proj.join(UUID_A).join("subagents");
         std::fs::create_dir_all(&sub).unwrap();
@@ -525,13 +564,16 @@ mod tests {
         // Newer <type>-<hex> subagent name must also be discovered
         std::fs::write(sub.join("agent-aExplore-b4b7e9141b9524f6.jsonl"), "{}\n").unwrap();
 
-        let sessions = discover_sessions(Some(std::slice::from_ref(&projects)));
-        assert_eq!(sessions.len(), 3, "one main + two subagents: {sessions:?}");
+        let sessions = discover_under(&projects);
+        assert_eq!(sessions.len(), 4, "two main + two subagents: {sessions:?}");
 
-        let main = sessions.iter().find(|s| !s.is_subagent).unwrap();
-        assert_eq!(main.session_id, UUID_A);
-        assert_eq!(main.project, "data-myapp");
-        assert_eq!(main.source, "qoder");
+        let mains: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).collect();
+        assert_eq!(mains.len(), 2, "UUID session + notes.jsonl");
+        assert!(mains.iter().any(|s| s.session_id == UUID_A));
+        assert!(mains.iter().any(|s| s.session_id == "notes"));
+        let uuid_main = mains.iter().find(|s| s.session_id == UUID_A).unwrap();
+        assert_eq!(uuid_main.project, "data-myapp");
+        assert_eq!(uuid_main.source, "qoder");
 
         assert!(sessions
             .iter()
@@ -544,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_discover_transcript_subdir_layout() {
-        let projects = tmp_projects_dir("transcript");
+        let projects = tmp_known_projects_dir("transcript");
         let proj = projects.join("-data-myapp");
         // Newer Qoder layout: sessions under <project>/transcript/
         let transcript = proj.join("transcript");
@@ -553,7 +595,7 @@ mod tests {
         // Old layout in the same project still works
         std::fs::write(proj.join(format!("{UUID_B}.jsonl")), "{}\n").unwrap();
 
-        let sessions = discover_sessions(Some(std::slice::from_ref(&projects)));
+        let sessions = discover_under(&projects);
         assert_eq!(sessions.len(), 2, "transcript + root layout: {sessions:?}");
         assert!(sessions
             .iter()
@@ -571,7 +613,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("rollout-abc123.jsonl"), "{}\n").unwrap();
 
-        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        let sessions = discover_under(&root);
         assert_eq!(sessions.len(), 1, "recursive flat layout: {sessions:?}");
         assert_eq!(sessions[0].session_id, "rollout-abc123");
         assert_eq!(sessions[0].source, "codex");
@@ -587,7 +629,7 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
 
-        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        let sessions = discover_under(&root);
         assert_eq!(sessions.len(), 1, "claude root: {sessions:?}");
         assert_eq!(sessions[0].source, "claude-code");
         assert_eq!(sessions[0].project, "demo");
@@ -605,6 +647,36 @@ mod tests {
             source_from_path(Path::new("/home/u/.qoder/projects")),
             "qoder"
         );
+        assert_eq!(
+            source_from_path(Path::new("/root/.agentsight/skillrubric/traces")),
+            "agentsight"
+        );
+    }
+
+    #[test]
+    fn test_scan_dirs_appends_to_defaults() {
+        // Verify append semantics: a custom dir is scanned IN ADDITION to
+        // default roots, not as a replacement.
+        let base = tmp_projects_dir("append");
+        let custom = base.join(".qoder").join("projects");
+        let proj = custom.join("-data-extra");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
+
+        // discover_sessions with custom dir must include sessions from it.
+        let all = discover_sessions(Some(std::slice::from_ref(&custom)));
+        let custom_sessions: Vec<_> = all.iter().filter(|s| s.path.starts_with(&custom)).collect();
+        assert_eq!(custom_sessions.len(), 1);
+        assert_eq!(custom_sessions[0].session_id, UUID_A);
+
+        // The result set must be >= default-only results (append, not replace).
+        let default_only = discover_sessions(None);
+        assert!(
+            all.len() >= default_only.len(),
+            "append mode must yield at least as many sessions as default-only"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

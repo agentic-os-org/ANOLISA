@@ -10,6 +10,7 @@
 pub mod atif;
 pub mod codex;
 pub mod discovery;
+pub mod pi;
 pub mod qoder;
 pub mod store;
 
@@ -32,8 +33,9 @@ use discovery::DiscoveredSession;
 pub struct CollectorConfig {
     /// Seconds between two scan rounds.
     pub scan_interval_secs: u64,
-    /// Optional override of the projects directories to scan; `None` probes
-    /// `/root` + `/home/*` for the default Qoder/QoderWork layout.
+    /// Optional additional directories to scan; these are **appended** to the
+    /// default roots (`/root` + `/home/*` probed for Qoder/QoderWork/Claude/
+    /// Codex/Cursor layouts). Duplicates are skipped.
     pub scan_dirs: Option<Vec<PathBuf>>,
     /// Path of the `trajectories.db` SQLite file.
     pub db_path: PathBuf,
@@ -135,11 +137,14 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     }
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
-    // that needs a dedicated converter; everything else shares the
-    // Claude-style converter.
+    // that needs a dedicated converter; Pi uses `type: "message"` with role
+    // discrimination; everything else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let is_pi = !is_codex && (session.source == "pi" || pi::is_pi_format(&events));
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
+    } else if is_pi {
+        pi::convert_pi_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -157,6 +162,8 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     // Agent-private info (cwd, message counts, project) rides in `extra`.
     let private = if is_codex {
         codex::extract_private_metadata(&events, &session.project)
+    } else if is_pi {
+        pi::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
@@ -252,7 +259,7 @@ mod tests {
     #[test]
     fn test_scan_once_ingests_and_skips_unchanged() {
         let base = tmp_dir("scan");
-        let projects = base.join("projects");
+        let projects = base.join(".qoder").join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         write_session(&projects);
 
@@ -264,9 +271,11 @@ mod tests {
         };
 
         scan_once(&store, &config);
-        assert_eq!(store.count().unwrap(), 1);
-
-        let rec = store.get(UUID_A).unwrap().unwrap();
+        // Append mode also ingests from default roots; verify our session exists.
+        let rec = store
+            .get(UUID_A)
+            .unwrap()
+            .expect("test session must be ingested");
         // Derived columns must agree with the persisted ATIF document.
         let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
         assert_eq!(doc["schema_version"], rec.schema_version);
@@ -280,9 +289,10 @@ mod tests {
         assert_eq!(doc["extra"]["cwd"], "/data/myapp");
         assert_eq!(doc["extra"]["project"], "data-myapp");
 
-        // Second scan with unchanged file must not fail and keeps one row.
+        // Second scan with unchanged file must not fail.
+        let count_before = store.count().unwrap();
         scan_once(&store, &config);
-        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(store.count().unwrap(), count_before);
     }
 
     #[test]
@@ -308,20 +318,26 @@ mod tests {
         stop.store(false, Ordering::SeqCst);
         handle.join().unwrap();
 
-        // The first immediate scan must have ingested the session.
+        // The first immediate scan must have ingested the test session.
         let store = TrajectoryStore::new_with_path(&config.db_path).unwrap();
-        assert_eq!(store.count().unwrap(), 1);
+        assert!(
+            store.get(UUID_A).unwrap().is_some(),
+            "test session must be ingested by collector loop"
+        );
     }
 
     #[test]
     fn test_scan_once_skips_empty_steps_session() {
+        // Use a synthetic UUID that cannot collide with real sessions on the
+        // machine (append mode also scans default roots like /root/.qoder/).
+        const UUID_EMPTY: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         let base = tmp_dir("empty-steps");
         let projects = base.join("projects");
         let proj = projects.join("-data-empty");
         std::fs::create_dir_all(&proj).unwrap();
         // JSONL with only metadata — no user/assistant events → 0 ATIF steps.
         std::fs::write(
-            proj.join(format!("{UUID_A}.jsonl")),
+            proj.join(format!("{UUID_EMPTY}.jsonl")),
             "{\"type\":\"runtime-config\",\"sessionId\":\"empty-1\",\"model\":\"test\"}\n{\"type\":\"session_meta\",\"foo\":\"bar\"}\n",
         )
         .unwrap();
@@ -334,7 +350,11 @@ mod tests {
         };
 
         scan_once(&store, &config);
-        assert_eq!(store.count().unwrap(), 0);
+        // The empty-steps session must NOT be ingested (0 ATIF steps).
+        assert!(
+            store.get(UUID_EMPTY).unwrap().is_none(),
+            "session with no steps must be skipped"
+        );
     }
 
     #[test]
@@ -359,9 +379,11 @@ mod tests {
         };
 
         scan_once(&store, &config);
-        assert_eq!(store.count().unwrap(), 1);
 
-        let rec = store.get("rollout-c0ffee").unwrap().unwrap();
+        let rec = store
+            .get("rollout-c0ffee")
+            .unwrap()
+            .expect("codex rollout must be ingested");
         assert_eq!(rec.source, "codex");
         // Codex has no per-project directories: the project column must come
         // from the session cwd, not the "(default)" discovery placeholder.
