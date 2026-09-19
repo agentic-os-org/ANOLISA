@@ -54,6 +54,10 @@ server = [
     "dep:agentsight-opt",
     "dep:agentsight-opt-store",
 ]
+# Pulls the real ActPlane backend into test builds. Off by default: enabling it
+# compiles the vendored ebpf-ifc-engine/actplane-ifc-compiler crates, which the
+# default CI clippy pass excludes (they carry pre-existing lint debt).
+enforcement-e2e = ["agentsight-enforcer/actplane"]
 
 [lib]
 name = "agentsight"
