@@ -120,6 +120,7 @@ anolisa adapter scan
 | OpenCode | `anolisa adapter enable tokenless opencode` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
 | QwenPaw | `anolisa adapter enable tokenless qwenpaw` |
+| Trae | 生命周期脚本（见下文） |
 
 接入后重启对应的 Agent CLI 或 IDE。OpenClaw 还需要运行
 `openclaw gateway restart`；如果安全检查拒绝 Plugin，请按照
@@ -139,6 +140,8 @@ anolisa adapter enable tokenless dsh \
 
 OpenCode 可使用相同的 Adapter 命令。对于没有 ANOLISA 组件记录的 npm 安装，随附生命周期
 脚本仍可作为替代方式。
+Trae 尚未注册到 `anolisa adapter enable`；请使用
+[Trae 接入说明](framework-integration.md#trae)中的随附生命周期脚本。
 
 ## 可选：不接入 Agent 测试压缩
 
