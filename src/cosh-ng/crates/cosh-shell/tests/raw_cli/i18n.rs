@@ -61,6 +61,20 @@ pub(crate) const SLASH_CONFIG_ZH_FORBIDDEN_UI: &[&str] = &[
     "Use /config language [auto|en-US|zh-CN].",
 ];
 
+pub(crate) const HELP_ZH_FORBIDDEN_UI: &[&str] = &[
+    "Slash commands",
+    "compose a one-shot Agent request",
+    // Group titles: the usages and scope tags inside the panel are lower-case
+    // (/status, /config language, [config]), so these only match a header that
+    // was never localized.
+    "Registry",
+    "Sessions",
+    "Status",
+    "Config",
+    "Health",
+    "Modes",
+];
+
 pub(crate) const MODE_ZH_FORBIDDEN_UI: &[&str] = &[
     "Trust confirmation required",
     "Trust mode auto-approves provider tool requests",

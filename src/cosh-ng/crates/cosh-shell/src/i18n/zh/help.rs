@@ -48,6 +48,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
+        // "Hooks" stays an English loanword on purpose. The zh catalog says
+        // Hook/Hooks everywhere and never 钩子: HelpSummaryHooks below renders
+        // "显示 Hook 状态" inside this very group, zh/hooks.rs counts "已注册 {count}
+        // 个 Hook。", zh/approval.rs titles its panel "Hook 审查", and zh/health.rs
+        // labels its collector "Hooks". Translating this one title would put 钩子
+        // directly above "显示 Hook 状态".
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "显示命令参考",
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
@@ -60,7 +66,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
         }
         MessageId::HelpSummaryModeRouting => "选择未知自然语言输入是否可以路由给 Agent",
-        MessageId::HelpSummaryAgent => "组稿一次性 Agent 请求",
+        MessageId::HelpSummaryAgent => "编写一次性 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",
         MessageId::HelpSummaryDetails => "查看审批或活动详情",
@@ -110,7 +116,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",
         MessageId::HelpSummaryTask => "委托并查看本机持久 Agent Task",
-        MessageId::HelpGroupRegistry => "Registry",
+        MessageId::HelpGroupRegistry => "注册表",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
         MessageId::HelpSummaryMcp => "管理 MCP 服务器",
