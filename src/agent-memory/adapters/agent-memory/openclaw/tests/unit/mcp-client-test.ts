@@ -13,8 +13,9 @@ import assert from "node:assert/strict";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
-  it("maps memory_get → mem_read", () => {
-    assert.equal(resolveMcpToolName("memory_get"), "mem_read");
+  it("maps namespaced OpenClaw tools to native MCP names", () => {
+    assert.equal(resolveMcpToolName("anolisa_memory_get"), "mem_read");
+    assert.equal(resolveMcpToolName("anolisa_memory_search"), "memory_search");
   });
 
   it("passes other OpenClaw contract names through", () => {

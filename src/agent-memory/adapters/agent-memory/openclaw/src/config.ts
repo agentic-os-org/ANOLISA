@@ -137,7 +137,7 @@ export const CONTRACT_TOOLS_HIDDEN_BY_EXPERT = [
  *  search, observe and get_context tools fail every call, whose auto-recall
  *  fails on every prompt, and whose corpus supplement silently answers
  *  nothing — the only hint is an error string inside each tool result. The
- *  adapter exposes exactly one Tier A tool (`memory_get` → `mem_read`) and
+ *  adapter exposes exactly one Tier A tool (`anolisa_memory_get` → `mem_read`) and
  *  cannot expose the rest without breaking the host's memory contract, so
  *  `expert` stays a setting for direct MCP clients that drive Tier A
  *  themselves. Refusing at boot is this module's standing contract for a

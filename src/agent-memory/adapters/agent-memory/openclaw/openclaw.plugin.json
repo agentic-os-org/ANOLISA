@@ -9,8 +9,8 @@
   "kind": "memory",
   "contracts": {
     "tools": [
-      "memory_search",
-      "memory_get",
+      "anolisa_memory_search",
+      "anolisa_memory_get",
       "memory_observe",
       "memory_get_context"
     ]

@@ -95,6 +95,13 @@ Once running as MCP server, agents interact via tools:
 | Get context | `memory_get_context(max_tokens)` |
 | Snapshot | `mem_snapshot(name)` |
 
+The OpenClaw plugin uses `anolisa_memory_search` and `anolisa_memory_get` for
+ANOLISA memories, alongside `memory_observe` and `memory_get_context`. Update
+old tool-name references in prompts and allowlists when upgrading, restart the
+gateway, and start a new conversation. Internal MCP names and stored data stay
+unchanged. See the [user guide](../../docs/user-guide/en/token-saving/agent-memory.md)
+for migration from installers that disabled `memory-core`.
+
 ## Architecture
 
 Single-process Tokio async runtime exposing 37 MCP tools over stdio JSON-RPC 2.0:
