@@ -649,14 +649,53 @@ type = "config"
 
 #[test]
 fn install_raw_end_to_end_from_local_repo() {
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
+    use anolisa_platform::rpm_query::RpmPackageQuery;
+
+    struct EmptyRpmDb;
+    impl CommandRunner for EmptyRpmDb {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            assert_eq!(program, "rpm");
+            let stdout = match args {
+                [
+                    "-q",
+                    "--whatprovides",
+                    "--qf",
+                    "%{NAME}\n",
+                    "anolisa-component(agentsight)",
+                ] => "no package provides anolisa-component(agentsight)",
+                ["-q", "agentsight"]
+                | [
+                    "-q",
+                    "--qf",
+                    "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n",
+                    "agentsight",
+                ] => "package agentsight is not installed",
+                _ => panic!("unexpected RPM query: {args:?}"),
+            };
+            Ok(CommandOutput {
+                code: Some(1),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
     let repo_url = write_local_repo(&tmp.path().join("repo"));
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url.clone());
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install must succeed");
+    a.backend = Some("raw".into());
+    handle_one_with_query_env(
+        "agentsight".into(),
+        a,
+        &ctx_with_prefix(false, Some(prefix.clone())),
+        &rpm_host_env(),
+        &RpmPackageQuery::with_runner(EmptyRpmDb),
+    )
+    .expect("raw install must succeed without an RPM repository");
 
     let layout = FsLayout::system(Some(prefix));
     let bin = layout.bin_dir.join("agentsight");

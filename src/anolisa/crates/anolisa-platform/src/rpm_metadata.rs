@@ -38,6 +38,7 @@ fn diagnostic_origin(value: &str) -> String {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct RpmSnapshot {
     packages: Vec<(PackageInfo, Vec<String>)>,
 }

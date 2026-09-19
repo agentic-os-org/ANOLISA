@@ -277,16 +277,25 @@ fn primary_header_requires_a_valid_package_count() {
 }
 
 #[test]
-fn empty_repository_is_success_and_unconfigured_query_is_an_error() {
+fn empty_or_unconfigured_repository_has_no_available_candidates() {
     let xml = r#"<metadata xmlns="http://linux.duke.edu/metadata/common" packages="0"></metadata>"#;
     let dir = fixture(xml, CompressionType::None);
     assert!(query(&dir).query_available("probe").unwrap().is_empty());
     let query = RpmPackageQuery::with_runner(NoCommands);
     assert_eq!(query.installed_origin("probe").unwrap(), None);
-    assert!(matches!(
-        query.query_available("probe"),
-        Err(PackageQueryError::Repository(_))
-    ));
+    assert!(query.query_available("probe").unwrap().is_empty());
+    assert!(
+        query
+            .what_provides_available("anolisa-component(probe)")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        query
+            .provided_capabilities_available("probe")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

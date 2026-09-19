@@ -9,7 +9,7 @@ use crate::pkg_files::{
     PackageFileQuery,
 };
 use crate::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
-use crate::rpm_metadata::{RpmMetadataError, RpmSnapshot};
+use crate::rpm_metadata::RpmSnapshot;
 use crate::rpm_repo::RpmRepoSource;
 use std::sync::OnceLock;
 
@@ -132,14 +132,11 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
         if let Some(snapshot) = self.snapshot.get() {
             return Ok(snapshot);
         }
-        let repo = self
-            .repo
-            .as_ref()
-            .ok_or_else(|| RpmMetadataError::Invalid {
-                url: "<unconfigured>".into(),
-                reason: "RPM repository queries require an explicit repository source".into(),
-            })?;
-        let snapshot = RpmSnapshot::load(repo)?;
+        let snapshot = match &self.repo {
+            Some(repo) => RpmSnapshot::load(repo)?,
+            // Local-only queries have no repository candidates to resolve.
+            None => RpmSnapshot::default(),
+        };
         Ok(self.snapshot.get_or_init(|| snapshot))
     }
 }
