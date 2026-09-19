@@ -137,6 +137,13 @@ runs:
 
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+          # Source0 must contain source and lockfiles only. Source1 supplies
+          # every generated Cargo/npm dependency needed by the offline V2 RPM.
+          find "/tmp/build/${ARCHIVE_NAME}" -type d \( \
+            -name '.venv' -o -name 'node_modules' -o -name 'target' -o \
+            -name 'dist' -o -name '__pycache__' -o -name '.pytest_cache' -o \
+            -name '.ruff_cache' \
+          \) -prune -exec rm -rf {} +
           # Replace example keys in trusted-keys with the real GPG public key
           # so the packaged archive ships the production key.
           if [ -n "$GPG_PUBLIC_KEY" ]; then

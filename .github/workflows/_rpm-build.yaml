@@ -29,6 +29,16 @@ on:
         required: false
         type: string
         default: ""
+      spec-template:
+        description: "Optional spec template filename inside Source0"
+        required: false
+        type: string
+        default: ""
+      offline-build:
+        description: "Build from Source0 and Source1 with Cargo and npm offline modes enabled"
+        required: false
+        type: boolean
+        default: false
 
 env:
   RUSTUP_DIST_SERVER: https://static.rust-lang.org
@@ -99,7 +109,7 @@ jobs:
         if: inputs.component == 'agent-sec-core'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.93.0'
+          toolchain: '1.93.1'
 
       - name: "Setup Rust toolchain (skillfs)"
         if: inputs.component == 'skillfs'
@@ -226,8 +236,13 @@ jobs:
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" anolisa
           fi
 
-          # Find and process spec template
-          SPEC_IN=$(find "$EXTRACT_DIR" -name "${COMPONENT}.spec.in" | head -1)
+          # Find and process the requested spec template. V2 sec-core must not
+          # fall back to the co-located V1 template.
+          if [ -n "${{ inputs.spec-template }}" ]; then
+            SPEC_IN=$(find "$EXTRACT_DIR" -name "${{ inputs.spec-template }}" | head -1)
+          else
+            SPEC_IN=$(find "$EXTRACT_DIR" -name "${COMPONENT}.spec.in" | head -1)
+          fi
           if [ -z "$SPEC_IN" ]; then
             SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
           fi
@@ -249,21 +264,32 @@ jobs:
           echo "SPEC_BASENAME=$(basename "$SPEC_FILE")" >> $GITHUB_ENV
           echo "EXTRACT_DIR=${EXTRACT_DIR}" >> $GITHUB_ENV
 
+      - name: Install declared build dependencies
+        if: inputs.offline-build
+        run: dnf builddep -y --spec "$HOME/rpmbuild/SPECS/${SPEC_BASENAME}"
+
       - name: Build RPM
         run: |
-          rpmbuild -bb --nodeps \
-            --define "_topdir $HOME/rpmbuild" \
-            ~/rpmbuild/SPECS/${SPEC_BASENAME}
+          if [ "${{ inputs.offline-build }}" = "true" ]; then
+            rpmbuild -ba \
+              --define "_topdir $HOME/rpmbuild" \
+              "$HOME/rpmbuild/SPECS/${SPEC_BASENAME}"
+          else
+            rpmbuild -ba --nodeps \
+              --define "_topdir $HOME/rpmbuild" \
+              "$HOME/rpmbuild/SPECS/${SPEC_BASENAME}"
+          fi
 
       - name: Collect RPM artifacts
         run: |
           ARCH="${{ inputs.arch }}"
           RPM_ARCH="$([[ "$ARCH" == "amd64" ]] && echo "x86_64" || echo "aarch64")"
 
-          mkdir -p /tmp/rpm-output/
+          mkdir -p /tmp/rpm-output/ /tmp/srpm-output/
 
-          # Collect built RPMs (both arch-specific and noarch)
+          # Collect built RPMs (both arch-specific and noarch) and the SRPM.
           find ~/rpmbuild/RPMS/ -name "*.rpm" -exec cp {} /tmp/rpm-output/ \;
+          find ~/rpmbuild/SRPMS/ -name "*.src.rpm" -exec cp {} /tmp/srpm-output/ \;
 
           echo "Built RPMs:"
           ls -la /tmp/rpm-output/
@@ -279,5 +305,13 @@ jobs:
         with:
           name: rpm-${{ inputs.component }}-${{ inputs.arch }}${{ inputs.artifact-suffix }}
           path: /tmp/rpm-output/*.rpm
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload SRPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: srpm-${{ inputs.component }}${{ inputs.artifact-suffix }}
+          path: /tmp/srpm-output/*.src.rpm
           retention-days: 7
           if-no-files-found: error
