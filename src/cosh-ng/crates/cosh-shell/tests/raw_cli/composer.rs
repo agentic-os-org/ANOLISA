@@ -250,10 +250,13 @@ fn raw_cli_bash_agent_composer_submits_multiline_request_and_restores_custom_pro
     assert!(count_occurrences(&output, "alice@remote:") >= 2, "{output}");
     let visible = strip_ansi_escape(&output).replace('\r', "");
     assert!(
-        count_occurrences(&visible, "◇ \nalice@remote:") >= 2,
-        "Enhanced must identify both the initial and restored Shell prompt: {output}"
+        count_occurrences(&visible, "\nalice@remote:") >= 2,
+        "Enhanced must render both the initial and restored Shell prompt: {output}"
     );
-    assert!(!output.contains("◇ ◇"), "{output}");
+    assert!(
+        !visible.contains("◇ ") && !visible.contains("◌ "),
+        "no status symbol lines may be emitted: {output}"
+    );
     assert!(!output.contains("bash: /agent"), "{output}");
     let composer = output.find("Agent Composer").expect("composer card");
     let draft_text = output[composer..]
@@ -333,10 +336,13 @@ fn raw_cli_zsh_agent_composer_cancel_restores_custom_prompt() {
     assert!(count_occurrences(&output, "zsh@remote:") >= 2, "{output}");
     let visible = strip_ansi_escape(&output).replace('\r', "");
     assert!(
-        count_occurrences(&visible, "◇ \nzsh@remote:") >= 2,
-        "Enhanced must identify both the initial and restored Zsh prompt: {output}"
+        count_occurrences(&visible, "\nzsh@remote:") >= 2,
+        "Enhanced must render both the initial and restored Zsh prompt: {output}"
     );
-    assert!(!output.contains("◇ ◇"), "{output}");
+    assert!(
+        !visible.contains("◇ ") && !visible.contains("◌ "),
+        "no status symbol lines may be emitted: {output}"
+    );
     assert!(
         !output.contains("Received shell prompt request: cancel this draft"),
         "{output}"

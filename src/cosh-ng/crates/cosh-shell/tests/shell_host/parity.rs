@@ -143,9 +143,10 @@ fn bash_secondary_prompt_stays_shell_owned() {
         if let (Some(environment_ps2), Some(_)) = (environment_ps2, startup_ps2) {
             assert!(!terminal.contains(environment_ps2), "{terminal:?}");
         }
-        if integration == ShellIntegration::Native {
-            assert!(!terminal.contains('◇'), "{terminal:?}");
-        }
+        assert!(
+            !terminal.contains('◇') && !terminal.contains('◌'),
+            "{integration_name}/{mode}: no status symbol lines may be emitted: {terminal:?}"
+        );
         assert_eq!(output.exit_status, Some(0), "{terminal:?}");
     }
 }

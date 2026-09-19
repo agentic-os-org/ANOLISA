@@ -881,8 +881,11 @@ fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
 
         let raw_terminal = String::from_utf8_lossy(&rendered);
         let terminal = without_readline_mode_controls(&raw_terminal);
-        assert!(terminal.contains("\r\x1b[2K◌ \r\nswitch$ "), "{terminal}");
-        assert!(terminal.contains("\r\x1b[2K◇ \r\nswitch$ "), "{terminal}");
+        assert!(terminal.contains("\r\x1b[2Kswitch$ "), "{terminal}");
+        assert!(
+            !terminal.contains('◇') && !terminal.contains('◌'),
+            "ownership toggles must not emit status symbol lines: {terminal}"
+        );
         assert!(terminal.contains("__KEEP__=alive"), "{terminal}");
         let intercepted = output
             .events

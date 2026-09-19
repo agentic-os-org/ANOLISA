@@ -1478,8 +1478,12 @@ fn raw_cli_cosh_entry_default_enhanced_reaches_user_prompt() {
     );
     let visible = strip_ansi_escape(&output);
     assert!(
-        visible.replace('\r', "").contains("◇ \n__RC_READY__ "),
+        visible.replace('\r', "").contains("__RC_READY__ "),
         "{output}"
+    );
+    assert!(
+        !visible.contains("◇ ") && !visible.contains("◌ "),
+        "default Enhanced must not emit status symbol lines: {output}"
     );
     assert_ordered(&visible, &["__RC_READY__ ", "__DONE__<loaded>"]);
 }

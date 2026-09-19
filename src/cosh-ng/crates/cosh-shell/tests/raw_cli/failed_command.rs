@@ -30,8 +30,10 @@ fn raw_cli_failure_insight_keeps_shell_only_ownership_of_shift_tab() {
         visible.contains("The previous input did not run successfully"),
         "{output}"
     );
-    assert!(count_occurrences(&visible, "◌ ") >= 2, "{output}");
-    assert_eq!(count_occurrences(&visible, "◇ "), 1, "{output}");
+    assert!(
+        !visible.contains("◌ ") && !visible.contains("◇ "),
+        "Shift+Tab ownership switches must not emit status symbol lines: {output}"
+    );
 }
 
 #[test]

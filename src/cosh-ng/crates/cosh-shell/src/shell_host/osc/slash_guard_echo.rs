@@ -41,7 +41,6 @@ pub(super) struct SlashGuardResolution {
     pub(super) prefix: Vec<u8>,
     pub(super) suffix: Vec<u8>,
     pub(super) insert_command: bool,
-    pub(super) presentation_start_in_prefix: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -161,8 +160,6 @@ impl PendingSlashGuardEcho {
             .is_some_and(|before_ending| {
                 Self::proves_painted_command(before_ending, command, &redraw.prefix)
             });
-        let presentation_start_in_prefix =
-            pending.presentation_start_in_prefix(&redraw.prefix, command);
         let mut suffix = redraw.line_ending;
         suffix.extend_from_slice(&redraw.deferred);
         suffix.extend_from_slice(&pending.line);
@@ -170,23 +167,7 @@ impl PendingSlashGuardEcho {
             prefix: redraw.prefix,
             suffix,
             insert_command,
-            presentation_start_in_prefix,
         })
-    }
-
-    fn presentation_start_in_prefix(&self, prefix: &[u8], command: &[u8]) -> Option<usize> {
-        let start = prefix
-            .iter()
-            .rposition(|byte| *byte == b'\r')
-            .map_or(0, |index| index + 1);
-        let candidate = &prefix[start..];
-        let direct_prompt_matches = self
-            .before_arm
-            .strip_suffix(b"\r\x1b[K\r")
-            .and_then(|before| before.strip_suffix(command))
-            .is_some_and(|before_prompt| before_prompt.ends_with(candidate));
-        let stable_prompt_matches = self.prompt_before_input.ends_with(candidate);
-        (!candidate.is_empty() && (stable_prompt_matches || direct_prompt_matches)).then_some(start)
     }
 
     fn proves_painted_command(before_ending: &[u8], command: &[u8], prefix: &[u8]) -> bool {
@@ -393,16 +374,7 @@ impl OscParser {
         else {
             return self.flush_pending_slash_guard_echo();
         };
-        let prefix_base = self.display.position();
         self.append_passthrough(&resolution.prefix)?;
-        if let Some(start) = resolution.presentation_start_in_prefix {
-            self.prompt_presentation_display_starts.push(
-                super::super::prompt_presentation::PromptDisplayStart {
-                    position: prefix_base + start,
-                    publish_status: false,
-                },
-            );
-        }
         if resolution.insert_command {
             self.append_display_only(command.as_bytes())?;
         }

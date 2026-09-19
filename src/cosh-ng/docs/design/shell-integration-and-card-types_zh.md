@@ -45,27 +45,25 @@ Enhanced 内部的路由子状态，不等同于没有 hook 的 Native 集成。
 | 符号 | 状态 | 所有者 | 行为 |
 |---|---|---|---|
 | 无 | Native | 子 Shell | 每个字节直接写入 PTY。Cosh 不装饰用户原提示符，也不观察命令事件。 |
-| `◌` | Enhanced Shell-only | 子 Shell，Cosh 观察 | 包括 `hello`、`/` 和 `??` 在内的普通输入都交给 Shell。Enhanced marker 集成仍加载，因此执行后洞察和安全切换仍可用。 |
-| `◇` | Enhanced Assisted | Shell 执行，Cosh 可路由 | Cosh 可以在 Shell 执行前观察、分类或路由提交的输入。 |
+| 无 | Enhanced Shell-only | 子 Shell，Cosh 观察 | 包括 `hello`、`/` 和 `??` 在内的普通输入都交给 Shell。Enhanced marker 集成仍加载，因此执行后洞察和安全切换仍可用。 |
+| 无 | Enhanced Assisted | Shell 执行，Cosh 可路由 | Cosh 可以在 Shell 执行前观察、分类或路由提交的输入。 |
 | `◆` | Agent | Agent runtime | `/agent` 打开无边框行内 Composer，并在可编辑文本前持续显示 `◆ `；普通文本（包括 `ls`）按 Agent 请求处理；开头的 slash 控制命令在本地分发。 |
 | `/` | Cosh Command | Cosh 控制面 | 明确的斜杠命令，只在 Enhanced Assisted 中拦截。 |
 
-`◇` 和 `◌` 在 PS1/PROMPT 前各占一个独立的外层终端状态行。Enhanced hook 的
-`prompt_ready` 边界发布该行；Agent 或面板返回、路由模式切换也发布当前状态。
-普通 candidate、ghost 和经过认证的 slash-guard 重绘只重画原提示符与输入，
-不能追加状态行。状态行随输出滚动；明确切换路由时，先前状态留在终端历史中，
-不会通过猜测旧状态所在的屏幕行来原地改写。
+Enhanced 的 Shell 所有状态不再发布外层终端状态行：Enhanced hook 的
+`prompt_ready` 边界只驱动观察与路由，子 Shell 的提示符字节逐字节透传。
+Agent 或面板返回、路由模式切换会原位重绘原提示符；普通 candidate、ghost
+和经过认证的 slash-guard 重绘同样只重画原提示符与输入，不能追加任何额外行。
 
 PS1/PROMPT 和 PTY 尺寸保持原值。子 Shell 从第 0 列绘制提示符，Readline/ZLE
 因此能计算提示符与输入的每一格，包括 ANSI、CJK、组合字符和多行文本。
-状态行不占用保留的终端区域；Shell 自主清屏/重绘可能移除它，直到下次发布或控制权返回。
 
 Bash 既有的历史隐私提交保护仍会在接受经过光标编辑、镜像无法证明不含秘密的草稿时
 添加一个前导空格。这是 accept-line 阶段的显示变化，与编辑区几何分开；参数字节和
 隐私保护逻辑保持原样。
 
-在 Enhanced 的空主提示符处按 `Shift+Tab` 会发布 `◌` 状态行并关闭 Cosh 输入拦截，
-再次按下则发布 `◇` 并恢复路由，不向 Shell 提交空命令，也不重启子 Shell。
+在 Enhanced 的空主提示符处按 `Shift+Tab` 会切换到 Shell-only 并关闭 Cosh 输入拦截，
+再次按下则恢复 Assisted 路由，不向 Shell 提交空命令，也不重启子 Shell。
 Shell 行已有内容时，按键序列原样交给 Shell；
 prompt ghost 或卡牌处于活动状态时，保留原有的 `Shift+Tab` 行为。提示符边界门禁
 保证快捷键不会误入 PS2、heredoc、前台程序或全屏应用。

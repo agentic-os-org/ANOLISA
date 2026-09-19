@@ -78,19 +78,18 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted is the default. The `◇` status line above the prompt shows
-that Cosh may classify and route submitted input before the foreground Shell executes it:
+Enhanced Assisted is the default. Cosh keeps the shell's native prompt
+appearance, and may classify and route submitted input before the foreground
+Shell executes it:
 
 ```text
-◇
 user@host:~/project$ git status
-◇
 user@host:~/project$ explain why this service keeps restarting
 ```
 
-At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only. Its
-`◌` status line means ordinary input goes to the Shell while post-command insights
-remain available. Press `Shift+Tab` again to return to Assisted mode.
+At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only, where
+ordinary input goes straight to the Shell while post-command insights remain
+available. Press `Shift+Tab` again to return to Assisted mode.
 
 Start Native explicitly when the session must have no Cosh hooks, observation,
 or insights:

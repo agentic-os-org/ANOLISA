@@ -1,41 +1,7 @@
 use super::*;
 
-fn initial_prompt_status_line<'a>(visible: &'a str, prompt: &str) -> &'a str {
-    let prompt_start = visible.find(prompt).expect("initial enhanced prompt");
-    visible[..prompt_start]
-        .trim_end_matches('\r')
-        .strip_suffix('\n')
-        .map(|before| {
-            before
-                .trim_end_matches('\r')
-                .rsplit('\n')
-                .next()
-                .unwrap_or_default()
-        })
-        .unwrap_or_default()
-}
-
 #[test]
-fn initial_assisted_status_requires_a_separate_line() {
-    let prompt = "enhanced-owner$ ";
-
-    assert_eq!(
-        initial_prompt_status_line("◇ \r\nenhanced-owner$ ", prompt),
-        "◇ "
-    );
-    assert_ne!(initial_prompt_status_line("enhanced-owner$ ", prompt), "◇ ");
-    assert_ne!(
-        initial_prompt_status_line("◇ enhanced-owner$ ", prompt),
-        "◇ "
-    );
-    assert_ne!(
-        initial_prompt_status_line("◇ ◇ \r\nenhanced-owner$ ", prompt),
-        "◇ "
-    );
-}
-
-#[test]
-fn raw_cli_isolated_candidate_redraws_do_not_repeat_assisted_status() {
+fn raw_cli_isolated_candidate_redraws_add_no_status_lines() {
     let prompt = "isolated-owner$ ";
     let home = temp_shell_home("prompt-owner-isolation-values");
     fs::write(home.join(".bashrc"), format!("PS1='{prompt}'\n")).unwrap();
@@ -83,13 +49,14 @@ fn raw_cli_isolated_candidate_redraws_do_not_repeat_assisted_status() {
                 prompt_count, expected_prompt_count,
                 "{isolated}/{width}: {output}"
             );
-            assert_eq!(
-                count_occurrences(&visible, &format!("◇ \n{prompt}")),
-                4,
-                "{isolated}/{width}: only publication and control return may add an Assisted status: {output}"
+            assert!(
+                !visible.contains("◇ "),
+                "{isolated}/{width}: no Assisted status line may be emitted: {output}"
             );
-            assert!(!visible.contains("◇ ◇"), "{isolated}/{width}: {output}");
-            assert!(!visible.contains("◌ "), "{isolated}/{width}: {output}");
+            assert!(
+                !visible.contains("◌ "),
+                "{isolated}/{width}: no Shell-only status line may be emitted: {output}"
+            );
         }
     }
     let _ = fs::remove_dir_all(home);
@@ -120,7 +87,7 @@ fn raw_cli_native_keeps_custom_bash_prompt_undecorated() {
 }
 
 #[test]
-fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1() {
+fn raw_cli_default_enhanced_keeps_bash_prompt_undecorated_without_mutating_ps1() {
     let home = temp_shell_home("enhanced-custom-prompt");
     fs::write(home.join(".bashrc"), "PS1='enhanced-owner$ '\n").unwrap();
     let home_str = home.to_string_lossy().to_string();
@@ -142,18 +109,61 @@ fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1(
     let _ = fs::remove_dir_all(&home);
     let visible = strip_ansi_escape(&output).replace('\r', "");
 
-    assert_eq!(
-        initial_prompt_status_line(&visible, "enhanced-owner$ "),
-        "◇ ",
-        "initial prompt must expose the Assisted input owner: {output}"
-    );
-
+    // The default Enhanced session must render the child prompt exactly as
+    // the shell drew it: no status symbol lines, no leftover blank lines.
     assert!(
-        count_occurrences(&visible, "◇ \nenhanced-owner$ ") >= 2,
+        !visible.contains("◇ "),
+        "no Assisted status line may be emitted: {output}"
+    );
+    assert!(
+        !visible.contains("◌ "),
+        "no Shell-only status line may be emitted: {output}"
+    );
+    // The prompt text itself must appear at least twice (initial prompt and
+    // the post-command repaint). Line-start anchoring is not portable: the
+    // first prompt may sit at the very start of the output, and in-place
+    // redraws (\r + clear-line) do not create new lines. Row geometry is
+    // covered by the VT100 terminal_ownership tests.
+    assert!(
+        count_occurrences(&visible, "enhanced-owner$ ") >= 2,
         "{output}"
     );
     assert!(visible.contains("__PS1__<enhanced-owner$ >"), "{output}");
     assert!(!visible.contains("__PS1__<◇ enhanced-owner$ >"), "{output}");
+}
+
+#[test]
+fn raw_cli_enhanced_passes_through_user_prompt_containing_status_glyph() {
+    let home = temp_shell_home("enhanced-glyph-prompt");
+    fs::write(home.join(".bashrc"), "PS1='◇ owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("◇ owner$", b"printf '__PS1__<%s>\\n' \"$PS1\"\n"),
+            ("__PS1__<◇ owner$ >", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    // The glyph comes from the user's own PS1 and must render verbatim,
+    // exactly once per prompt, with no extra injected status line.
+    assert!(
+        count_occurrences(&visible, "◇ owner$ ") >= 2,
+        "user prompt containing ◇ must pass through unchanged: {output}"
+    );
+    assert!(!visible.contains("◇ \n◇"), "{output}");
+    assert!(!visible.contains("◌ "), "{output}");
+    assert!(visible.contains("__PS1__<◇ owner$ >"), "{output}");
 }
 
 #[test]
@@ -194,12 +204,14 @@ fn raw_cli_mode_routing_switches_the_live_enhanced_session() {
         1,
         "{output}"
     );
-    assert!(visible.contains("◌ "), "{output}");
-    assert!(visible.contains("◇ "), "{output}");
+    assert!(
+        !visible.contains("◌ ") && !visible.contains("◇ "),
+        "routing switches must not emit status symbol lines: {output}"
+    );
 }
 
 #[test]
-fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
+fn raw_cli_enhanced_keeps_zsh_prompt_undecorated_without_mutating_prompt() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
     }
@@ -229,14 +241,14 @@ fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
     let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(
-        count_occurrences(&visible, "◇ \nenhanced-zsh> ") >= 2,
+        count_occurrences(&visible, "enhanced-zsh> ") >= 2,
         "{output}"
+    );
+    assert!(
+        !visible.contains("◇ ") && !visible.contains("◌ "),
+        "no status symbol lines may be emitted: {output}"
     );
     assert!(visible.contains("__PROMPT__<enhanced-zsh> >"), "{output}");
-    assert!(
-        !visible.contains("__PROMPT__<◇ enhanced-zsh> >"),
-        "{output}"
-    );
 }
 
 #[test]
@@ -274,8 +286,12 @@ fn raw_cli_enhanced_shift_tab_toggles_zsh_routing_in_place() {
         "{output}"
     );
     assert!(
-        count_occurrences(&visible, "◇ \nenhanced-zsh> ") >= 2,
+        count_occurrences(&visible, "enhanced-zsh> ") >= 2,
         "{output}"
+    );
+    assert!(
+        !visible.contains("◇ ") && !visible.contains("◌ "),
+        "Shift+Tab toggles must not emit status symbol lines: {output}"
     );
 }
 
