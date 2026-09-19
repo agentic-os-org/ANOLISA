@@ -7,7 +7,7 @@
 ///
 /// This struct contains metadata about a specific AI agent product,
 /// including the process names that can be used to identify it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentInfo {
     /// Agent name (e.g., "Claude Code", "Aider", "GitHub Copilot")
     pub name: String,
@@ -40,7 +40,7 @@ impl AgentInfo {
 ///
 /// This struct represents an actual running process that has been
 /// identified as an AI agent based on matching against known agent types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiscoveredAgent {
     /// The corresponding agent type information
     pub agent_info: AgentInfo,

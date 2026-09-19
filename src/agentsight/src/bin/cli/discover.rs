@@ -20,6 +20,10 @@ pub struct DiscoverCommand {
     /// Path to JSON configuration file
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
+
+    /// Output as JSON
+    #[structopt(long)]
+    pub json: bool,
 }
 
 impl DiscoverCommand {
@@ -74,6 +78,12 @@ impl DiscoverCommand {
         let mut scanner = AgentScanner::from_rules(&rules, &[]);
         let running_agents = scanner.scan();
 
+        if self.json {
+            let infos: Vec<_> = matchers.iter().map(|m| m.info().clone()).collect();
+            super::print_json(&infos);
+            return;
+        }
+
         println!("已知 AI Agent（共 {} 条规则）:", matchers.len());
         println!("{}", "=".repeat(60));
         println!();
@@ -112,6 +122,11 @@ impl DiscoverCommand {
         let mut scanner = AgentScanner::from_rules(&rules, &[]);
         let agents = scanner.scan();
 
+        if self.json {
+            super::print_json(&agents);
+            return;
+        }
+
         if agents.is_empty() {
             println!("未发现正在运行的 AI Agent。");
             println!();
@@ -127,7 +142,6 @@ impl DiscoverCommand {
             println!("  {} [PID: {}]", agent.agent_info.name, agent.pid);
             println!("    类别: {}", agent.agent_info.category);
 
-            // Truncate long command lines
             let cmdline_str = agent.cmdline_args.join(" ");
             let cmdline = if cmdline_str.len() > 80 && !self.verbose {
                 format!("{}...", &cmdline_str[..77])
