@@ -24,12 +24,18 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from swe_runner.trace_extraction.helpers import extract_issue_id, ns_to_iso, parse_time_value
+from swe_runner.trace_extraction.helpers import ExtractionError, extract_issue_id, ns_to_iso, parse_time_value
 from swe_runner.trace_extraction.token_counting import count_tokens
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
+
+# OpenClaw 2026.8.2 keeps transcripts in SQLite and writes no session JSONL at
+# all. A profile that has the SQLite store but no JSONL is not an empty run --
+# it is a run this extractor cannot read, and reporting zero traces for it was
+# indistinguishable from an agent that did nothing.
+_AGENT_SQLITE_GLOB = "agents/*/agent/openclaw-agent.sqlite"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -577,6 +583,25 @@ def _session_files_in_profile(profile_dir: Path) -> list[Path]:
     return sorted(profile_dir.glob("agents/*/sessions/*.jsonl"))
 
 
+def _reject_sqlite_only_profile(profile_dir: Path) -> None:
+    """Fail when a profile stores its transcript somewhere this reader cannot see.
+
+    Raises:
+        ExtractionError: The profile holds an agent SQLite store but no session
+            JSONL, so a silently empty trace set could be mistaken for a run
+            with nothing to record.
+    """
+    stores = sorted(profile_dir.glob(_AGENT_SQLITE_GLOB))
+    if not stores:
+        return
+    raise ExtractionError(
+        f"OpenClaw profile {profile_dir} has no session JSONL but does have "
+        f"{len(stores)} agent SQLite store(s) (first: {stores[0]}); this OpenClaw "
+        "build records transcripts in SQLite, so JSONL trace extraction would "
+        "report an empty run instead of failing. Use the SQLite reader instead."
+    )
+
+
 def _iter_session_files(
     profiles_root: Path | None,
     profile_dirs: Iterable[str | Path] | None,
@@ -589,7 +614,10 @@ def _iter_session_files(
             if not profile_dir.exists():
                 logger.warning("OpenClaw profile dir not found, skipping JSONL trace record: %s", profile_dir)
                 continue
-            session_files.extend(_session_files_in_profile(profile_dir))
+            found = _session_files_in_profile(profile_dir)
+            if not found:
+                _reject_sqlite_only_profile(profile_dir)
+            session_files.extend(found)
         return sorted(dict.fromkeys(session_files))
 
     if profiles_root is None:
@@ -599,7 +627,11 @@ def _iter_session_files(
     if not profiles_root.exists():
         logger.warning("OpenClaw profiles dir not found, skipping JSONL trace record: %s", profiles_root)
         return []
-    return sorted(profiles_root.glob("*/agents/*/sessions/*.jsonl"))
+    found = sorted(profiles_root.glob("*/agents/*/sessions/*.jsonl"))
+    if not found:
+        for profile_dir in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
+            _reject_sqlite_only_profile(profile_dir)
+    return found
 
 
 def _trace_started_in_window(trace_data: dict[str, Any], start_ns: int, end_ns: int) -> bool:

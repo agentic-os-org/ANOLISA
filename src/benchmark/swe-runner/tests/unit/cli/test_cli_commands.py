@@ -96,3 +96,68 @@ def test_build_run_settings_rejects_unsupported_tokenless_agent(tmp_path: Path) 
             tokenless=True,
             per_case_prompt=False,
         )
+
+
+def test_build_run_settings_rejects_unsupported_headroom_agent(tmp_path: Path) -> None:
+    with pytest.raises(CommandUsageError, match="not supported"):
+        build_run_settings(
+            agent="cosh",
+            subset="lite",
+            split="test",
+            output=tmp_path,
+            timeout=120,
+            step_limit=0,
+            slice_range=None,
+            filter_regex=None,
+            instance_id=None,
+            workers=1,
+            docker_pull_registry=None,
+            use_skill=False,
+            tokenless=False,
+            headroom=True,
+            per_case_prompt=False,
+        )
+
+
+def test_build_run_settings_rejects_tokenless_combined_with_headroom(tmp_path: Path) -> None:
+    with pytest.raises(CommandUsageError, match="mutually exclusive"):
+        build_run_settings(
+            agent="openclaw",
+            subset="lite",
+            split="test",
+            output=tmp_path,
+            timeout=120,
+            step_limit=0,
+            slice_range=None,
+            filter_regex=None,
+            instance_id=None,
+            workers=1,
+            docker_pull_registry=None,
+            use_skill=False,
+            tokenless=True,
+            headroom=True,
+            per_case_prompt=False,
+        )
+
+
+def test_build_run_settings_maps_headroom_into_agent_config(tmp_path: Path) -> None:
+    settings = build_run_settings(
+        agent="openclaw",
+        subset="lite",
+        split="test",
+        output=tmp_path,
+        timeout=120,
+        step_limit=0,
+        slice_range=None,
+        filter_regex=None,
+        instance_id=None,
+        workers=1,
+        docker_pull_registry=None,
+        use_skill=False,
+        tokenless=False,
+        headroom=True,
+        per_case_prompt=False,
+    )
+
+    assert settings.agent.headroom is True
+    assert settings.agent.tokenless is False

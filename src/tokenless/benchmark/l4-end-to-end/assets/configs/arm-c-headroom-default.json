@@ -1,0 +1,49 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "bench-qwen/qwen3-coder-plus"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "bench-qwen": {
+        "baseUrl": "http://127.0.0.1:8801/v1",
+        "apiKey": "${DASHSCOPE_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "request": {
+          "allowPrivateNetwork": true
+        },
+        "models": [
+          {
+            "id": "qwen3-coder-plus",
+            "name": "Qwen3 Coder Plus",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000000,
+            "maxTokens": 65536
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "headroom": {
+        "enabled": true,
+        "config": {
+          "proxyUrl": "http://127.0.0.1:8801",
+          "autoStart": false,
+          "routeCodexViaProxy": false,
+          "gatewayProviderIds": ["bench-qwen"]
+        }
+      }
+    },
+    "slots": {
+      "memory": "none"
+    }
+  }
+}

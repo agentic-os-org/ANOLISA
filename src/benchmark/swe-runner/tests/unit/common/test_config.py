@@ -32,6 +32,7 @@ class TestAgentConfig:
         assert config.docker_pull_registry is None
         assert config.use_skill is False
         assert config.tokenless is False
+        assert config.headroom is False
 
     def test_agent_config_custom_values(self) -> None:
         """Create AgentConfig with custom values."""
@@ -60,6 +61,14 @@ class TestAgentConfig:
 
         with pytest.raises(ValidationError):
             AgentConfig(name="cosh", workers=-1)
+
+    def test_agent_config_rejects_tokenless_with_headroom(self) -> None:
+        """Verify the two context-optimization layers cannot be enabled together."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            AgentConfig(name="openclaw", tokenless=True, headroom=True)
 
     def test_skill_and_per_case_prompt_are_mutually_exclusive(self) -> None:
         """Verify only one guidance injection mode can be enabled."""

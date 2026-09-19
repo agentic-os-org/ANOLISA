@@ -24,6 +24,12 @@ from pathlib import Path
 from swe_runner.agents import AgentAdapter, PreparedAgentRun, register_agent
 from swe_runner.agents.openclaw.artifacts import OpenClawArtifacts
 from swe_runner.agents.openclaw.client import OpenClawClient
+from swe_runner.agents.openclaw.headroom_evidence import write_headroom_evidence
+from swe_runner.agents.openclaw.headroom_proxy import (
+    fetch_proxy_counters,
+    proxy_compression_delta,
+    resolve_proxy_url,
+)
 from swe_runner.agents.openclaw.identifiers import (
     build_openclaw_agent_id,
     build_openclaw_session_id,
@@ -140,7 +146,7 @@ class OpenClawAdapter(AgentAdapter):
 
         profile_manager = OpenClawCaseProfileManager(
             output_dir=settings.output.output_dir,
-            base_config_path=self._base_config_path,
+            base_config_path=settings.agent.base_config or self._base_config_path,
             profile_link_root=self._profile_link_root,
         )
         profile = profile_manager.prepare(instance.instance_id)
@@ -151,6 +157,9 @@ class OpenClawAdapter(AgentAdapter):
             profile=profile.name,
             cli_path=self._cli_path,
             tokenless=settings.agent.tokenless,
+            headroom=settings.agent.headroom,
+            temperature=settings.agent.temperature,
+            seed=settings.agent.seed,
         )
         sandbox_manager.configure(
             OpenClawSandboxSpec(
@@ -186,6 +195,7 @@ class OpenClawAdapter(AgentAdapter):
             openclaw_workspace_root=str(openclaw_workspace_root),
             openclaw_injection_mode=injection_mode,
             openclaw_tokenless_requested=_string_bool(settings.agent.tokenless),
+            openclaw_headroom_requested=_string_bool(settings.agent.headroom),
         )
         if agents_text is not None:
             openclaw_artifacts = openclaw_artifacts.with_updates(
@@ -228,6 +238,16 @@ class OpenClawAdapter(AgentAdapter):
             timeout,
             max_turns,
         )
+
+        # Snapshot the Headroom proxy counters around the invocation: they are
+        # the only place the arm's treatment is observable, and a delta taken
+        # after the fact cannot tell this instance's traffic from the run's.
+        headroom_proxy_url: str | None = None
+        headroom_counters_before: dict[str, object] | None = None
+        if prepared_openclaw_artifacts.openclaw_headroom_requested == "true":
+            headroom_proxy_url = resolve_proxy_url(Path(prepared_openclaw_artifacts.openclaw_config_path or ""))
+            if headroom_proxy_url is not None:
+                headroom_counters_before = fetch_proxy_counters(headroom_proxy_url)
 
         client = OpenClawClient(
             profile=profile_name,
@@ -295,6 +315,21 @@ class OpenClawAdapter(AgentAdapter):
             except Exception:
                 logger.exception("OPENCLAW_TOKENLESS_EVIDENCE_FAILED instance=%s", instance_id)
                 metadata["openclaw_tokenless_evidence_error"] = "failed"
+
+        if prepared_openclaw_artifacts.openclaw_headroom_requested == "true":
+            try:
+                counters_after = fetch_proxy_counters(headroom_proxy_url) if headroom_proxy_url is not None else None
+                metadata.update(
+                    write_headroom_evidence(
+                        output_dir=prepared.settings.output.output_dir,
+                        instance_id=instance_id,
+                        metadata={**prepared.metadata, **metadata},
+                        proxy_delta=proxy_compression_delta(headroom_counters_before, counters_after),
+                    )
+                )
+            except Exception:
+                logger.exception("OPENCLAW_HEADROOM_EVIDENCE_FAILED instance=%s", instance_id)
+                metadata["openclaw_headroom_evidence_error"] = "failed"
 
         return AgentResult(
             raw_output=outcome.raw_output,
