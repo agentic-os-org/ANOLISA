@@ -121,9 +121,13 @@ Without a valid token the Dashboard shows the login screen:
 
 ![AgentSight Dashboard login](../../../../images/agentsight/en/dashboard-login.png)
 
-Paste the token from `agentsight dashboard --no-open` and you land on the Agent Observability page.
-It lists sessions with their Token totals and interruption badges; clicking a row expands the
-conversations inside that session:
+Paste the token from `agentsight dashboard --no-open` and you land on the Agent Dashboard
+(`http://127.0.0.1:7396/#/health`) — live Agent health plus the unresolved interruption inbox.
+
+The session analysis page keeps an address of its own: pick **Agent Observability** in the
+navigation bar, or open `http://127.0.0.1:7396/#/observability` directly. It lists sessions with
+their Token totals and interruption badges; clicking a row expands the conversations inside that
+session:
 
 ![Session list with an expanded session](../../../../images/agentsight/en/dashboard-session-expanded.png)
 

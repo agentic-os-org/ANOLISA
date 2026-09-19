@@ -69,6 +69,11 @@ components on every page load and reports the result through `GET /api/auth/stat
 So a Dashboard that shows fewer entries than this guide is not broken — the matching component is
 simply not installed.
 
+A fresh visit to `http://<host>:7396/` lands on the Agent Dashboard (`#/health`). The bare root
+renders no page of its own: it redirects to the first entry in navigation order whose capability is
+advertised, so a host that does not report `agent_health` lands on Agent Observability instead.
+Agent Observability is reachable at `#/observability`, whether or not it is the landing page.
+
 Most pages share the same header: a start/end time range with `Last 1h / 6h / 24h / 7d` shortcuts,
 an Agent filter, and a **Query** button. Pages that show cost or savings figures wait for you to
 press **Query**; the observability pages load the last 24 hours immediately.
