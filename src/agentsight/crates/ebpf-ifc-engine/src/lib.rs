@@ -2798,12 +2798,6 @@ fn populate_policy_mask_map(bpf: &mut Ebpf, cfg: &CConfig) -> io::Result<()> {
 const CAP_REQ_APPEND_UPDATE: i32 = -4;
 const CAP_REQ_APPEND_RULE: i32 = -5;
 
-// RELOAD protocol tags (capability.bpf.h): only check feature support,
-// bypass the cap_check_fields authority gate entirely.
-const CAP_REQ_RELOAD_UPDATE: i32 = -1;
-const CAP_REQ_RELOAD_RULE: i32 = -2;
-const CAP_REQ_RELOAD_COUNTS: i32 = -3;
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct AppendUpdate {
@@ -2824,31 +2818,6 @@ struct AppendRule {
     new_scope_id: u32,
     required_mask: u64,
     entry: CRule,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadUpdate {
-    tag: i32,
-    index: u32,
-    entry: CUpdate,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadRule {
-    tag: i32,
-    index: u32,
-    entry: CRule,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadCounts {
-    tag: i32,
-    n_rules: u32,
-    n_updates: u32,
-    _pad: u32,
 }
 
 /// A handle for appending runtime policy deltas into a running eBPF engine.
@@ -3252,80 +3221,6 @@ impl ReloadHandle {
                 "{e}; rolled back partial runtime policy delta"
             )));
         }
-
-        Ok(())
-    }
-
-    /// Applies a policy delta using the RELOAD protocol instead of APPEND.
-    ///
-    /// The RELOAD path (tags -1/-2/-3) only checks feature support and does not
-    /// require the submitter to hold capability authority in cap_state. This is
-    /// the correct path for an external trusted enforcer injecting policies into
-    /// a freshly seeded domain.
-    ///
-    /// Protocol: RELOAD_COUNTS(0,0) → RELOAD_UPDATE(i) × n → RELOAD_RULE(i) × n → RELOAD_COUNTS(n_rules, n_updates)
-    pub fn reload_policy_delta(&self, target_id: u32, delta_blob: &[u8]) -> io::Result<()> {
-        if target_id == 0 {
-            return Err(err("target_id must be set"));
-        }
-        if delta_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "delta config size mismatch: got {}, expected {}",
-                delta_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        let cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(delta_blob.as_ptr() as *const CConfig) });
-        validate_config(&cfg)?;
-        validate_supported_features(&cfg, self.policy_features, "runtime policy delta (reload)")?;
-
-        let _guard = self
-            .append_lock
-            .lock()
-            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
-        let _file_guard = self.lock_append_file()?;
-
-        // Step 1: quiesce — RELOAD_COUNTS(0, 0)
-        self.submit(&CapReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: 0,
-            n_updates: 0,
-            _pad: 0,
-        })?;
-
-        // Step 2: RELOAD_UPDATE(i) for each active update
-        for i in 0..cfg.n_updates {
-            let mut entry = cfg.updates[i as usize];
-            // RELOAD path does not override domain_id like APPEND does,
-            // so we must set it explicitly.
-            entry.domain_id = target_id;
-            self.submit(&CapReloadUpdate {
-                tag: CAP_REQ_RELOAD_UPDATE,
-                index: i,
-                entry,
-            })?;
-        }
-
-        // Step 3: RELOAD_RULE(i) for each active rule
-        for i in 0..cfg.n_rules {
-            let mut entry = cfg.rules[i as usize];
-            // RELOAD path does not override domain_id like APPEND does.
-            entry.domain_id = target_id;
-            self.submit(&CapReloadRule {
-                tag: CAP_REQ_RELOAD_RULE,
-                index: i,
-                entry,
-            })?;
-        }
-
-        // Step 4: activate — RELOAD_COUNTS(n_rules, n_updates)
-        self.submit(&CapReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: cfg.n_rules,
-            n_updates: cfg.n_updates,
-            _pad: 0,
-        })?;
 
         Ok(())
     }
