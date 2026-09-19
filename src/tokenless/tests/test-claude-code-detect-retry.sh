@@ -598,21 +598,33 @@ awk -v v="$requested" 'BEGIN { exit !(v <= 1) }' \
 # The clamp decides how long detect.sh asks to wait, not how long a contended
 # host actually waits: its timer can fire well after the requested delay.
 # Scenario 12 pins the on-time case, where the sleep the clamp paid for does
-# get its one boundary attempt. Here the same clamped backoff — a 2s delay
-# clamped to a 1s window — wakes up 2s late, so the window closed about 2s ago
-# and the attempt would be a *brand new* `plugin list`, not an invocation
-# already in flight being allowed to finish. It must not start: being the sleep
-# the clamp shortened is not a licence on its own, the wake-up time decides.
-# Asserted from the call and sleep counts plus the delay requested, never from
-# elapsed time, so the scenario cannot flake on a loaded runner.
+# get its one boundary attempt. Here the same knobs — a 30s backoff clamped to
+# a 3s window — wake up 3s late instead, so the window closed about 3s ago and
+# the attempt would be a *brand new* `plugin list`, not an invocation already
+# in flight being allowed to finish. It must not start: being the sleep the
+# clamp shortened is not a licence on its own, the wake-up time decides.
+#
+# The window is scenario 12's 3s rather than the tightest one that still
+# clamps, because $SECONDS counts whole seconds and the re-list loop reads it
+# twice: once to decide whether the window is still open, then again — after
+# two awk spawns — to clamp the backoff against what is left of it. Under a 1s
+# window a host that spends that second on the initial `plugin list` leaves the
+# loop either nothing to clamp, so it requests 0.000s, or no loop at all, and
+# both read as a failure here even though detect.sh did the right thing. Three
+# ticks of margin is what scenario 12 already runs on. For the same reason the
+# sleep count and the requested delay are bounds, not exact values: the strict
+# invariant is the call count, and it holds either way, because a clamped sleep
+# of `left` plus 3s of lateness lands at least 3s past a deadline whose slack
+# is 1s — far enough past it that the wake-up rule must deny the attempt no
+# matter how much of the window the host had already spent.
 reset_env
 install_claude_stub
-install_late_sleep_stub 2
+install_late_sleep_stub 3
 stage_adapter yes yes
 echo absent >"$STUB_MODE_FILE"
 mkdir -p "$FAKE_HOME/.claude"
 set +e
-out="$(run_detect 3 2 5 1)"
+out="$(run_detect 3 30 5 3 60)"
 rc=$?
 set -e
 [ "$rc" -eq 1 ] \
@@ -622,12 +634,16 @@ grep -qF "not installed" <<<"$out" \
 calls="$(plugin_list_calls)"
 [ "$calls" -eq 1 ] \
     || fail "a clamped backoff that woke up past the window must start no new list (saw $calls calls)" "$out"
-[ "$(sleep_calls)" -eq 1 ] \
-    || fail "expected exactly one backoff before the window closed (saw $(sleep_calls) sleeps)" "$out"
-# Proves the clamped path really was exercised: unclamped, the 2s delay would
-# have been requested as-is and the scenario would pass for the wrong reason.
-slept="$(cat "$SLEEP_LOG")"
-awk -v v="$slept" 'BEGIN { exit !(v > 0 && v <= 1) }' \
-    || fail "the 2s backoff should have been clamped to the 1s window, requested ${slept}s" "$out"
+[ "$(sleep_calls)" -le 1 ] \
+    || fail "the window must close after at most one backoff (saw $(sleep_calls) sleeps)" "$out"
+# Proves the clamped path really was exercised: unclamped, the 30s delay would
+# have been requested as-is — the 60s ceiling leaves it alone — and the
+# scenario would pass for the wrong reason. There is deliberately no lower
+# bound: a host slow enough to spend the whole window before the clamp asks for
+# 0.000s and still behaves correctly, and the wake-up rule above is what this
+# scenario is about, not the size of the remainder the clamp happened to see.
+requested="$(awk '{ total += $1 } END { printf "%.3f", total }' "$SLEEP_LOG")"
+awk -v v="$requested" 'BEGIN { exit !(v <= 3) }' \
+    || fail "the 30s backoff should have been clamped to the 3s window (requested ${requested}s)" "$out"
 
 echo "claude-code detect retry test passed"
