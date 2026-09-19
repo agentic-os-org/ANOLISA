@@ -14,6 +14,12 @@ pub struct DaemonRequest {
     /// Method-specific object, defaulting to an empty object.
     #[serde(default = "empty_object", deserialize_with = "deserialize_params")]
     pub params: Value,
+    /// Optional versioned W3C carrier; absent means a fresh inbound root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<crate::TraceCarrierV1>,
+    /// Caller-supplied V1 correlation labels, never `OTel` trace identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<crate::CompatibilityV1>,
 }
 
 fn empty_object() -> Value {

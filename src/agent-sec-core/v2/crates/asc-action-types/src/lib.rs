@@ -44,34 +44,6 @@ pub struct CallerIdentity {
     pub pid: u32,
 }
 
-/// Optional business-correlation fields carried by an action invocation.
-///
-/// The current daemon protocol does not transport them, so the default is empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Correlation {
-    /// Opaque v1-compatible trace correlation string.
-    pub trace_id: String,
-    /// Optional agent session identifier.
-    pub session_id: Option<String>,
-    /// Optional agent run identifier.
-    pub run_id: Option<String>,
-    /// Optional LLM call identifier.
-    pub call_id: Option<String>,
-    /// Optional tool-call identifier.
-    pub tool_call_id: Option<String>,
-}
-
-/// Trusted caller identity plus optional business correlation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActionAttribution {
-    /// Kernel-authenticated caller identity.
-    pub caller: CallerIdentity,
-    /// Business correlation fields.
-    pub correlation: Correlation,
-    /// Optional Agent product attribution; never grants authority.
-    pub agent_name: Option<String>,
-}
-
 /// Result returned by a capability execution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionOutcome {

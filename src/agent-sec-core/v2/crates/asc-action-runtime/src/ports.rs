@@ -1,5 +1,5 @@
 //! Application execution and output ports; no concrete scanner or writer dependencies.
-use asc_action_types::{ActionAttribution, ActionId, ActionOutcome, AuditProjection};
+use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity};
 use asc_security_events::SecurityEvent;
 use asc_telemetry::{TelemetryRecord, TelemetryStatus};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ pub trait Invocation<R>: Send + Sync {
     fn invoke(
         &self,
         control: &ExecutionControl,
-        attribution: &ActionAttribution,
+        caller: &CallerIdentity,
         request: &R,
     ) -> Result<ActionOutcome, InvokeError>;
 }
@@ -51,6 +51,7 @@ pub struct InvokeError;
 /// Audit destination supplied by the process composition root.
 pub trait SecurityEventSink: Send + Sync {
     /// Attempts persistence. Return does not acknowledge a successful insert.
+    /// Receives a complete event, including attribution captured by the finalizer.
     fn write(&self, event: &SecurityEvent);
 }
 
@@ -62,6 +63,7 @@ pub trait TelemetrySink: Send + Sync {
         true
     }
     /// Attempts one independent telemetry append.
+    /// The record already contains allowlisted Agent attribution; no enrichment is needed.
     fn write(&self, record: &TelemetryRecord) -> TelemetryStatus;
 }
 

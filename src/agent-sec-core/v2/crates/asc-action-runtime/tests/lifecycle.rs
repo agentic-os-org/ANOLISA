@@ -1,6 +1,7 @@
 //! Common lifecycle conformance using the implemented code-scan identity.
 use asc_action_runtime::*;
 use asc_action_types::*;
+use asc_observability::{Context, bind_trace_context_input};
 use asc_security_events::SecurityEvent;
 use asc_telemetry::TelemetryRecord;
 use serde_json::{Value, json};
@@ -41,21 +42,11 @@ impl DiagnosticSink for Outputs {
 fn finalizer(output: &Arc<Outputs>) -> Finalizer {
     Finalizer::new(output.clone(), output.clone(), output.clone())
 }
-fn attribution() -> ActionAttribution {
-    ActionAttribution {
-        caller: CallerIdentity {
-            uid: 1001,
-            gid: 1002,
-            pid: 1003,
-        },
-        correlation: Correlation {
-            trace_id: "legacy-test".into(),
-            session_id: Some("session".into()),
-            run_id: Some("run".into()),
-            call_id: Some("call".into()),
-            tool_call_id: Some("tool".into()),
-        },
-        agent_name: Some(" codex ".into()),
+fn caller() -> CallerIdentity {
+    CallerIdentity {
+        uid: 1001,
+        gid: 1002,
+        pid: 1003,
     }
 }
 fn control() -> ExecutionControl {
@@ -107,6 +98,11 @@ fn smc_004_005_012_013_code_scan_matches_v1_goldens() {
     ))
     .unwrap();
     for case in fixture["cases"].as_array().unwrap() {
+        let mut input = case["audit"].clone();
+        input["agent_name"] = case["agent"].clone();
+        input["unknown"] = json!("SECRET_UNKNOWN");
+        let context = bind_trace_context_input(&Context::new(), &input).unwrap();
+        let _guard = context.attach();
         let outputs = Arc::new(Outputs::default());
         let finalizer = finalizer(&outputs);
         assert_eq!(case["action"], "code_scan");
@@ -118,10 +114,8 @@ fn smc_004_005_012_013_code_scan_matches_v1_goldens() {
             error_type: case["error_type"].as_str().unwrap().into(),
             data: case["data"].as_object().unwrap().clone(),
         };
-        let mut context = attribution();
-        context.agent_name = case["agent"].as_str().map(str::to_owned);
         assert_eq!(
-            runtime.invoke(&control(), &context, &expected).unwrap(),
+            runtime.invoke(&control(), &caller(), &expected).unwrap(),
             expected
         );
         let events = outputs.audit.lock().unwrap();
@@ -168,9 +162,7 @@ fn smc_007_failures_of_either_sink_or_diagnostics_preserve_outcomes_and_other_at
         );
         let expected = outcome();
         assert_eq!(
-            runtime
-                .invoke(&control(), &attribution(), &expected)
-                .unwrap(),
+            runtime.invoke(&control(), &caller(), &expected).unwrap(),
             expected
         );
         assert_eq!(output.audit.lock().unwrap().len(), 1);
@@ -196,9 +188,7 @@ fn projection_failure_emits_minimal_audit_and_still_projects_telemetry_from_outc
     );
     let expected = outcome();
     assert_eq!(
-        runtime
-            .invoke(&control(), &attribution(), &expected)
-            .unwrap(),
+        runtime.invoke(&control(), &caller(), &expected).unwrap(),
         expected
     );
     let events = output.audit.lock().unwrap();
@@ -236,7 +226,7 @@ fn smc_006_014_unhandled_execution_failure_is_finalized_once_and_safely_returned
         finalizer(&output),
     );
     assert_eq!(
-        runtime.invoke(&control(), &attribution(), &outcome()),
+        runtime.invoke(&control(), &caller(), &outcome()),
         Err(InvokeError)
     );
     let events = output.audit.lock().unwrap();
@@ -285,7 +275,7 @@ fn synchronous_finalization_precedes_return_and_duration_includes_output_attempt
     let runtime = ActionRuntime::new(ActionId::CodeScan, CodeExecutor, Projector, finalizer);
     let worker = std::thread::spawn(move || {
         result_tx
-            .send(runtime.invoke(&control(), &attribution(), &outcome()))
+            .send(runtime.invoke(&control(), &caller(), &outcome()))
             .unwrap();
     });
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -329,9 +319,7 @@ fn disabled_telemetry_is_skipped_by_lifecycle_without_suppressing_audit() {
     );
     let expected = outcome();
     assert_eq!(
-        runtime
-            .invoke(&control(), &attribution(), &expected)
-            .unwrap(),
+        runtime.invoke(&control(), &caller(), &expected).unwrap(),
         expected
     );
     assert_eq!(output.audit.lock().unwrap().len(), 1);

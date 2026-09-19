@@ -364,6 +364,8 @@ fn all_frozen_methods_route_once_and_return_domain_values_directly() {
             RequestId::new(format!("request-{index}")).unwrap(),
             PeerCredentials::new(1000, 100, 4242),
             DaemonRequest {
+                trace_context: None,
+                compatibility: None,
                 method: method.to_owned(),
                 params: fixture["params"].clone(),
             },
@@ -449,6 +451,8 @@ fn unknown_methods_and_invalid_method_params_use_distinct_errors() {
             RequestId::new(format!("request-{method}")).unwrap(),
             PeerCredentials::new(1000, 100, 4242),
             DaemonRequest {
+                trace_context: None,
+                compatibility: None,
                 method: method.to_owned(),
                 params,
             },

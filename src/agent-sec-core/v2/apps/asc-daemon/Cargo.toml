@@ -25,6 +25,10 @@ asc-policy-types.workspace = true
 asc-policy-repository.workspace = true
 asc-action-runtime = { workspace = true }
 rustix.workspace = true
+
+asc-daemon-protocol = { workspace = true }
+asc-observability = { workspace = true, features = ["runtime"] }
+tracing.workspace = true
 asc-daemon-core = { workspace = true }
 asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }
@@ -41,6 +45,12 @@ tokio = { workspace = true }
 asc-action-runtime = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 asc-daemon-protocol = { workspace = true }
+
+asc-policy-repository = { workspace = true }
+opentelemetry.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
 asc-foundation-types = { workspace = true }
 uuid = { workspace = true }
 

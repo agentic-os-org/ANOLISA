@@ -95,16 +95,18 @@ impl ConfiguredSecurityEventSinks {
             self.jsonl.write(event);
         }));
         if jsonl.is_err() {
-            eprintln!("security_event_jsonl_callback_failed");
+            tracing::warn!(target: "asc_process_diagnostic", "security_event_jsonl_callback_failed");
         }
         let sqlite = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match self.sqlite_writer() {
                 Ok(writer) => writer.write(event),
-                Err(_) => eprintln!("security_event_sqlite_initialization_failed"),
+                Err(_) => {
+                    tracing::warn!(target: "asc_process_diagnostic", "security_event_sqlite_initialization_failed");
+                }
             }
         }));
         if sqlite.is_err() {
-            eprintln!("security_event_sqlite_callback_failed");
+            tracing::warn!(target: "asc_process_diagnostic", "security_event_sqlite_callback_failed");
         }
     }
 

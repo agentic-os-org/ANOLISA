@@ -40,11 +40,10 @@ impl asc_action_runtime::TelemetrySink for TelemetryAdapter {
 }
 
 /// Safe diagnostics use stderr/journald without serializing capability payloads.
-pub(crate) struct LifecycleDiagnostics;
-impl asc_action_runtime::DiagnosticSink for LifecycleDiagnostics {
+pub(crate) struct LifecycleDiagnostics<F>(pub F);
+impl<F: Fn(&str) + Send + Sync> asc_action_runtime::DiagnosticSink for LifecycleDiagnostics<F> {
     fn record(&self, diagnostic: &asc_action_runtime::Diagnostic) {
         use asc_action_runtime::{Diagnostic, TelemetryStatus};
-        use std::io::Write;
         let value = match diagnostic {
             Diagnostic::Started(action) => serde_json::json!({
                 "component":"action_lifecycle", "phase":"started", "action":action.event_type()}),
@@ -72,6 +71,6 @@ impl asc_action_runtime::DiagnosticSink for LifecycleDiagnostics {
             }
         };
         // Diagnostics cannot turn successful scanning into a broken-stderr panic.
-        let _ = writeln!(std::io::stderr().lock(), "{value}");
+        (self.0)(&value.to_string());
     }
 }

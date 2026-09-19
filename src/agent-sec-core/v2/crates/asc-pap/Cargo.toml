@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+tracing.workspace = true
 asc-foundation-types = { workspace = true }
 asc-policy-types = { workspace = true }
 serde = { workspace = true }

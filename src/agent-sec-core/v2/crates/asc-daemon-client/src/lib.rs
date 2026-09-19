@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse};
 use socket2::{Domain, SockAddr, Socket, Type};
 
-/// LF-inclusive wire limit, matching the current daemon bootstrap defaults.
-pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// LF-inclusive response limit and business request capacity. Propagation has
+/// a separate request-only allowance in `asc_daemon_protocol`.
+pub const MAX_FRAME_BYTES: usize = asc_daemon_protocol::BUSINESS_FRAME_BYTES;
 
 /// Sends one request and preserves the complete protocol response.
 ///
@@ -28,12 +29,77 @@ pub fn call(
     request: &DaemonRequest,
     timeout: Duration,
 ) -> Result<DaemonResponse, ClientError> {
+    let parent = request
+        .trace_context
+        .as_ref()
+        .map_or_else(asc_observability::Context::current, |carrier| {
+            asc_observability::extract_parent(&carrier.headers())
+        });
+    let parent = if let Some(labels) = &request.compatibility {
+        parent.with_value(asc_observability::CompatibilityCorrelation {
+            trace_id: labels
+                .trace_id
+                .as_deref()
+                .and_then(asc_observability::normalize),
+            invocation_label: labels
+                .invocation_label
+                .as_deref()
+                .and_then(asc_observability::normalize),
+        })
+    } else {
+        parent
+    };
+    let _parent = parent.clone().attach();
+    let span = asc_observability::parent_span(
+        tracing::info_span!(parent: None, "daemon.client", otel.kind = "client"),
+        parent,
+    );
+    span.in_scope(|| {
+        let mut wire = request.clone();
+        let mut headers = std::collections::HashMap::new();
+        asc_observability::inject_context(&asc_observability::Context::current(), &mut headers);
+        if !headers.is_empty() {
+            wire.trace_context = Some(asc_daemon_protocol::TraceCarrierV1::from_headers(headers));
+        }
+        let labels = asc_observability::snapshot().compatibility;
+        wire.compatibility = if labels.trace_id.is_some()
+            || labels.invocation_label.is_some()
+            || request.compatibility.is_some()
+        {
+            Some(asc_daemon_protocol::CompatibilityV1 {
+                version: 1,
+                trace_id: labels.trace_id,
+                invocation_label: labels.invocation_label,
+            })
+        } else {
+            None
+        };
+        let result = call_wire(socket, &wire, timeout);
+        if result.is_err() {
+            asc_observability::mark_error("client_failed");
+        } else {
+            asc_observability::mark_success();
+        }
+        asc_observability::diagnostic(if result.is_ok() {
+            "client_completed"
+        } else {
+            "client_failed"
+        });
+        result
+    })
+}
+
+fn call_wire(
+    socket: &Path,
+    request: &DaemonRequest,
+    timeout: Duration,
+) -> Result<DaemonResponse, ClientError> {
     if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
         return Err(ClientError::InvalidTimeout);
     }
     let mut payload = serde_json::to_vec(request).map_err(ClientError::Encode)?;
     payload.push(b'\n');
-    if payload.len() > MAX_FRAME_BYTES {
+    if !asc_daemon_protocol::request_fits_budget(&payload).map_err(ClientError::Encode)? {
         return Err(ClientError::RequestTooLarge);
     }
 
@@ -150,7 +216,9 @@ pub enum ClientError {
     #[error("request encoding failed: {0}")]
     Encode(serde_json::Error),
     /// Local wire limit exceeded before connecting.
-    #[error("request exceeds the 4194304-byte frame limit; not sent")]
+    #[error(
+        "request exceeds a frame budget (business: 4194304 bytes, propagation: 32768 bytes, total: 4227072 bytes including LF); not sent"
+    )]
     RequestTooLarge,
     /// No connection was established.
     #[error("daemon connection unavailable; request not sent: {0}")]

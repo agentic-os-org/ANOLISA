@@ -42,56 +42,70 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    let telemetry = match asc_observability::init_runtime("asc-daemon") {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            asc_observability::report_startup_error(&format!("otel: {reason}"));
+            return ExitCode::FAILURE;
+        }
+    };
     let lease = match RuntimeLease::acquire(&cli.bootstrap.socket_path) {
         Ok(lease) => lease,
         Err(problem) => {
-            report_error(&problem);
+            report_error(&telemetry, &problem);
+            telemetry.shutdown(Duration::from_millis(2000));
             return ExitCode::FAILURE;
         }
     };
     // Retain the singleton through the outer Tokio blocking-task shutdown window.
-    match run_with_shutdown_timeout(run(cli, &lease), RUNTIME_SHUTDOWN_TIMEOUT) {
-        Ok((exit_code, event_sinks)) => {
-            if let Some(sinks) = event_sinks {
-                sinks.close();
+    let outcome =
+        match run_with_shutdown_timeout(run(cli, &lease, &telemetry), RUNTIME_SHUTDOWN_TIMEOUT) {
+            Ok((exit_code, event_sinks)) => {
+                if let Some(sinks) = event_sinks {
+                    sinks.close();
+                }
+                exit_code
             }
-            exit_code
-        }
-        Err(problem) => {
-            report_error(&problem);
-            ExitCode::FAILURE
-        }
-    }
+            Err(problem) => {
+                report_error(&telemetry, &problem);
+                ExitCode::FAILURE
+            }
+        };
+    telemetry.shutdown(Duration::from_millis(2000));
+    outcome
 }
 
 async fn run(
     cli: Cli,
     lease: &RuntimeLease,
+    telemetry: &asc_observability::TelemetryRuntime,
 ) -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
     if let Err(problem) = lease.prepare_socket().await {
-        report_error(&problem);
+        report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
     }
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {
-            eprintln!("agent-sec-daemon: {problem}");
+            telemetry.report(&format!("agent-sec-daemon: {problem}"));
             return (ExitCode::FAILURE, None);
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
-    let (finalizer, event_sinks) = match event_finalizer() {
+    let (finalizer, event_sinks) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
-            eprintln!("agent-sec-daemon: security event storage unavailable: {error}");
+            telemetry.report(&format!(
+                "agent-sec-daemon: security event storage unavailable: {error}"
+            ));
             return (ExitCode::FAILURE, None);
         }
     };
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
-            eprintln!("asc-daemon: reconciliation unavailable; Binding mutations disabled");
-            report_error(&error);
+            telemetry.report("asc-daemon: reconciliation unavailable; Binding mutations disabled");
+            report_error(telemetry, &error);
             None
         }
     };
@@ -113,12 +127,13 @@ async fn run(
         policy_for_handler,
         asc_daemon::scan_application(finalizer),
     ));
-    eprintln!("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
+    telemetry
+        .report("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
     let shutdown = ShutdownToken::new();
     let health_task = policy_runtime
         .as_ref()
-        .map(|runtime| watch_policy_health(runtime.enqueuer()));
+        .map(|runtime| watch_policy_health(runtime.enqueuer(), telemetry.reporter()));
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     let result = serve(
         cli.bootstrap,
@@ -143,24 +158,27 @@ async fn run(
         match result {
             Ok(_) => ExitCode::SUCCESS,
             Err(problem) => {
-                report_error(&problem);
+                report_error(telemetry, &problem);
                 ExitCode::FAILURE
             }
         }
     } else {
-        eprintln!("asc-daemon: reconciliation drain failed or timed out");
+        telemetry.report("asc-daemon: reconciliation drain failed or timed out");
         ExitCode::FAILURE
     };
     (exit_code, Some(event_sinks))
 }
 
-fn event_finalizer()
--> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
+fn event_finalizer(
+    telemetry: &asc_observability::TelemetryRuntime,
+) -> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
     let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
     let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
     sinks.warm_sqlite()?;
     if let Err(error) = sinks.warm_jsonl() {
-        eprintln!("agent-sec-daemon: warning: JSONL security event log unavailable: {error}");
+        telemetry.report(&format!(
+            "agent-sec-daemon: warning: JSONL security event log unavailable: {error}"
+        ));
     }
     Ok((
         Finalizer::new(
@@ -170,7 +188,7 @@ fn event_finalizer()
                     asc_telemetry::config::TelemetryConfig::from_process(),
                 ),
             )),
-            Arc::new(sinks::LifecycleDiagnostics),
+            Arc::new(sinks::LifecycleDiagnostics(telemetry.reporter())),
         ),
         sinks,
     ))
@@ -179,27 +197,26 @@ fn event_finalizer()
 fn install_panic_hook() {
     // Unwind conversion cannot suppress the default hook's raw payload output.
     std::panic::set_hook(Box::new(|info| {
-        use std::io::Write;
-        let mut stderr = std::io::stderr().lock();
-        if let Some(location) = info.location() {
-            let _ = writeln!(stderr, "agent-sec-daemon: internal panic at {location}");
-        } else {
-            let _ = writeln!(stderr, "agent-sec-daemon: internal panic");
-        }
+        let message = info.location().map_or_else(
+            || "agent-sec-daemon: internal panic".to_owned(),
+            |location| format!("agent-sec-daemon: internal panic at {location}"),
+        );
+        asc_observability::report_startup_error(&message);
     }));
 }
 
-fn report_error(problem: &dyn std::error::Error) {
-    eprintln!("agent-sec-daemon: {problem}");
+fn report_error(telemetry: &asc_observability::TelemetryRuntime, problem: &dyn std::error::Error) {
+    telemetry.report(&format!("asc-daemon: {problem}"));
     let mut source = problem.source();
     while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
+        telemetry.report(&format!("  caused by: {cause}"));
         source = cause.source();
     }
 }
 
 fn watch_policy_health(
     queue: Arc<asc_policy_runtime::reconciliation::WorkQueue>,
+    report: impl Fn(&str) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut healthy = true;
@@ -207,10 +224,10 @@ fn watch_policy_health(
             tokio::time::sleep(Duration::from_secs(1)).await;
             let current = queue.is_healthy();
             if current != healthy {
-                eprintln!(
+                report(&format!(
                     "asc-daemon: reconciliation health {}",
                     if current { "running" } else { "degraded" }
-                );
+                ));
                 healthy = current;
             }
             if queue.has_failed() {

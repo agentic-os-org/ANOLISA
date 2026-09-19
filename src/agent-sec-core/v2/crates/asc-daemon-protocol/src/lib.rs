@@ -10,6 +10,11 @@
 
 mod action;
 mod common;
+mod trace;
+pub use trace::{
+    BUSINESS_FRAME_BYTES, CONTEXT_FRAME_BYTES, CompatibilityV1, MAX_REQUEST_FRAME_BYTES,
+    TraceCarrierV1, request_fits_budget,
+};
 mod envelope;
 pub mod method;
 mod pap;

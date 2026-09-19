@@ -22,6 +22,7 @@ use asc_policy_types::resource::{
 pub struct PolicyTemplateCompiler;
 
 impl PolicyCompiler for PolicyTemplateCompiler {
+    #[tracing::instrument(skip_all, name = "policy.compile")]
     fn lower(&self, template: &TemplateEnvelope) -> Result<PolicyEnvelope, ValidationError> {
         let PolicyTemplate::PreventFileDeletion { files } = &template.template else {
             return Err(ValidationError::new(

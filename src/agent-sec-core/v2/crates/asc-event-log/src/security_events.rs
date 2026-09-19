@@ -88,15 +88,11 @@ impl SecurityEventWriter {
     }
 }
 
-/// Reports a swallowed security-events write failure on stderr.
-///
-/// v1 routes this through the `agent_sec_cli` logger tree into `cli.jsonl`.
-/// That diagnostic stream is a separate v1 module which is not part of this
-/// migration, so v2 emits one prefixed line on stderr instead. Only the error
-/// type and message are printed, never the record, so a failing write cannot
-/// leak event details.
+/// Reports a swallowed security-events write failure through the host subscriber.
+/// The daemon routes this target to its bounded stderr writer. Only the error
+/// type and message are included, never the event record.
 fn report_write_failure(err: &EventLogError) {
-    eprintln!(
+    tracing::warn!(target: "asc_process_diagnostic",
         "{DEFAULT_ERROR_PREFIX} security events JSONL write failed: {}: {err}",
         err.error_type()
     );

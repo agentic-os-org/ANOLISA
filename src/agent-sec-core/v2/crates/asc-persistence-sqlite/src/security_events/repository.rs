@@ -636,7 +636,7 @@ fn row_to_event(row: &Row<'_>) -> Result<Option<SecurityEvent>, KernelError> {
 }
 
 fn skip(reason: &str) -> Option<SecurityEvent> {
-    eprintln!("[security_events] malformed row skipped: {reason}");
+    tracing::warn!(target: "asc_process_diagnostic", "[security_events] malformed row skipped: {reason}");
     None
 }
 

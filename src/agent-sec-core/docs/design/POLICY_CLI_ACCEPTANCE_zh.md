@@ -164,3 +164,11 @@ persistence、重启恢复、Reconciler、AgentSight/ActPlane 或内核 enforcem
 
 仅回滚 CCLI-CR-006 时，须同时恢复客户端 async API、CLI runtime 调用及对应 transport
 测试和 Cargo 依赖；无需更改 daemon、协议、启动参数或数据。
+
+### OTel tracing 接线后的兼容证据
+
+Rust CLI 增加 legacy `--trace-context` 和 native `--otel-context` 输入；client 在 child span 内
+注入可选 version 1 carrier。原有 CLI parsing、stdout/默认 stderr、exit code 与 PAP CRUD fixtures
+继续验收；wire golden 比较前单独校验新增 carrier，原 method/params 保持精确比较。
+默认无 exporter，CLI 不启动应用级 Tokio runtime；独立 worker 的退出等待上限 50 ms。
+对应代码、测试、未迁移实际 hook 的范围和部署回滚见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。

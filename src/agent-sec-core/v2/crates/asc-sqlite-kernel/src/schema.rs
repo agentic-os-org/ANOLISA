@@ -94,7 +94,7 @@ pub fn is_valid_identifier(name: &str) -> bool {
 
 /// Emits v1's "schema is newer than this binary" warning.
 fn warn_newer_schema_version(version: i64, supported: u32, log_prefix: &str) {
-    eprintln!(
+    tracing::warn!(target: "asc_process_diagnostic",
         "{log_prefix} sqlite schema version {version} is newer than \
          this binary supports ({supported}); skipping schema migration"
     );
@@ -291,14 +291,14 @@ pub fn warn_readonly_schema_readiness(
     if version > expected {
         warn_newer_schema_version(version, schema_version, log_prefix);
     } else if version < expected && missing.is_empty() && version != 0 {
-        eprintln!(
+        tracing::warn!(target: "asc_process_diagnostic",
             "{log_prefix} sqlite schema is v{version}, \
              this binary expects v{schema_version}; \
              run any write command (for example `agent-sec-cli scan-code ...`) \
              to migrate. read-only queries may return empty results until then."
         );
     } else if !missing.is_empty() || version == 0 {
-        eprintln!(
+        tracing::warn!(target: "asc_process_diagnostic",
             "{log_prefix} sqlite schema not ready for read-only access: \
              version={version}, expected={schema_version}, \
              missing_tables={}",

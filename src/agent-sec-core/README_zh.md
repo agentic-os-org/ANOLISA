@@ -49,6 +49,11 @@ CRUD 命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent
 和 [V2 workspace](v2/README.md)。当前 PAP 状态仅在进程内存中，Binding 受理不代表策略已生效。
 非 root 开发与 E2E 可通过 daemon 的 `--policy-admin-uid <UID>` 配置管理员；默认仍只授权 root。
 
+V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
+现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
+W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
+[上下文示例与日志限制](v2/README.md#native-opentelemetry-tracing)。
+
 ## 安全防护架构
 
 ```

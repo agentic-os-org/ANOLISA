@@ -11,6 +11,9 @@ publish.workspace = true
 [dependencies]
 asc-action-runtime = { workspace = true }
 asc-action-types = { workspace = true }
+
+asc-observability.workspace = true
+tracing.workspace = true
 asc-daemon-core = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-daemon-service = { workspace = true }

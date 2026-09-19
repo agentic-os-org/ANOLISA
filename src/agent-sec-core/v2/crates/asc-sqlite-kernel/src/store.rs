@@ -218,7 +218,7 @@ impl SqliteStore {
                     return Err(err);
                 }
                 if self.read_only || !is_corruption(&err) {
-                    eprintln!("{} schema init failure: {err}", self.log_prefix);
+                    tracing::warn!(target: "asc_process_diagnostic", "{} schema init failure: {err}", self.log_prefix);
                     return Ok(None);
                 }
                 self.handle_corruption_locked(inner, &err);
@@ -228,7 +228,7 @@ impl SqliteStore {
                 match self.open_and_prepare(inner, None) {
                     Ok(()) => Ok(Some(())),
                     Err(rebuild_err) => {
-                        eprintln!(
+                        tracing::warn!(target: "asc_process_diagnostic",
                             "{} corruption rebuild failed: {rebuild_err}",
                             self.log_prefix
                         );
@@ -312,7 +312,7 @@ impl SqliteStore {
     }
 
     fn handle_corruption_locked(&self, inner: &mut Inner, err: &KernelError) {
-        eprintln!("{} corrupt DB detected, recreating: {err}", self.log_prefix);
+        tracing::warn!(target: "asc_process_diagnostic", "{} corrupt DB detected, recreating: {err}", self.log_prefix);
         dispose_inner(inner);
         for db_file in sqlite_database_files(&self.path) {
             match fs::remove_file(&db_file) {
@@ -320,7 +320,7 @@ impl SqliteStore {
                 Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(remove_err) => {
                     inner.disabled = true;
-                    eprintln!(
+                    tracing::warn!(target: "asc_process_diagnostic",
                         "{} cannot delete corrupt db, writer disabled: {remove_err}",
                         self.log_prefix
                     );

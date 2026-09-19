@@ -62,7 +62,8 @@ impl<F: Fn(&WriteDrop) + Send + Sync> DropSink for F {
     }
 }
 
-/// A [`DropSink`] that writes one line to stderr.
+/// A [`DropSink`] that emits one diagnostic to the host tracing subscriber.
+/// The daemon routes it to bounded stderr output; the legacy type name is retained.
 ///
 /// Only the phase, error type and message are printed; never the event payload.
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,7 +71,7 @@ pub struct StderrDropSink;
 
 impl DropSink for StderrDropSink {
     fn on_drop(&self, drop: &WriteDrop) {
-        eprintln!(
+        tracing::warn!(target: "asc_process_diagnostic",
             "[security_events] {} phase={} error_type={} error={}",
             drop.message, drop.phase, drop.error_type, drop.error
         );

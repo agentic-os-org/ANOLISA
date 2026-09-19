@@ -318,3 +318,111 @@ Other scan capabilities will add their identities and projections in their own c
 
 See the [implementation, compatibility and acceptance record](../docs/design/RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)
 for the exact scope, executable checks, deferred work, and rollback procedure.
+
+## Native OpenTelemetry tracing
+
+This is the first OTel integration. V1/V2 refer to the Python/Rust product
+implementations, not OTel generations. Existing `--trace-context` JSON and record
+metadata remain supported inputs. `bind_trace_context_input` maps the former into
+the unified OTel Context. Caller-supplied opaque trace/invocation labels retain
+their correlation meaning separately from SDK TraceId/SpanId.
+
+`asc-observability` supplies the current OTel Context, five Agent baggage fields,
+read-only correlation snapshots and a process-owned `runtime` feature. CLI/client,
+daemon, PAP and compiler spans share SDK identity. A raw UDS caller that omits
+context gets a fresh daemon root. Missing Agent metadata is allowed for ordinary
+PAP calls; future observability consumers call `validate_metadata` when required.
+Adapters for the existing V1 record input use `bind_metadata(parent, value, kind)` with `AgentRun`,
+`ModelCall` or `ToolCall`. It validates the record's own V1 metadata before replacing
+session/run/call/tool fields: missing required fields fail even if the parent has
+them; omitted/null optional fields clear inherited values. Trace parentage,
+request correlation, compatibility labels and independent agent attribution remain.
+Metadata extras are ignored per hook schema; `agent_name` comes from trace-context
+or the native carrier. Ordinary child-context propagation continues to inherit.
+The production runtime uses a real SDK with fixed `AlwaysOff` sampling for local
+correlation. IDs, parentage and baggage remain available; no exporter is installed.
+
+Existing caller input remains flat JSON; put this bootstrap option before command
+names and before other options' non-option values, matching the V1 parser:
+
+```bash
+agent-sec-cli --trace-context '{"agent_name":"openclaw","session_id":"session-123","tool_call_id":"tool-1"}' \
+  --socket /run/agent-sec-core/daemon.sock policy list
+```
+
+A native upstream parent may be supplied alongside it:
+
+```bash
+agent-sec-cli --trace-context '{"session_id":"session-123"}' \
+  --otel-context '{"version":1,"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}' \
+  --socket /run/agent-sec-core/daemon.sock policy list
+```
+
+The current release exposes no OTLP exporter or exporter configuration. `OTEL_*`
+export, sampling and batch settings cannot enable export or change the fixed
+local sampling policy. No Collector, HTTP client or exporter worker is created.
+
+| Variable | Behavior |
+| --- | --- |
+| `RUST_LOG` | Default warn; `info` enables bounded JSON correlation diagnostics on stderr; `off` suppresses these records without disabling context |
+| `AGENT_SEC_INVOCATION_ID` | Optional caller-supplied invocation label; never automatically generated |
+
+Service resources use `asc-daemon` / `agent-sec-cli` and the build package version.
+Each runtime owns one diagnostic worker with a 64-record queue and a 32 KiB
+per-record limit (2 MiB queued payload). It also handles daemon startup warnings
+and operational errors, independently of `RUST_LOG`. Reconciliation, JSONL and
+SQLite library warnings use the `asc_process_diagnostic` tracing target, routed
+to the same writer without a synchronous fallback. Library hosts must install a
+subscriber; the libraries do not create threads or initialize the SDK. Producers never wait for
+stderr I/O; overflow, oversized records, worker creation failure and sink failures
+lose diagnostics. There is no per-second rate limit; the stderr consumer owns
+retention and rotation. CLI draining waits at most 50 ms; daemon draining shares
+the additional 2 s provider shutdown budget after service/runtime shutdown.
+`init_runtime` is called once from main. Subscriber conflicts or invalid SDK
+identity fail before business work with exit 1; `otel: <reason>` is best effort,
+using a bounded worker even before successful runtime initialization.
+The process panic hook also queues only `runtime: panic`, without payloads;
+unwind/abort behavior is unchanged.
+CLI help, usage, errors and business results retain synchronous output semantics.
+These required outputs can wait for their consumer; the diagnostic queue is not a
+lossy replacement for business output.
+
+Native requests support optional `traceContext` (version 1, optional string
+`traceparent`, `tracestate`, `baggage`) and `compatibility` (version 1, optional
+`traceId`, `invocationLabel`). The new CLI requires a daemon supporting this
+carrier; pre-carrier daemons are outside the supported version matrix. Deploy
+server first; a client never retries without context after rejection. Regular
+RPCs inject a carrier even without tracing flags. The preserved `--trace-context`
+input and explicit `AGENT_SEC_INVOCATION_ID` can affect wire attribution/labels. Requests have separate 4 MiB business and 32 KiB
+propagation budgets; response capacity remains 4 MiB, including LF.
+
+Business functions use `tracing::info_span!` or `#[tracing::instrument(skip_all)]`;
+names are defined at each callsite. For a task/thread boundary, capture
+`asc_observability::Context::current()`, bind a fresh child using `parent_span`,
+and instrument the future. Do not hold an entered span/Context guard across await.
+Consumers call `snapshot()` inside the scope, then persist that read-only snapshot
+independently of span sampling/export. This package does not implement event
+storage or local trajectory reconstruction.
+
+Validation and rollback: [OTel acceptance](../docs/design/V2_OTEL_ACCEPTANCE_zh.md).
+
+The AgentSec UDS adapter accepts up to 16 KiB of encoded baggage, preserving all
+five 256-code-point values. Non-ASCII bytes must be percent-encoded; using fewer
+ASCII escapes does not reduce their size. Receivers supporting only the W3C
+8192-byte interoperability minimum may drop larger headers; the locked SDK's
+standard BaggagePropagator drops them whole. Cross-service forwarding must define
+its own budget/compatibility contract before use. The local adapter does not
+silently shrink original metadata to meet another receiver's limit.
+
+After building the V2 workspace, run the cases from the component directory:
+
+```bash
+PATH="$PWD/v2/target/debug:$PATH" uv run --project agent-sec-cli pytest tests/v2/e2e/test_otel_e2e.py -v
+```
+
+These tests require Linux, UDS, loopback TCP and subprocess support. Missing
+binaries on PATH or unavailable sockets fail; only the root-inapplicable non-root
+authorization case explicitly skips. The existing `make test-e2e-rpm-v2` target
+also collects these cases against installed binaries. Source-built process tests
+do not establish RPM/systemd acceptance. Storage-fault cases verify that blocked
+stderr cannot prevent scanning, independent audit writes or shutdown.

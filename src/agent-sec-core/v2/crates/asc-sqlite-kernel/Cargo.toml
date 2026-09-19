@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+tracing.workspace = true
 rusqlite.workspace = true
 rustix.workspace = true
 thiserror.workspace = true

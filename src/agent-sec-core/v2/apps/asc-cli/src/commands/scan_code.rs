@@ -26,6 +26,8 @@ impl ScanCodeCommand {
             return Err(InputError::EmptyCode);
         }
         Ok(DaemonRequest {
+            trace_context: None,
+            compatibility: None,
             method: method::ACTION_CODE_SCAN.to_owned(),
             params: serde_json::to_value(CodeScanParams {
                 code: self.code.clone(),

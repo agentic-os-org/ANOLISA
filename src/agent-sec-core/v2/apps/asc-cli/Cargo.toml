@@ -13,6 +13,8 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+asc-observability = { workspace = true, features = ["runtime"] }
+tracing.workspace = true
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }

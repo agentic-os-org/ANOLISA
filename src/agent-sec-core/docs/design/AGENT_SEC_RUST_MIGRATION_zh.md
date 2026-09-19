@@ -394,3 +394,11 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 | OTel 故障影响安全功能 | tracing/export 与 ActionResult、SecurityEvent sink 隔离 |
 | per-user 数据迁移丢失 owner | state migrator owner mapping、事务、重复运行和回滚测试 |
 | 只有 Markdown、没有可执行门禁 | manifest、fixture、runner、pass/fail matrix 是完成条件 |
+
+### OTel tracing 基础切片落地
+
+`asc-observability` 已提供统一 OTel Context、Agent Baggage、兼容输入及只读关联快照；
+CLI/client/daemon/PAP/compiler 已接线，产品 main 启用 runtime feature 和可选 OTLP。
+该基础设施不依赖尚未落地的 Action Runtime、安全事件 Rust sink 或本地链路重组。
+协议/部署/中间件契约同步记录 TARGET V2 条款，V1 实现继续仅作为冻结输入 oracle。
+实施、验收边界及 server-first/caller-first 回滚顺序见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。

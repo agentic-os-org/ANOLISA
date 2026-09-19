@@ -3,7 +3,7 @@ use crate::{
     AuditProjector, CapabilityExecutor, Diagnostic, ExecutionControl, Finalizer, Invocation,
     InvokeError,
 };
-use asc_action_types::{ActionAttribution, ActionId, ActionOutcome, AuditProjection};
+use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity};
 use serde_json::Map;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
@@ -37,7 +37,7 @@ where
     fn invoke(
         &self,
         control: &ExecutionControl,
-        attribution: &ActionAttribution,
+        caller: &CallerIdentity,
         request: &E::Request,
     ) -> Result<ActionOutcome, InvokeError> {
         let started = Instant::now();
@@ -65,7 +65,7 @@ where
             })
         };
         self.finalizer
-            .finalize(self.action, attribution, &outcome, projection, unhandled);
+            .finalize(self.action, caller, &outcome, projection, unhandled);
         self.finalizer.diagnostic(Diagnostic::Completed {
             action: self.action,
             succeeded: outcome.success,

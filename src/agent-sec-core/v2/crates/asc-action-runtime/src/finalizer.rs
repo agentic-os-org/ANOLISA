@@ -1,6 +1,6 @@
 //! One common terminal emission path for every registered capability runtime.
 use crate::{Diagnostic, DiagnosticSink, SecurityEventSink, TelemetrySink};
-use asc_action_types::{ActionAttribution, ActionId, ActionOutcome, AuditProjection};
+use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity};
 use asc_security_events::{EventResult, SecurityEvent};
 use asc_telemetry::{ScanTelemetryInput, TelemetryRecord};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -36,11 +36,13 @@ impl Finalizer {
     pub(crate) fn finalize(
         &self,
         action: ActionId,
-        attribution: &ActionAttribution,
+        caller: &CallerIdentity,
         outcome: &ActionOutcome,
         projection: AuditProjection,
         unhandled: bool,
     ) {
+        // Freeze attribution once while the request context is active, before either sink runs.
+        let mut context = asc_observability::snapshot();
         let mut event = SecurityEvent::new(
             action.event_type(),
             action.category(),
@@ -51,17 +53,14 @@ impl Finalizer {
         } else {
             EventResult::Failed
         };
-        event.pid = attribution.caller.pid;
-        event.uid = attribution.caller.uid;
-        event.trace_id.clone_from(&attribution.correlation.trace_id);
-        event
-            .session_id
-            .clone_from(&attribution.correlation.session_id);
-        event.run_id.clone_from(&attribution.correlation.run_id);
-        event.call_id.clone_from(&attribution.correlation.call_id);
-        event
-            .tool_call_id
-            .clone_from(&attribution.correlation.tool_call_id);
+        event.pid = caller.pid;
+        event.uid = caller.uid;
+        // This event schema retains the opaque compatibility label, not SDK TraceId.
+        event.trace_id = context.compatibility.trace_id.unwrap_or_default();
+        event.session_id = context.agent.remove("session_id");
+        event.run_id = context.agent.remove("run_id");
+        event.call_id = context.agent.remove("call_id");
+        event.tool_call_id = context.agent.remove("tool_call_id");
         // No shared transaction: the second destination is attempted even if the first unwinds.
         let audit = catch_unwind(AssertUnwindSafe(|| self.audit.write(&event)));
         self.diagnostic(if audit.is_ok() {
@@ -82,7 +81,7 @@ impl Finalizer {
                 result: &outcome.data,
                 error_type: &outcome.error_type,
                 exit_code: (!unhandled).then_some(outcome.exit_code),
-                agent_name: attribution.agent_name.as_deref(),
+                agent_name: context.agent.get("agent_name").map(String::as_str),
             });
             self.telemetry.write(&record)
         }));

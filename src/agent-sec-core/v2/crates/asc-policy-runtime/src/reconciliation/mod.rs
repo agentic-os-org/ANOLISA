@@ -351,7 +351,7 @@ fn finish_failed(
     }));
     let terminal = matches!(confirmed, Ok(Ok(true)));
     if !terminal {
-        eprintln!("binding reconciliation {id}: termination unconfirmed ({code})");
+        tracing::warn!(target: "asc_process_diagnostic", "binding reconciliation {id}: termination unconfirmed ({code})");
     }
     queue.finish_terminalization(id, terminal);
 }
@@ -395,7 +395,7 @@ fn error_retry_at(id: &ResourceId, error: StoreError, now: u64, delay: Duration)
     // Errors may prevent recording diagnostics in the Binding. Only emit the ID
     // and the closed, payload-free error enum; contention is routine scheduling.
     if error != StoreError::Contended {
-        eprintln!("binding reconciliation {id}: {error}");
+        tracing::warn!(target: "asc_process_diagnostic", "binding reconciliation {id}: {error}");
     }
     retry_at(now, delay)
 }

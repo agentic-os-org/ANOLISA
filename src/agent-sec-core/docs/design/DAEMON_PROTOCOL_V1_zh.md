@@ -50,6 +50,8 @@ V1 默认 request 和 response frame 上限均为 4194304 bytes（4 MiB），wir
 时也使用 `payload_too_large`。例外是启用 notify authentication 后、第一帧尚不能安全
 分类的 timeout/oversize：服务端按认证 fail-closed 规则静默关闭连接。
 
+以上为冻结的 Python V1 上限；Rust 原生 PAP 的请求分项预算与错误类别见 §13。
+
 ### 2.2 一般 JSON 规则
 
 - request 和 response 顶层必须是 JSON object。
@@ -841,3 +843,46 @@ struct 的构造函数不足以证明 wire compatibility。
 [`ef0d75f27c389434cf6f4361f5dbcdeaff42ab72`](https://github.com/alibaba/anolisa/commit/ef0d75f27c389434cf6f4361f5dbcdeaff42ab72)
 中的 `daemon/handlers/prompt_scan.py`、`prompt_scan_protocol.md`、
 `test_prompt_scan_handler.py` 和 CLI daemon call path。
+
+## 13. **[TARGET V2]** 原生 PAP OTel carrier 扩展
+
+本节只扩展 Rust 原生 PAP envelope，不改变前文冻结的 Python V1 `request_id/ok/data` 协议。
+Rust 响应仍保留公开 `requestId` UUID 和既有 result/error 结构。
+
+```json
+{
+  "method": "policy.templates.list",
+  "params": {},
+  "traceContext": {
+    "version": 1,
+    "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "baggage": "agentsec.session.id=session-123"
+  },
+  "compatibility": {"version": 1, "traceId": "caller-label"}
+}
+```
+
+- 两个扩展对象可省略/null。对象内 version 必须为整数 1；traceContext 的三个可选字段
+  traceparent/tracestate/baggage 若出现必须是 string，不能是 null。compatibility 的可选
+  traceId/invocationLabel 可省略/null，只作关联标签，不决定 SDK ID。
+- 未知字段、重复 JSON key、错误类型/version 返回 `invalid_request`，不执行 PAP。
+  W3C 内容错误独立降级：无效 parent 新建 root，保留有效 Agent Baggage；坏 tracestate 丢弃；
+  坏 Baggage 整体丢弃。未知 Baggage key 不传播，其值不做 UTF-8 解码；
+  member 结构/key/property/percent 语法仍须有效。允许 key 重复或值解码失败时整体丢弃。
+- 仅允许 agentsec.agent.name、agentsec.session.id、agentsec.run.id、agentsec.call.id、
+  agentsec.tool_call.id。字段上限 256 Unicode 字符；Baggage wire ≤16384 bytes/32 input members；
+  traceparent/tracestate 各 ≤512 bytes。metadata 原值空白通过 percent encoding 保留；V1 trace-context 输入适配独立归一化。
+- 所有正常 dispatch 从干净 Context 开始，没有 context 也生成 SDK root。归属字段不参与授权；
+  Principal 仍来自 kernel peer 和服务端 policy。非法 envelope 不从坏 JSON 抢救 parent。
+- LF-inclusive 请求业务预算 4 MiB，传播成员另有 32 KiB，总 wire 上限 4 MiB+32 KiB。
+  按原始字节计量；超出业务/传播预算返回 `invalid_request`，超出 transport 总上限沿用
+  `resource_exhausted`。原先超过 4 MiB 就被 transport 拒绝的帧，如今在总上限内
+  若违反分项预算则返回 `invalid_request`，合法传播扩展则正常处理。响应仍为 4 MiB。caller 不会为了适配旧 server 自动去掉 context 重发。
+
+支持范围为新 CLI 与支持 carrier 的新 daemon；旧 daemon 不属于兼容验收范围，
+不增加 opt-in、版本协商或无 carrier 重试。部署时先升级 daemon，回滚时先回滚 caller。
+正常 RPC 即使未传 tracing 参数也会注入 carrier；V1 `--trace-context` 与显式
+`AGENT_SEC_INVOCATION_ID` 会影响 wire 归属/标签，保留输入语义不代表 wire 不变。
+关闭 exporter 不关闭 carrier。
+兼容记录 OTEL-CR-001/002/005/006/007、执行 fixtures、直接消费者和回滚见
+[V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。冻结 V1 运行时没有增加 OTel 依赖。

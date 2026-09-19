@@ -115,6 +115,8 @@ impl Drop for Endpoint {
 
 fn request() -> DaemonRequest {
     DaemonRequest {
+        trace_context: None,
+        compatibility: None,
         method: "test.method".to_owned(),
         params: json!({}),
     }
@@ -384,4 +386,25 @@ fn full_connect_queue_is_bounded_and_never_marks_request_sent() {
         listener.accept().unwrap_err().kind(),
         io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn explicit_carrier_is_preserved_without_an_injectable_context() {
+    let endpoint = Endpoint::new();
+    let mut input = request();
+    input.trace_context = Some(asc_daemon_protocol::TraceCarrierV1 {
+        version: 1,
+        traceparent: Some("invalid-traceparent".into()),
+        tracestate: None,
+        baggage: None,
+    });
+    endpoint
+        .exchange(&input, Duration::from_secs(1), |peer| {
+            let (mut stream, bytes) = read_request(peer.accept());
+            let wire: DaemonRequest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(wire.trace_context, input.trace_context);
+            stream.get_mut().write_all(RESPONSE).unwrap();
+            stream
+        })
+        .unwrap();
 }

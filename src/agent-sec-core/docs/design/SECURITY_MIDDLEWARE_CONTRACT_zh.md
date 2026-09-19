@@ -314,8 +314,8 @@ scanner `elapsed_ms` 保持原始业务语义。生产 sink 不允许隐式 no-o
 
 本切片仅包含 code-scan 的 identity、真实能力、telemetry 投影及 fixture；其它扫描能力
 随各自后续提交加入共享机制，不预留未实现 identity 或 RPC。受控异常使用固定 `InternalExecutionError` 和空 request，明确替代
-Python 原始 exception 审计文本。现有正常 audit schema 不变，OTel 与 metadata ingress
-仍待后续工作，不能把本切片当作 SMC-017–023 完成。
+Python 原始 exception 审计文本。现有正常 audit schema 不变；请求 Context 已接入下述
+兼容 audit/telemetry 投影，但不能把本切片当作 SMC-017–023 完成。
 实现、fixture 对应表与回滚见 [共享生命周期验收记录](RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)。
 
 ## 6. SecurityEvent 契约
@@ -430,7 +430,7 @@ SecurityEventV2 增加显式版本和标准 span identity：
 - `tracestate` 不进入 SecurityEvent；
 - 缺少 `schema_version` 的历史记录按 V1 解释，其 `trace_id` 仍是 opaque correlation；
   reader/query 在迁移窗口必须支持混合 V1/V2 数据并显示 schema 语义；
-- V2 之后不再生成或保存新的 AgentSec legacy trace ID，也不定义
+- V2 之后不再生成或保存新的 AgentSec 自定义 trace ID，也不定义
   `agentsec.correlation.trace_id` attribute；
 - SecurityEvent 是独立的本地安全审计记录。OTel sampling decision、export queue、exporter
   或 Collector 故障不能使已路由 invocation 的 event 因此消失。
@@ -567,7 +567,7 @@ boundary failure 才返回 `ok=false`。需要 product error type 的新 wire co
 | SMC-019 | carrier 缺失或不合法时创建有效 root trace；未配置 exporter 时 daemon 路径仍有有效 TraceId/SpanId |
 | SMC-020 | Agent/session/run/call/tool-call/action/backend/policy/verdict 使用有界、脱敏 semantic attributes，不替代 OTel identity |
 | SMC-021 | SecurityEventV2 保存 `security.invoke` TraceId/SpanId；sampling/exporter/Collector 故障不改变 ActionResult 或 event sink attempt |
-| SMC-022 | V1/V2 event 由 schema version 区分并可混合读取；V2 不产生新的 legacy trace ID |
+| SMC-022 | V1/V2 event 由 schema version 区分并可混合读取；V2 不产生新的 V1 自定义 trace ID |
 | SMC-023 | TraceId/SpanId/`traceparent` 不参与 authorization、principal、idempotency、deduplication 或 replay decision |
 
 比较 current Python oracle 与 Rust action-runtime result 时，可以规范化 UUID、
@@ -593,3 +593,41 @@ V1 response 重建未传输的 `ActionResult.success/error_type`。
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)；
 - [OpenTelemetry Context propagation](https://opentelemetry.io/docs/concepts/context-propagation/)；
 - [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)。
+
+## 附录：**[TARGET V2]** 调用关联的 OTel 投影（OTEL-CR-003/007）
+
+Rust tracing 以一个 OTel Context 持有 SDK identity、五个 Agent Baggage 字段和有限兼容标签。
+普通同步业务函数不显式传 metadata/span；task/thread 边界捕获完整 Context，创建 child 并
+instrument future，不能跨 await 持有 entered guard。调用方仍通过既有 trace-context/metadata
+输入提供业务归属，不能由 daemon 猜测缺失的 Agent session/tool 身份。
+
+`asc-observability::snapshot()` 为 SecurityEvent/log/observability 提供只读关联值，
+未采样和没有 Collector 时同样可读。事件 sink 按自己的契约执行和持久化，不依赖 exporter。
+`bind_trace_context_input` 保留 V1 alias/strip/截断；`bind_metadata` 保留 metadata 的字符串值语义。
+`bind_metadata(parent, value, kind)` 按 AgentRun/ModelCall/ToolCall 校验本次记录自身输入，
+再替换 session/run/call/tool_call 字段；必填字段缺失或 null 直接拒绝，可选字段缺失/null
+清除父值，其他 hook 的字段按原 schema 忽略。保留技术 parentage、请求引用、兼容标签和
+由 trace-context/carrier 提供的独立 agent_name。记录 scope 退出后恢复父 Context。
+消费者可用 `validate_metadata(AgentRun/ModelCall/ToolCall)` 校验 session/run、以及 tool hook 的 tool_call_id；
+普通 PAP 调用不执行该必填校验。空字符串的兼容语义不在本 tracing 层擅自改为 trim/拒绝。
+
+**[PRESERVE V1] 当前 Rust code-scan 接线：** 共享 Finalizer 在构造输出记录前读取一次
+当前 Context 快照，复用于 SecurityEvent 和 TelemetryRecord；不通过 invocation 参数传递
+correlation/agent_name。既有 SecurityEvent 的 `trace_id`
+取兼容 extension 的 opaque 标签，缺失为空串；`session_id/run_id/call_id/tool_call_id`
+取对应 Agent Baggage，缺失为 null。Finalizer 在写入前补齐一次，JSONL 和 SQLite 使用同一记录，
+不以 SDK TraceId 或 daemon request ID 填补缺失值，不修改事件 schema。第 6.4 节的
+versioned SecurityEventV2 技术 TraceId/SpanId 仍是后续目标。
+
+`agent_name` 仅作为 telemetry projector 的候选产品名，经过既有产品白名单后写入
+`component.agent_name`；未知产品为空串，所有 correlation IDs 与未知 Baggage 均不进入
+telemetry JSONL。UID/PID 继续来自内核 peer credentials。快照和 audit sink 不依赖采样、
+Collector 或诊断日志开关。Finalizer 在调用任何 sink 前冻结关联信息，audit 失败不会阻止
+telemetry 使用同一快照的 agent_name。capability 和 invocation 无需读取或携带 Context；
+两个 sink 只写入已完整构造的记录，不再读取 Context 或修改归属。当前 Finalizer 在 request
+blocking thread 的 attached scope 内执行；以后将 finalization 移到其它任务/线程时必须传播 Context。
+进程验收见 `test_scan_lifecycle_process.py` 的成功/失败、原生/兼容输入和并发隔离用例。
+
+V1 Action lifecycle、verdict、SecurityEvent schema、写入失败语义和历史数据均未由本改动替换。
+实际 observability RPC、本地链路重组和其它 capability 的接入另行迁移。
+证据：[V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。

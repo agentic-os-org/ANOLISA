@@ -43,7 +43,7 @@ impl BootstrapConfig {
 /// Returns the explicit transport limits used by the runnable daemon bootstrap.
 pub const fn default_service_config() -> ServiceConfig {
     ServiceConfig {
-        max_request_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+        max_request_frame_bytes: asc_daemon_protocol::MAX_REQUEST_FRAME_BYTES,
         max_response_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
         max_connections: DEFAULT_MAX_CONNECTIONS,
         max_rejection_connections: DEFAULT_MAX_REJECTION_CONNECTIONS,

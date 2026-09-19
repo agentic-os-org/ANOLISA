@@ -1,9 +1,7 @@
 //! Authenticated scan application operations, composed over the shared lifecycle.
 use crate::PeerCredentials;
 use asc_action_runtime::{ExecutionControl, Invocation, InvokeError};
-use asc_action_types::{
-    ActionAttribution, ActionOutcome, CallerIdentity, CodeScanRequest, Correlation,
-};
+use asc_action_types::{ActionOutcome, CallerIdentity, CodeScanRequest};
 
 /// Holds capability registrations assembled by the process composition root.
 pub struct ActionService {
@@ -31,14 +29,10 @@ impl ActionService {
     ) -> Result<ActionOutcome, InvokeError> {
         self.code_scan.invoke(
             control,
-            &ActionAttribution {
-                caller: CallerIdentity {
-                    uid: peer.uid(),
-                    gid: peer.gid(),
-                    pid: peer.pid(),
-                },
-                correlation: Correlation::default(),
-                agent_name: None,
+            &CallerIdentity {
+                uid: peer.uid(),
+                gid: peer.gid(),
+                pid: peer.pid(),
             },
             request,
         )

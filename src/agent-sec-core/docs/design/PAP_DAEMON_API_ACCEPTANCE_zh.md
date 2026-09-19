@@ -161,3 +161,10 @@ PendingApply/PendingDelete 允许因入队拒绝直接进入 ApplyFailed/DeleteF
 当前 V2 契约修订：移除 Repository RuntimeState，重试次数和 deadline 仅由 WorkQueue
 持有，重建队列时重置。fixture 的 initialSchedule 是测试调用方的内存进度输入，
 不属于 initial/expected Repository 记录；旧跨重启预算保持要求已被 CR-020 取代。
+
+### OTel carrier 的后续兼容扩展
+
+原生请求新增可选 version 1 `traceContext/compatibility`，请求新增独立 32 KiB 传播预算；
+业务 4 MiB、响应 schema/UUID、授权、revision 和 CAS 不变。现有 CRUD goldens 继续执行；
+新版 CLI wire capture 先校验 carrier，再逐项比较原业务 envelope。
+新增传播/故障/回滚证据见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)，不扩展此处的持久化或分发验收声明。

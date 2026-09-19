@@ -95,10 +95,24 @@ class ProcessDaemon:
                 self.log.close()
             assert not self.socket.exists()
 
-    def scan(self, code="echo SECRET_REQUEST", mode="regex"):
+    def scan(
+        self,
+        code="echo SECRET_REQUEST",
+        mode="regex",
+        trace_context=None,
+        otel_context=None,
+    ):
+        context_args = []
+        for flag, context in (
+            ("--trace-context", trace_context),
+            ("--otel-context", otel_context),
+        ):
+            if context is not None:
+                context_args.extend([flag, json.dumps(context)])
         result = subprocess.run(
             [
                 binary("agent-sec-cli"),
+                *context_args,
                 "--socket",
                 str(self.socket),
                 "scan-code",
@@ -200,34 +214,40 @@ def test_dproc_scan_emission_is_visible_before_response_and_survives_restart(
 
 def test_each_destination_can_fail_without_suppressing_the_other_two(process_daemon):
     daemon = process_daemon
-    daemon.scan()
+    context = {"agent_name": "codex", "session_id": "PRIVATE_FAILURE"}
+    daemon.scan(trace_context=context)
     daemon.audit.rename(daemon.root / "previous-audit")
     daemon.audit.mkdir()
-    assert daemon.scan()["verdict"] == "pass"
+    assert daemon.scan(trace_context=context)["verdict"] == "pass"
     assert len(daemon.rows()) == len(lines(daemon.telemetry)) == 2
     daemon.audit.rmdir()
     with sqlite3.connect(daemon.db, timeout=0.1) as blocker:
         blocker.execute("BEGIN IMMEDIATE")
-        assert daemon.scan()["verdict"] == "pass"
+        assert daemon.scan(trace_context=context)["verdict"] == "pass"
         blocker.rollback()
     assert len(daemon.rows()) == 2
     assert len(lines(daemon.audit)) == 1
     assert len(lines(daemon.telemetry)) == 3
     with daemon.telemetry.open("a") as locked:
         fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert daemon.scan()["verdict"] == "pass"
+        assert daemon.scan(trace_context=context)["verdict"] == "pass"
     assert len(daemon.rows()) == 3
     assert len(lines(daemon.telemetry)) == 3
+    assert all(
+        record["component.agent_name"] == "codex" for record in lines(daemon.telemetry)
+    )
+    assert "PRIVATE_FAILURE" not in daemon.telemetry.read_text()
     daemon.telemetry.unlink()
-    assert daemon.scan()["verdict"] == "pass"
+    assert daemon.scan(trace_context=context)["verdict"] == "pass"
     assert not daemon.telemetry.exists()
     assert len(daemon.rows()) == 4
     daemon.telemetry.mkdir()
-    assert daemon.scan()["verdict"] == "pass"
+    assert daemon.scan(trace_context=context)["verdict"] == "pass"
     assert len(daemon.rows()) == 5
     log = (daemon.root / "daemon.stderr").read_text()
     assert "skipped" in log
     assert "SECRET_REQUEST" not in log
+    assert all(row["session_id"] == "PRIVATE_FAILURE" for row in daemon.rows())
 
 
 def test_rejected_requests_never_enter_lifecycle(process_daemon):
@@ -253,10 +273,77 @@ def test_rejected_requests_never_enter_lifecycle(process_daemon):
     assert lines(daemon.telemetry)[0]["seccore.error_type"] == "ErrUnsupportedLang"
 
 
+@pytest.mark.parametrize("mode", ["regex", "llm"])
+def test_context_reaches_audit_with_only_allowlisted_agent_in_telemetry(
+    process_daemon, mode
+):
+    daemon = process_daemon
+    fields = ("trace_id", "session_id", "run_id", "call_id", "tool_call_id")
+    legacy = {field: f"PRIVATE_LEGACY_{field}" for field in fields}
+    native = {
+        field: f"PRIVATE_NATIVE_{field}" for field in fields if field != "trace_id"
+    }
+    carrier = {
+        "version": 1,
+        "traceparent": "00-11111111111111111111111111111111-2222222222222222-00",
+        "baggage": "agentsec.agent.name=hermes,"
+        + ",".join(
+            f"agentsec.{field.removesuffix('_id')}.id={value}"
+            for field, value in native.items()
+        )
+        + ",unknown=PRIVATE_UNKNOWN",
+    }
+    # Compatibility input overrides native baggage while SDK identity remains separate.
+    daemon.scan(
+        mode=mode, trace_context=legacy | {"agentName": " codex "}, otel_context=carrier
+    )
+    daemon.scan(mode=mode, otel_context=carrier)
+    daemon.scan(mode=mode)
+    daemon.scan(mode=mode, trace_context={"agent_name": "PRIVATE_UNAPPROVED_AGENT"})
+    events, records = lines(daemon.audit), lines(daemon.telemetry)
+    rows = {row["event_id"]: row for row in daemon.rows()}
+    assert len(events) == len(records) == len(rows) == 4
+    empty = {field: "" if field == "trace_id" else None for field in fields}
+    for event, expected in zip(
+        events, [legacy, native | {"trace_id": ""}, empty, empty]
+    ):
+        row = rows[event["event_id"]]
+        assert {field: event.get(field) for field in fields} == expected
+        assert {field: row[field] for field in fields} == expected
+        assert event["uid"] == os.getuid()
+        assert "agent_name" not in event
+    assert [record["component.agent_name"] for record in records] == [
+        "codex",
+        "hermes",
+        "",
+        "",
+    ]
+    assert "PRIVATE_" not in daemon.telemetry.read_text()
+    assert all(
+        not any(field in key for field in fields)
+        for record in records
+        for key in record
+    )
+
+
 def test_concurrent_requests_finalize_once_without_audit_loss(process_daemon):
     daemon = process_daemon
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda _: daemon.scan(), range(16)))
+        results = list(
+            pool.map(
+                lambda i: daemon.scan(
+                    trace_context={
+                        "trace_id": f"PRIVATE_TRACE_{i}",
+                        "session_id": f"PRIVATE_SESSION_{i}",
+                        "run_id": f"PRIVATE_RUN_{i}",
+                        "call_id": f"PRIVATE_CALL_{i}",
+                        "tool_call_id": f"PRIVATE_TOOL_{i}",
+                        "agent_name": "codex",
+                    }
+                ),
+                range(16),
+            )
+        )
     assert all(r["verdict"] == "pass" for r in results)
     rows, events, telemetry = (
         daemon.rows(),
@@ -265,6 +352,25 @@ def test_concurrent_requests_finalize_once_without_audit_loss(process_daemon):
     )
     assert len(rows) == len(events) == 16
     assert len({event["event_id"] for event in events}) == 16
+    assert {row["trace_id"] for row in rows} == {
+        f"PRIVATE_TRACE_{i}" for i in range(16)
+    }
+    by_id = {row["event_id"]: row for row in rows}
+    for event in events:
+        i = event["trace_id"].removeprefix("PRIVATE_TRACE_")
+        for field, label in (
+            ("session_id", "SESSION"),
+            ("run_id", "RUN"),
+            ("call_id", "CALL"),
+            ("tool_call_id", "TOOL"),
+        ):
+            assert (
+                event[field]
+                == by_id[event["event_id"]][field]
+                == f"PRIVATE_{label}_{i}"
+            )
     # V1 telemetry intentionally skips a contended nonblocking lock.
     assert 0 < len(telemetry) <= 16
     assert all(record["seccore.verdict"] == "pass" for record in telemetry)
+    assert all(record["component.agent_name"] == "codex" for record in telemetry)
+    assert "PRIVATE_" not in daemon.telemetry.read_text()

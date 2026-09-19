@@ -53,6 +53,11 @@ and [V2 workspace](v2/README.md). PAP state is currently process-local; Binding
 acceptance does not imply enforcement. For non-root development and E2E, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
+V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
+Pass Agent attribution through the existing `--trace-context` JSON option, or an
+upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
+bounded correlation records on stderr. See [context examples and logging limits](v2/README.md#native-opentelemetry-tracing).
+
 ## Security Architecture
 
 ```

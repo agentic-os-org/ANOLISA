@@ -20,10 +20,12 @@ impl RejectionEncoder for JsonRejectionEncoder {
         response: &mut dyn Write,
     ) -> Result<ResponseDisposition, DispatchError> {
         let (code, message) = project_rejection(request.reason);
-        write_response(
-            response,
-            &DaemonResponse::<serde_json::Value>::error(new_request_id(), code, message),
-        )
+        asc_observability::rejection_scope(code, || {
+            write_response(
+                response,
+                &DaemonResponse::<serde_json::Value>::error(new_request_id(), code, message),
+            )
+        })
     }
 }
 

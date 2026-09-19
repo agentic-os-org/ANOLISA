@@ -12,6 +12,7 @@ publish.workspace = true
 testing = []
 
 [dependencies]
+asc-observability.workspace = true
 asc-telemetry.workspace = true
 thiserror.workspace = true
 asc-action-types = { workspace = true }
