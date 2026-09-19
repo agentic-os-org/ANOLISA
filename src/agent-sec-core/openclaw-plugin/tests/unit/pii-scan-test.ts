@@ -238,6 +238,26 @@ describe("pii-scan-user-input", () => {
     assert.match(result?.text, /当前策略已阻断本次请求/);
   });
 
+  it("uses complete counts when finding details are reduced", async () => {
+    const { beforeDispatch } = registerHandlers(policyConfig("block"));
+    mockCli({
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        verdict: "deny",
+        findings: [denyFinding],
+        summary: {
+          total: 20001,
+          by_severity: { deny: 1, warn: 20000 },
+          findings_truncated: true,
+        },
+      }),
+    });
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+    assert.equal(result?.handled, true);
+    assert.match(result?.text, /20001.*高风险 1、一般风险 20000.*明细已省略/);
+  });
+
   it("summarizes mixed findings by per-finding risk", async () => {
     const { beforeDispatch } = registerHandlers(policyConfig("block"));
     mockCli(
@@ -335,11 +355,7 @@ describe("pii-scan-user-input", () => {
     assert.equal(result, undefined);
     assert.ok(logs.some((log) => log.includes("verdict=deny policy=ask")));
     assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")));
-    assert.ok(
-      logs.some((log) =>
-        log.includes("当前环节不支持确认/阻断，本次仅提醒，不会阻断"),
-      ),
-    );
+    assert.ok(logs.some((log) => log.includes("当前环节不支持确认/阻断，本次仅提醒，不会阻断")));
     assert.ok(!logs.some((log) => log.includes("password=[REDACTED]")));
     assert.ok(!logs.some((log) => log.includes("当前策略已阻断本次请求")));
   });

@@ -326,8 +326,9 @@ code-scan telemetry，因此依赖它们的 hook 仍处于延期状态。
 
 检测个人数据与凭证，可输出脱敏文本。
 
-随包提供的 [pii-checker Skill](skills/pii-checker/SKILL.md) 支持 Agent 通过 V1 CLI
-检查指定文本或文件，并生成脱敏文本。
+随包提供的 [pii-checker Skill](skills/pii-checker/SKILL.md) 支持 Agent 检查指定文本或文件，
+并生成脱敏文本。V2 使用 Rust daemon：设置 `AGENT_SEC_DAEMON_SOCKET` 或顶层 `--socket`；
+CLI 不会自动启动 daemon。
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
@@ -336,7 +337,10 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 ```
 
-可在 `~/.config/agent-sec/pii-checker/rules.yaml` 中添加自定义业务类型。
+V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
+`agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md)。
 

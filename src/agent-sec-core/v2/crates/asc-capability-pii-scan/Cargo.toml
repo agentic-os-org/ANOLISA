@@ -1,0 +1,31 @@
+[package]
+name = "asc-capability-pii-scan"
+description = "Local PII and credential detection with explicit scan coverage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-action-runtime = { workspace = true }
+asc-action-types = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+fancy-regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+yaml-rust2 = { workspace = true }
+
+[dev-dependencies]
+asc-action-runtime = { workspace = true, features = ["testing"] }
+asc-event-sink = { workspace = true }
+asc-persistence-sqlite = { workspace = true }
+asc-security-events = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

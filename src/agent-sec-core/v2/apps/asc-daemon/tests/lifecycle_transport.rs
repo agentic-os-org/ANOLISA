@@ -113,7 +113,17 @@ async fn scenario(kind: Scenario) {
             Arc::new(PolicyTemplateCompiler),
         ),
         Arc::new(RootManagedPrincipalPolicy::default()),
-        Arc::new(ActionService::new(runtime)),
+        Arc::new(ActionService::new(
+            runtime,
+            ActionRuntime::new(
+                ActionId::PiiScan,
+                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
+                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
+                )),
+                asc_capability_pii_scan::PiiAuditProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+        )),
     ));
     let shutdown = ShutdownToken::new();
     let service_shutdown = shutdown.clone();

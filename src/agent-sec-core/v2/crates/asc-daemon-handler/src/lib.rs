@@ -11,6 +11,7 @@
 mod action;
 mod dispatcher;
 mod pap;
+mod pii;
 mod rejection;
 
 pub use dispatcher::DaemonDispatcher;

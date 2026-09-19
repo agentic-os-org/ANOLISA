@@ -17,6 +17,7 @@ asc-action-types.workspace = true
 asc-capability-code-scan.workspace = true
 asc-telemetry.workspace = true
 serde_json.workspace = true
+asc-capability-pii-scan = { workspace = true }
 asc-policy-runtime.workspace = true
 asc-pcp.workspace = true
 asc-agentsight-client.workspace = true

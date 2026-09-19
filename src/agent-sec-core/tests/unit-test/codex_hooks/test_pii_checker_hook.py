@@ -1016,6 +1016,22 @@ class TestHelpers:
     def test_risk_summary(self, verdict, findings, expected):
         assert pii_checker_hook._risk_summary(verdict, findings) == expected
 
+    def test_truncated_details_use_total_counts_and_reject_malformed_counts(self):
+        summary = {
+            "findings_truncated": True,
+            "total": 20001,
+            "by_severity": {"deny": 1, "warn": 20000},
+        }
+        findings = [{"severity": "deny"}]
+        message = pii_checker_hook._risk_summary("deny", findings, summary)
+        assert "20001" in message and "20000" in message
+        assert "明细已省略" in message
+        summary["total"] = "20001"
+        assert (
+            pii_checker_hook._risk_summary("deny", findings, summary)
+            == "检测到 1 项高风险敏感信息"
+        )
+
 
 class TestFormatBlockReason:
     """Test _format_block_reason output formatting."""

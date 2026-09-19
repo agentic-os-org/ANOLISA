@@ -394,3 +394,9 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 | OTel 故障影响安全功能 | tracing/export 与 ActionResult、SecurityEvent sink 隔离 |
 | per-user 数据迁移丢失 owner | state migrator owner mapping、事务、重复运行和回滚测试 |
 | 只有 Markdown、没有可执行门禁 | manifest、fixture、runner、pass/fail matrix 是完成条件 |
+
+## PII Checker 第一阶段实现入口
+
+PII 检测核心、中央规则、Runtime/Finalizer、RPC/CLI 和 Hook/RPM 验收位于
+[PII 两阶段迁移设计](PII_V2_MIGRATION_zh.md)。该文显式区分当前执行服务与未来
+PIP 证据获取、PDP 决策、PEP 执行反馈的覆盖范围；不改变本文的系统级部署及 OTel 目标。

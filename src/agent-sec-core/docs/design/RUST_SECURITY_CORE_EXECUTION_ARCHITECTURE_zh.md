@@ -131,8 +131,8 @@ Rust 应先构造 immutable `FinalizedInvocation`，再做三个有边界的 pro
 
 ### 4.1 ActionId 与 typed request
 
-**实现范围：** 当前 V2 `ActionId` 只有 `CodeScan`。下面八个 action 的 enum 是迁移完成后的
-目标示意，不是当前支持清单；`PromptScan`、`PiiScan` 等须随各自能力实现再加入代码。
+**实现范围：** 当前 V2 `ActionId` 包含 `CodeScan` 和 `PiiScan`。下面八个 action 的 enum
+是迁移完成后的目标示意，不是当前支持清单；其余 action 须随各自能力实现再加入代码。
 
 八个 action 使用封闭的 `ActionId`，每个 action 定义自己的 request/output 类型。adapter
 完成 transport/binding envelope 校验后，把固定 `ActionId`、context 和有大小限制的 raw
@@ -355,7 +355,9 @@ V1 client 不得自动重放执行状态不明的有副作用 action。
 
 `asc-action-runtime` 的 lifecycle 与 Finalizer 是所有扫描 capability 共用的基础设施，
 由 runtime 隐式完成终态处理，具体 capability 和 handler 不拥有 sink。
-当前 code-scan 是已接入的消费者；其 identity、telemetry 投影与 fixture 不限定公共机制的适用范围。
+当前 code-scan 与 PII scan 均已接入。PII 的共享请求类型、应用入口、安全参数拒绝及
+标量遥测复用本节机制，具体迁移与验收见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+下述共享基础设施的原始验收记录保留其当时的 code-scan 范围，不代替 PII 的直接消费者验收。
 其它扫描能力在各自提交中添加 identity、Executor、投影与注册，复用本节的装配与执行路径。
 
 以下为 **[TARGET V2][PARTIAL_MIGRATION]** 的实际实现，不表示 §5.1 的完整目标状态机、
@@ -619,8 +621,9 @@ Telemetry projector 与 event projector 可以共享 enum 和字段定义，但�
 - code/prompt/PII、evidence、path、原始 error、correlation、未知扩展字段不进入 telemetry。
 - Projector 从相同 finalized outcome 取 allowlisted 字段，不依赖 audit projector 或落库成功。
   这是 V2 的失败隔离增强；正常投影输出与 V1 scan mapper 等价。
-- 可注入的 Agent product 仍须经过白名单；当前 RPC 尚未携带 Agent/session/run/call metadata，
-  core 保持默认空 attribution，不把 daemon request ID 当作 trace ID。
+- 可注入的 Agent product 仍须经过白名单。PII RPC 的 `traceContext` 经归一化后把业务关联
+  字段与 `agent_name` 传入 `ActionAttribution`；只有白名单 Agent 名称进入遥测，correlation
+  不进入遥测。code-scan 仍保留默认空 attribution，不把 daemon request ID 当作 trace ID。
 - `written` 只表示完整 append；`skipped` 表示 policy/目标/锁导致跳过；`failed` 表示写入失败。
   这些状态不改变 capability 结果，也不意味着 fsync 或远端上传完成。
 

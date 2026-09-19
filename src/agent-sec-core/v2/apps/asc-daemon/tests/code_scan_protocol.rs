@@ -7,7 +7,13 @@
 //! administer policy.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use asc_action_runtime::{
+    Diagnostic, DiagnosticSink, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus,
+};
+use asc_security_events::SecurityEvent;
+use asc_telemetry::TelemetryRecord;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -34,7 +40,28 @@ impl PrincipalPolicy for FixedRolePolicy {
     }
 }
 
+#[derive(Default)]
+struct Outputs {
+    audit: Mutex<Vec<SecurityEvent>>,
+    telemetry: Mutex<Vec<TelemetryRecord>>,
+}
+impl SecurityEventSink for Outputs {
+    fn write(&self, event: &SecurityEvent) {
+        self.audit.lock().unwrap().push(event.clone());
+    }
+}
+impl TelemetrySink for Outputs {
+    fn write(&self, record: &TelemetryRecord) -> TelemetryStatus {
+        self.telemetry.lock().unwrap().push(record.clone());
+        TelemetryStatus::Written
+    }
+}
+impl DiagnosticSink for Outputs {
+    fn record(&self, _: &Diagnostic) {}
+}
+
 struct RunningDaemon {
+    output: Arc<Outputs>,
     directory: PathBuf,
     socket_path: PathBuf,
     shutdown: asc_daemon_service::ShutdownToken,
@@ -54,10 +81,14 @@ impl RunningDaemon {
             Arc::new(ProcessLocalPapRepository::default()),
             Arc::new(PolicyTemplateCompiler),
         );
+        let output = Arc::new(Outputs::default());
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,
             Arc::new(FixedRolePolicy(role)),
-            asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+            asc_daemon::scan_application(
+                Finalizer::new(output.clone(), output.clone(), output.clone()),
+                Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+            ),
         ));
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
@@ -75,6 +106,7 @@ impl RunningDaemon {
         });
         wait_for_socket(&socket_path).await;
         Self {
+            output,
             directory,
             socket_path,
             shutdown,
@@ -101,6 +133,98 @@ async fn wait_for_socket(path: &Path) {
     })
     .await
     .expect("daemon should accept connections on its socket");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pii_scan_finalizes_safe_outputs_with_peer_identity_and_business_trace() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let trace = json!({"traceId":" trace ","sessionId":"session","agentName":" codex ","uid":424_242,"pid":424_242});
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "action.pii_scan", "params": {
+            "text": "PRIVATE_INPUT alice@company.cn", "rawEvidence":true,
+            "redactOutput":true,"traceContext":trace
+        }}),
+    )
+    .await;
+    assert_eq!(response["result"]["verdict"], "warn", "{response}");
+    assert!(
+        response["result"]["redacted_text"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATE_INPUT")
+    );
+    for (extra, error) in [
+        (json!({"unknown":"PRIVATE_PARAMETER"}), "invalid_request"),
+        (json!({"source":"PRIVATE_SOURCE"}), "invalid_argument"),
+        (json!({"maxBytes":0}), "invalid_argument"),
+    ] {
+        let mut params = json!({"text":"PRIVATE_INPUT","traceContext":trace});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = support::request_json(
+            &daemon.socket_path,
+            &json!({"method":"action.pii_scan","params":params}),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], error, "{response}");
+        assert!(!response.to_string().contains("PRIVATE"));
+    }
+    for (method, error) in [
+        ("policy.templates.list", "permission_denied"),
+        ("action.unknown", "unknown_method"),
+    ] {
+        let response =
+            support::request_json(&daemon.socket_path, &json!({"method":method,"params":{}})).await;
+        assert_eq!(response["error"]["code"], error);
+    }
+    {
+        let audit = daemon.output.audit.lock().unwrap();
+        let telemetry = daemon.output.telemetry.lock().unwrap();
+        assert_eq!(audit.len(), 4);
+        assert_eq!(telemetry.len(), 4);
+        for (index, event) in audit.iter().enumerate() {
+            assert_eq!(event.uid, rustix::process::getuid().as_raw());
+            assert_eq!(event.pid, std::process::id());
+            assert_eq!(event.trace_id, "trace");
+            assert_eq!(event.session_id.as_deref(), Some("session"));
+            let serialized = serde_json::to_string(event).unwrap();
+            assert!(!serialized.contains("PRIVATE"));
+            assert!(!serialized.contains("alice@company.cn"));
+            if index > 0 {
+                assert_eq!(event.details["request"], json!({}));
+                assert_eq!(event.details["error_type"], "invalid_parameters");
+            }
+            let scalar = serde_json::to_value(&telemetry[index]).unwrap();
+            assert_eq!(scalar["component.agent_name"], "codex");
+            assert_eq!(scalar["seccore.event_type"], "pii_scan");
+            assert_eq!(
+                scalar["seccore.result"],
+                if index == 0 { "succeeded" } else { "failed" }
+            );
+            if index == 0 {
+                assert_eq!(scalar["seccore.verdict"], "warn");
+                assert!(scalar["seccore.elapsed_ms"].is_number());
+            } else {
+                assert!(scalar.get("seccore.verdict").is_none());
+                assert_eq!(scalar["seccore.error_type"], "invalid_parameters");
+            }
+            for forbidden in [
+                "PRIVATE",
+                "alice@company.cn",
+                "findings",
+                "redacted_text",
+                "raw_evidence",
+                "session",
+                "trace",
+            ] {
+                assert!(!scalar.to_string().contains(forbidden));
+            }
+        }
+    }
+    daemon.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

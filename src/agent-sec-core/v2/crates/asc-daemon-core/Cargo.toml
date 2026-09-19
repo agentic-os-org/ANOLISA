@@ -14,6 +14,7 @@ asc-action-types.workspace = true
 asc-foundation-types = { workspace = true }
 asc-pap = { workspace = true }
 asc-policy-types = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

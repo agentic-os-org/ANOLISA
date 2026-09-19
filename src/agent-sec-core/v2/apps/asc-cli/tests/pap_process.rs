@@ -58,7 +58,10 @@ async fn start(
     let inner = Arc::new(DaemonDispatcher::new(
         application,
         Arc::new(TestPolicy(role)),
-        asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let dispatcher = Arc::new(RecordingDispatcher {

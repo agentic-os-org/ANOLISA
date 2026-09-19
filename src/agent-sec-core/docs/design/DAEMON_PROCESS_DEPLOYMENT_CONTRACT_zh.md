@@ -1,5 +1,7 @@
 # AgentSec daemon 进程与部署契约
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python 交付基线、兼容语料及仓库内 V2 部署目标 |
@@ -467,3 +469,22 @@ DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→
   v2/apps/asc-daemon/tests/bootstrap.rs；
 - Rust PAP 完整 serialized UDS scenario：
   v2/crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json。
+
+## PII 第一阶段 V2 启动配置
+
+**[TARGET V2，已实现]** `agent-sec-daemon --pii-rules <绝对路径>` 仅在进程启动时选择、
+读取、校验并编译自定义检测规则，默认路径为 `/etc/agent-sec/pii-checker/rules.yaml`。
+每进程共享不可变 Arc 规则集合；更改文件后重启生效。扫描请求不能指定规则或输入文件路径。
+不按 peer owner 选择规则，不读取 HOME，不自动汇总 V1 用户文件。
+路径参数拒绝相对路径、空值和重复指定；显式文件读取失败只禁用自定义规则，内置检测继续，
+启动诊断和扫描 summary 仅包含安全错误码。
+
+CLI 沿用显式 `--socket`、非空 `AGENT_SEC_DAEMON_SOCKET`、系统默认
+`/run/agent-sec-core/daemon.sock` 的优先级；不自动拉起进程，不回退 Python。
+UID/GID/PID 来自 UDS peer；来源与 trace 不改变授权。
+本迁移不改 systemd 拓扑，不切换真实宿主；已有 V2 RPM 的服务打包边界不能当作系统级部署目标已完成。
+安装态验收运行真实 Rust CLI/daemon 和已安装 Hook，并屏蔽 V1 检测包与源码。
+
+可执行启动/路径/重启/身份用例为 `tests/v2/e2e/test_pii_cli_e2e.py`；安装态入口为
+`make test-e2e-rpm-v2`，六宿主 direct_protocol 用例为 `test_pii_hook_contracts.py`。
+规则及 runtime 回滚步骤见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。

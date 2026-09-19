@@ -424,7 +424,19 @@ jobs:
             echo "ERROR: agent_sec_cli remains importable after hiding V1 source"
             exit 1
           fi
-          make -C src/agent-sec-core test-e2e-rpm-v2
+          printf '%s\n' "$GITHUB_SHA" > src/agent-sec-core/v2-rpm-revision.txt
+          PYTEST_ADDOPTS=--junitxml=v2-rpm-e2e.xml make -C src/agent-sec-core test-e2e-rpm-v2
+
+      - name: Upload V2 installed acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-v2-e2e-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            src/agent-sec-core/v2-rpm-e2e.xml
+            src/agent-sec-core/v2-rpm-revision.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Show V2 daemon log after E2E failure
         if: failure()

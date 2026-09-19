@@ -1,9 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import {
-  afterToolCallPiiScanText,
-  inboundPiiScanText,
-  valueToText,
-} from "../helpers/pii-text.js";
+import { afterToolCallPiiScanText, inboundPiiScanText, valueToText } from "../helpers/pii-text.js";
 import {
   buildTraceContext,
   callAgentSecCli,
@@ -24,8 +20,7 @@ type PiiScanConfig = {
 };
 
 function readConfig(pluginConfig: Record<string, any>, api: any): PiiScanConfig {
-  const capabilityConfig =
-    pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
+  const capabilityConfig = pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
   let policy: HookPolicy = "observe";
   if (process.env.PII_CHECKER_MODE !== undefined) {
     policy = envHookPolicy("PII_CHECKER_MODE", "observe");
@@ -56,10 +51,7 @@ function safeString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function findingRisk(
-  finding: Record<string, unknown>,
-  verdict: string,
-): "high" | "general" {
+function findingRisk(finding: Record<string, unknown>, verdict: string): "high" | "general" {
   const severity = safeString(finding.severity);
   if (severity === "deny") {
     return "high";
@@ -70,10 +62,36 @@ function findingRisk(
   return verdict === "deny" ? "high" : "general";
 }
 
-function riskSummary(verdict: string, findings: Record<string, unknown>[]): string {
-  const highCount = findings.filter(
-    (finding) => findingRisk(finding, verdict) === "high",
-  ).length;
+function riskSummary(
+  verdict: string,
+  findings: Record<string, unknown>[],
+  summary?: unknown,
+): string {
+  if (typeof summary === "object" && summary !== null) {
+    const data = summary as Record<string, unknown>;
+    if (
+      data.findings_truncated === true &&
+      typeof data.by_severity === "object" &&
+      data.by_severity !== null
+    ) {
+      const counts = data.by_severity as Record<string, unknown>;
+      const high = counts.deny ?? 0;
+      const general = counts.warn ?? 0;
+      const total = data.total;
+      if (
+        typeof high === "number" &&
+        typeof general === "number" &&
+        Number.isSafeInteger(high) &&
+        Number.isSafeInteger(general) &&
+        high >= 0 &&
+        general >= 0 &&
+        total === high + general
+      ) {
+        return `检测到 ${total} 项敏感信息（高风险 ${high}、一般风险 ${general}；明细已省略）`;
+      }
+    }
+  }
+  const highCount = findings.filter((finding) => findingRisk(finding, verdict) === "high").length;
   const generalCount = findings.length - highCount;
 
   if (highCount > 0 && generalCount > 0) {
@@ -89,24 +107,17 @@ function formatPiiWarning(
   verdict: string,
   findings: unknown[],
   finalMessage = "本次仅提醒，未触发确认或阻断。",
+  summary?: unknown,
 ): string {
   const typedFindings = findings.filter(
     (finding): finding is Record<string, unknown> =>
       typeof finding === "object" && finding !== null && !Array.isArray(finding),
   );
-  return `[pii-checker] ${riskSummary(verdict, typedFindings)}；${finalMessage}`;
+  return `[pii-checker] ${riskSummary(verdict, typedFindings, summary)}；${finalMessage}`;
 }
 
 function buildScanArgs(source: string, includeLowConfidence: boolean): string[] {
-  const args = [
-    "scan-pii",
-    "--stdin",
-    "--format",
-    "json",
-    "--redact-output",
-    "--source",
-    source,
-  ];
+  const args = ["scan-pii", "--stdin", "--format", "json", "--redact-output", "--source", source];
   if (includeLowConfidence) {
     args.push("--include-low-confidence");
   }
@@ -145,7 +156,7 @@ async function scanPiiText(
   ctx: any,
   text: string,
   source: string,
-): Promise<{ verdict: string; findings: unknown[] } | undefined> {
+): Promise<{ verdict: string; findings: unknown[]; summary?: unknown } | undefined> {
   const result = await callAgentSecCli(buildScanArgs(source, cfg.includeLowConfidence), {
     timeout: CLI_TIMEOUT_MS,
     stdin: text,
@@ -156,11 +167,12 @@ async function scanPiiText(
     return undefined;
   }
 
-  let scanResult: { verdict?: unknown; findings?: unknown };
+  let scanResult: { verdict?: unknown; findings?: unknown; summary?: unknown };
   try {
     scanResult = JSON.parse(result.stdout) as {
       verdict?: unknown;
       findings?: unknown;
+      summary?: unknown;
     };
   } catch (error) {
     api.logger.warn(
@@ -173,6 +185,7 @@ async function scanPiiText(
   return {
     verdict: safeString(scanResult.verdict) || "pass",
     findings: Array.isArray(scanResult.findings) ? scanResult.findings : [],
+    summary: scanResult.summary,
   };
 }
 
@@ -181,9 +194,10 @@ function logPiiWarning(
   verdict: string,
   findings: unknown[],
   cfg: PiiScanConfig,
+  summary?: unknown,
   finalMessage?: string,
 ): string {
-  const warning = formatPiiWarning(verdict, findings, finalMessage);
+  const warning = formatPiiWarning(verdict, findings, finalMessage, summary);
   api.logger.debug?.(`[pii-checker] verdict=${verdict} policy=${cfg.policy}`);
   api.logger.warn(warning);
   return warning;
@@ -220,7 +234,7 @@ export const piiScan: SecurityCapability = {
 
           const scanResult = await scanPiiText(api, cfg, event, ctx, text, "user_input");
           if (scanResult === undefined) return undefined;
-          const { verdict, findings } = scanResult;
+          const { verdict, findings, summary } = scanResult;
 
           if (verdict === "pass" || findings.length === 0) {
             api.logger.info("[pii-checker] pass");
@@ -237,6 +251,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             verdict === "deny" && cfg.policy === "block"
               ? "当前策略已阻断本次请求。"
               : verdict === "deny" && cfg.policy === "ask"
@@ -268,7 +283,7 @@ export const piiScan: SecurityCapability = {
           if (!text.trim()) return undefined;
           const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_input");
           if (scanResult === undefined) return undefined;
-          const { verdict, findings } = scanResult;
+          const { verdict, findings, summary } = scanResult;
           if (verdict === "pass" || findings.length === 0) return undefined;
           if (verdict !== "warn" && verdict !== "deny") return undefined;
           if (cfg.policy === "observe") return undefined;
@@ -277,6 +292,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             verdict === "deny" && cfg.policy === "block"
               ? "当前策略已阻断本次工具调用。"
               : verdict === "deny" && cfg.policy === "ask"
@@ -312,7 +328,7 @@ export const piiScan: SecurityCapability = {
         if (!text.trim()) return undefined;
         const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_output");
         if (scanResult === undefined) return undefined;
-        const { verdict, findings } = scanResult;
+        const { verdict, findings, summary } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
         if (cfg.policy !== "observe") {
@@ -323,6 +339,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             cannotEnforce
               ? "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
               : "工具已经执行；本次仅提醒，未触发确认或阻断，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。",
@@ -343,7 +360,7 @@ export const piiScan: SecurityCapability = {
         if (!text.trim()) return undefined;
         const scanResult = await scanPiiText(api, cfg, event, ctx, text, "model_output");
         if (scanResult === undefined) return undefined;
-        const { verdict, findings } = scanResult;
+        const { verdict, findings, summary } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
         if (cfg.policy !== "observe") {
@@ -352,6 +369,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             "当前环节仅提醒，原始模型输出仍会交付，不会被脱敏或阻断。",
           );
         }

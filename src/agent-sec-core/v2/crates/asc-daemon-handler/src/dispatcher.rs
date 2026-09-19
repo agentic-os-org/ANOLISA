@@ -10,11 +10,13 @@ use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, Resp
 
 use crate::action::CodeScanHandler;
 use crate::pap::PapHandler;
+use crate::pii::PiiScanHandler;
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
     pap: PapHandler,
     code_scan: CodeScanHandler,
+    pii_scan: PiiScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -30,7 +32,8 @@ impl DaemonDispatcher {
     ) -> Self {
         Self {
             pap: PapHandler::new(application),
-            code_scan: CodeScanHandler::new(actions),
+            code_scan: CodeScanHandler::new(Arc::clone(&actions)),
+            pii_scan: PiiScanHandler::new(actions),
             principal_policy,
         }
     }
@@ -83,6 +86,10 @@ impl DaemonDispatcher {
             MethodId::Action(method) => match method {
                 method::ActionMethod::CodeScan => {
                     self.code_scan
+                        .handle(request_id, peer, control, request.params)
+                }
+                method::ActionMethod::PiiScan => {
+                    self.pii_scan
                         .handle(request_id, peer, control, request.params)
                 }
             },
