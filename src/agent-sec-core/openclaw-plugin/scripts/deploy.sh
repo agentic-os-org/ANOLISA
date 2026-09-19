@@ -23,6 +23,7 @@ MIN_CONVERSATION_ACCESS_VERSION="2026.4.24"
 OPENCLAW_INSTALL_HELP=""
 OPENCLAW_INSTALL_SUPPORTS_UNSAFE=0
 OPENCLAW_INSTALL_REQUIRES_UNSAFE=0
+OPENCLAW_INSTALL_SUPPORTS_ACCEPT_CAPABILITIES=0
 OPENCLAW_INSPECT_HELP=""
 OPENCLAW_INSPECT_SUPPORTS_RUNTIME=0
 VERIFY_RUNTIME_TMPDIR=""
@@ -191,6 +192,9 @@ verify_openclaw_install_cli() {
     if [[ "$install_help_normalized" == *"--dangerously-force-unsafe-install"* ]]; then
         OPENCLAW_INSTALL_SUPPORTS_UNSAFE=1
     fi
+    if [[ "$install_help_normalized" == *"--accept-capabilities"* ]]; then
+        OPENCLAW_INSTALL_SUPPORTS_ACCEPT_CAPABILITIES=1
+    fi
 
     # Treat help output as the CLI contract: if the current OpenClaw installer
     # advertises the compatibility flag, pass it on the first install attempt
@@ -211,6 +215,11 @@ verify_openclaw_inspect_cli() {
 
 install_plugin() {
     local install_args=("plugins" "install" "$PLUGIN_DIR" "--force")
+
+    if [[ "$OPENCLAW_INSTALL_SUPPORTS_ACCEPT_CAPABILITIES" == "1" ]]; then
+        echo "安装策略: OpenClaw ${OPENCLAW_VERSION_DETECTED} 安装器暴露 --accept-capabilities，将接受插件声明的 capabilities（含 hook 激活）。"
+        install_args+=("--accept-capabilities")
+    fi
 
     if [[ "$OPENCLAW_INSTALL_REQUIRES_UNSAFE" == "1" ]]; then
         echo "安装策略: OpenClaw ${OPENCLAW_VERSION_DETECTED} 安装器暴露 legacy --dangerously-force-unsafe-install，首次安装将使用该兼容参数。"
