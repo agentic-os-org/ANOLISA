@@ -71,6 +71,11 @@ package supports macOS arm64, where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
 
+On Windows, a community preview launcher starts cosh-ng inside WSL2 from Git
+Bash: install cosh-ng in a WSL2 distribution, then run `scripts/cosh-wsl`
+from Git Bash. This is a preview path, not a native Windows target; see
+[Run cosh-ng on Windows with WSL2 (preview)](../../docs/user-guide/en/user-entrypoint/cosh-ng/wsl-preview.md).
+
 ## Start in 30 seconds
 
 ```bash
