@@ -53,7 +53,7 @@ files while continuing to check their presence, permissions, and path safety.
 | `system` | System helper daemon lifecycle (setup / serve / teardown / status) |
 | `register` | Join / leave Agentic OS Co-Build Program |
 | `env` | Show environment detection results |
-| `bug` | Generate a bug report |
+| `bug` | Generate a bug report (`--component cosh-ng` also summarizes the cosh-shell diagnostic bundle; `COSH_SHELL_BIN` overrides the binary) |
 
 Running `anolisa adapter enable <component> openclaw` accepts the plugin's
 declared capabilities when the host supports capability consent. This does

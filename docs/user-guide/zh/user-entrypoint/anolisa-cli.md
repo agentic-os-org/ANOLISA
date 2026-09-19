@@ -214,6 +214,16 @@ anolisa bug
 
 `--level` 是 `--severity` 的别名。
 
+使用 `--component cosh-ng` 时，`anolisa bug` 还会调用已安装的
+`cosh-shell` 二进制，将脱敏诊断包导出到全新的私有路径（`0600`，绝不
+覆盖已有文件），并在报告中汇总其健康检查 finding ID 与清单摘要。二进
+制从 cosh-ng 安装的私有 libexec 位置解析（raw 契约目录与 RPM 的
+`/usr/libexec` 路径），可用 `COSH_SHELL_BIN` 覆盖，PATH 仅作为开发场
+景回退；报告中的手工与复现命令使用解析后的绝对路径，保证可直接执行。
+诊断包写入调用者本人的 state 根目录——即使诊断的是 system scope 安
+装——且不会被上传；请在本地审阅后再附加到 issue。无法产出诊断包时，
+报告会显式说明原因，并给出可手工执行的 `diagnostics export` 命令。
+
 ---
 
 ## 恢复行为
