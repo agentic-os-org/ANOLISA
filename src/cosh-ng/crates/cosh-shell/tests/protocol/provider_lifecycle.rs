@@ -1239,6 +1239,43 @@ exec sleep 30"#
 }
 
 #[test]
+fn cosh_core_cancel_after_completed_result_emits_only_cancelled() {
+    // If a genuine AgentCompleted races with the cancel signal, cancellation
+    // must still win: the terminal event stream should contain AgentCancelled
+    // and no AgentCompleted.
+    let script = mock_provider_script(
+        "cosh-core-cancel-after-completed-result",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000"}'
+exec sleep 30"#,
+    );
+
+    let adapter = cosh_core_active_adapter(&script);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-cancel-after-completed-result"),
+        CoshApprovalMode::Recommend,
+    );
+    // Give the provider enough time to emit init + result before cancelling.
+    thread::sleep(Duration::from_millis(200));
+    handle.cancel();
+    let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCancelled { .. })),
+        "cancelled run should emit AgentCancelled: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "cancelled run must not emit AgentCompleted: {events:?}"
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn structured_session_failure_survives_nonzero_exit_for_every_runner() {
     let script = mock_provider_script(
         "cosh-core-active-persist-conflict-exit-one",

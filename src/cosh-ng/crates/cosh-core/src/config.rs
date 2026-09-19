@@ -503,7 +503,7 @@ impl LoggingConfig {
         if verbose {
             return "debug".to_string();
         }
-        self.level.clone().unwrap_or_else(|| "warn".to_string())
+        self.level.clone().unwrap_or_else(|| "info".to_string())
     }
 }
 

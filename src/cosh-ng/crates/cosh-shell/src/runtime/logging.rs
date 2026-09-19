@@ -4,11 +4,11 @@ pub(crate) fn init_logging(config_log_level: &str) {
     let log_dir = log_directory();
 
     let filter = if let Ok(cosh_log) = std::env::var("COSH_LOG") {
-        EnvFilter::try_new(&cosh_log).unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_new(&cosh_log).unwrap_or_else(|_| EnvFilter::new("info"))
     } else if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        EnvFilter::try_new(&rust_log).unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_new(&rust_log).unwrap_or_else(|_| EnvFilter::new("info"))
     } else {
-        EnvFilter::try_new(config_log_level).unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_new(config_log_level).unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
     if let Some(dir) = &log_dir {
