@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-09-20
+
+### Added
+- Managed Tasks are now end-to-end: submit persistent Core or Codex Tasks from the guided `/task` form, choose a checkpoint policy, reconnect to inspect progress, and safely preview, diff, and switch Task-owned snapshots through a Gateway-backed recovery flow (#2911)
+- Slash command discovery inside `/agent`: typing `/` in the Composer offers prefix-filtered candidates with browsing and Tab completion, and submitted commands run through the normal handlers with confirmation cards (#3224)
+- First-time provider setup is now automated: a conflict-free default name is derived from the template type and existing configs, and ECS RAM Role credentials are detected and submitted without manual confirmation through a bounded, cancellable probe (#3298)
+- Readonly commands whose only redirection suppresses stderr to `/dev/null` (e.g. `find /tmp -name '*x*' 2>/dev/null`) no longer require approval in auto mode (#3208)
+
+### Changed
+- Declared `[[hooks.PreToolUse]]` config hooks now run by default without requiring `hooks.enabled`; explicitly disabled hooks warn and are removed before extension registration, and empty hook output still blocks the tool call by default (#3330)
+- Enhanced sessions no longer print the ownership status line (`◇`/`◌`) above the prompt by default, keeping the shell's native prompt appearance; set `shell.status_symbols = true` or `COSH_SHELL_STATUS_SYMBOLS=1` to opt back in — when enabled, the symbol is published on its own line so narrow-terminal editing no longer loses CJK characters or misplaces the cursor (#3345, #3254)
+
+### Fixed
+- Lexical path-traversal spellings that resolve into `/proc`, `/dev`, or `/sys` are now blocked by the readonly safety check, closing a bypass where variants like `/../proc/version` slipped through (#2708)
+- Quoted `/dev/null` redirection targets such as `2>"/dev/null"` are now classified as null redirections instead of redirection-write, so the approval card shows the correct reason (#2710)
+- SysOM endpoint resolution now prefers a reachable in-VPC proxy, so ECS instances without public egress can reach SysOM; explicit overrides via `COSH_SYSOM_ENDPOINT` or the `sysom_endpoint` config keep the system proxy (#3188)
+- Medium-risk tool requests whose names merely contain `HOOK:` as a substring are no longer misclassified as Hook requests, so the approval card offers the standard actions instead of the Hook action set (#3248)
+- Valid token-plan credentials can again be saved through `/auth` when the gateway answers HTTP 400 on the model-retrieve route, while list-only providers still reject unverifiable credentials (#3276)
+- zh-CN `/help` panel: the Registry group title is localized and the `/agent` summary wording corrected; en-US output is unchanged (#3363)
+- RPM install/erase scriptlets now manage the `/etc/shells` entry safely: swapping between `cosh-ng` and `copilot-shell` no longer drops the login-shell registration the replacement still needs, updates are atomic and preserve file metadata, and install-time failures are reported instead of silent (#3367)
+
 ## [0.24.1] — 2026-09-09
 
 ### Fixed
