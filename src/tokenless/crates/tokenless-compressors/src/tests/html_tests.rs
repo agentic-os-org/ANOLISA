@@ -507,6 +507,17 @@ fn link_targets_with_spaces_or_parentheses_are_wrapped() {
         format!("{PARAGRAPH} [v](ab) [w](cd) ![i](ef) [x](<a\\>b>) [y](<x\\> [End page]>)")
     );
     assert_eq!(view.output.matches("\n[End page]").count(), 1);
+    // Scheme filters see the normalized URL, case-insensitively; backslashes
+    // are escaped inside the wrapped form.
+    let html = page(&format!(
+        "<p>{PARAGRAPH} <a href=\"java\nscript:alert(1)\">t</a> <a href=\"JAVASCRIPT:alert(1)\">u</a> \
+         <img alt=\"a\" src=\"da\tta:text/html,x\"> <a href=\"c:\\dir (x)\">v</a></p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH} t u ![a] [v](<c:\\\\dir (x)>)")
+    );
 }
 
 #[test]

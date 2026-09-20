@@ -1021,9 +1021,9 @@ impl Renderer<'_> {
                     if alt.is_empty() {
                         return;
                     }
-                    match node.attr("src").map(str::trim) {
-                        Some(src) if !src.is_empty() && !src.starts_with("data:") => {
-                            let _ = write!(out, "![{alt}]({})", link_target(src));
+                    match node.attr("src").map(|src| url_text(src.trim())) {
+                        Some(src) if !src.is_empty() && !has_scheme(&src, "data") => {
+                            let _ = write!(out, "![{alt}]({})", link_target(&src));
                         }
                         _ => {
                             let _ = write!(out, "![{alt}]");
@@ -1036,11 +1036,11 @@ impl Renderer<'_> {
                     let text = text.trim();
                     let href = node
                         .attr("href")
-                        .map(str::trim)
-                        .filter(|href| !href.is_empty() && !href.starts_with("javascript:"));
+                        .map(|href| url_text(href.trim()))
+                        .filter(|href| !href.is_empty() && !has_scheme(href, "javascript"));
                     match href {
                         Some(href) if !text.is_empty() => {
-                            let _ = write!(out, "[{text}]({})", link_target(href));
+                            let _ = write!(out, "[{text}]({})", link_target(&href));
                         }
                         _ => out.push_str(text),
                     }
@@ -1228,13 +1228,25 @@ fn url_text(url: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Whether a URL normalized by `url_text` carries the given scheme. Schemes
+/// are ASCII case-insensitive, and the check runs after normalization so a
+/// tab or newline inside the scheme cannot hide it.
+fn has_scheme(url: &str, scheme: &str) -> bool {
+    url.split_once(':')
+        .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(scheme))
+}
+
 /// A link destination as Markdown can carry it: a target with whitespace,
-/// parentheses or angle brackets is wrapped in `<…>`, inside which angle
-/// brackets are backslash-escaped.
+/// parentheses or angle brackets is wrapped in `<…>`, inside which
+/// backslashes and angle brackets are backslash-escaped.
 fn link_target(target: &str) -> std::borrow::Cow<'_, str> {
     let target = url_text(target);
     if target.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>')) {
-        format!("<{}>", target.replace('<', "\\<").replace('>', "\\>")).into()
+        let escaped = target
+            .replace('\\', "\\\\")
+            .replace('<', "\\<")
+            .replace('>', "\\>");
+        format!("<{escaped}>").into()
     } else {
         target
     }
