@@ -2,7 +2,7 @@ manifest_version = 2
 
 [component]
 name = "sec-core"
-version = "0.12.0"
+version = "0.13.0"
 layer = "runtime"
 domain = "security"
 display_name = "Agent Security Core"

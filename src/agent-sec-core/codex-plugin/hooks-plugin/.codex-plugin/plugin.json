@@ -1,5 +1,5 @@
 {
   "name": "agent-sec-core",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Agent security core plugin for Codex - code scanning, prompt scanning, PII checking, skill ledger integrity verification, and turn/tool observability."
 }

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.13.0
+
+**V2 Policy & Daemon Runtime**
+
+- Added V2 daemon Policy, Scope, and Binding CRUD APIs with root-only authorization. (#3062)
+- Added V2 CLI commands for Policy, Scope, and Binding management through the daemon. (#3097)
+- Added AgentSight policy adapters, client integration, and binding reconciliation. (#3103)
+- Added bounded concurrent reconciliation workers so one binding failure cannot block the daemon. (#3194)
+
+**V2 Security Operations**
+
+- Added the V2 daemon-backed Bash and Python regex Code Scanner with compatible structured results. (#3203)
+- Added the V2 `capabilities` command with V1-compatible environment capability reporting. (#3243)
+- Added V1-shaped JSONL and SQLite persistence for accepted V2 code-scan events. (#3246)
+- Added shared scan lifecycle recording and allowlisted telemetry sinks for V2 security operations. (#3300)
+
+**Skill Ledger Runtime**
+
+- Skipped unmanaged read-only raw user Skills during default batch initialization and scanning. (#3183)
+- Unified Skill Ledger CLI and configuration inputs around supported names, initialization, and policies. (#3253)
+
+**Build & Packaging**
+
+- Delivered the V2 daemon as a hardened systemd system service. (#3217)
+
+**Skills**
+
+- Added the bundled `pii-checker` Skill for PII and credential scans with optional redaction. (#3241)
+
+**Testing & CI**
+
+- Added installed V2 RPM end-to-end coverage for CLI, daemon, plugins, and service contracts. (#3162)
+
+**Documentation**
+
+- Added AARM registry and OWASP Agentic Top 10 security-control mappings. (#3227)
+
+**Maintenance**
+
+- Flattened the V2 crate layout and updated internal references. (#3319)
+
 ## 0.12.0
 
 **cosh & Cosh-NG Hook Integration**
