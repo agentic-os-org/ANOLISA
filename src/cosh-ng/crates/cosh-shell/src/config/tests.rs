@@ -268,40 +268,6 @@ fn parse_boolean_fields() {
     assert!(cfg.debug);
 }
 
-#[test]
-fn status_symbols_defaults_to_off() {
-    assert!(!CoshConfig::default().status_symbols);
-}
-
-#[test]
-fn parse_status_symbols_simple_key() {
-    let mut cfg = CoshConfig::default();
-    parse_simple_config("shell.status_symbols = true\n", &mut cfg);
-    assert!(cfg.status_symbols);
-
-    let mut cfg = CoshConfig::default();
-    parse_simple_config("shell.status_symbols = off\n", &mut cfg);
-    assert!(!cfg.status_symbols);
-
-    // Unrecognized values follow the parse_bool_value convention: not a
-    // truthy token means off.
-    let mut cfg = CoshConfig::default();
-    parse_simple_config("shell.status_symbols = sometimes\n", &mut cfg);
-    assert!(!cfg.status_symbols);
-}
-
-#[test]
-fn parse_status_symbols_shell_table() {
-    let mut cfg = CoshConfig::default();
-    parse_toml_config("[shell]\nstatus_symbols = true\n", &mut cfg);
-    assert!(cfg.status_symbols);
-
-    // Non-boolean values are treat-as-unset and keep the default off.
-    let mut cfg = CoshConfig::default();
-    parse_toml_config("[shell]\nstatus_symbols = \"yes\"\n", &mut cfg);
-    assert!(!cfg.status_symbols);
-}
-
 // #2161: both config forms must reach `input_wait_timeout_secs`; invalid
 // values are treat-as-unset (built-in default), never 0/disabled.
 #[test]

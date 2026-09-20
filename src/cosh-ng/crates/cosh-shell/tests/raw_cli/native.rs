@@ -239,7 +239,7 @@ fn raw_cli_enhanced_status_symbols_follow_shift_tab_ownership() {
 fn raw_cli_status_symbols_config_file_enables_symbols() {
     let home = temp_shell_home("status-symbols-config-file");
     fs::write(home.join(".bashrc"), "PS1='file-owner$ '\n").unwrap();
-    write_cosh_config(&home, "[shell]\nstatus_symbols = true\n");
+    write_cosh_config(&home, "shell.status_symbols = true\n");
     let home_str = home.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
@@ -282,6 +282,32 @@ fn raw_cli_status_symbols_env_overrides_config_file() {
     let visible = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(visible.contains("override-owner$ "), "{output}");
+    assert!(!visible.contains("◇ "), "{output}");
+    assert!(!visible.contains("◌ "), "{output}");
+}
+
+#[test]
+fn raw_cli_status_symbols_invalid_config_value_stays_off() {
+    let home = temp_shell_home("status-symbols-invalid-value");
+    fs::write(home.join(".bashrc"), "PS1='invalid-owner$ '\n").unwrap();
+    write_cosh_config(&home, "[shell]\nstatus_symbols = \"sometimes\"\n");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("invalid-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(visible.contains("invalid-owner$ "), "{output}");
     assert!(!visible.contains("◇ "), "{output}");
     assert!(!visible.contains("◌ "), "{output}");
 }
