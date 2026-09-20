@@ -260,6 +260,56 @@ fn raw_cli_status_symbols_config_file_enables_symbols() {
 }
 
 #[test]
+fn raw_cli_status_symbols_table_form_enables_symbols() {
+    let home = temp_shell_home("status-symbols-table-form");
+    fs::write(home.join(".bashrc"), "PS1='table-owner$ '\n").unwrap();
+    write_cosh_config(&home, "[shell]\nstatus_symbols = true\n");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("table-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(visible.contains("◇ \ntable-owner$ "), "{output}");
+}
+
+#[test]
+fn raw_cli_status_symbols_simple_key_invalid_bare_value_stays_off() {
+    let home = temp_shell_home("status-symbols-invalid-bare-value");
+    fs::write(home.join(".bashrc"), "PS1='bare-invalid-owner$ '\n").unwrap();
+    write_cosh_config(&home, "shell.status_symbols = sometimes\n");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("bare-invalid-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(visible.contains("bare-invalid-owner$ "), "{output}");
+    assert!(!visible.contains("◇ "), "{output}");
+    assert!(!visible.contains("◌ "), "{output}");
+}
+
+#[test]
 fn raw_cli_status_symbols_env_overrides_config_file() {
     let home = temp_shell_home("status-symbols-env-overrides-file");
     fs::write(home.join(".bashrc"), "PS1='override-owner$ '\n").unwrap();
