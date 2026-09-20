@@ -109,6 +109,7 @@ pub(crate) fn run_raw(
         .is_some_and(|argv0| crate::runtime::invocation::is_login_invocation(argv0, &args[1..]));
     config.login_shell = login;
     let cosh_config = load_config();
+    config.status_symbols = cosh_config.status_symbols;
     let Some(configured_integration) =
         ShellIntegration::parse_config(&cosh_config.shell_integration)
     else {

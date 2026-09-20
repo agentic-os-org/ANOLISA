@@ -153,7 +153,7 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
     let mut output = Vec::new();
     let mut display_start = 0usize;
     let mut echoed = 0usize;
-    let mut prompt_presentation = PromptPresentation::new();
+    let mut prompt_presentation = PromptPresentation::new(false);
 
     parser
         .feed(b"BACKGROUND\r\n")
@@ -211,7 +211,7 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     parser.feed(b"bash-4.4$ ").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (_generation, mut prompt_replay) = tracker_for_test();
-    let mut prompt_presentation = PromptPresentation::new();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -249,7 +249,7 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
     parser.feed(b"prompt> \x1b[?2004h").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (generation, mut prompt_replay) = tracker_for_test();
-    let mut prompt_presentation = PromptPresentation::new();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -323,7 +323,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
-    let prompt_presentation = PromptPresentation::new();
+    let prompt_presentation = PromptPresentation::new(false);
 
     let barrier_count = |parser: &OscParser| {
         parser
@@ -412,7 +412,7 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         "prompt$ ",
         &mut 0,
         &mut prompt_replay,
-        &PromptPresentation::new(),
+        &PromptPresentation::new(false),
     )
     .unwrap();
     assert!(!parser
@@ -436,7 +436,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
-    let prompt_presentation = PromptPresentation::new();
+    let prompt_presentation = PromptPresentation::new(false);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -471,7 +471,8 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
-    let prompt_presentation = PromptPresentation::new();
+    // Status symbols enabled: candidate redraws must still not publish.
+    let prompt_presentation = PromptPresentation::new(true);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -516,7 +517,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut output = Vec::new();
         let mut echoed = 0usize;
-        let prompt_presentation = PromptPresentation::new();
+        let prompt_presentation = PromptPresentation::new(false);
 
         sender
             .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -984,7 +985,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     let (_generation, mut prompt_replay) = tracker_for_test();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
-    let mut prompt_presentation = PromptPresentation::new();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut null = File::open("/dev/null").expect("open null");
 
     let action = resolve_pty_emit(

@@ -91,6 +91,10 @@ At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only, where
 ordinary input goes straight to the Shell while post-command insights remain
 available. Press `Shift+Tab` again to return to Assisted mode.
 
+Status symbols are optional: set `shell.status_symbols = true` in `config.toml`
+(or `COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇` (Assisted) or
+`◌` (Shell-only) status line above each prompt. They are off by default.
+
 Start Native explicitly when the session must have no Cosh hooks, observation,
 or insights:
 

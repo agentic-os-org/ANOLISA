@@ -60,15 +60,18 @@ cd your-project
 cosh
 ```
 
-默认的 Enhanced Assisted 使用 `◇ ` 表示输入可能在 Shell 执行前被分类和路由。
+默认的 Enhanced Assisted 保持 Shell 原生提示符外观，同时输入可能在 Shell
+执行前被分类和路由。
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ 分析上次部署失败的原因
+user@host:~/project$ git status
+user@host:~/project$ 分析上次部署失败的原因
 ```
 
-在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。此时前缀变为 `◌ `，
-普通输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。此时普通输入交给
+Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。可通过
+`shell.status_symbols` 或 `COSH_SHELL_STATUS_SYMBOLS=1` 开启提示符上方的
+可选 `◇ `/`◌ ` 状态行，默认关闭。
 
 要求不加载 Cosh Hook、不观察也不提供洞察时，显式启动 Native。
 

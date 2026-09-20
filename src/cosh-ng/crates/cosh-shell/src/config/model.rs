@@ -7,6 +7,10 @@ use crate::types::CoshApprovalMode;
 pub struct CoshConfig {
     pub shell_default: String,
     pub shell_integration: String,
+    /// Shows the `◇ `/`◌ ` input-ownership status line above each Enhanced
+    /// prompt. Off by default so the child shell keeps its native prompt
+    /// appearance; `COSH_SHELL_STATUS_SYMBOLS` overrides per session.
+    pub status_symbols: bool,
     pub analysis_mode: String,
     pub approval_mode: CoshApprovalMode,
     pub adapter_default: String,
@@ -91,6 +95,7 @@ impl Default for CoshConfig {
         Self {
             shell_default: "auto".into(),
             shell_integration: "enhanced".into(),
+            status_symbols: false,
             analysis_mode: "smart".into(),
             approval_mode: CoshApprovalMode::Auto,
             adapter_default: "cosh-core".into(),

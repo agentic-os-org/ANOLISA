@@ -8,7 +8,7 @@
 
 | 命令 | 用途 |
 |---|---|
-| `cosh` | 启动 Enhanced Assisted（`◇ `），提供 Agent 和斜杠命令路由。 |
+| `cosh` | 启动 Enhanced Assisted，提供 Agent 和斜杠命令路由。 |
 | `COSH_SHELL_INTEGRATION=native cosh` | 启动不加载 Cosh Hook、不观察也不提供洞察的 Native。 |
 | `cosh --shell zsh` | 明确选择zsh。 |
 | `cosh --isolated` | 跳过用户rcfile。 |
@@ -34,11 +34,12 @@
 ## 输入和编辑
 
 - 原生集成把每个输入字节交给前台 bash 或 zsh。
-- Enhanced Assisted（`◇ `）把 Shell 语法交给前台 Shell，并可以把自然语言
+- Enhanced Assisted 把 Shell 语法交给前台 Shell，并可以把自然语言
   请求转为 Agent 请求。
-- 在 Enhanced 的空提示符按 `Shift+Tab` 可切换到 Shell-only（`◌ `）。此时
+- 在 Enhanced 的空提示符按 `Shift+Tab` 可切换到 Shell-only。此时
   包括行首 `/` 在内的普通输入都交给 Shell，但仍可获得命令执行后的洞察。
-  再次按下即可恢复 Assisted。
+  再次按下即可恢复 Assisted。开启 `shell.status_symbols`（默认关闭）后，
+  可选的 `◇ `/`◌ ` 状态行会在每个提示符上方标记当前模式。
 - 行首 `/` 只在 Enhanced Assisted 中运行 Cosh 控制命令。Native 和 Enhanced
   Shell-only 都把它留给 Shell。
 - 终端支持时，`Shift+Enter`插入换行；多行粘贴仍作为一次提交。

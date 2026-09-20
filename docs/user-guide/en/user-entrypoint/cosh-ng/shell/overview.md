@@ -2,15 +2,19 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/overview.md)
 
-`cosh` starts in Enhanced Assisted mode. The `◇` status line above the prompt
-shows that Cosh may route natural-language input before bash or zsh executes it. Press `Shift+Tab`
-at an empty prompt for Enhanced Shell-only (`◌ `), or select Native at startup
+`cosh` starts in Enhanced Assisted mode and keeps the shell's native prompt
+appearance. Cosh may route natural-language input before bash or zsh executes
+it. Press `Shift+Tab`
+at an empty prompt for Enhanced Shell-only, or select Native at startup
 when the session must have no Cosh hooks, observation, or insights.
 
-The status is printed when a prompt opens, control returns from a card, or
-routing changes. It scrolls with terminal output. Shell prompts start on the
-next line, keeping normal wrapping and cursor movement; editing redraws do not
-add status lines. Native sessions have no Cosh status line.
+Status symbols are off by default. Set `shell.status_symbols = true` in
+`config.toml` (or `COSH_SHELL_STATUS_SYMBOLS=1` for one session) to publish a
+`◇` (Assisted) or `◌` (Shell-only) status line when a prompt opens, control
+returns from a card, or routing changes. It scrolls with terminal output.
+Shell prompts start on the next line, keeping normal wrapping and cursor
+movement; editing redraws do not add status lines. Native sessions have no
+Cosh status line.
 
 ## A typical workflow
 
@@ -31,7 +35,7 @@ COSH_SHELL_INTEGRATION=native cosh
 
 ## How input is routed
 
-| Input | Native | Enhanced Shell-only `◌` | Enhanced Assisted `◇` |
+| Input | Native | Enhanced Shell-only (`◌` if enabled) | Enhanced Assisted (`◇` if enabled) |
 |---|---|---|---|
 | `git status` | Runs in the Shell. | Runs in the Shell; an execution insight may follow. | Runs in the Shell; an execution insight may follow. |
 | `hello` | The Shell normally reports a missing command. | The Shell normally reports a missing command. | The classifier evaluates it and currently leaves this ambiguous single word to the Shell. |

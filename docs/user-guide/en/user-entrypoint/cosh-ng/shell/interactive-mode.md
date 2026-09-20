@@ -8,7 +8,7 @@ Use this page to start `cosh` and control a running session. Run `/help` to see 
 
 | Command | Use |
 |---|---|
-| `cosh` | Start Enhanced Assisted (`◇ `) with Agent and slash-command routing. |
+| `cosh` | Start Enhanced Assisted with Agent and slash-command routing. |
 | `COSH_SHELL_INTEGRATION=native cosh` | Start Native without Cosh hooks, observation, or insights. |
 | `cosh --shell zsh` | Select zsh explicitly. |
 | `cosh --isolated` | Skip user rcfiles. |
@@ -37,11 +37,13 @@ to use its existing isolation handling.
 ## Input and editing
 
 - Native integration sends every input byte to the foreground bash or zsh.
-- Enhanced Assisted (`◇ `) routes Shell syntax to the foreground Shell and can
+- Enhanced Assisted routes Shell syntax to the foreground Shell and can
   turn a natural-language request into an Agent request.
-- At an empty Enhanced prompt, `Shift+Tab` switches to Shell-only (`◌ `).
+- At an empty Enhanced prompt, `Shift+Tab` switches to Shell-only.
   Ordinary input, including a leading `/`, then goes to the Shell while
   post-command insights remain available. Press it again to restore Assisted.
+  With `shell.status_symbols` enabled (off by default), an optional `◇ `/`◌ `
+  status line marks the current mode above each prompt.
 - A leading `/` runs a Cosh control command only in Enhanced Assisted. In
   Native and Enhanced Shell-only it remains Shell input.
 - `Shift+Enter` inserts a newline when supported. Multiline paste remains one submission.

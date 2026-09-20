@@ -86,6 +86,10 @@ user@host:~/project$ 分析这个服务为什么反复重启
 在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only：普通输入直接交给
 Shell，同时仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
 
+状态符号为可选项：在 `config.toml` 中设置 `shell.status_symbols = true`
+（或单次会话使用 `COSH_SHELL_STATUS_SYMBOLS=1`）后，每个提示符上方会显示
+`◇`（Assisted）或 `◌`（Shell-only）状态行。默认关闭。
+
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
 
 ```bash

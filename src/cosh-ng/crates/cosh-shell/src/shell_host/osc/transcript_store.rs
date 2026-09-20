@@ -107,6 +107,7 @@ impl OscParser {
             last_prompt_display: Vec::new(),
             capture_prompt_display: false,
             prompt_ready_display_start: None,
+            prompt_presentation_display_starts: Vec::new(),
             prompt_epoch_exchange: None,
             prompt_epoch: None,
             synthetic_prompt_repaint_armed: false,

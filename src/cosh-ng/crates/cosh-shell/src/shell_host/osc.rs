@@ -89,6 +89,7 @@ pub(super) struct OscParser {
     last_prompt_display: Vec<u8>,
     capture_prompt_display: bool,
     prompt_ready_display_start: Option<usize>,
+    prompt_presentation_display_starts: Vec<super::prompt_presentation::PromptDisplayStart>,
     prompt_epoch_exchange: Option<crate::raw_input::PromptEpochExchange>,
     prompt_epoch: Option<u64>,
     /// #1932: the soft-newline upgrade submitted a synthetic empty line so
@@ -508,6 +509,12 @@ impl OscParser {
             self.start_prompt_display_capture();
         }
         self.prompt_ready_display_start = Some(self.display.position());
+        self.prompt_presentation_display_starts.push(
+            super::prompt_presentation::PromptDisplayStart {
+                position: self.display.position(),
+                publish_status: true,
+            },
+        );
         self.main_prompt_gate.set_at_prompt(true);
         if let Some(control) = &self.assistance_control {
             control.set_at_prompt(true);
@@ -704,6 +711,12 @@ impl OscParser {
 
     pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<(usize, DisplayCutKind)> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    pub(super) fn drain_prompt_presentation_display_starts(
+        &mut self,
+    ) -> Vec<super::prompt_presentation::PromptDisplayStart> {
+        std::mem::take(&mut self.prompt_presentation_display_starts)
     }
 
     /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint

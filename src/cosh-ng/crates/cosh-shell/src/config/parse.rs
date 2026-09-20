@@ -17,6 +17,7 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
             match key {
                 "shell.default" => config.shell_default = value.into(),
                 "shell.integration" => config.shell_integration = value.into(),
+                "shell.status_symbols" => config.status_symbols = parse_bool_value(value),
                 "shell.analysis_mode" => config.analysis_mode = value.into(),
                 "shell.approval_mode" => {
                     config.approval_mode = CoshApprovalMode::from_config(value)
@@ -119,6 +120,9 @@ fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     }
     if let Some(integration) = shell.get("integration").and_then(toml::Value::as_str) {
         config.shell_integration = integration.to_string();
+    }
+    if let Some(status_symbols) = shell.get("status_symbols").and_then(toml::Value::as_bool) {
+        config.status_symbols = status_symbols;
     }
     if let Some(analysis_mode) = shell.get("analysis_mode").and_then(toml::Value::as_str) {
         config.analysis_mode = analysis_mode.to_string();

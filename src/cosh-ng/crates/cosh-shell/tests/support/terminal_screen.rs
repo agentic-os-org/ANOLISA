@@ -44,6 +44,25 @@ impl TerminalSession {
         cols: u16,
         files: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_with_startup_env(shell, integration, cols, files, &[])
+    }
+
+    pub(crate) fn spawn_for_shell_with_env(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_with_startup_env(shell, integration, cols, &[], extra_envs)
+    }
+
+    fn spawn_with_startup_env(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        files: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
         let gate = raw_cli_shared_run_guard();
         let root = tempfile::Builder::new()
             .prefix("cosh-screen-")
@@ -105,6 +124,7 @@ impl TerminalSession {
             .env("COSH_SHELL_STARTUP_BANNER", "0")
             .env("COSH_SHELL_HEALTH_SCAN", "disabled")
             .env("COSH_RECOMMENDATIONS_ENABLED", "0")
+            .envs(extra_envs.iter().map(|(key, value)| (*key, *value)))
             .current_dir(root.path())
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))

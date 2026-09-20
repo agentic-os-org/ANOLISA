@@ -53,6 +53,7 @@ integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
+status_symbols = false
 ```
 
 优先使用环境变量或 `/auth`，不要把原始 secret 写入 TOML。Provider 选择见 [Providers](core/providers.md)。
@@ -115,11 +116,16 @@ expected = "active"
 ```
 
 `integration` 支持 `native` 和 `enhanced`。默认的 Enhanced 从 Assisted
-模式（`◇ `）启动，提供基于 marker 的 Agent 路由和命令事件。在空提示符按
-`Shift+Tab` 可在 Assisted 与 Shell-only（`◌ `）之间切换。Shell-only 保留
+模式启动，提供基于 marker 的 Agent 路由和命令事件。在空提示符按
+`Shift+Tab` 可在 Assisted 与 Shell-only 之间切换。Shell-only 保留
 命令事件和执行后洞察，但把普通输入交给 bash 或 zsh。Native 把输入、Shell
 选项、trap 和启动文件完全交给 bash 或 zsh，不进行 Cosh 观察，也不提供洞察。
 `cosh` 在启动时读取集成值，修改后需要新建会话；非法值会显示错误并拒绝启动。
+
+`status_symbols` 默认为 `false`。设为 `true`（或单次会话使用
+`COSH_SHELL_STATUS_SYMBOLS=1`）后，每个 Enhanced 提示符上方会显示
+`◇ `（Assisted）或 `◌ `（Shell-only）状态行。Native 会话不显示状态符号。
+该值在启动时读取；非法值回退为 `false`。
 
 `analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
 `auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。

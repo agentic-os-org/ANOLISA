@@ -152,6 +152,9 @@ pub struct ShellHostConfig {
     pub input_classifier: InputClassifier,
     /// Chooses transparent Shell ownership or marker integration.
     pub integration: ShellIntegration,
+    /// Emits the `◇ `/`◌ ` ownership status line above Enhanced prompts.
+    /// Off by default; only meaningful when `integration` uses markers.
+    pub status_symbols: bool,
     /// Controls whether user startup files are loaded. This remains
     /// orthogonal to `integration`: isolated sessions can run with or without
     /// Cosh marker hooks.
@@ -195,6 +198,7 @@ impl ShellHostConfig {
             winsize,
             input_classifier: InputClassifier::default(),
             integration: ShellIntegration::Enhanced,
+            status_symbols: false,
             native_mode: true,
             login_shell: false,
             slash_via_shell: slash_via_shell_default(),
@@ -213,6 +217,11 @@ impl ShellHostConfig {
 
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_overrides.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_status_symbols(mut self, enabled: bool) -> Self {
+        self.status_symbols = enabled;
         self
     }
 

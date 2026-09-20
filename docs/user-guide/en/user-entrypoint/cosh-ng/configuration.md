@@ -59,6 +59,7 @@ integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
+status_symbols = false
 ```
 
 Use environment expansion or `/auth` instead of writing a raw secret into
@@ -129,13 +130,19 @@ expected = "active"
 ```
 
 `integration` accepts `native` or `enhanced`. Enhanced is the default and starts
-in Assisted mode (`◇ `), with marker-based Agent routing and command events.
-At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only
-(`◌ `); Shell-only keeps command events and post-command insights but sends
+in Assisted mode, with marker-based Agent routing and command events.
+At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only;
+Shell-only keeps command events and post-command insights but sends
 ordinary input to bash or zsh. Native leaves input, Shell options, traps, and
 startup files under bash or zsh ownership and provides no Cosh observation or
 insights. The integration value is read when `cosh` starts, so changing it
 requires a new session. Invalid values reject startup with a visible error.
+
+`status_symbols` is `false` by default. Set it to `true` (or
+`COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇ ` (Assisted) or
+`◌ ` (Shell-only) status line above each Enhanced prompt. Native sessions
+never show status symbols. The value is read at startup, and invalid values
+fall back to `false`.
 
 `analysis_mode` accepts `smart`, `auto`, or `manual`; shell approval accepts
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or

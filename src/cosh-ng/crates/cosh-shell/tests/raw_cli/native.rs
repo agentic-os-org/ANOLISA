@@ -167,6 +167,187 @@ fn raw_cli_enhanced_passes_through_user_prompt_containing_status_glyph() {
 }
 
 #[test]
+fn raw_cli_enhanced_status_symbols_on_decorates_bash_prompt_without_mutating_ps1() {
+    let home = temp_shell_home("enhanced-status-symbols-on");
+    fs::write(home.join(".bashrc"), "PS1='symbol-owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_STATUS_SYMBOLS", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("symbol-owner$", b"printf '__PS1__<%s>\\n' \"$PS1\"\n"),
+            ("__PS1__<symbol-owner$ >", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    // The status occupies its own line directly above the prompt; the prompt
+    // itself and PS1 stay untouched.
+    assert!(
+        count_occurrences(&visible, "◇ \nsymbol-owner$ ") >= 2,
+        "{output}"
+    );
+    assert!(!visible.contains("◌ "), "{output}");
+    assert!(!visible.contains("◇ ◇"), "{output}");
+    assert!(visible.contains("__PS1__<symbol-owner$ >"), "{output}");
+    assert!(!visible.contains("__PS1__<◇ symbol-owner$ >"), "{output}");
+}
+
+#[test]
+fn raw_cli_enhanced_status_symbols_follow_shift_tab_ownership() {
+    let home = temp_shell_home("enhanced-status-symbols-toggle");
+    fs::write(home.join(".bashrc"), "PS1='toggle-owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_STATUS_SYMBOLS", "1"),
+        ],
+        vec![
+            (b"\x1b[Z".to_vec(), Duration::from_millis(500)),
+            (b"\x1b[Z".to_vec(), Duration::from_millis(500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    // Initial Assisted publish, Shell-only after the first toggle, Assisted
+    // again after the second.
+    assert!(
+        count_occurrences(&visible, "◇ \ntoggle-owner$ ") >= 2,
+        "{output}"
+    );
+    assert!(visible.contains("◌ \ntoggle-owner$ "), "{output}");
+}
+
+#[test]
+fn raw_cli_status_symbols_config_file_enables_symbols() {
+    let home = temp_shell_home("status-symbols-config-file");
+    fs::write(home.join(".bashrc"), "PS1='file-owner$ '\n").unwrap();
+    write_cosh_config(&home, "[shell]\nstatus_symbols = true\n");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("file-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(visible.contains("◇ \nfile-owner$ "), "{output}");
+}
+
+#[test]
+fn raw_cli_status_symbols_env_overrides_config_file() {
+    let home = temp_shell_home("status-symbols-env-overrides-file");
+    fs::write(home.join(".bashrc"), "PS1='override-owner$ '\n").unwrap();
+    write_cosh_config(&home, "[shell]\nstatus_symbols = true\n");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_STATUS_SYMBOLS", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("override-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(visible.contains("override-owner$ "), "{output}");
+    assert!(!visible.contains("◇ "), "{output}");
+    assert!(!visible.contains("◌ "), "{output}");
+}
+
+#[test]
+fn raw_cli_native_never_shows_status_symbols() {
+    let home = temp_shell_home("native-status-symbols-gated");
+    fs::write(home.join(".bashrc"), "PS1='native-gated$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "native"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_STATUS_SYMBOLS", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("native-gated$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("native-gated$ "), "{output}");
+    assert!(!output.contains("◇ "), "{output}");
+    assert!(!output.contains("◌ "), "{output}");
+}
+
+#[test]
+fn raw_cli_enhanced_status_symbols_on_decorates_zsh_prompt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("enhanced-status-symbols-on-zsh");
+    fs::write(home.join(".zshrc"), "PROMPT='symbol-zsh> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_STATUS_SYMBOLS", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("symbol-zsh> ", b"printf '__PROMPT__<%s>\\n' \"$PROMPT\"\n"),
+            ("__PROMPT__<symbol-zsh> >", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(
+        count_occurrences(&visible, "◇ \nsymbol-zsh> ") >= 2,
+        "{output}"
+    );
+    assert!(visible.contains("__PROMPT__<symbol-zsh> >"), "{output}");
+    assert!(!visible.contains("__PROMPT__<◇ symbol-zsh> >"), "{output}");
+}
+
+#[test]
 fn raw_cli_mode_routing_switches_the_live_enhanced_session() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",

@@ -834,6 +834,56 @@ fn enhanced_history_disabled_emits_redacted_boundaries_and_keeps_shell_ownership
 }
 
 #[test]
+fn enhanced_shift_tab_publishes_status_rows_when_symbols_enabled() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    for enable_bracketed_paste in [false, true] {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-enhanced-toggle-symbols-{}-{}-{}",
+            enable_bracketed_paste,
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        std::fs::write(home_dir.join(".bashrc"), "PS1='switch$ '\n").expect("bashrc");
+        let config = ShellHostConfig::new("enhanced-toggle-symbols", &work_dir)
+            .with_integration(ShellIntegration::Enhanced)
+            .with_status_symbols(true)
+            .with_env("HOME", home_dir.display().to_string());
+        let config = with_bracketed_paste_readline(config, enable_bracketed_paste);
+
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_bash_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::write(b"\x1b[Z".to_vec()),
+                RawRelayAction::line("hello there"),
+                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::line("printf '__DONE__\\n'"),
+                RawRelayAction::wait(Duration::from_secs(1)),
+                RawRelayAction::write(b"\x1b[Z".to_vec()),
+                RawRelayAction::line("exit"),
+            ],
+            &mut rendered,
+        )
+        .expect("enhanced toggle relay with status symbols");
+
+        let raw_terminal = String::from_utf8_lossy(&rendered);
+        let terminal = without_readline_mode_controls(&raw_terminal);
+        assert!(terminal.contains("\r\x1b[2K◌ \r\nswitch$ "), "{terminal}");
+        assert!(terminal.contains("\r\x1b[2K◇ \r\nswitch$ "), "{terminal}");
+        assert!(terminal.contains("__DONE__"), "{terminal}");
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+        let _ = output;
+    }
+}
+
+#[test]
 fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;

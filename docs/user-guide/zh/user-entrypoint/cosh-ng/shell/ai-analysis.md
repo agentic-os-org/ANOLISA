@@ -3,7 +3,7 @@
 [English](../../../../en/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
 增强集成可以检查命令失败和有价值的诊断输出，随后建议下一步或启动 Agent
-分析。Assisted（`◇ `）和 Shell-only（`◌ `）都可提供命令执行后的洞察，只有
+分析。Assisted 和 Shell-only 都可提供命令执行后的洞察，只有
 Assisted 会在执行前路由自然语言。Native 没有命令事件、洞察或 Agent 请求路由。
 
 ## 选择模式

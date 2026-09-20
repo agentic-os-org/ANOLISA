@@ -2,14 +2,16 @@
 
 [English](../../../../en/user-entrypoint/cosh-ng/shell/overview.md)
 
-`cosh` 默认启动 Enhanced Assisted 模式。提示符上方的 `◇` 状态行表示 Cosh 可能在 bash 或
-zsh 执行前路由自然语言输入。在空提示符按 `Shift+Tab` 可进入 Enhanced
-Shell-only（`◌ `）。如果要求不加载 Cosh Hook、不观察也不提供洞察，需要在
-启动时选择 Native。
+`cosh` 默认启动 Enhanced Assisted 模式，并保持 Shell 原生提示符外观。
+Cosh 可能在 bash 或 zsh 执行前路由自然语言输入。在空提示符按 `Shift+Tab`
+可进入 Enhanced Shell-only。如果要求不加载 Cosh Hook、不观察也不提供洞察，
+需要在启动时选择 Native。
 
-新提示符出现、卡片返回或路由模式切换时会输出状态行，它随终端输出滚动。
-Shell 提示符从下一行开始，保留正常的换行与光标移动；编辑重绘不会追加状态行。
-Native 会话没有 Cosh 状态行。
+状态符号默认关闭。在 `config.toml` 中设置 `shell.status_symbols = true`
+（或单次会话使用 `COSH_SHELL_STATUS_SYMBOLS=1`）后，新提示符出现、卡片返回
+或路由模式切换时会发布 `◇`（Assisted）或 `◌`（Shell-only）状态行，它随
+终端输出滚动。Shell 提示符从下一行开始，保留正常的换行与光标移动；编辑重绘
+不会追加状态行。Native 会话没有 Cosh 状态行。
 
 ## 典型工作流
 
@@ -30,7 +32,7 @@ COSH_SHELL_INTEGRATION=native cosh
 
 ## 输入如何分流
 
-| 输入 | Native | Enhanced Shell-only `◌` | Enhanced Assisted `◇` |
+| 输入 | Native | Enhanced Shell-only（开启后显示 `◌`） | Enhanced Assisted（开启后显示 `◇`） |
 |---|---|---|---|
 | `git status` | 在 Shell 中执行。 | 在 Shell 中执行，之后可能提供执行洞察。 | 在 Shell 中执行，之后可能提供执行洞察。 |
 | `hello` | Shell 通常报告命令不存在。 | Shell 通常报告命令不存在。 | 分类器会检查它，当前仍把这个有歧义的单词交给 Shell。 |
