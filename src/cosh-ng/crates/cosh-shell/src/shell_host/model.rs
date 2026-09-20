@@ -160,6 +160,19 @@ pub struct ShellHostConfig {
     /// Cosh marker hooks.
     pub native_mode: bool,
     pub login_shell: bool,
+    /// #R2: when a login + Enhanced + non-isolated session runs, launch the
+    /// inner Bash with a real login identity (`argv0="-bash" --posix` + `$ENV`
+    /// inject) instead of the interactive-but-non-login `--rcfile <marker>`.
+    /// The `shell.login_identity` config default is now `on` (flip-on gate
+    /// passed). This struct default stays `false`: the runtime always sets it
+    /// from `CoshConfig` (`controller::bootstrap`), so the conservative struct
+    /// default only affects direct construction such as unit tests.
+    pub login_identity: bool,
+    /// #R2: whether the inner Bash can safely use the posix `$ENV` marker path.
+    /// Bash < 4 does not source it, while posix startup drops exported functions
+    /// whose names are not shell identifiers; either condition falls back to
+    /// `--rcfile`. Defaults `true`; the runtime overwrites it after probing.
+    pub bash_login_env_posix: bool,
     /// Routes exact slash-control submissions through Bash Readline so they
     /// enter native history without reaching shell parsing (issue #2912).
     /// Defaults from `COSH_SLASH_VIA_SHELL` (on unless "0"); disabling keeps
@@ -201,6 +214,8 @@ impl ShellHostConfig {
             status_symbols: false,
             native_mode: true,
             login_shell: false,
+            login_identity: false,
+            bash_login_env_posix: true,
             slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
             raw_action_watchdog: Duration::from_secs(120),

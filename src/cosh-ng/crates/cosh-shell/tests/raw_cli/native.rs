@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use nix::libc;
 
 #[test]
 fn raw_cli_isolated_candidate_redraws_add_no_status_lines() {
@@ -84,6 +86,154 @@ fn raw_cli_native_keeps_custom_bash_prompt_undecorated() {
     assert!(output.contains("native-owner$ "), "{output}");
     assert!(!output.contains("◇ "), "{output}");
     assert!(!output.contains("◌ "), "{output}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn raw_cli_login_probe_infrastructure_failure_keeps_path_resolution() {
+    let home = temp_shell_home("login-probe-macos-home");
+    let missing = temp_shell_home("login-probe-macos-missing-path");
+    fs::write(home.join(".bash_profile"), "PS1='macos-fallback-owner$ '\n")
+        .expect("write login profile");
+    let path = format!(
+        "{}:{}",
+        missing.display(),
+        std::env::var("PATH").expect("test PATH")
+    );
+    let home_str = home.display().to_string();
+
+    let output = run_raw_cli_with_args_and_env(
+        "fake",
+        &["--shell", "bash", "--login"],
+        "printf '__MACOS_FALLBACK__%s\\n' \"$(shopt -q login_shell && printf yes || printf no)\"\nexit\n",
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let _ = fs::remove_dir_all(&missing);
+
+    assert!(output.contains("__MACOS_FALLBACK__no"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_probe_preserves_login_argv0() {
+    let home = temp_shell_home("login-probe-argv0");
+    let logout_log = home.join("logout-log");
+    fs::write(home.join(".bash_profile"), "PS1='r2-login-owner$ '\n").expect("write login profile");
+    fs::write(
+        home.join(".bash_logout"),
+        format!(
+            "if [ -n \"${{COSH_R2_CAPABILITY_INJECT+x}}\" ]; then printf 'probe\\n'; else printf 'session\\n'; fi >> '{}'\n",
+            logout_log.display()
+        ),
+    )
+    .expect("write logout profile");
+    let home_str = home.display().to_string();
+
+    let output = run_raw_cli_with_args_and_env(
+        "fake",
+        &["--shell", "bash", "--login"],
+        "printf '__R2_LOGIN__%s|%s|%s\\n' \"$(shopt -q login_shell && printf yes || printf no)\" \"$0\" \"$(shopt -qo posix && printf on || printf off)\"\nexit\n",
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+    );
+    let logout_events = fs::read_to_string(&logout_log).expect("read logout events");
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(
+        visible.contains("__R2_LOGIN__yes|-bash|off"),
+        "capability supervisor must preserve argv0=-bash: {output}"
+    );
+    assert_eq!(
+        logout_events, "session\n",
+        "capability discovery must not run the real session's logout hook"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_probe_reaps_detached_descendants() {
+    for mode in ["normal", "timeout"] {
+        let home = temp_shell_home(&format!("login-probe-descendant-home-{mode}"));
+        let wrapper_dir = temp_shell_home(&format!("login-probe-descendant-path-{mode}"));
+        let helper_state_file = wrapper_dir.join("helper-state");
+        let wrapper = wrapper_dir.join("bash");
+        write_executable(
+            &wrapper,
+            &format!(
+                "#!/bin/bash\nif [ -n \"${{COSH_R2_CAPABILITY_INJECT+x}}\" ]; then\n  /usr/bin/setsid /bin/sh -c 'read -r pid comm state ppid pgrp sid rest < /proc/self/stat; printf \"%s %s\\n\" \"$pid\" \"$sid\" > \"$1\"; exec /bin/sleep 30' sh '{}' >/dev/null 2>&1 &\n  while [ ! -s '{}' ]; do :; done\n  if [ \"$COSH_TEST_PROBE_MODE\" = timeout ]; then exec /bin/sleep 30; fi\nfi\nexec -a -bash /bin/bash \"$@\"\n",
+                helper_state_file.display(),
+                helper_state_file.display()
+            ),
+        );
+        let path = format!(
+            "{}:{}",
+            wrapper_dir.display(),
+            std::env::var("PATH").expect("test PATH")
+        );
+        let home_str = home.display().to_string();
+
+        let output = run_raw_cli_with_args_and_env(
+            "fake",
+            &["--shell", "bash", "--login"],
+            "exit\n",
+            &[
+                ("HOME", &home_str),
+                ("PATH", &path),
+                ("COSH_TEST_PROBE_MODE", mode),
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_ISOLATED", "0"),
+                ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ],
+        );
+        let helper_state = fs::read_to_string(&helper_state_file)
+            .unwrap_or_else(|error| panic!("probe helper state missing: {error}; output={output}"));
+        let mut fields = helper_state.split_whitespace();
+        let helper_pid = fields
+            .next()
+            .expect("helper PID")
+            .parse::<i32>()
+            .expect("parse helper PID");
+        let helper_sid = fields
+            .next()
+            .expect("helper SID")
+            .parse::<i32>()
+            .expect("parse helper SID");
+        assert_eq!(
+            helper_sid, helper_pid,
+            "setsid fixture did not create a detached session"
+        );
+        let helper_alive = unsafe { libc::kill(helper_pid, 0) == 0 };
+        if helper_alive {
+            let cmdline = fs::read(format!("/proc/{helper_pid}/cmdline")).unwrap_or_default();
+            if cmdline.starts_with(b"/bin/sleep\0") {
+                unsafe {
+                    libc::kill(helper_pid, libc::SIGKILL);
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&wrapper_dir);
+
+        assert!(
+            !helper_alive,
+            "{mode} capability probe left detached helper PID {helper_pid} alive; output={output}"
+        );
+    }
 }
 
 #[test]

@@ -57,6 +57,9 @@ fn apply_env_overrides(config: &mut CoshConfig) {
     if let Ok(v) = std::env::var("COSH_SHELL_STATUS_SYMBOLS") {
         config.status_symbols = parse_bool_value(&v);
     }
+    if let Ok(v) = std::env::var("COSH_SHELL_LOGIN_IDENTITY") {
+        config.login_identity = parse_bool_value(&v);
+    }
     if let Ok(v) = std::env::var("COSH_SHELL_ANALYSIS_MODE") {
         config.analysis_mode = v;
     }

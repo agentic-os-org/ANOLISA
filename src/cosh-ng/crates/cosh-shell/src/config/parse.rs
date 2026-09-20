@@ -18,6 +18,7 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "shell.default" => config.shell_default = value.into(),
                 "shell.integration" => config.shell_integration = value.into(),
                 "shell.status_symbols" => config.status_symbols = parse_bool_value(value),
+                "shell.login_identity" => config.login_identity = parse_bool_value(value),
                 "shell.analysis_mode" => config.analysis_mode = value.into(),
                 "shell.approval_mode" => {
                     config.approval_mode = CoshApprovalMode::from_config(value)
@@ -123,6 +124,12 @@ fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     }
     if let Some(status_symbols) = shell.get("status_symbols").and_then(toml::Value::as_bool) {
         config.status_symbols = status_symbols;
+    }
+    // #R2: `[shell]` table form of the login-identity gate. Native TOML bool,
+    // so the documented rollback `login_identity = false` also works here (not
+    // only in the dotted-key form parsed by parse_simple_config).
+    if let Some(login_identity) = shell.get("login_identity").and_then(toml::Value::as_bool) {
+        config.login_identity = login_identity;
     }
     if let Some(analysis_mode) = shell.get("analysis_mode").and_then(toml::Value::as_str) {
         config.analysis_mode = analysis_mode.to_string();

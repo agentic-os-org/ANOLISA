@@ -13,7 +13,10 @@ use crate::recommendation::personal_analysis_runtime::AnalyzerCancellation;
 use crate::recommendation::personal_runtime::PersonalRuntime;
 use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
-use crate::runtime::startup::bootstrap_process_path_from_shell;
+use crate::runtime::startup::{
+    bootstrap_process_path_from_shell, exported_bash_functions_posix_compatible,
+    resolve_bash_for_r2,
+};
 use crate::runtime::state::{AnalysisMode, InlineState};
 use crate::shell_host::ShellIntegration;
 
@@ -64,6 +67,18 @@ pub(crate) fn run_host_demo() -> i32 {
     render_loop_from_events(&output.events)
 }
 
+// #R2 A11: resume forces Enhanced so its marker path is present, which is the
+// precondition for the login-identity inject to fire (the adapter only reaches
+// the R2 branch when marker_path is Some). Without this override a resume under
+// a Native default would keep the login identity lost.
+fn integration_for_launch(resume_active: bool, configured: ShellIntegration) -> ShellIntegration {
+    if resume_active {
+        ShellIntegration::Enhanced
+    } else {
+        configured
+    }
+}
+
 pub(crate) fn run_raw(
     adapter_name: &str,
     shell_kind: RawShellKind,
@@ -110,6 +125,10 @@ pub(crate) fn run_raw(
     config.login_shell = login;
     let cosh_config = load_config();
     config.status_symbols = cosh_config.status_symbols;
+    // #R2 gate: sourced from shell.login_identity (default on; flip-on gate
+    // passed). Sole writer mirroring CoshConfig. Only fires for login +
+    // Enhanced + non-isolated sessions (BashAdapter::uses_login_identity_inject).
+    config.login_identity = cosh_config.login_identity;
     let Some(configured_integration) =
         ShellIntegration::parse_config(&cosh_config.shell_integration)
     else {
@@ -122,14 +141,35 @@ pub(crate) fn run_raw(
     // Resume is an explicit Agent action. It needs the ShellReady boundary
     // that opens the requested provider session even when Native is the
     // configured default.
-    config.integration = if launch_options.resume.is_some() {
-        ShellIntegration::Enhanced
-    } else {
-        configured_integration
-    };
+    config.integration =
+        integration_for_launch(launch_options.resume.is_some(), configured_integration);
     let enhanced_integration = config.integration.uses_markers();
     if config.native_mode && enhanced_integration {
         bootstrap_process_path_from_shell(&shell_kind, login, &config.winsize);
+    }
+    // #R2: PATH bootstrap may change which bare `bash` would be launched. Only
+    // probe when every other R2 leg holds, resolve after PATH is final, and
+    // freeze the same absolute executable for both probe and spawn.
+    if config.login_identity
+        && config.login_shell
+        && config.native_mode
+        && enhanced_integration
+        && matches!(&shell_kind, RawShellKind::Bash)
+    {
+        if let Some((path, supports_env_posix)) =
+            resolve_bash_for_r2(&config.bash_path, &config.winsize)
+        {
+            // ShellHostConfig currently stores a UTF-8 path. Freeze only when
+            // lossless; for a non-UTF-8 PATH entry keep the bare name so execvp
+            // can still resolve it from the same final PATH.
+            if let Some(path) = path.to_str() {
+                config.bash_path = path.to_string();
+            }
+            config.bash_login_env_posix =
+                supports_env_posix && exported_bash_functions_posix_compatible();
+        } else {
+            config.bash_login_env_posix = false;
+        }
     }
     let recommendations_environment_override = parse_recommendations_environment_override(
         std::env::var("COSH_RECOMMENDATIONS_ENABLED")
@@ -507,5 +547,26 @@ mod tests {
         }
 
         assert!(!dir.exists(), "temp session dir should be removed on drop");
+    }
+
+    #[test]
+    fn resume_forces_enhanced_marker_path_for_r2() {
+        // #R2 A11: a resume under a Native default must be upgraded to Enhanced,
+        // and Enhanced must carry markers (the R2 branch is gated on marker_path
+        // being Some). If the override regresses to `configured`, the first
+        // assert fails; if Enhanced ever stopped emitting markers, the second.
+        assert_eq!(
+            integration_for_launch(true, ShellIntegration::Native),
+            ShellIntegration::Enhanced,
+        );
+        assert!(integration_for_launch(true, ShellIntegration::Native).uses_markers());
+        assert_eq!(
+            integration_for_launch(false, ShellIntegration::Native),
+            ShellIntegration::Native,
+        );
+        assert_eq!(
+            integration_for_launch(false, ShellIntegration::Enhanced),
+            ShellIntegration::Enhanced,
+        );
     }
 }

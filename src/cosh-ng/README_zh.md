@@ -8,6 +8,11 @@ Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可�
 在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
 JSONL 接口。
 
+默认情况下，登录 shell（例如 `cosh --login`）会在 Bash 4+ 上以真实 login 身份
+启动 Bash；设 `shell.login_identity = false` 可保留旧的非 login（`--rcfile`）启动。
+有界的真实 login 身份能力探测失败、使用 Bash 3.2（如 macOS 系统 bash），或父会话导出了 POSIX
+启动无法导入的函数名时，cosh 会自动回退。
+
 ## 为什么使用 cosh-ng
 
 | 传统终端 | cosh-ng |

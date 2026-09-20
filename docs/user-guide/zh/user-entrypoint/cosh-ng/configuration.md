@@ -50,6 +50,7 @@ log_level = "warn"
 [shell]
 default = "auto"
 integration = "enhanced"
+login_identity = true
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -130,6 +131,13 @@ expected = "active"
 `analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
 `auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
 
+`login_identity`（默认 `true`）让交互式 Enhanced 登录 shell 拥有真实的 login
+身份：内层 bash 以登录 shell 启动（`shopt -q login_shell` == yes），像 `bash
+-l` 一样读取 `/etc/profile` 和 `~/.bash_profile`。设 `login_identity = false`
+可回退到旧的非 login 启动（`--rcfile`）。Bash 4 及以上版本在有界的真实启动能力
+探测通过时走真实 login 身份路径；Bash 3.2（包括 macOS 系统 Bash）、探测失败，或父环境导出了
+POSIX 启动无法导入的函数名时都会自动回退。zsh 不受影响。
+
 ## 审计设置
 
 系统文件包含 `[audit]` 表时，以系统设置为准；否则使用用户设置。项目审计表会被忽略。
@@ -175,6 +183,7 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun 凭据回退 |
 | `COSH_SHELL_DEFAULT_SHELL`、`COSH_SHELL_ADAPTER`、`COSH_SHELL_ANALYSIS_MODE`、`COSH_SHELL_APPROVAL_MODE` | 交互式 Shell 选择 |
 | `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
+| `COSH_SHELL_LOGIN_IDENTITY` | 下一次 Enhanced 登录 shell 是否启用真实 login 身份，`on`/`off`（默认 on） |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |

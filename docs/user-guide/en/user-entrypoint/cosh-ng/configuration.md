@@ -56,6 +56,7 @@ log_level = "warn"
 [shell]
 default = "auto"
 integration = "enhanced"
+login_identity = true
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -148,6 +149,16 @@ fall back to `false`.
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
 
+`login_identity` (default `true`) gives an interactive Enhanced login shell a
+real login identity: the inner bash starts as a login shell (`shopt -q
+login_shell` == yes) and reads `/etc/profile` and `~/.bash_profile` like `bash
+-l`. Set `login_identity = false` to fall back to the previous non-login startup
+(`--rcfile`). Bash 4 and newer use the login-identity path when the bounded
+real-launch capability probe succeeds. Bash 3.2 (including the macOS system
+Bash), probe failures, and
+parent environments that export function names POSIX startup cannot import all
+fall back automatically. Zsh is unaffected.
+
 ## Audit settings
 
 Audit settings come from the system file when it has an `[audit]` table;
@@ -201,6 +212,7 @@ required.
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET`, `ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun credential fallbacks |
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
 | `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
+| `COSH_SHELL_LOGIN_IDENTITY` | `on`/`off` real login identity for the next Enhanced login shell (default on) |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |

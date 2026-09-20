@@ -10,6 +10,13 @@ bash or zsh must own the session without Cosh hooks, observation, or insights.
 Structured JSON and JSONL interfaces remain available for automation and
 Agent integration.
 
+By default a login shell (for example `cosh --login`) launches Bash with a real
+login identity on Bash 4+; set `shell.login_identity = false` to keep the previous
+non-login (`--rcfile`) startup. Cosh falls back automatically when the bounded
+login-identity capability probe fails, on Bash 3.2 (such as the macOS system
+bash), or when the
+parent exports a function name that POSIX startup cannot import.
+
 ## Why cosh-ng
 
 | In a conventional terminal | In cosh-ng |
