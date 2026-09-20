@@ -123,7 +123,7 @@ build-openclaw-plugin: sync-versions generate-component-contract ## Build opencl
 	# a type error in src/ or tests/ still produces a dist/index.js. Nothing else
 	# in the pipeline would catch it either: agent-memory.spec.in's %build
 	# deliberately runs no npm and consumes the bundle `make dist` pre-built here,
-	# and the `Test agent-memory` CI job has no Node step. Type-check first so the
+	# while the PR CI job runs the plugin unit suite. Type-check first so the
 	# bundle that ships is the bundle tsc accepted. `npm run build:check` is
 	# `tsc --project tsconfig.json --noEmit` over the same tsconfig the plugin is
 	# written against, and needs only the devDependencies installed just above.
@@ -146,7 +146,7 @@ test: test-openclaw-install ## Run all tests (Linux only — use `make remote-te
 
 # Bash-only flag-negotiation test for the OpenClaw installer (no Node):
 # capability consent plus the legacy unsafe-install bypass.
-# A future npm/tsx-based plugin unit-test target is a separate entry point
+# The npm/tsx-based plugin unit-test target is a separate entry point
 # and deliberately not part of `make test`.
 test-openclaw-install: ## Run the OpenClaw adapter installer flag-negotiation test
 	@echo "==> Testing OpenClaw adapter installer..."
@@ -164,8 +164,7 @@ test-tools: ## Run Tier A file-tool integration tests only
 # registry access. Use this target to exercise the adapter suite. CI runs it
 # from the `package-source` action, right after `build-openclaw-plugin` has
 # npm-installed the same directory, so the nightly and release packaging paths
-# gate on it. The per-PR `Test agent-memory` job still has no Node step —
-# wiring one there needs the `workflow` token scope (#3255).
+# gate on it. The per-PR `Test agent-memory` job also runs this target.
 test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
 	@echo "==> Running openclaw adapter unit tests..."
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund

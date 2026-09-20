@@ -224,13 +224,8 @@ runs:
         fi
         make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin
 
-    # The openclaw adapter's TypeScript unit suite (`make test-openclaw-plugin`
-    # -> `npx tsx --test tests/unit/*-test.ts`, 7 files / 140 tests) has no
-    # other CI entry point: the `Test agent-memory` job in ci.yaml has no Node
-    # step at all, and adding one there needs the `workflow` token scope
-    # (#3255). Wiring it here instead turns the nightly and release packaging
-    # paths into a gate, so a red adapter cannot ship inside an RPM; per-PR
-    # coverage is still tracked by #3255.
+    # Run the adapter unit suite on nightly and release packaging paths as
+    # well as PR CI, so a failing plugin cannot ship inside an RPM.
     #
     # Both ordering constraints come from `build-openclaw-plugin` above: it
     # runs `sync-versions` first and manifest-config-schema-test.ts asserts on

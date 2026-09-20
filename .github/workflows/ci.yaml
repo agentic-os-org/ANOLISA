@@ -1089,6 +1089,17 @@ jobs:
           cd src/agent-memory
           cargo test --locked
 
+      - name: Setup Node.js (agent-memory plugin tests)
+        uses: actions/setup-node@v4
+        with:
+          # Match the packaging suite's OpenClaw runtime requirement.
+          node-version: '22.23.2'
+
+      - name: Test OpenClaw plugin (TypeScript unit suite)
+        run: |
+          cd src/agent-memory
+          make test-openclaw-plugin
+
   # =========================================================================
   # Step 9: Test anolisa (Rust workspace)
   # =========================================================================
