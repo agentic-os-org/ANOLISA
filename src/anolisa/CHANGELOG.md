@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-09-20
+
+### Added
+
+- Manage OpenCode local plugins with `anolisa adapter enable tokenless opencode`,
+  `anolisa adapter status tokenless`, and `anolisa adapter disable tokenless opencode`.
+  Existing links to the same plugin can be adopted, conflicting user entries are
+  preserved, and interrupted changes can be retried. Custom configuration directories
+  are supported through `OPENCODE_CONFIG_DIR`. Restart OpenCode after enabling or
+  disabling; runtime loading remains reported as `unknown`
+  ([#3346](https://github.com/agentic-os-org/ANOLISA/pull/3346)).
+- `anolisa bug --component cosh-ng` now exports a local diagnostic bundle and includes
+  its health findings and collection summary in Markdown and `--json` reports.
+  `COSH_SHELL_BIN` can override the installed binary. Failed collection provides a
+  reason and a manual retry command; `--dry-run` skips collection, and bundles are
+  never uploaded automatically
+  ([#3317](https://github.com/agentic-os-org/ANOLISA/pull/3317)).
+
+### Fixed
+
+- `anolisa bug --component <name>` now finds visible system installations from user
+  mode and reads recent logs from the installation's scope. Unreadable cross-scope
+  logs produce a warning without aborting the report
+  ([#3317](https://github.com/agentic-os-org/ANOLISA/pull/3317)).
+
 ## [0.3.13] - 2026-09-20
 
 ### Changed

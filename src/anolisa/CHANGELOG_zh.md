@@ -9,6 +9,29 @@
 
 ## [未发布]
 
+## [0.3.14] - 2026-09-20
+
+### 新增
+
+- 通过 `anolisa adapter enable tokenless opencode`、
+  `anolisa adapter status tokenless` 和 `anolisa adapter disable tokenless opencode`
+  管理 OpenCode 本地插件。可接管指向同一插件的已有链接，保留冲突的用户文件，
+  并支持重试中断的操作；通过 `OPENCODE_CONFIG_DIR` 支持自定义配置目录。
+  启用或禁用后需重启 OpenCode，运行时加载状态仍报告为 `unknown`
+  ([#3346](https://github.com/agentic-os-org/ANOLISA/pull/3346))。
+- `anolisa bug --component cosh-ng` 现在会导出本地诊断包，并在 Markdown 和
+  `--json` 报告中附加健康检查结果与采集摘要。可通过 `COSH_SHELL_BIN`
+  覆盖已安装的二进制路径。采集失败时提供原因和手动重试命令；
+  `--dry-run` 跳过采集，诊断包不会自动上传
+  ([#3317](https://github.com/agentic-os-org/ANOLISA/pull/3317))。
+
+### 修复
+
+- `anolisa bug --component <name>` 现在可在用户模式下找到可见的系统级安装，
+  并从该安装所属作用域读取近期日志。跨作用域日志无法读取时会给出警告，
+  不再中断报告生成
+  ([#3317](https://github.com/agentic-os-org/ANOLISA/pull/3317))。
+
 ## [0.3.13] - 2026-09-20
 
 ### 变更

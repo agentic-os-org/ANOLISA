@@ -144,6 +144,11 @@ fi
 
 %changelog
 * Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Manage OpenCode local plugins with recoverable enable and disable operations.
+- Include local cosh-ng diagnostic bundle summaries in bug reports.
+- Diagnose visible system installations and warn on unreadable cross-scope logs.
+
+* Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.13-1
 - Support Yum 3 and DNF 4 with exact-version RPM transactions and preflight checks.
 - Query validated RPM metadata with proxy and private CA support.
 - Recognize derivative distributions and explain unavailable Raw platforms.
