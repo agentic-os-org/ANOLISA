@@ -1,6 +1,6 @@
 [package]
 name = "agent-memory"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 # edition 2024 stabilised in rustc 1.85; let-chains land in 1.88 so we
 # avoid them. Anolis ships 1.86, which is fine for build but won't take

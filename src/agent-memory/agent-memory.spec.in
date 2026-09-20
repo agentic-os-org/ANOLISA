@@ -201,6 +201,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Sep 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.8-1
+- Namespace OpenClaw tools; prompts and tool policies require migration
+- Avoid memory-core takeover and declare coding profile tool membership
+- Fall back to private writable session directories for unprivileged users
+- Accept session configuration and validate UTF-8 identifier byte limits
+- Correct BM25 ranking and reject unsupported OpenClaw expert profiles
+- Stop stale clients on reload and restore buildable source archives
+
 * Wed Sep 09 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.7-1
 - Negotiate OpenClaw capability consent and effective installer flags
 - Fix corpus read routing and returned line-window metadata

@@ -1,6 +1,6 @@
 {
   "component": "agent-memory",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "targets": {
     "openclaw": {
       "compatibleVersions": ">=5.0.0",

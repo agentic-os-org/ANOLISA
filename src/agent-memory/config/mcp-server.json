@@ -1,7 +1,7 @@
 {
   "name": "agent-memory",
   "description": "Agent memory — filesystem memory MCP server. 31 tools across three tiers: Tier A file ops (read/write/append/edit/list/grep/diff/mkdir/remove/promote + mem_session_log), Tier B structured (memory_search, memory_observe, memory_get_context, memory_task_save/resume/list/close, memory_forget, memory_consent, mem_export, mem_import), Tier C governance (mem_snapshot/mem_snapshot_list/mem_snapshot_restore/mem_log/mem_revert/mem_consolidate/mem_compact, memory_about, memory_auto_created). Optional Linux user-namespace isolation, SQLite FTS5 BM25 + vector hybrid background index, time-decay ranking, cold archival, episodic memory extraction, conflict detection, git versioning, tar.gz snapshots, cgroup v2 memory.max, and journald audit fan-out.",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "command": "/usr/bin/agent-memory",
   "args": [],
   "env": {},

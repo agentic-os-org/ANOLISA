@@ -1,6 +1,6 @@
 [component]
 name = "agent-memory"
-version = "0.2.7"
+version = "0.2.8"
 layer = "runtime"
 domain = "state"
 display_name = "Agent Memory"

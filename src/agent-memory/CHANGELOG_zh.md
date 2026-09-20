@@ -7,6 +7,24 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.8] - 2026-09-20
+
+### 新增
+
+- **agent-memory**：配置的会话目录不可用时，回退到当前用户独享的运行时目录或临时目录，非特权安装无需创建 root 所有的目录即可使用会话日志和 `mem_promote`；回退路径会检查所有者、权限及符号链接重定向（#3266）
+
+### 变更
+
+- **agent-memory**：**不兼容变更：** OpenClaw 工具更名为 `anolisa_memory_search` 和 `anolisa_memory_get`，Agent 可以同时访问 ANOLISA 记忆和 OpenClaw 自带记忆工具，避免名称冲突；升级时需更新提示词及工具 allowlist、重启 gateway 并开启新会话。内部 MCP 名称和已存储记忆保持不变（#3347）
+- **agent-memory**：在 OpenClaw 的 `coding` profile 中声明全部四个插件工具，Agent 在该 profile 下无需禁用 `memory-core` 即可访问插件工具；自定义策略仍需显式添加工具条目，中间版本安装器留下的禁用标记需按[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)手动恢复（#3347）
+
+### 修复
+
+- **agent-memory**：在 OpenClaw 插件 schema 中接纳 `sessionId` 和 `sessionDir`，并在插件启动时按服务端规则检查标识符的 128 字节 UTF-8 上限，用户可在子进程重启后复用会话临时文件，并在无效标识符改变命名空间之前看到配置错误（#3213）
+- **agent-memory**：让更强的 BM25 匹配排在前面，并统一关键词分数越高越相关的约定，搜索、混合检索和自动召回会优先返回最相关的匹配记忆（#3296）
+- **agent-memory**：拒绝 OpenClaw 插件不支持的 `expert` profile，提示改用 `basic` 或 `advanced`，并在验证重载配置之前停止旧客户端，用户可获得明确的配置错误，避免旧记忆进程继续持有存储锁（#3238）
+- **agent-memory**：补齐 `make dist` 源码归档所需文件，源码包和 RPM 构建可获得编译及安装所需的示例目标、配置和适配器资源（#3231）
+
 ## [0.2.7] - 2026-09-09
 
 ### 修复

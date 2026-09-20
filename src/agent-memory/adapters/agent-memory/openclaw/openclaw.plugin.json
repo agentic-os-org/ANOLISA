@@ -1,7 +1,7 @@
 {
   "id": "memory-anolisa",
   "name": "Anolisa Memory",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Persistent memory backed by the agent-memory MCP server with namespace isolation and openat2 sandbox. Provides BM25 search, file read/write, observe, and context assembly tools.",
   "activation": {
     "onStartup": false
