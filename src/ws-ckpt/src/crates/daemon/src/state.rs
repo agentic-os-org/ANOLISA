@@ -56,6 +56,8 @@ pub struct DaemonState {
     /// Distinct from `WorkspaceState::policy_io_mu` (which lives inside an Arc
     /// that recover may unregister). Held across `await`.
     wsid_locks: DashMap<String, Arc<Mutex<()>>>,
+    /// Serializes initialization before paths can change during migration.
+    pub(crate) init_lock: Mutex<()>,
     /// Serializes manifest snapshots and writes across different workspaces.
     manifest_save_lock: Mutex<()>,
 }
@@ -98,6 +100,7 @@ impl DaemonState {
             state_dir,
             selection_method,
             wsid_locks: DashMap::new(),
+            init_lock: Mutex::new(()),
             manifest_save_lock: Mutex::new(()),
         }
     }

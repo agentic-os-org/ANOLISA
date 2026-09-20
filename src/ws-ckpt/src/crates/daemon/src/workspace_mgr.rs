@@ -109,6 +109,10 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         ));
     }
     let workspace = strip_trailing_slashes(workspace);
+    // Lock before resolving aliases or observing the rename-to-symlink gap.
+    // ponytail: init is globally serialized; use stable path identities if
+    // concurrent initialization of unrelated workspaces becomes necessary.
+    let init_guard = state.init_lock.lock().await;
     // 0. Early check: detect workspace already managed via symlink to our data_root.
     //    This must run before canonicalize(), which would resolve the symlink
     //    and cause the "inside mount_path" guard to reject it.
@@ -263,7 +267,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     if abs_path.starts_with(&state.mount_path) {
         // The user-facing path canonicalises into our mount root. Two
         // sub-cases need different handling:
-        //   (a) `abs_path == mount_path/<ws_id>` for some `ws_id` we
+        //   (a) `abs_path == data_root/<ws_id>` for some `ws_id` we
         //       manage. The user is effectively reaching one of our
         //       subvolumes through a bind mount or symlink chain — treat
         //       this as idempotent (already registered) or auto-adopt
@@ -272,7 +276,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         //       nested directory inside a subvol, or an unknown name at
         //       the root). This is real self-referential nesting and
         //       must stay an error.
-        if let Ok(rest) = abs_path.strip_prefix(&state.mount_path) {
+        if let Ok(rest) = abs_path.strip_prefix(state.backend.data_root()) {
             let mut comps = rest.components();
             let single = match (comps.next(), comps.next()) {
                 (Some(first), None) => Some(first.as_os_str().to_string_lossy().to_string()),
@@ -351,11 +355,11 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     }
 
     // 3. Generate ws-id
-    let mount_path = &state.mount_path;
+    let data_root = state.backend.data_root();
     let base_id = generate_ws_id_base(&abs_path.to_string_lossy());
     let mut ws_id = base_id.clone();
     let mut suffix = 2u32;
-    while mount_path.join(&ws_id).exists() {
+    while data_root.join(&ws_id).exists() {
         ws_id = format!("{}-{}", base_id, suffix);
         suffix += 1;
     }
@@ -418,6 +422,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // Lifecycle window done (state + index_dir written). Watcher / warmup
     // below only read paths, so let a queued recover proceed.
     drop(_wsid_guard);
+    drop(init_guard);
 
     // 13b. Start file watcher for write-lock detection
     match crate::fs_watcher::WorkspaceWatcher::start(&abs_path) {
@@ -889,6 +894,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_init_waits_through_storage_migration() {
+        use std::time::Duration;
+
+        // Exercise both ordinary allocation and a pre-existing ID collision.
+        for collision in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(workspace.join("payload"), b"keep me").unwrap();
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+            let backend = Arc::new(RecorderStubBackend {
+                data_root_path: temp.path().join("mount/data"),
+                snapshots_root_path: temp.path().join("mount/snapshots"),
+                ..RecorderStubBackend::new()
+            });
+            let base_id = generate_ws_id_base(workspace.to_str().unwrap());
+            if collision {
+                std::fs::create_dir_all(backend.data_root().join(&base_id)).unwrap();
+            }
+            let expected_id = if collision {
+                format!("{base_id}-2")
+            } else {
+                base_id.clone()
+            };
+            let config = DaemonConfig {
+                mount_path: temp.path().join("mount"),
+                ..test_config()
+            };
+            let state = Arc::new(DaemonState::new(
+                config,
+                backend.clone(),
+                temp.path().join("state"),
+            ));
+            let workspace_str = workspace.to_str().unwrap();
+            let alias_str = alias.to_str().unwrap();
+            let leader = init(&state, workspace_str);
+            tokio::pin!(leader);
+
+            // Hold the first init after creating storage, before renaming.
+            tokio::select! {
+                response = &mut leader => panic!("init returned before migration: {response:?}"),
+                permit = backend.init_progress.acquire() => permit.unwrap().forget(),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("init never reached storage"),
+            }
+            let follower = init(&state, workspace_str);
+            tokio::pin!(follower);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut follower)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                backend.init_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+
+            backend.init_continue.add_permits(1);
+            tokio::select! {
+                response = &mut leader => panic!("init returned before symlink: {response:?}"),
+                permit = backend.init_progress.acquire() => permit.unwrap().forget(),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("init never renamed workspace"),
+            }
+            assert!(!workspace.exists());
+            // Both the original spelling and an alias must wait through the
+            // missing-path window rather than reporting InvalidPath.
+            let during_gap = init(&state, workspace_str);
+            let via_alias = init(&state, alias_str);
+            tokio::pin!(during_gap, via_alias);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut during_gap)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut via_alias)
+                    .await
+                    .is_err()
+            );
+            backend.init_continue.add_permits(1);
+            let responses = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(leader, follower, during_gap, via_alias)
+            })
+            .await
+            .expect("concurrent init did not finish");
+            for response in [responses.0, responses.1, responses.2, responses.3] {
+                let response = response.unwrap();
+                assert!(
+                    matches!(&response, Response::InitOk { ws_id } if ws_id == &expected_id),
+                    "{response:?}"
+                );
+            }
+            assert_eq!(
+                backend.init_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            assert!(state.get_by_path(&workspace).is_some());
+            assert_eq!(
+                std::fs::read(workspace.join("payload")).unwrap(),
+                b"keep me"
+            );
+            assert!(
+                !std::path::Path::new(&crate::backends::btrfs_common::backup_path_for(
+                    workspace_str
+                ))
+                .exists()
+            );
+            assert!(state.index_dir(&expected_id).join("index.json").is_file());
+            assert!(!backend.data_root().join(format!("{base_id}-3")).exists());
+        }
+    }
+
+    #[tokio::test]
     async fn init_registered_but_regular_dir_returns_error_with_hint() {
         let state = Arc::new(DaemonState::new(
             test_config(),
@@ -990,7 +1108,11 @@ mod tests {
 
         let mut cfg = test_config();
         cfg.mount_path = mount_path.clone();
-        let state = Arc::new(DaemonState::new(cfg, test_backend(), test_state_dir()));
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            mount_path.clone(),
+            mount_path.join("test.img"),
+        ));
+        let state = Arc::new(DaemonState::new(cfg, backend, test_state_dir()));
         state.register_workspace(
             ws_id.to_string(),
             PathBuf::from("/some/user/facing/path"),
@@ -1341,6 +1463,9 @@ mod tests {
         data_root_path: PathBuf,
         snapshots_root_path: PathBuf,
         recover_calls: std::sync::atomic::AtomicUsize,
+        init_calls: std::sync::atomic::AtomicUsize,
+        init_progress: tokio::sync::Semaphore,
+        init_continue: tokio::sync::Semaphore,
     }
 
     impl RecorderStubBackend {
@@ -1349,6 +1474,9 @@ mod tests {
                 data_root_path: PathBuf::from("/tmp/stub-data"),
                 snapshots_root_path: PathBuf::from("/tmp/stub-snapshots"),
                 recover_calls: std::sync::atomic::AtomicUsize::new(0),
+                init_calls: std::sync::atomic::AtomicUsize::new(0),
+                init_progress: tokio::sync::Semaphore::new(0),
+                init_continue: tokio::sync::Semaphore::new(0),
             }
         }
         fn recover_call_count(&self) -> usize {
@@ -1374,10 +1502,32 @@ mod tests {
         }
         async fn init_workspace(
             &self,
-            _: &str,
-            _: &str,
+            original_path: &str,
+            ws_id: &str,
         ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
-            unimplemented!("stub: init_workspace not used")
+            self.init_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let subvol = self.data_root().join(ws_id);
+            tokio::fs::create_dir_all(&subvol).await?;
+            tokio::fs::create_dir_all(self.snapshots_root().join(ws_id)).await?;
+            self.init_progress.add_permits(1);
+            self.init_continue.acquire().await?.forget();
+            let backup = crate::backends::btrfs_common::backup_path_for(original_path);
+            tokio::fs::rename(original_path, &backup).await?;
+            self.init_progress.add_permits(1);
+            self.init_continue.acquire().await?.forget();
+            tokio::fs::copy(
+                std::path::Path::new(&backup).join("payload"),
+                subvol.join("payload"),
+            )
+            .await?;
+            tokio::fs::symlink(&subvol, original_path).await?;
+            tokio::fs::remove_dir_all(backup).await?;
+            Ok(ws_ckpt_common::WorkspaceInfo {
+                ws_id: ws_id.to_string(),
+                path: original_path.to_string(),
+                snapshot_count: 0,
+            })
         }
         async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
