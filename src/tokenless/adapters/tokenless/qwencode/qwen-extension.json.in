@@ -1,7 +1,7 @@
 {
   "name": "tokenless",
   "version": "@VERSION@",
-  "description": "Token-Less context compression for Qwen Code — RTK command rewriting, response/TOON/schema compression, and registered but hard-disabled Tool Ready",
+  "description": "Token-Less for Qwen Code — RTK command rewriting and registered but hard-disabled Tool Ready; the response and schema hooks are registered but current Qwen Code releases cannot replace tool results and do not run BeforeModel",
   "author": { "name": "ANOLISA" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/alibaba/anolisa/tree/main/src/tokenless",
@@ -43,7 +43,7 @@
           {
             "type": "command",
             "name": "tokenless-compress-response",
-            "description": "Compresses tool responses and encodes to TOON format",
+            "description": "Shared response hook; Qwen Code cannot replace tool results, so responses pass through",
             "command": "bash \"${extensionPath}/hooks/run-hook.sh\" compress_response_hook.py --agent-id qwencode",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "qwencode" }
@@ -57,7 +57,7 @@
           {
             "type": "command",
             "name": "tokenless-compress-schema",
-            "description": "Compresses tool schema definitions for token savings",
+            "description": "Declared schema hook; current Qwen Code releases do not run the BeforeModel event",
             "command": "bash \"${extensionPath}/hooks/run-hook.sh\" compress_schema_hook.py",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "qwencode" }

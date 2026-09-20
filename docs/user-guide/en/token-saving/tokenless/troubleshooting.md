@@ -125,10 +125,11 @@ directory.
 How schema compression plugs in depends on the host:
 
 - **cosh and Cosh-NG** run it on the `BeforeModel` hook before every model call; the warnings in this section come from that hook.
-- **OpenCode** runs it per tool definition through its `tool.definition` plugin hook, not through `BeforeModel`. MCP tools do not pass through that hook, so an MCP-only tool set produces no records there, and the `BeforeModel` warnings below never apply.
-- **Qwen Code** ships a `BeforeModel` hook entry in the extension manifest, but current Qwen Code releases do not implement that hook event: the hook registry skips unknown event names, so only the other hook groups are registered and the schema hook never runs. Zero `compress-schema` records on Qwen Code are expected; this section cannot diagnose them.
+- **OpenCode** runs the same hook per tool definition through its `tool.definition` plugin hook, not through `BeforeModel`. MCP tools do not pass through that hook, and the `BeforeModel` warnings below never apply.
+- **Qwen Code** declares a `BeforeModel` hook, but current Qwen Code releases do not implement that event, so the schema hook never runs. Zero `compress-schema` records on Qwen Code are expected; this section cannot diagnose them.
+- **The shared hook on cosh, Cosh-NG and OpenCode** has no marker-authorized recovery, so with compression enabled it returns the tools unchanged and writes no statistics record; zero records are expected there. To measure the saving, run `tokenless compress-schema` directly, or set `TOKENLESS_COMPRESSION_ENABLED=0` and let the host run a dry run, which is still recorded. Step 1 below is a host-independent way to confirm there is something to compress; step 2 explains the warnings that only cosh and Cosh-NG emit.
 
-When there are no `compress-schema` records on a host that actually runs the hook, check the following in order:
+Check the following in order:
 
 ### 1. Confirm there is something to compress
 
@@ -140,7 +141,7 @@ echo '[{"name":"example_tool","description":"A deliberately long example tool de
 
 If stderr shows `did not reduce size`, the current tool set has nothing to compress; tool sets with long descriptions (for example some MCP tools) record normally.
 
-### 2. Confirm the BeforeModel hook actually fires
+### 2. Read the BeforeModel warnings (cosh and Cosh-NG)
 
 On cosh and Cosh-NG, when a BeforeModel event carries nothing schema compression can work on, the hook emits one of the following warnings (each at most once per session) and passes the request through unchanged:
 
@@ -150,11 +151,11 @@ On cosh and Cosh-NG, when a BeforeModel event carries nothing schema compression
 [tokenless] WARNING: BeforeModel event carries no tool declarations ...
 ```
 
-The first warning means the hook received a payload that is not a JSON object; the second means the payload carries no `llm_request` object; the third means the host fires BeforeModel but its event format carries no tool declarations (`llm_request.config.tools` or `llm_request.tools`) — check or upgrade the host's hook protocol version. With neither a warning nor any records, BeforeModel is not firing at all:
+The first warning means the hook received a payload that is not a JSON object; the second means the payload carries no `llm_request` object; the third means the host fires BeforeModel but its event format carries no tool declarations (`llm_request.config.tools` or `llm_request.tools`) — check or upgrade the host's hook protocol version. These three warnings come only from the shared host hook; QwenPaw, AgentScope and the direct CLI never print them, so their absence says nothing about those entry points. What zero records mean depends on the entry point:
 
-- The extension or plugin is installed and enabled (`anolisa adapter status tokenless`).
-- Hooks are not disabled in the host configuration.
-- The host version supports the BeforeModel event.
+- **cosh, Cosh-NG and OpenCode**: with compression enabled the shared hook writes no record either way, so the record count cannot tell you whether the hook ran; on cosh and Cosh-NG no warning is the normal case. If a dry run still records nothing although step 1 shows a saving, confirm that the extension or plugin is installed and enabled (`anolisa adapter status tokenless`), that hooks are not disabled in the host configuration, and on cosh or Cosh-NG that the host version supports the BeforeModel event.
+- **QwenPaw and AgentScope**: zero records although step 1 shows a saving usually means the plugin or middleware never loaded, statistics are off, or Core could not open its Stash. Confirm it is installed and enabled, then check [Database errors](#database-errors).
+- **Direct CLI**: `tokenless compress-schema` does not depend on any host event. Check that statistics are enabled and that you are querying the database the command wrote to.
 
 Then continue with the generic steps in [No statistics appear after enabling the adapter](#no-statistics-appear-after-enabling-the-adapter).
 
@@ -194,7 +195,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches fixed `tokenless` and `rtk` child processes. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
+The npm/manual install script consents differently: on hosts where the installer still treats the option as effective, it adds `--dangerously-force-unsafe-install` automatically because the plugin launches fixed `tokenless` and `rtk` child processes; on OpenClaw 2026.6.5 and later the scan follows `security.installPolicy`, and a rejection must be resolved by relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
 
 ## QwenPaw install reports an unavailable SDK wheel
 
@@ -222,13 +223,11 @@ has another cause:
 curl -sIL -o /dev/null -w '%{http_code}\n' "<wheel URL from the message>"
 ```
 
-- Maintainers, the `tokenless/vX.Y.Z` release does not exist: push the tag and
-  approve the `release` environment so the publish workflow uploads the wheel
-  assets, then rerun the installer.
-- Maintainers, the release exists but this wheel is missing: the upload was
-  incomplete. The publish workflow refuses to overwrite an existing release, so
-  delete that release and run the workflow again — or upload the missing asset
-  to it — then rerun the installer.
+- Maintainers: when the `tokenless/vX.Y.Z` release does not exist, push the tag
+  and approve the `release` environment so the publish workflow uploads the wheel
+  assets; when the release exists but this wheel is missing, upload the asset to
+  it (the publish workflow refuses to overwrite an existing release, so re-running
+  it alone does not help); then rerun the installer.
 - Everyone else: install a Tokenless package whose version already has a
   downloadable wheel.
 - Offline or mirrored networks, where the probe cannot reach GitHub but pip
@@ -276,11 +275,11 @@ The JSON result should contain `"status":"UNKNOWN"` and `"enabled":false`. A `NO
 
 ```bash
 ls -ld ~/.tokenless
-ls -l ~/.tokenless/stats.db*
+ls -l ~/.tokenless/stats.db* ~/.tokenless/stash.db*
 env | grep -E 'TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-Confirm that the current user can write the selected data directory and database. `TOKENLESS_DATA_DIR` may be outside the real home, but it must be an absolute non-root directory without parent traversal. An invalid explicit data directory does not fall back to home. `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` must remain under the real home or selected data directory; the bundled RTK writer applies the same rule.
+The two databases fail differently. A `stats.db` that cannot be opened does not stop compression, Stash or `retrieve`: those paths skip local recording silently and only the records are missing, while `tokenless stats summary`, `list`, `show`, `diff` and `clear` exit 1 with the `Failed to open database` message this section is named after and the underlying cause. A `stash.db` that cannot be opened makes the standalone `compress-response` and `compress-schema` commands print `[tokenless] stash disabled` on stderr and continue without Stash; a PostTool hook request that declared recovery, and a BeforeModel request with a static recovery Tool while compression is enabled, fail before producing output, so the host keeps the original (a BeforeModel dry run does not open Stash); in-process integrations keep running and expose the cause only through the runtime's `stash_error` and `stats_error` properties, with schema compression returning the tools unchanged and `retrieve` unable to find the originals. Confirm that the current user can write the selected data directory and database. `TOKENLESS_DATA_DIR` may be outside the real home, but it must be an absolute non-root directory without parent traversal. An invalid explicit data directory does not fall back to home. `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` must remain under the real home or selected data directory; the bundled RTK writer applies the same rule.
 
 Do not share one `stats.db` between users. AgentSight and Tokenless should run so that they can access the same user's database.
 

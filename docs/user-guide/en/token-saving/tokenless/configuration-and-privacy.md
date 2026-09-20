@@ -79,21 +79,21 @@ environment variable does not override them.
 The compressor handles complete ordinary Git diffs received as successful command
 output. It requires a text replacement slot, an available Stash, and a supported
 recovery method. All additions, deletions, metadata, and up to two available context
-lines around changes are retained. Within each hunk, it may retain extra context
-when splitting would add more header overhead. It only adopts output when both
-characters decrease and the heuristic token estimate saves at least 16 tokens,
-including the notice and recovery instruction. This estimate uses no runtime
-tokenizer and does not guarantee a reduction for every model tokenizer.
+lines around changes are retained, and a hunk may keep more when splitting it would cost
+more in hunk-header text. It only adopts output when both characters decrease and the
+heuristic token estimate saves at least 16 tokens, including the notice and recovery
+instruction. This estimate uses no runtime tokenizer and does not guarantee a reduction
+for every model tokenizer.
 
 The emitted operation is `diff_reduction` and recoverability is `retrievable`, not
-`lossless`: unmodified context is omitted from the visible output. Follow the
-emitted shell or tool instruction to retrieve the received original while it is in
-Stash. Recovery requires an additional tool call. File reads and results already
-marked as RTK-optimized bypass this compressor; enabling it does not change RTK
-command rewriting. Unsupported or incomplete diffs pass through. Special file
-sections such as renames and binary summaries retain their received bytes; encoded
-binary patches pass through in full. Tokenless does not open host-persisted output
-files to complete truncated diffs or change the host's truncation limit.
+`lossless`: unmodified context is omitted from the visible output. Follow the emitted
+shell or tool instruction to retrieve the received original while it is in Stash.
+Recovery requires an additional tool call. File read tool results and results already
+marked as RTK-optimized bypass this compressor; enabling it does not change RTK command
+rewriting. Unsupported or incomplete diffs pass through, and so does any diff that
+contains an encoded binary patch; within a cropped diff, rename sections and binary-file
+summaries are kept as received. Tokenless does not open host-persisted output files to
+complete truncated diffs or change the host's truncation limit.
 
 Local compression and original recovery have been verified on finite samples.
 Stable whole-Agent token savings have not been established, so this feature remains
@@ -115,42 +115,36 @@ environment variable does not override them.
 
 The compressor handles complete HTML documents (starting with `<!doctype html` or
 `<html>`) received as successful command output or API responses, for example a page
-fetched with `curl` or returned by an MCP tool. It requires a text replacement slot,
-an available Stash, and a supported recovery method. The page is rendered as a
-Markdown subset: headings, paragraphs, lists, tables, fenced code with its language,
-links with targets, image alt text, quotes, and admonitions. MathML formulas render
-as their TeX annotation or `alttext` between `$` signs; cells spanning rows or columns
-leave empty cells in the slots they cover, and rows are not padded to the widest
-row; paragraph lines that start like a Markdown
-heading, list item, quote, rule or code fence are escaped. The content root is
-`<main>`, an element with `role=main`, or the only outermost `<article>` (articles
-nested inside it, such as comments, do not count); otherwise the whole body.
-Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
-page-level `header`/`footer`, elements with navigation, banner, contentinfo, or
-complementary roles, form controls (`button`, `input`, `select`, `textarea`,
-`datalist`, `progress`, `meter`), media embeds (`audio`, `video`, `canvas`, `object`,
-`embed`, `map`), and `dialog` are removed; `menu` renders as a list, and `label`,
-`legend`, and `fieldset` stay because content tabs keep their titles there. The first line of the view names
-the root, the number of nodes omitted outside it, and every removal count by
-category. Pages whose
-rendered body is shorter than 64 characters, such as application shells, pass through,
-and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
-quadratically with nesting depth, so such pages are not parsed at all.
-It only adopts output when both characters decrease and the heuristic token estimate
-saves at least 16 tokens, including the notice and recovery instruction.
+fetched with `curl` or returned by an MCP tool. It requires a text replacement slot, an
+available Stash, and a supported recovery method. The page is rendered as a Markdown
+subset: headings, paragraphs, lists, tables, fenced code, links, image alt text, quotes,
+admonitions, and MathML formulas as TeX. The content root is `<main>`, an element with
+`role=main`, or the only outermost `<article>`; otherwise the whole body. Only
+enumerated non-content elements are removed: scripts, styles, `noscript`, templates,
+SVG, iframes, comments, navigation, page-level headers and footers, asides, form
+controls, media embeds, and dialogs; links and images with `javascript:` or `data:`
+targets keep only their text. The first line of the view lists the count of each removed
+category that occurred and, when the root is not the body, names the root and the number
+of nodes omitted outside it. Pages whose rendered body is shorter than 64 characters,
+such as application shells, pass through, and so do pages whose markup nests deeper than
+512 elements. It only adopts output when both characters decrease and the heuristic
+token estimate saves at least 16 tokens, including the notice and recovery instruction.
 
 The emitted operation is `html_extraction` and recoverability is `retrievable`, not
 `lossless`: markup and the removed elements are not in the visible output. Follow the
 emitted shell or tool instruction to retrieve the received original while it is in
-Stash. Content that a page loads through scripts is not visible in the view. Content
-origin is classified by the adapters: file read tool results pass through, and the
-shared PostTool hook and the Hermes plugin report shell commands that only print local
-files (`cat`, `head`, `tail`, `nl`, `less`, `more`, `bat`, and `sed -n` with a
-print-only script, optionally after `cd … &&`) as `file_read`. JSON, CSV, build logs
-and diffs in such output still compress, but a printed HTML page is source the agent
-may edit and stays verbatim. A read combined with a pipe, redirection or another
-command, and a page returned by an MCP file tool, is still rendered like a fetched page
-and must be retrieved to see its source.
+Stash. Content that a page loads through scripts is not visible in the view. File read
+tool results pass through on every adapter. Only the shared PostTool hook and the Hermes
+plugin also report a shell command that merely prints local files (`cat`, `head`,
+`tail`, `nl`, `less`, `more`, `bat`, or `sed -n` with a print-only script, optionally
+after `cd … &&`) as a file read: JSON, CSV, build logs and diffs in that output still
+compress, but a printed HTML page is source the agent may edit and stays verbatim.
+There, a read combined with a pipe, redirection or another command, and a page returned
+by an MCP file tool, are not file reads and are rendered like a fetched page. Adapters
+that classify content by tool name, can replace the result and declare a recovery method
+render a page printed by a shell command the same way; adapters that cannot replace the
+result, or declare no recovery method, keep the original. Anything rendered must be
+retrieved to see the source.
 
 Local rendering and original recovery have been verified on finite samples. Stable
 whole-Agent token savings have not been established, so this feature remains opt-in.
@@ -186,16 +180,16 @@ whole-Agent token savings have not been established, so this feature remains opt
 
 Tool Ready is hard-disabled in this build. Its specification and repair-script overrides are retained for the dormant legacy implementation but have no runtime effect. They are subject to trusted-path validation and are not recommended for normal users.
 
-`TOKENLESS_TRACEPARENT` and the standard `TRACEPARENT` carry a W3C trace context for SLS records. Injecting one is the launcher's job: OpenTelemetry propagates W3C context through in-process carriers and does not export the active span as a process variable, so a host or adapter that wants correlation has to set one of these two variables in the environment it spawns Tokenless with. Tokenless only reads them. The override is read first, and an empty or unparsable override falls back to the standard variable so one typo cannot drop correlation for a whole session. Both are optional: when neither carries a usable context, records keep the previous shape and are written uncorrelated. The identity is stamped only onto the SLS JSONL — the local statistics database does not store it.
+`TOKENLESS_TRACEPARENT` and the standard `TRACEPARENT` carry a W3C trace context for SLS records. Tokenless only reads them: a host or adapter that wants correlation sets one of them in the environment it spawns Tokenless with. The override is read first, and an empty or unparsable override falls back to the standard variable. When neither carries a usable context, records are written uncorrelated. The identity is stamped only onto the SLS JSONL, not the local statistics database.
 
 Database path priority is:
 
 - Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
 
-`TOKENLESS_DATA_DIR` is an explicit directory-level relocation and may point outside the real user home, including to a managed service directory under `/var/lib`. Both the CLI and bundled RTK writer reject filesystem root, relative paths, parent traversal, and existing non-directory targets. Without a valid higher-priority file override, an invalid explicit data directory disables that operation's SQLite state instead of silently falling back to home.
+`TOKENLESS_DATA_DIR` is an explicit directory-level relocation and may point outside the real user home, including to a managed service directory under `/var/lib`. Filesystem root, relative paths, parent traversal, and existing non-directory targets are rejected. Without a valid higher-priority file override, an invalid explicit data directory disables that operation's SQLite state instead of silently falling back to home.
 
-An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory that does not exist yet; Tokenless canonicalizes its nearest existing ancestor before creating it. File-level overrides are accepted only beneath the canonical real home or selected data directory, and existing database symlinks are rejected. `TOKENLESS_DATA_DIR` does not relocate `~/.tokenless/config.json` or the SLS JSONL output.
+An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory that does not exist yet. File-level overrides are accepted only beneath the real home or selected data directory, and existing database symlinks are rejected. `TOKENLESS_DATA_DIR` does not relocate `~/.tokenless/config.json` or the SLS JSONL output.
 
 DeepSeek Harness is an exception to the default database location because its
 sandbox removes inherited `TOKENLESS_*` variables and may not expose the home
@@ -212,7 +206,7 @@ them from source control or backups as required by your data policy.
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | No automatic TTL; retained until cleared | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, and build/log gaps | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
+| Stash | `~/.tokenless/stash.db` | Truncated original strings and subtrees, dropped array segments, omitted log runs, the complete record array behind a record-reduction view, the complete original behind a table row reduction, diff cropping or HTML rendering view, and the original text of schema descriptions removed by truncation | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
 | Configuration | `~/.tokenless/config.json` | Three Boolean toggles | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 
@@ -225,7 +219,7 @@ them from source control or backups as required by your data policy.
 - Business data returned by an API.
 - Access tokens, cookies, or credentials found in logs.
 
-The `tokenless` CLI's SQLite recorder attempts to set `stats.db` to `0600` whenever it opens the database. The bundled RTK statistics patch can create or open the same file directly and does not apply that permission change itself. Do not rely on the process umask; verify the deployed database and sidecars:
+Tokenless attempts to set `stats.db` to `0600` whenever it opens the database, and the bundled RTK statistics writer can create the same file without that permission change. Do not rely on the process umask; verify the deployed database and sidecars:
 
 ```bash
 ls -l ~/.tokenless/stats.db*

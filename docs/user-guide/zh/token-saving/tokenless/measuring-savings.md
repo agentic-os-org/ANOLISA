@@ -4,7 +4,7 @@
 
 Tokenless 记录自己处理的 Payload 在压缩前后的大小和估算 Token 数。它回答的是“压缩候选内容缩小了多少”，不是“模型请求或账单减少了多少”。
 
-数据库和 CLI 把大小字段称为“字符”，但当前写入器实际保存 UTF-8 字节长度。统计中的 Token 数使用近似 `ceil(bytes / 4)` 规则，并没有调用模型 Tokenizer。二者都应只作为对比指标。
+数据库和 CLI 把大小字段称为“字符”，但当前写入器实际保存 UTF-8 字节长度。统计中的 Token 数使用启发式估算，并没有调用模型 Tokenizer：Core 每个 CJK 字符计一个 Token，其他字符每四个计一个并向上取整；RTK `rewrite-command` 记录则按每四个 UTF-8 字节计一个 Token 并向上取整。二者都应只作为对比指标。
 
 ## 先理解统计范围
 
@@ -124,7 +124,7 @@ tokenless stats diff --session <session-id> \
   --tool-use-id <tool-use-id>
 ```
 
-Session 总览只包含指标。tool-use 报告会显示内容差异；只有 session/tool-use ID 相同，并且上一阶段存储的输出与下一阶段输入完全一致时，连续的 active 阶段才会串联。断开的阶段、dry-run 记录及缺少 tool-use ID 的记录保持独立，避免重复计算中间输入。
+Session 总览只包含指标。tool-use 报告会显示内容差异，并在上一阶段存储的输出与下一阶段输入完全一致时串联同一次工具调用的连续 active 阶段。断开的阶段、dry-run 记录及缺少 tool-use ID 的记录保持独立，避免重复计算中间输入。
 
 对于 dry-run 记录，`after` 表示预测压缩大小，`emitted` 仍是原始 `before` 大小。无估算节省的操作不会入库，因此 Session 报告只覆盖节省记录。
 
@@ -195,8 +195,8 @@ Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结�
 目录运行 `./run-benchmarks.sh --quick`。
 
 这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、易于
-压缩的合成数据；测试只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
-估算 Token，而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
+压缩的合成数据；测试只使用一个响应和一个 Schema，并以启发式规则估算 Token，
+而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
 会话中的占比。因此，这组结果只用于确认同一源码版本的行为是否相近；评估真实工作
 负载时，应使用有代表性的自有 Payload，并执行下文的 dry-run 双跑。详细口径见
 [benchmark 方法与限制](../../../../../src/tokenless/benchmark/l1-compressor/README.md#methodology)。
@@ -251,9 +251,9 @@ tokenless stats summary \
 压缩率取决于 Payload 中有多少可移除内容，不同场景差异很大：
 
 - **收益高**：返回大量统一结构记录的工具（列表、表格、搜索结果），携带 `debug`/`trace`/`logs` 等冗余字段的 Payload，或描述冗长的 Schema。
-- **收益中等**：Shell 输出只有超过 Layer 2 阈值（字符串 65,536 字符、数组头部窗口 128 项、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损清理和记录缩减（至少 33 条记录的对象数组）。
+- **收益中等**：Shell 输出只有超过 Shell 工具阈值（字符串 65,536 字符、数组长度超过「128 项头部窗口 + 8 项尾部窗口」、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损清理和记录缩减（至少 33 条记录的对象数组）。
 - **收益接近零**：短于 200 字符最小门禁的响应；已足够紧凑、没有冗余的 JSON；任何没有变小的输入（尺寸保护会保留原文）。
-- **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 默认原样透传，显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 后才做上下文裁剪；其他纯文本、Stack Trace、HTML 和源码目前原样透传。
+- **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 和 HTML 页面的压缩器默认关闭，需显式开启（`TOKENLESS_DIFF_COMPRESSION_ENABLED`、`TOKENLESS_HTML_EXTRACTION_ENABLED`）；其他纯文本、Stack Trace 和源码原样透传。
 
 参考数字总是属于测量时的确切 commit——可复现负载、当前快照及其限制见上文[运行仓库参考负载](#运行仓库参考负载)。实际会话收益还需乘以工具 Payload 占会话总 Token 的比例，见[正确解释节省率](#正确解释节省率)。完整触发规则见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 

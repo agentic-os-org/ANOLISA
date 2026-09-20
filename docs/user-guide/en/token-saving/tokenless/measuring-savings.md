@@ -4,7 +4,7 @@
 
 Tokenless records payload size and estimated tokens before and after processing. It answers “how much a compression candidate shrank,” not “how much the model request or bill decreased.”
 
-The database and CLI call the size fields “characters,” but the current writers store UTF-8 byte length. Stored token counts use an approximate `ceil(bytes / 4)` heuristic; they do not call a model tokenizer. Treat both as comparison metrics.
+The database and CLI call the size fields “characters,” but the current writers store UTF-8 byte length. Stored token counts use a heuristic, not a model tokenizer: Core counts one token per CJK character plus one per four other characters, rounded up, while RTK `rewrite-command` rows count one token per four UTF-8 bytes, rounded up. Treat both as comparison metrics.
 
 ## Understand the measurement scope
 
@@ -124,7 +124,7 @@ tokenless stats diff --session <session-id> \
   --tool-use-id <tool-use-id>
 ```
 
-The session overview contains metrics only. A tool-use report includes content diffs and links consecutive active stages only when their session/tool-use IDs match and the previous stored output exactly equals the next stored input. Disconnected stages, dry-run rows, and rows without a tool-use ID remain separate, preventing intermediate inputs from being counted twice.
+The session overview contains metrics only. A tool-use report includes content diffs and chains consecutive active stages of the same tool call when one stage's stored output is exactly the next stage's input. Disconnected stages, dry-run rows, and rows without a tool-use ID remain separate, so intermediate inputs are not counted twice.
 
 For dry-run rows, `after` is the predicted compressed size while `emitted` remains the original `before` size. Operations with no estimated saving are not stored, so session reports cover saving records only.
 
@@ -204,8 +204,8 @@ criterion performance benches; takes a few minutes), run
 
 This is a regression workload, not a promised production range. The response
 fixture is synthetic and compression-friendly, the suite uses one response and
-one schema, and token counts use the approximate `ceil(bytes / 4)` rule rather
-than a model tokenizer. It also excludes adapter behavior and the share of tool
+one schema, and token counts use the heuristic estimate rather than a model
+tokenizer. It also excludes adapter behavior and the share of tool
 data in a complete session. Use the snapshot only to check that the same source
 revision behaves comparably; use your own representative payloads and the
 dry-run comparison below to evaluate an actual workload. See the
@@ -262,9 +262,9 @@ For example, a 60% payload compression rate with tool payloads representing 20% 
 The compression rate depends on how much removable material a payload contains, and varies widely by scenario:
 
 - **High savings**: tools returning many uniform records (lists, tables, search results), payloads carrying redundant fields such as `debug`/`trace`/`logs`, or schemas with verbose descriptions.
-- **Moderate savings**: shell output is truncated only beyond the Layer 2 thresholds (65,536-character strings, a 128-item array head window, depth 8); below them, lossless cleanup and record reduction (object arrays of at least 33 records) are what change the payload.
+- **Moderate savings**: shell output is truncated only beyond the shell-tool thresholds (65,536-character strings, arrays longer than the 128-item head window plus the 8-item tail window, depth 8); below them, lossless cleanup and record reduction (object arrays of at least 33 records) are what change the payload.
 - **Near-zero savings**: responses shorter than the 200-character minimum gate; already-compact JSON without redundancy; any input that does not shrink (the size guard keeps the original).
-- **Not compressed**: content-retrieval tool output (Read/Glob/Grep and the like, except the narrow native-Grep path-sharing case) and file-content results. Build/test logs, CSV/TSV tables, and supported API search listings do have their own compressors; Git diffs pass through unless the opt-in `TOKENLESS_DIFF_COMPRESSION_ENABLED` switch enables context cropping; other plain text, stack traces, HTML, and source code pass through unchanged for now.
+- **Not compressed**: content-retrieval tool output (Read/Glob/Grep and the like, except the narrow native-Grep path-sharing case) and file-content results. Build/test logs, CSV/TSV tables, and supported API search listings do have their own compressors; Git diffs and HTML pages have opt-in compressors that are off by default (`TOKENLESS_DIFF_COMPRESSION_ENABLED`, `TOKENLESS_HTML_EXTRACTION_ENABLED`); other plain text, stack traces, and source code pass through unchanged.
 
 Reference numbers always belong to the exact commit they were measured on — see [Run the repository reference workload](#run-the-repository-reference-workload) for the reproducible load, the current snapshot, and its limits. Real session savings must additionally be multiplied by the share of tool payloads in total session tokens; see [Interpret the saving rate correctly](#interpret-the-saving-rate-correctly). For the full trigger rules, see [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
 

@@ -93,7 +93,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；逐工具 Schema Hook 会运行但原样返回工具，因为共享 Hook 未声明 Marker 授权恢复
 - **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
@@ -282,7 +282,7 @@ Session，再传入启用 Tokenless 的 Session。
 ### OpenCode 安装
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
-RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+RTK 命令重写和响应/TOON 压缩；`tool.definition` 上的 Schema Hook 会运行但原样返回工具。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。

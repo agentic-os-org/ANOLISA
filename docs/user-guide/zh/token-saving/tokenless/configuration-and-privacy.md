@@ -75,17 +75,17 @@ Rust 使用 `RuntimeConfig.diff_compression_enabled`；Python 使用
 的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
 
 压缩器处理成功命令输出中收到的完整普通 Git Diff，需要文本替换能力、可用的
-Stash 和支持的恢复方式。保留全部增删行、元信息，以及修改附近两行可用上下文。
-在每个 hunk 内，如果拆分增加的头部开销更大，可以多留上下文。仅在字符数减少、
-且计入说明和恢复指令后至少节省 16 个估算 token 时采用。此估算不调用运行时
- tokenizer，不能保证对所有模型 tokenizer 都减少 token。
+Stash 和支持的恢复方式。保留全部增删行、元信息，以及修改附近两行可用上下文；拆分
+hunk 会多付头部开销时可以多留几行。仅在字符数减少、且计入说明和恢复指令后至少节省
+16 个估算 token 时采用。此估算
+不调用运行时 tokenizer，不能保证对所有模型 tokenizer 都减少 token。
 
 采用后的操作名为 `diff_reduction`，恢复等级是 `retrievable`，而非 `lossless`：
 可见输出省略了部分未修改上下文。原文仍在 Stash 时，可按输出中的 shell 或工具
-指令取回收到的原始内容；恢复需要额外工具调用。文件读取和已标记由 RTK 优化的
-结果直接透传；启用此功能不改变 RTK 命令重写。不支持或不完整的 Diff 透传。
-重命名、二进制摘要等特殊文件段保留收到的字节；编码二进制补丁整份透传。
-Tokenless 不读取宿主持久化输出文件以补全被截断的 Diff，也不改变宿主截断上限。
+指令取回收到的原始内容；恢复需要额外工具调用。文件读取工具的结果和已标记由 RTK
+优化的结果直接透传；启用此功能不改变 RTK 命令重写。不支持或不完整的 Diff 透传，
+含编码二进制补丁的 Diff 也整份透传；被裁剪的 Diff 中，重命名段和二进制摘要按收到的原样保留。Tokenless 不读取宿主持久化
+输出文件以补全被截断的 Diff，也不改变宿主截断上限。
 
 有限样本已验证局部压缩及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
 因此该功能保持可选启用。
@@ -105,29 +105,24 @@ Rust 使用 `RuntimeConfig.html_extraction_enabled`；Python 使用
 压缩器处理成功命令输出或 API 响应中收到的完整 HTML 文档（以 `<!doctype html`
 或 `<html>` 开头），例如 `curl` 抓取的页面或 MCP 工具返回的页面，需要文本替换
 能力、可用的 Stash 和支持的恢复方式。页面转写为 Markdown 子集：标题、段落、
-列表、表格、带语言的围栏代码、带目标的链接、图片 alt、引用和提示框。MathML 公式
-输出其 TeX 注解或 `alttext`，两侧加 `$`；跨行或跨列的单元格在其覆盖的位置留空单元格，
-各行不补齐到最宽行；段落行首形似 Markdown 标题、列表项、引用、分隔线或代码围栏时加
-转义。正文根为 `<main>`、`role=main` 元素或唯一的最外层 `<article>`（其内部嵌套的
-article，如评论，不计入），否则为整个 body。移除脚本、样式、`noscript`、模板、SVG、iframe、注释、
-`nav`、`aside`、页面级 `header`/`footer`、role 为 navigation、banner、contentinfo、
-complementary 的元素、表单控件（`button`、`input`、`select`、`textarea`、`datalist`、
-`progress`、`meter`）、媒体嵌入（`audio`、`video`、`canvas`、`object`、`embed`、`map`）、
-`dialog`；`menu` 按列表渲染，`label`、`legend`、`fieldset` 保留，因为内容标签页的标题写在其中。
-视图首行写明根元素、根之外省略的节点数和每一类的移除计数。转写后正文少于 64 个字符的页面
-（例如应用空壳）透传；标记嵌套超过 512 层的页面也透传，因为 HTML 解析耗时随
-嵌套深度二次方增长，这类页面不做解析。仅在字符数减少、且计入说明和恢复指令后至少节省 16 个
-估算 token 时采用。
+列表、表格、围栏代码、链接、图片 alt、引用、提示框，以及以 TeX 表示的 MathML 公式。
+正文根为 `<main>`、`role=main` 元素或唯一的最外层 `<article>`，否则为整个 body。
+只移除可枚举的非内容元素：脚本、样式、`noscript`、模板、SVG、iframe、注释、导航、页面级页眉页脚、
+侧栏、表单控件、媒体嵌入和对话框；目标为 `javascript:` 或 `data:` 的链接和图片只保留文字。
+视图首行列出实际发生移除的每一类计数；正文根不是 body 时还写明根元素和根之外省略的节点数。转写后正文少于 64 个字符的
+页面（例如应用空壳）透传，标记嵌套超过 512 层的页面也透传。仅在字符数减少、且计入说明
+和恢复指令后至少节省 16 个估算 token 时采用。
 
 采用后的操作名为 `html_extraction`，恢复等级是 `retrievable`，而非 `lossless`：
 标记和被移除的元素不在可见输出中。原文仍在 Stash 时，可按输出中的 shell 或工具
-指令取回收到的原始内容。页面通过脚本加载的内容在视图中不可见。内容来源由
-adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 Hermes 插件还把只打印本地
-文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、`bat`，以及 `-n` 模式下只含
-打印范围的 `sed`，可带 `cd … &&` 前缀）报告为 `file_read`。这类输出里的 JSON、CSV、构建
-日志和 diff 照常压缩，但打印出的 HTML 页面是 Agent 可能要编辑的源码，保持原样。带管道、
-重定向或其他命令的读取，以及 MCP 文件工具返回的页面，仍与抓取的页面一样被转写，需要取回
-才能看到源码。
+指令取回收到的原始内容。页面通过脚本加载的内容在视图中不可见。文件读取工具
+的结果在所有 adapter 上都透传。只有共享 PostTool Hook 与 Hermes 插件会把仅打印本地文件
+的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、`bat`，以及 `-n` 模式下只含打印
+范围的 `sed`，可带 `cd … &&` 前缀）也报成文件读取：这类输出里的 JSON、CSV、构建日志和 diff
+照常压缩，但打印出的 HTML 页面是 Agent 可能要编辑的源码，保持原样。在这两处，带管道、
+重定向或其他命令的读取，以及 MCP 文件工具返回的页面，不算文件读取，仍与抓取的页面一样
+被转写。按工具名分类、能替换结果且声明了恢复方式的 adapter 会把 shell 打印出的页面同样转写；
+不能替换结果或没有声明恢复方式的 adapter 保留原文。被转写的内容都需要取回才能看到源码。
 
 有限样本已验证局部转写及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
 因此该功能保持可选启用。
@@ -163,16 +158,16 @@ adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 He
 
 当前构建已硬关闭 Tool Ready。依赖规范和修复脚本覆盖仅为休眠的旧版实现保留，运行时不会生效；这些路径会经过信任校验，也不建议普通用户修改。
 
-`TOKENLESS_TRACEPARENT` 与标准变量 `TRACEPARENT` 用于为 SLS 记录提供 W3C trace context。注入是启动方的责任：OpenTelemetry 通过进程内 carrier 传播 W3C context，不会把 active span 导出为进程环境变量，因此需要关联能力的宿主或 Adapter 必须在启动 Tokenless 的环境中显式写入这两个变量之一，Tokenless 只负责读取：先看覆盖项，覆盖项为空或无法解析时回退到标准变量，因此一次拼写错误不会让整个会话失去关联能力。两者都是可选的：两个变量都没有可用上下文时，记录结构与之前完全一致，即以未关联形式写出；该标识只写入 SLS JSONL，本地统计数据库不保存。
+`TOKENLESS_TRACEPARENT` 与标准变量 `TRACEPARENT` 用于为 SLS 记录提供 W3C trace context。Tokenless 只负责读取：需要关联能力的宿主或 Adapter 在启动 Tokenless 的环境中写入其中之一。先看覆盖项，覆盖项为空或无法解析时回退到标准变量；两个变量都没有可用上下文时，记录以未关联形式写出。该标识只写入 SLS JSONL，本地统计数据库不保存。
 
 数据库路径优先级如下：
 
 - 统计库：`TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
 
-`TOKENLESS_DATA_DIR` 是显式的目录级迁移配置，可以指向真实用户 home 之外，包括 `/var/lib` 下由服务管理的目录。CLI 和随包 RTK 写入器都会拒绝文件系统根目录、相对路径、父目录遍历以及已存在的非目录目标。若没有有效的更高优先级文件覆盖项，显式数据目录无效时会停用本次操作的 SQLite 状态，不会静默回退到 home。
+`TOKENLESS_DATA_DIR` 是显式的目录级迁移配置，可以指向真实用户 home 之外，包括 `/var/lib` 下由服务管理的目录。文件系统根目录、相对路径、父目录遍历以及已存在的非目录目标会被拒绝。若没有有效的更高优先级文件覆盖项，显式数据目录无效时会停用本次操作的 SQLite 状态，不会静默回退到 home。
 
-空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录；Tokenless 会先规范化其最近的已存在父目录，再创建目标目录。文件级覆盖项只能位于规范化后的真实用户 home 或选定的数据目录下，且已存在的数据库软链接会被拒绝。该变量不会迁移 `~/.tokenless/config.json` 或 SLS JSONL 输出。
+空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录。文件级覆盖项只能位于真实用户 home 或选定的数据目录下，且已存在的数据库软链接会被拒绝。该变量不会迁移 `~/.tokenless/config.json` 或 SLS JSONL 输出。
 
 DeepSeek Harness 是默认数据库位置的例外：它的沙箱会移除继承的 `TOKENLESS_*` 变量，并且
 可能无法访问 home 目录。未设置 `TOKENLESS_DATA_DIR` 时，Adapter 使用会话工作区下的
@@ -186,7 +181,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |
 |------|----------|----------|----------|--------------|
 | 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 无自动 TTL，直到清理 | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述和 build/log 间隙内容 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
+| Stash | `~/.tokenless/stash.db` | 被截断的原始字符串和子树、截断数组中被丢弃的段、省略的日志段、记录缩减视图背后的完整记录数组，表格行缩减、Diff 裁剪、HTML 转写视图背后的完整原文，以及 Schema 描述被截断时的原始文本 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
 | 配置 | `~/.tokenless/config.json` | 三个布尔开关 | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 
@@ -199,7 +194,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 - API 返回的业务数据。
 - 日志中的访问令牌、Cookie 或凭证。
 
-`tokenless` CLI 的 SQLite Recorder 每次打开 `stats.db` 时都会尝试设置 `0600`。随包提供的 RTK 统计补丁也可以直接创建或打开同一个文件，但它本身不会执行该权限修改。不要依赖进程 umask，应检查数据库及 sidecar 文件：
+Tokenless 每次打开 `stats.db` 时都会尝试设置 `0600`，而随包提供的 RTK 统计写入器可能在没有该权限修改的情况下创建同一个文件。不要依赖进程 umask，应检查数据库及 sidecar 文件：
 
 ```bash
 ls -l ~/.tokenless/stats.db*

@@ -121,10 +121,11 @@ env | grep '^TOKENLESS_'
 Schema 压缩的接入方式因宿主而异：
 
 - **cosh 与 Cosh-NG**：通过 `BeforeModel` Hook 在每次模型调用前运行；本节的告警来自该 Hook。
-- **OpenCode**：通过其 `tool.definition` 插件 Hook 逐个压缩工具定义，不走 `BeforeModel`。MCP 工具不经过该 Hook，因此工具集只有 MCP 工具时不会有记录，下面的 `BeforeModel` 告警也不适用。
-- **Qwen Code**：扩展清单里带有 `BeforeModel` Hook 条目，但当前 Qwen Code 版本未实现该 Hook 事件：其 Hook 注册器会跳过未知事件名，实际只注册其余 Hook 组，Schema Hook 不会运行。Qwen Code 上没有 `compress-schema` 记录属于预期行为，本节无法用于诊断。
+- **OpenCode**：通过其 `tool.definition` 插件 Hook 对每个工具定义运行同一个 Hook，不走 `BeforeModel`。MCP 工具不经过该 Hook，下面的 `BeforeModel` 告警也不适用。
+- **Qwen Code**：扩展声明了 `BeforeModel` Hook，但当前 Qwen Code 版本未实现该事件，Schema Hook 不会运行。Qwen Code 上没有 `compress-schema` 记录属于预期行为，本节无法用于诊断。
+- **cosh、Cosh-NG 和 OpenCode 的共享 Hook**：没有 Marker 授权恢复，因此在开启压缩时工具原样返回且不写统计记录，0 条记录属于预期；要验证收益请直接运行 `tokenless compress-schema`，或设置 `TOKENLESS_COMPRESSION_ENABLED=0` 让宿主跑一次 dry-run，dry-run 仍会被记录。下面的步骤 1 与宿主无关，用于确认确实有可压缩内容；步骤 2 解释只有 cosh 与 Cosh-NG 才会给出的告警。
 
-在实际运行该 Hook 的宿主上没有 `compress-schema` 记录时，按以下顺序排查：
+按以下顺序排查：
 
 ### 1. 确认确实有可压缩内容
 
@@ -136,7 +137,7 @@ echo '[{"name":"example_tool","description":"这是一段刻意写得足够长�
 
 如果 stderr 输出 `did not reduce size`，说明当前工具集没有可压缩内容；带有长描述的工具集（例如部分 MCP 工具）会正常产生记录。
 
-### 2. 确认 BeforeModel Hook 已触发
+### 2. 读懂 BeforeModel 告警（cosh 与 Cosh-NG）
 
 在 cosh 与 Cosh-NG 上，BeforeModel 事件没有可供 Schema 压缩处理的内容时，Hook 会给出以下警告之一（每条均为每个会话最多一次）并原样放行：
 
@@ -146,11 +147,11 @@ echo '[{"name":"example_tool","description":"这是一段刻意写得足够长�
 [tokenless] WARNING: BeforeModel event carries no tool declarations ...
 ```
 
-第一条警告表示 Hook 收到的负载不是 JSON 对象；第二条表示负载缺少 `llm_request` 对象；第三条表示宿主已发射 BeforeModel，但事件格式不带工具声明（`llm_request.config.tools` 或 `llm_request.tools`），应升级或检查宿主的 Hook 协议版本。既没有警告也没有记录时，说明 BeforeModel 根本没有触发，确认：
+第一条警告表示 Hook 收到的负载不是 JSON 对象；第二条表示负载缺少 `llm_request` 对象；第三条表示宿主已发射 BeforeModel，但事件格式不带工具声明（`llm_request.config.tools` 或 `llm_request.tools`），应升级或检查宿主的 Hook 协议版本。这三条告警只来自共享宿主 Hook，QwenPaw、AgentScope 和直接 CLI 都不会输出，没有告警不说明这些入口的任何问题。0 条记录的含义因入口而异：
 
-- 扩展或插件已安装并启用（`anolisa adapter status tokenless`）。
-- 宿主配置没有禁用 Hooks。
-- 宿主版本支持 BeforeModel 事件。
+- **cosh、Cosh-NG 与 OpenCode**：开启压缩时共享 Hook 无论如何都不写记录，记录数无法用来判断 Hook 是否运行过；在 cosh 与 Cosh-NG 上没有告警才是正常情况。若步骤 1 确认有收益而 dry-run 仍没有记录，确认扩展或插件已安装并启用（`anolisa adapter status tokenless`）、宿主配置没有禁用 Hooks，以及 cosh 或 Cosh-NG 的宿主版本支持 BeforeModel 事件。
+- **QwenPaw 与 AgentScope**：步骤 1 确认有收益却仍为 0 条记录，通常说明插件或中间件没有加载、统计已关闭，或 Core 打不开 Stash。确认其已安装并启用，再检查[数据库错误](#数据库错误)。
+- **直接 CLI**：`tokenless compress-schema` 不依赖任何宿主事件。检查统计是否开启，以及查询的是不是该命令写入的那个数据库。
 
 之后按[启用后没有产生统计记录](#启用后没有产生统计记录)的通用步骤继续排查。
 
@@ -189,7 +190,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
+npm/手动安装脚本的同意方式不同：在安装器仍认为该参数有效的宿主上，脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程；OpenClaw 2026.6.5 及以上由 `security.installPolicy` 决定安全扫描，安装被拒时应放宽该策略，重跑脚本无效。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
 
 ## QwenPaw 安装提示 SDK wheel 不可用
 
@@ -213,10 +214,9 @@ QwenPaw 插件包会从 GitHub Release 资产安装原生 Python SDK，该资产
 curl -sIL -o /dev/null -w '%{http_code}\n' "<wheel URL from the message>"
 ```
 
-- 维护者，`tokenless/vX.Y.Z` Release 不存在：推送该 tag 并审批 `release` environment，
-  让发布 workflow 上传 wheel 资产，然后重跑安装脚本。
-- 维护者，Release 已存在但缺少该 wheel：说明资产上传不完整。发布 workflow 拒绝覆盖已存在的
-  Release，应先删除该 Release 再重跑 workflow（或把缺失资产补传到该 Release），然后重跑安装脚本。
+- 维护者：Release 不存在时推送该 tag 并审批 `release` environment，让发布 workflow 上传
+  wheel 资产；Release 已存在但缺少该 wheel 时把缺失资产补传到该 Release（发布 workflow
+  拒绝覆盖已存在的 Release，单纯重跑 workflow 无效）；然后重跑安装脚本。
 - 其他用户：安装版本已有可下载 wheel 的 Tokenless 软件包。
 - 离线或镜像网络（探测无法访问 GitHub，但 pip 能从本地镜像解析 wheel）：
   用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 重跑安装脚本。
@@ -261,11 +261,11 @@ JSON 应包含 `"status":"UNKNOWN"` 和 `"enabled":false`。如果仍得到 `NOT
 
 ```bash
 ls -ld ~/.tokenless
-ls -l ~/.tokenless/stats.db*
+ls -l ~/.tokenless/stats.db* ~/.tokenless/stash.db*
 env | grep -E 'TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-确认当前用户对选定的数据目录和数据库可写。`TOKENLESS_DATA_DIR` 可以位于真实用户 home 之外，但必须是不包含父目录遍历的绝对非根目录；显式数据目录无效时不会回退到 home。`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 必须位于真实用户 home 或选定的数据目录下，随包 RTK 写入器也执行相同规则。
+两个数据库的失败表现不同。`stats.db` 打不开不会影响压缩、Stash 和 `retrieve`：这些路径静默跳过本地记录，只是没有记录；而 `tokenless stats summary`、`list`、`show`、`diff` 和 `clear` 会以退出码 1 打印本节标题的 `Failed to open database` 及底层原因。`stash.db` 打不开时，独立的 `compress-response` 和 `compress-schema` 命令在 stderr 打一行 `[tokenless] stash disabled` 后不带 Stash 继续；声明了恢复能力的 PostTool Hook 请求，以及开启压缩时带静态恢复 Tool 的 BeforeModel 请求，会在产生输出前失败，宿主保留原文（BeforeModel dry-run 不打开 Stash）；进程内集成继续运行，只通过 Runtime 的 `stash_error` 和 `stats_error` 属性暴露原因，Schema 压缩原样返回工具，`retrieve` 找不到原文。确认当前用户对选定的数据目录和数据库可写。`TOKENLESS_DATA_DIR` 可以位于真实用户 home 之外，但必须是不包含父目录遍历的绝对非根目录；显式数据目录无效时不会回退到 home。`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 必须位于真实用户 home 或选定的数据目录下，随包 RTK 写入器也执行相同规则。
 
 不要让多个用户共享同一个 `stats.db`。AgentSight 和 Tokenless 应以能访问同一用户数据库的方式运行。
 

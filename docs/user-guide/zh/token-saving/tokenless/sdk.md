@@ -278,10 +278,10 @@ config = TokenlessConfig(
 `data_dir` 必须是可写的绝对路径。每个租户或安全边界应使用不同目录；
 `TOKENLESS_DATA_DIR` 只是进程级回退。`retrieve_tool_name` 为 AgentScope 等 Framework Layer
 选择 Integration 自有的 Tool 名称，Integration 通过恢复能力将该名称声明给 Core。
-名称必须由 1–64 个 ASCII 字母、数字、下划线或连字符组成。这也收紧了已有
-`retrieve_tool_name` 配置的校验：含点号、冒号或空格的名称必须在升级前重命名。
-`rtk_enabled` 控制 SDK 是否为 PreTool
-解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
+名称必须由 1–64 个 ASCII 字母、数字、下划线或连字符组成；已有配置若含点号、冒号或空格，
+升级前需重命名。`rtk_enabled` 控制 SDK 是否为 PreTool
+解析 Wheel 内置 RTK；`search_path_sharing_enabled`（默认开启）、`diff_compression_enabled`
+与 `html_extraction_enabled`（默认关闭）控制对应的 PostTool 压缩域，见[配置与数据隐私](configuration-and-privacy.md)。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
 行为，不是 Python 配置。
 
 ### Runtime 直接调用示例

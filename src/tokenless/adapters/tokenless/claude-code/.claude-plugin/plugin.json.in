@@ -1,7 +1,7 @@
 {
   "name": "tokenless",
   "version": "@VERSION@",
-  "description": "Token-Less context compression for Claude Code — RTK command rewriting, response/TOON compression, and Tool Ready environment pre-check",
+  "description": "Token-Less context compression for Claude Code — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready",
   "author": { "name": "ANOLISA" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/alibaba/anolisa/tree/main/src/tokenless",

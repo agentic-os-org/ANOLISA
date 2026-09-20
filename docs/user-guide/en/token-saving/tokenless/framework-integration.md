@@ -10,20 +10,20 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | — (hook runs, tools returned unchanged) |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
-| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
+| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | — (hook runs, tools returned unchanged) |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
-“—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
+“—” means that the capability is not available: the current adapter does not register it, current host releases do not run it, or it runs without taking effect (see the cell's note). The corresponding Tokenless CLI command may still be available.
 
-Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook); Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
+Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode runs the same hook for each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through it); current Qwen Code releases do not run the declared `BeforeModel` event. None of these hosts applies the result: the shared hook has no marker-authorized recovery (see [Adapter processing rules](#adapter-processing-rules)), and Qwen Code does not run the event at all. Only QwenPaw and AgentScope, which declare a static recovery Tool, replace tool definitions.
 
 Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
 
@@ -48,15 +48,17 @@ disposition keeps the original. The hook currently routes:
 | CSV/TSV tables when the host can replace output with text | Full compaction; tables with more than 32 data rows may reduce rows when Stash-backed recovery is available |
 | API search-result listings when path sharing is enabled and the host can replace output with text | Lossless search path sharing; every received match is retained |
 | Git diffs from command output when `TOKENLESS_DIFF_COMPRESSION_ENABLED` opts in (default off) and the host can replace output with text | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
-| Long plain text, stack trace, HTML, source code, unknown | Passthrough until a matching domain compressor is connected |
+| HTML pages from command output or API responses (not shell file reads) when `TOKENLESS_HTML_EXTRACTION_ENABLED` opts in (default off), the host can replace output with text and Stash-backed recovery is available | Markdown rendering of the page's content root; the received page stays retrievable through Stash; otherwise passthrough |
+| Long plain text, stack trace, source code, unknown | Passthrough |
 
 Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
-selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
-skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
+selection, and final acceptance are Core policy; the hook maps host objects to protocol fields
+and puts the result back into the host's shape.
 
-The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
-transformations are lossy, so Core passes the tools through unchanged. OpenCode's separate per-tool
-definition path and the direct `compress-schema` command are unchanged.
+The shared BeforeModel hook, which cosh, Cosh-NG and OpenCode's per-tool definition path all use,
+has no marker-authorized recovery path, so schema compression returns the tools unchanged there.
+Only the direct `compress-schema` command and in-process integrations that declare a static
+recovery Tool (QwenPaw, AgentScope) apply it.
 
 OpenClaw, Hermes, and DeepSeek Harness delegate their PostTool decisions to Core. The standalone
 `compress-response` command remains the explicit JSON cleanup interface.
@@ -76,10 +78,9 @@ documented default minimum, while the CLI can lower it per call with `--min-toon
 Qwen Code do not run response compression or TOON because their current PostToolUse contracts
 cannot replace the original model-visible output.
 
-Common Hooks and OpenClaw carry RTK ownership into the matching PostTool call. Hermes supports older
-host releases by blocking and suggesting a retry; its final-result hook recognizes the attributed
-RTK wrapper from the command Hermes actually executed. All three therefore bypass a second
-compression pass over RTK output.
+RTK output is never compressed a second time: the shared hooks and OpenClaw carry RTK ownership
+into the matching PostTool call, and Hermes recognizes the RTK wrapper in the command it actually
+executed.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
@@ -104,16 +105,17 @@ selected profiles and their resolved DSH home in the adapter receipt, so later
 status, disable, and re-enable operations continue to address the same profile
 tree.
 
-The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
-root results containing one text block to `tokenless compress`. Core owns
-content detection, JSON and Build Log compression, TOON selection, size gates,
-tool-origin thresholds, and final acceptance. Unsupported content domains and
-file-content results pass through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
-executable selected for the Core call, a Marker can ask the model to run a
-standalone `tokenless retrieve` command; its successful output bypasses
-compression. Multiple blocks, images, Code Mode child successes, and canonical
-values replaced by a later waterfall listener remain untouched. A missing,
-failing, or timed-out CLI also preserves the original content.
+The plugin sends replaceable root results containing one text block to
+`tokenless compress`; Core owns content detection, compression, TOON selection,
+size gates, tool-origin thresholds, and final acceptance. Unsupported content
+domains and file-content results pass through. When bare `tokenless` resolves on
+DSH's shell `PATH` to the same executable selected for the Core call, a Marker
+can ask the model to run a standalone `tokenless retrieve` command; its
+successful output bypasses compression. Multi-block results, images and the
+successful results of Code Mode child calls stay untouched, a result whose value
+another DSH policy has already replaced is never compressed (only a structured
+command failure in that replacement still receives diagnostics), and a missing,
+failing, or timed-out CLI preserves the original content.
 
 DSH removes inherited `TOKENLESS_*` variables from model shell commands. The
 adapter publishes managed aliases for the selected data directory and optional
@@ -149,12 +151,10 @@ that need to differ.
 | `agentId` | `dsh` | Sets the Agent attribution recorded by Tokenless statistics. |
 
 The plugin maps DSH's built-in read/search tools to `file_content`, command
-tools to `command_output`, and unknown tools to `api_response`. These mappings
-only describe host facts; Core owns the resulting policy. Raw DSH failures and
-structured command failures are sent to Core for environment diagnosis even
-when compression is disabled. When a later waterfall listener replaces the
-canonical `value`, Tokenless examines only that replacement and never applies
-content compression to it.
+tools to `command_output`, and unknown tools to `api_response`; Core owns the
+resulting policy. DSH-flagged failures, and command results whose structured value
+reports a non-zero exit, a signal or a timeout, are sent to Core for environment
+diagnosis even when compression is disabled.
 
 For the full trigger conditions (compression switch, minimum response length, supported content domains, strictly-smaller guard) and threshold semantics, see [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
 
@@ -215,14 +215,12 @@ DeepSeek Harness is profile-scoped and therefore requires at least one
 generic command without a profile is rejected. A later enable or re-enable
 must repeat every profile that should remain registered.
 
-Running OpenClaw adapter enable or the tokenless OpenClaw `install.sh` accepts
-the plugin's declared capabilities. Both entry points pass
-`--accept-capabilities` only when `plugins install --help` advertises that
-exact option, so older hosts keep working. The standalone `install.sh` also
-passes `--dangerously-force-unsafe-install` only while the installer advertises
-the option as effective; hosts that list it as a deprecated no-op (OpenClaw
-2026.6.5+) no longer receive it, and the safety scan there follows
-`security.installPolicy`.
+Enabling the OpenClaw adapter, through anolisa or the bundled `install.sh`,
+accepts the plugin's declared capabilities; both pass `--accept-capabilities`
+only when the host's `plugins install --help` lists it, so older hosts still
+install. The standalone `install.sh` adds `--dangerously-force-unsafe-install`
+only on hosts where the installer still treats it as effective; on OpenClaw
+2026.6.5 and later the safety scan follows `security.installPolicy`.
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -288,7 +286,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 The scripts call the framework's own plugin or extension mechanism. Follow their restart instructions. If a script is missing, fails, or reports an incompatible framework version, prefer an anolisa-managed installation.
 
-On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
+On hosts whose installer still enforces the safety scan, the OpenClaw install script passes `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries; on newer hosts the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it, and do not install the plugin where that policy forbids the override.
 
 ### npm with cosh
 
@@ -396,9 +394,9 @@ The extension loads in a new Qwen Code session. Restart and run one tool call to
 
 ### QwenPaw
 
-The adapter is a QwenPaw plugin: `anolisa adapter enable tokenless qwenpaw` and the bundled install script both run `qwenpaw plugin install <bundle> --force`, so QwenPaw copies the plugin into `<working dir>/plugins/tokenless/` and installs its `requirements.txt` into QwenPaw's own Python environment. That requirement is the `anolisa_tokenless` wheel from the matching GitHub Release, so the first install needs network access. QwenPaw only runs pip when `anolisa_tokenless` is missing from its interpreter's package metadata, so on an offline host `pip install` the wheel into QwenPaw's Python environment first; the same rule means an already installed older wheel is never upgraded by `plugin install`. The install script therefore checks, through the interpreter behind the `qwenpaw` command, that `anolisa_tokenless` imports and carries the SDK surface the plugin needs, and fails when no wheel matched the platform (`requirements.txt` lists Linux x86_64, Linux aarch64, and macOS arm64). The plugin itself refuses to register against an older wheel and logs the required release instead of failing at the first model call. The plugin requires the recovery entry points introduced in Tokenless 0.8.0. Install the SDK wheel matching the plugin release into QwenPaw's Python environment; the 0.7.14 wheel does not provide these APIs. The working directory is resolved like QwenPaw itself: `QWENPAW_WORKING_DIR`, else `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`. Without a `qwenpaw` command the install script prints a hint and exits 0 so `make setup` completes on hosts without QwenPaw.
+The adapter is a QwenPaw plugin: `anolisa adapter enable tokenless qwenpaw` and the bundled install script both run `qwenpaw plugin install <bundle> --force`, which copies the plugin into `<working dir>/plugins/tokenless/` and installs the `anolisa_tokenless` SDK wheel from the matching GitHub Release into QwenPaw's Python environment, so the first install needs network access. QwenPaw runs pip only when the package is missing, so on an offline host install the wheel first; an already installed older wheel is never upgraded by `plugin install`. Wheels exist only for Linux x86_64, Linux aarch64 and macOS arm64; on any other platform the install script fails after confirming that QwenPaw's Python cannot import `anolisa_tokenless`, and without a `qwenpaw` command on `PATH` it only prints a hint and exits 0 without installing anything. The plugin refuses to register against a wheel that lacks the SDK entry points it imports (introduced in Tokenless 0.8.0) and logs which release to install. The working directory is resolved like QwenPaw itself: `QWENPAW_WORKING_DIR`, else `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`.
 
-A running QwenPaw hot-loads the plugin; otherwise start QwenPaw. Schema compression and the `tokenless_retrieve` tool apply from the next model call, and command rewriting runs after QwenPaw's approval step, so an approved `execute_shell_command` executes the rewritten command. Only QwenPaw's built-in tools are classified: `execute_shell_command` is command output, `read_file`, `recall_history`, `view_image`, and `view_video` are file content, and the remaining built-ins are API responses; skills, MCP tools, and tools added by later QwenPaw releases pass through untouched. QwenPaw's own tool-result pruning runs after Tokenless and keeps the head of each result (50000 bytes for the two most recent tool results, 3000 bytes for older ones, overflow written to `tool_results/`), so a recovery instruction at the end of a compressed result survives only while the result fits that budget; the omitted content stays retrievable from the stash with `tokenless retrieve`. Records land under `<workspace>/.tokenless` for each QwenPaw workspace; point `tokenless stats list --data-dir` there.
+A running QwenPaw hot-loads the plugin; otherwise start QwenPaw. Schema compression and the `tokenless_retrieve` tool apply from the next model call, and an approved `execute_shell_command` executes the rewritten command. Only QwenPaw's built-in tools are classified: `execute_shell_command` is command output; `read_file`, `recall_history`, `view_image`, and `view_video` are file content; the remaining built-ins are API responses. Skills, MCP tools, and tools added by later QwenPaw releases pass through untouched. QwenPaw's own tool-result pruning runs after Tokenless and keeps only the head of each result, with a larger budget for the two most recent ones, so a recovery instruction at the end of a compressed result may be cut off; the omitted content stays retrievable through the `tokenless_retrieve` tool, or with `tokenless retrieve --stash-db <workspace>/.tokenless/stash.db`. Records land under `<workspace>/.tokenless` for each QwenPaw workspace; point `tokenless stats list --data-dir` there.
 
 ## AgentScope framework integration
 

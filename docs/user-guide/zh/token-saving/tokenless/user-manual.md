@@ -2,7 +2,7 @@
 
 [English](../../../en/token-saving/tokenless/user-manual.md)
 
-Tokenless 面向工具调用密集的 AI Agent。它的 CLI 可以精简 Schema 和工具响应，Adapter 还可以改写 Shell 命令、检查工具依赖，并把压缩结果交给 Agent。最终效果取决于宿主框架：有的 Adapter 会替换原始结果，有的只会追加压缩上下文而保留原文。
+Tokenless 面向工具调用密集的 AI Agent。它的 CLI 可以精简 Schema 和工具响应，Adapter 还可以改写 Shell 命令，并把压缩结果交给 Agent。最终效果取决于宿主框架：受支持的 Adapter 会替换原始结果，其余 Adapter 原样透传，至多为失败的命令追加环境诊断。
 
 第一次使用请从[快速开始](QUICKSTART.md)进入。
 
@@ -41,13 +41,13 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
-| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的代码，合并空白并截断描述 | 只在直接 `compress-schema` 命令，以及声明了静态恢复 Tool 的进程内集成（QwenPaw、AgentScope）上生效；cosh、Cosh-NG 和 OpenCode 逐工具路径共用的 BeforeModel Hook 没有 Marker 授权恢复，因此原样返回工具，Qwen Code 不运行该 Hook |
+| Content-aware 响应压缩 | 成功的 JSON、已识别的构建/测试日志、CSV/TSV 表格、受支持的搜索列表，以及需显式开启的 Git Diff 和 HTML 域各有自己的压缩器；只接受端到端更小的结果 | 其他内容与 Tool Error 透传；可恢复缩减需要经 Framework 或 Shell 命令的 Marker 授权取回 |
 | 搜索路径共享 | API 搜索记录（含 Claude 原生 Grep）的连续行共享完整路径，保留收到的全部文本与位置 | 默认开启；需要 API 响应来源、文本替换能力及无上下文记录；文件和命令输出不进入此域 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 已识别的构建/测试命令保持原生输出交给 Build Log；其他无规则或被拒绝的改写透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
-| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，被省略的 Build Log 进度区间，以及行缩减背后的完整原始表格 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
+| Stash | 保存截断移除的内容、省略的日志段，以及缩减视图（记录缩减、表格行缩减、Diff 裁剪、HTML 转写）背后的完整原文 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
 
@@ -56,9 +56,9 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 启用对应 Adapter 后，一次工具调用可能经过以下阶段：
 
 ```text
-工具调用前：已识别的构建/测试命令预留给 Build Log；其他命令 RTK 改写 → 传递输出优化状态
-工具调用后：状态与优化旁路 → JSON/CSV/TSV/Search/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
-模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
+工具调用前：已识别的构建/测试命令保持原样；其他受支持命令由 RTK 改写
+工具调用后：旁路检查 → 领域压缩器 → 可选 Stash/TOON → 写入统计
+模型调用前：Schema 压缩 → 提取可见 Marker
 Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
 
@@ -98,15 +98,10 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 1. 压缩未被停用。`compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 时进入 dry-run，仍计算统计但返回原文（见上一节）。
 2. 工具不属于内容读取类。Read/Glob/Grep/LSP/NotebookRead 及别名会跳过响应压缩，保留完整内容。搜索路径共享引入了一个很窄的例外：Claude Code 原生 `Grep` 的无上下文 content 模式结果会改走该无损压缩器，同样保留全部已收到命中（见[控制搜索路径共享](#控制搜索路径共享)）。
 3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
-4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
-   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 搜索路径共享，以及需显式开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 视图可能不完整](#csvtsv-视图可能不完整)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。
-   - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
-   - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
-
-   共享响应 Hook 还会在启动压缩子进程前跳过带 YAML frontmatter、形似 Skill 的文本（这类文本在 Core 侧本来也会原样透传）。
+4. 内容命中受支持的压缩域。JSON 对象和数组走按阈值截断的响应压缩；纯文本只有命中匹配的文本压缩器才会被压缩：构建/测试日志、CSV/TSV 表格、API 搜索列表，以及需显式开启的 Git Diff 和 HTML 域（见[Adapter 处理规则](framework-integration.md#adapter-处理规则)、[CSV/TSV 视图可能不完整](#csvtsv-视图可能不完整)和[控制搜索路径共享](#控制搜索路径共享)）。哪些结果能到达 Core 因宿主而异：共享 Hook 会在 Shell 信封中最大的 `stdout` 或 `stderr` 字段至少 2,000 字符时拆出该字段（以 `diff --git` 开头的 Bash `stdout` 不受该下限限制），Hermes 拆出 `output` 字段，两者压缩后都回填到同一信封；更小的信封整体作为 JSON 交给 Core。OpenClaw 压缩纯字符串和单文本块的工具结果，跳过其他工具结果且不调用 Core，并把结构化对象作为 JSON 整体交给 Core 且不做文本替换。带 YAML frontmatter 的 Skill 文件透传。
 5. 压缩结果严格小于原文。响应压缩和 TOON 编码都没有让内容变小时，保留原文。
 
-通过上述检查后，截断强度由工具类别决定。分类和阈值定义在 Adapter 目录下的 `tool_categories.json`（各 Adapter 共享的单一事实来源）；文件缺失或无效时使用内置的安全回退值：
+通过上述检查后，截断强度由 Adapter 为该工具上报的内容来源决定。阈值由 Core 持有、对所有 Adapter 相同；类别背后的工具名列表因 Adapter 而异，例如 DSH 和 QwenPaw 使用各自内置表，QwenPaw 把 MCP 服务器等未知工具视为文件内容并透传，而 AgentScope 对没有声明契约的工具直接报错：
 
 | 类别 | 代表工具 | 字符串截断阈值 | 数组截断阈值 | 最大嵌套深度 |
 |------|----------|----------------|--------------|--------------|
@@ -114,15 +109,15 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 | Shell/exec | Bash、Shell、exec、terminal 等 | 65,536 字符 | 128 项 | 8 |
 | 其他结构化工具 | 未列入前两类的工具 | 1,048,576 字符 | 65,536 项 | 32 |
 
-阈值含义：字符串超过阈值时从阈值处截断（启用 Stash 时可取回原文）。数组只有在长度超过「类别阈值 + 尾部窗口」时才会截断：前部保留至多阈值个元素，尾部默认保留 8 个元素（尾部窗口），被丢弃的中间段在启用 Stash 时可取回，两个窗口之间插入截断标记。至少包含 33 个 JSON Object 的数组不受这些阈值控制，改走记录缩减（Record Reduction）：按 32 条记录的基础预算选取（前 4 条、后 4 条、携带错误或异常信号的记录、数值异常记录，以及其余记录的稳定采样），并追加取回标记，完整原始数组写入 Stash；记录缩减依赖 Stash，没有 Stash 时保留全部记录。嵌套超过深度上限的子树折叠为截断标记。完整规则与参数见 [CLI 参考](cli-reference.md)。
+阈值含义：字符串超过阈值时从阈值处截断；数组长度超过「阈值 + 8 项尾部窗口」时保留头尾并在中间插入标记；至少包含 33 个 JSON Object 的数组改走记录缩减，保留约 32 条记录的选集并把完整数组写入 Stash；超过深度上限的子树折叠为标记。截断和记录缩减只在启用 Stash 且宿主声明了恢复方式（可解析的 `tokenless retrieve` Shell 命令或静态恢复 Tool）时运行；没有恢复方式时 Core 保留全部元素和记录，只做无损清理。完整规则与参数见 [CLI 参考](cli-reference.md)。
 
 几点路径差异：
 
 - 独立运行 `tokenless compress-response` 时使用 CLI 自身默认值（字符串 4,096 字符、头部窗口 32 项 + 尾部窗口 8 项、深度 8），可用 `--truncate-strings-at`、`--truncate-arrays-at`、`--array-tail-preserve`、`--max-depth` 覆盖，详见 [CLI 参考](cli-reference.md)。
 - Codex 和 Qwen Code 在当前 PostToolUse 契约下无法替换模型可见的原始输出，因此不运行响应压缩和 TOON：Codex 保留原文，只对被归类的环境失败附加上下文；Qwen Code 原样透传。各集成的实际能力详见下方适配器表格。
-- OpenClaw Plugin 读取同一份 `tool_categories.json` 分类，把工具映射为内容来源（文件内容、命令输出或 API 响应），该文件缺失或无效时回退到内置列表，再由 Core 套用对应阈值；它原有的 `skip_tools`、`shell_tools` 覆盖项已删除，不再控制 Adapter。当前选项见[配置与数据隐私](configuration-and-privacy.md)。
+- OpenClaw Plugin 按同一套共享分类把工具映射为内容来源（文件内容、命令输出或 API 响应）。它不声明 Marker 恢复，因此启用压缩时 Core 会把任何截断或记录缩减判定为不可恢复并拒绝，OpenClaw 的结果只可能被无损 JSON 清理和 TOON 替换；它原有的 `skip_tools`、`shell_tools` 选项已不存在，当前选项见[配置与数据隐私](configuration-and-privacy.md)。
 - TOON 编码是独立的触发判断：只对至少 500 字符的负载、且宿主槽位接受文本时运行，并且只有编码结果比当前内容更小时才会采用。
-- Git Diff 上下文裁剪是独立的可选判断，默认关闭：在 Agent 进程环境设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`（或 SDK 的 `diff_compression_enabled` 选项）后，槽位接受文本时 Core 才会裁剪命令输出中 Git Diff 的未变更上下文；每条变更行都保留，完整原始输出写入 Stash 并附取回提示，计入该包装文本后净节省不足 16 个估算 Token 的候选会被拒绝。
+- Git Diff 上下文裁剪和 HTML 页面转写是独立的可选判断，默认关闭；开关与行为见[配置与数据隐私](configuration-and-privacy.md)。
 - Python SDK 与 AgentScope 层不通过 Python 配置设置上述阈值：压缩阈值、内容检测和 TOON 选择都是 Core 行为；直接调用 `TokenlessRuntime.compress_response` 时仍可按次覆盖截断参数。详见 [Python SDK](sdk.md) 与 [AgentScope 集成](sdk/agentscope.md)文档。
 
 ### 控制搜索路径共享
@@ -133,12 +128,9 @@ API 搜索路径共享默认开启。在 Agent 进程环境中设置 `TOKENLESS_
 `TokenlessConfig(search_path_sharing_enabled=False)` 关闭；Rust 将
 `RuntimeConfig.search_path_sharing_enabled` 设为 `false`。所有入口均默认开启。
 
-关闭此功能时搜索列表原样返回。其他工具名仍可使用 JSON、表格和日志压缩。精确名称 `Grep`
-始终排除这些压缩器以保留已收到命中，即使路径共享关闭也不例外。因此，自定义 `Grep` 工具
-无法通过此开关恢复此功能引入前的 JSON、表格和日志压缩。支持的无上下文 Claude Grep 结果
-保留全部已收到命中；
-文件读取和命令输出（包括没有 RTK 的 Bash）均不进入搜索路径共享。其他 API 工具也可使用同一 Core 能力。
-整任务节省取决于工作负载；搜索结果变小并不保证总 Token 用量更低。
+关闭此功能时搜索列表原样返回。精确名称 `Grep` 无论路径共享是否开启都不进入 JSON、表格和
+日志压缩器，以保留已收到命中。文件读取和命令输出（包括没有 RTK 的 Bash）均不进入搜索
+路径共享。整任务节省取决于工作负载；搜索结果变小并不保证总 Token 用量更低。
 
 ### CSV/TSV 视图可能不完整
 
@@ -151,16 +143,14 @@ Markdown 或定宽表格。
 它移除非必要引号并规范化记录分隔符；单元格内部的换行保持不变。
 这保证单元格等价，不保证原始字节一致。全量视图的估算 Token 节省达到 15% 时优先采用。
 
-行筛选要求列名证据：每个非空表头以 Unicode 字母或 `_` 开头，后续只允许字母、数字、
-`_`、`-` 和 `.`，且至少有一个非空列名。允许重复和空列名。含空格、表达式或句子标点的
-表头保留全部行，避免对这些源码或散文形式采样。该保守启发式规则也会跳过部分真实表格的行筛选。
+行筛选只在表头形似列名（以字母或 `_` 开头、其余只含字母、数字、`_`、`-`、`.` 的单词；
+允许空列名和重复列名，但至少一个非空）时进行；含空格或句子标点的表头保留全部行，避免对源码和逗号分隔的散文采样。该保守规则
+也会跳过部分真实表格。
 
 否则，超过 32 条数据行的表格可保留首尾各四行、含诊断关键词的行，并均匀选择普通行补足
-32 行基础预算。受保护行可以超出该预算。表格外的提示说明保留行数和总行数、从 1 开始且
-不含表头的原始数据行区间，以及恢复方法。完整原始 CSV/TSV 会存入 Stash，Retrieve 返回
-原始字节。完整枚举或计算前应先恢复原文：选定行只是一个不完整视图。
-缺少恢复能力或 Stash 写入失败时，只允许全量压紧或原文透传。
-精确源行号范围列表超过 1 KiB 时也只保留全量候选或原文，不会只报告部分诊断行或源行号。
+32 行基础预算；受保护行可以超出该预算。表格外的提示说明保留行数和总行数、选中的数据行区间（从 1 开始、不含表头）
+以及恢复方法；完整原始 CSV/TSV 存入 Stash。完整枚举或计算前应先恢复原文：选定行只是一个
+不完整视图。缺少恢复能力、Stash 写入失败或行号区间列表超过 1 KiB 时，只允许全量压紧或原文透传。
 
 计入提示后，缩减候选的字符数和估算 Token 数必须同时小于原文及全量视图。
 这些检查不保证在所有模型的 Tokenizer 下都有节省。
@@ -171,7 +161,7 @@ Claude Code 2.1.121 及更新版本的原生 Grep 文本结果可以共享重复
 `File="..."` 头提供后续 `line:text` 记录的完整路径，直到下一个文件头。
 收到的全部记录、源码正文、空白和换行均保留。仅采用更小的表示，不需要 Stash 条目或回取命令。
 
-首版支持至少三条记录的无上下文 `path:line:text` 列表，路径不能包含冒号。
+首版支持至少三条记录、路径不含冒号的无上下文 `path:line:text` 列表。
 上下文查询、计数/文件列表模式、不支持的格式和文件读取保持现有行为；Bash 搜索继续经过 RTK。
 Grep 可能在 Tokenless 收到结果前已经应用宿主限额，路径共享无法恢复此前未交付的命中。
 首次结果变短不保证整个任务的总消耗下降。
@@ -187,10 +177,8 @@ Grep 可能在 Tokenless 收到结果前已经应用宿主限额，路径共享�
 
 本地可以通过受信 `tokenless retrieve` 命令取回。受支持的 CLI Adapter 会把这条精确命令
 写入 Marker，让模型通过已有 Shell Tool 执行；只有裸 `tokenless` 能从 Shell 的 `PATH`
-解析时，Adapter 才启用可恢复压缩；DSH 还要求它解析到 Core 调用选中的同一个可执行文件。
-AgentScope 则使用静态恢复 Tool，并对照模型当前的
-`visible_markers` 集合授权。旧的无状态 MCP Server 无法获得可信模型可见性上下文，因此已经
-删除。以下情况会失去可恢复性：
+解析时，Adapter 才启用可恢复压缩。AgentScope 则使用静态恢复 Tool，并对照当前模型调用
+可见的 Marker 授权。以下情况会失去可恢复性：
 
 - 使用了 `--no-stash`。
 - 压缩处于 dry-run 模式。
@@ -198,17 +186,16 @@ AgentScope 则使用静态恢复 Tool，并对照模型当前的
 - 条目已经超过 TTL。
 - 有效条目超过 10,000 个后，较早条目被容量策略淘汰。
 - 调用方使用了不同的 Stash 数据库路径。
-- 在 DSH 中，裸 `tokenless` 不存在于稳定的绝对 `PATH` 项中，或解析到与
-  `tokenlessBin`/`TOKENLESS_BIN` 不同的可执行文件。
+- 在 DSH 中，裸 `tokenless` 不在绝对路径的 `PATH` 项中（`PATH` 中靠前的相对路径项同样会关闭恢复），或解析到与 Plugin 使用的可执行文件不同的文件（见
+  [Agent 集成](framework-integration.md#deepseek-harness-原生处理路径)）。
 
 Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、`null` 和空值、Schema `title`/`examples` 以及 Markdown 格式不会保存供取回。启用实际压缩前，应使用有代表性的数据验证关键 Payload。
 
 ### 普通处理错误通常 fail-open
 
-缺少 `tokenless` 或 `rtk`、压缩无收益时，压缩和重写 Hook 通常不返回修改。Protocol v2
-`compress` 的正常未应用结果使用退出码 `0`；Transport 格式错误退出 `2`；RTK Timeout、
-未授权 Retrieve、Stash 或 Pipeline 失败退出 `1`，且不输出 Response JSON。Tool Ready 会在
-旧版检查、修复和阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
+缺少 `tokenless` 或 `rtk`、压缩无收益时，压缩和重写 Hook 通常不返回修改；操作失败时
+以非零退出码结束且不输出 Response JSON，宿主保留原文（退出码见 [CLI 参考](cli-reference.md#compress)）。
+Tool Ready 已硬关闭；工具执行后的失败归因是独立能力，保持不变。
 
 命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
@@ -216,15 +203,17 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 | Agent 产品 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
-| cosh | Extension | Tool Ready（已硬关闭）、命令重写、Schema；Cosh-NG 替换符合条件的 Pipeline 输出并支持 Marker 命令恢复，旧版 Copilot Shell 透传工具后输出 |
-| OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
-| Hermes | Plugin | Tool Ready（已硬关闭）、Core-owned 阻止后重试改写、用 Core 选择的 TOON 替换结果、Marker 命令恢复；无 Schema |
-| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `updatedToolOutput` 交付响应 Pipeline 和 Marker 命令恢复；无 Schema |
-| Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应并支持 Marker 命令恢复；条件式 TOON；无 Schema |
-| Codex | Plugin | Tool Ready（已硬关闭）、RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
-| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Marker 命令恢复、Schema |
-| Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写；当前宿主缺少工具后替换能力，并跳过声明的 BeforeModel 事件 |
+| cosh | Extension | 命令重写；Cosh-NG 替换符合条件的 Pipeline 输出并支持 Marker 命令恢复，旧版 Copilot Shell 透传工具后输出；Schema Hook 会运行但原样返回工具 |
+| OpenClaw | Plugin | `exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
+| Hermes | Plugin | 阻止后重试改写、用 Core 选择的 TOON 替换结果、Marker 命令恢复；无 Schema |
+| Qoder | Plugin | 命令重写、通过 `updatedToolOutput` 替换响应并支持 Marker 命令恢复；无 Schema |
+| Claude Code | Marketplace Plugin | Bash 命令重写；Claude Code 2.1.121 及以上可替换响应并支持 Marker 命令恢复；条件式 TOON；无 Schema |
+| Codex | Plugin | RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
+| OpenCode | Plugin | Bash 命令重写、用响应压缩 + TOON 替换工具输出、Marker 命令恢复；逐工具 Schema Hook 会运行但原样返回工具 |
+| Qwen Code | Extension | 命令重写；宿主没有工具后替换能力，也不运行 BeforeModel 事件 |
 | DeepSeek Harness | 原生 Plugin | 单文本结果替换、Marker 命令恢复和环境错误归因；无 Schema 或命令重写 |
+
+凡是注册了 Tool Ready 的 Adapter，该能力都已硬关闭。
 
 ## 支持的 Agent 开发框架
 

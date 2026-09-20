@@ -64,10 +64,9 @@ can apply separate pre-spawn size gates; see
 
 ## `compress`
 
-`compress` is the strict Protocol v2 transport used by shared Agent hooks. The command name is
-unchanged, but the wire format is intentionally incompatible with Protocol v1. Every envelope has
-exactly four top-level fields: `protocol_version`, `operation`, `attribution`, and `input` for a
-request or `result` for a response. Unknown envelope and operation fields are rejected.
+`compress` is the Protocol v2 transport used by shared Agent hooks. Every envelope has exactly
+four top-level fields: `protocol_version`, `operation`, `attribution`, and `input` for a request
+or `result` for a response; unknown fields are rejected.
 
 PostTool example:
 
@@ -113,26 +112,28 @@ Operations:
 
 - Retrieve results, interrupted or denied calls, and RTK-optimized output bypass compression.
 - Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
-- Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
-- Recognized successful build/test command output uses `BuildLogCompressor`; terminal cleanup and
-  recoverable routine-progress reduction may be selected.
-- Successful CSV/TSV uses `TabularCompressor` when the host supports arbitrary text replacement;
-  cell-preserving compaction or recoverable row reduction may be selected. File-origin results
-  pass through. Row reduction requires column-label evidence and an exact source-range list
-  no larger than 1 KiB; see [CSV/TSV views](user-manual.md#csvtsv-views-can-be-incomplete).
-- Other content types pass through until their domain compressor is connected.
+- Successful JSON is cleaned up and may be encoded as TOON; large arrays may be truncated or
+  record-reduced recoverably.
+- Recognized successful build/test command output may get terminal cleanup and recoverable
+  routine-progress reduction.
+- Successful CSV/TSV, when the host supports text replacement, may get cell-preserving compaction
+  or recoverable row reduction; file-origin results pass through. See
+  [CSV/TSV views](user-manual.md#csvtsv-views-can-be-incomplete).
+- Git diffs and HTML pages are handled only when their switches are on; see
+  [Configuration and data privacy](configuration-and-privacy.md).
+- API search-result listings get lossless search path sharing, on by default; see
+  [Controlling search path sharing](user-manual.md#controlling-search-path-sharing).
+- Other content types pass through.
 
 Only `disposition: "applied"` means `output` differs from the original. `dry_run`, `passthrough`,
 `no_savings`, `recoverability_unavailable`, `timeout`, and `tool_error` carry the original content.
-`content_type: "json"` replaces the old JSON label, and `applied_operations` reports the actual
-transformations instead of a configured compressor list.
+`applied_operations` reports the transformations that ran.
 
 `before_model` and `post_tool` require `capabilities.recovery`: `{"kind":"none"}`,
 `{"kind":"shell"}`, or `{"kind":"tool","name":"tokenless_retrieve"}`. Tool names contain
-1–64 ASCII letters, digits, underscores, or hyphens. Unknown fields, missing recovery, and the former
-`retrieval_available` boolean are rejected; update Core and callers together. The protocol version
-remains 2. Only a static Tool enables recoverable BeforeModel schema truncation; shell recovery
-applies to PostTool and does not add or change Agent tools.
+1–64 ASCII letters, digits, underscores, or hyphens. Only a static Tool enables recoverable
+BeforeModel schema truncation; shell recovery applies to PostTool and does not add or change Agent
+tools.
 
 Exit codes are part of the transport contract:
 
@@ -143,12 +144,12 @@ Exit codes are part of the transport contract:
 - `2`: malformed JSON, unsupported protocol version, or an invalid envelope/payload shape.
 
 The `pre_tool` operation resolves the separately packaged `rtk` executable from `PATH` and supported
-install layouts, skipping candidates older than 0.35.0 before trying the next packaged location.
-Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so their output has
-a single PostTool owner; other supported commands may be rewritten by RTK.
-Agent-facing `retrieve` authorizes the requested hash against `visible_markers` before reading Stash.
-The standalone `tokenless retrieve` command below is a separate trusted local operations path and
-does not require model-visibility context.
+install layouts, skipping candidates older than 0.35.0 and continuing to the next layout.
+Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so PostTool owns
+their output; other supported commands may be rewritten by RTK.
+Agent-facing `retrieve` authorizes the requested hash against `visible_markers` before reading Stash;
+the standalone `tokenless retrieve` command below is a trusted local operations path and does not
+require model-visibility context.
 
 ## Bundled RTK commands
 
@@ -224,7 +225,7 @@ Accepted item shapes (detected per item):
 
 - OpenAI function wrapper: `{"function": {"name", "description", "parameters"}}`
 - Direct schema: `{"name", "description", "parameters"}`
-- Gemini / copilot-shell wrapper: `{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`; copilot-shell BeforeModel hooks deliver tool declarations in this shape (`llm_request.config.tools`). Declarations inside the wrapper are compressed individually (the parameter schema is read from `parametersJsonSchema` when present, otherwise from `parameters`); the wrapper itself and any sibling fields are preserved.
+- Gemini / copilot-shell wrapper: `{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`; declarations inside the wrapper are compressed individually, and the wrapper and its sibling fields are preserved.
 
 An array input enables batch handling automatically.
 
@@ -324,7 +325,7 @@ JSON to TOON:
 echo '{"name":"Alice","age":30}' | tokenless compress-toon --min-toon-chars 0
 ```
 
-Payloads shorter than 500 characters pass through unchanged by default: TOON savings on small JSON are near-zero, so the CLI applies the same minimum length as the adapter hooks. Pass `--min-toon-chars 0` to encode any payload that yields token savings anyway. Input is validated as JSON before the length check, so invalid JSON exits with code 2 even when it is below the threshold.
+Payloads shorter than 500 characters pass through unchanged by default, the same minimum as the adapter hooks, because TOON savings on small JSON are near zero. Pass `--min-toon-chars 0` to encode any payload that yields token savings. Invalid JSON exits with code 2 regardless of length.
 
 TOON to JSON:
 
@@ -340,7 +341,7 @@ echo '{"name":"test","value":42}' \
   | tokenless decompress-toon
 ```
 
-`compress-toon` supports `--agent-id`, `--session-id`, `--tool-use-id`, and `--min-toon-chars`. When a payload is below the minimum length or encoding provides no savings, it returns the original JSON and does not record that operation. The exit code is still `0` in these passthrough cases, and the note on stderr is informational only: when scripting, detect whether encoding happened by comparing stdout with the input payload instead of relying on stderr. Passthrough and no-savings runs reproduce the input byte-for-byte on stdout (no trailing newline is added or stripped), so any byte difference means the payload was encoded; checking whether stdout is still valid JSON works as a fallback.
+`compress-toon` supports `--agent-id`, `--session-id`, `--tool-use-id`, and `--min-toon-chars`. When a payload is below the minimum length or encoding provides no savings, it returns the original JSON byte-for-byte with exit code `0` and does not record that operation; the note on stderr is informational. When scripting, detect whether encoding happened by comparing stdout with the input.
 
 ## `retrieve`
 
@@ -389,9 +390,7 @@ Every JSON invocation returns exactly three fields:
 {"tool":"Shell","status":"UNKNOWN","enabled":false}
 ```
 
-`tool` is the requested tool name, `all`, or `checklist`. The hard-disabled
-contract never includes the dormant legacy checklist's `tools` or `summary`
-fields.
+`tool` is the requested tool name, `all`, or `checklist`.
 
 Report the disabled state for one tool:
 
@@ -414,7 +413,7 @@ Automatic repair:
 tokenless env-check --tool Shell --fix
 ```
 
-> While the hard bypass is active, `--fix` does not invoke a package manager or modify the environment. The retained legacy implementation would attempt only missing required dependencies if it were redesigned and re-enabled in a future release.
+> While the hard bypass is active, `--fix` does not invoke a package manager or modify the environment.
 
 ## `stats`
 

@@ -288,11 +288,13 @@ config = TokenlessConfig(
 boundary; `TOKENLESS_DATA_DIR` is only a process-wide fallback. `retrieve_tool_name` selects the
 integration-owned tool name for framework layers such as AgentScope; they declare that name to
 Core through the recovery capability. Names must contain 1–64 ASCII letters, digits, underscores,
-or hyphens. This also tightens validation of existing `retrieve_tool_name` configurations: names
-containing dots, colons, or spaces must be renamed before upgrading.
-`rtk_enabled` controls whether the SDK resolves packaged RTK for PreTool. Compression thresholds,
-content detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior
-and are not Python configuration.
+or hyphens; an existing configuration that uses dots, colons, or spaces must be renamed before
+upgrading. `rtk_enabled` controls whether the SDK resolves packaged RTK for PreTool;
+`search_path_sharing_enabled` (default on), `diff_compression_enabled` and
+`html_extraction_enabled` (default off) switch the corresponding PostTool domains, see
+[Configuration and data privacy](configuration-and-privacy.md). Compression thresholds, content
+detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior and are
+not Python configuration.
 
 ### Direct Runtime examples
 

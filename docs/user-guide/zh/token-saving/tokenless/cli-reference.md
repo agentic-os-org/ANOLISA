@@ -60,10 +60,9 @@ Agent Adapter 还可能在启动 CLI 前应用独立的大小门槛，详见
 
 ## `compress`
 
-`compress` 是共享 Agent Hook 使用的严格 Protocol v2 Transport。命令名保持不变，但 Wire
-格式有意不兼容 Protocol v1。每个 Envelope 顶层严格只有四个字段：请求使用
-`protocol_version`、`operation`、`attribution`、`input`，响应把 `input` 换为 `result`。
-Envelope 和操作 Payload 中的未知字段都会被拒绝。
+`compress` 是共享 Agent Hook 使用的 Protocol v2 Transport。每个 Envelope 顶层只有四个字段：
+请求使用 `protocol_version`、`operation`、`attribution`、`input`，响应把 `input` 换为
+`result`；未知字段会被拒绝。
 
 PostTool 示例：
 
@@ -109,24 +108,22 @@ jq -n \
 
 - Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
-- 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
-- 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
-  Routine Progress Reduction。
-- 成功 CSV/TSV 在宿主支持任意文本替换时使用 `TabularCompressor`，可选择保留全部单元格的
-  全量压紧或可恢复的行筛选。文件来源结果透传。行筛选要求列名证据，且精确源行号范围列表
-  不超过 1 KiB；见[CSV/TSV 视图](user-manual.md#csvtsv-视图可能不完整)。
-- 其他内容类型在对应领域 Compressor 接入前原样透传。
+- 成功 JSON 做结构清理并可能编码为 TOON；大数组可能被可恢复地截断或做记录缩减。
+- 已识别的成功构建/测试命令输出可能做终端输出清理和可恢复的常规进度缩减。
+- 成功 CSV/TSV 在宿主支持文本替换时可能做保留全部单元格的全量压紧或可恢复的行筛选；
+  文件来源结果透传。见[CSV/TSV 视图](user-manual.md#csvtsv-视图可能不完整)。
+- Git Diff 和 HTML 页面只在对应开关开启时处理，见[配置与数据隐私](configuration-and-privacy.md)。
+- API 搜索列表做无损的搜索路径共享，默认开启，见[控制搜索路径共享](user-manual.md#控制搜索路径共享)。
+- 其他内容类型原样透传。
 
 只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
 `no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。
-JSON 的 `content_type` 现在是 `json`；`applied_operations` 报告实际发生的变换，而不是配置的
-Compressor 列表。
+`applied_operations` 报告实际发生的变换。
 
 `before_model` 和 `post_tool` 必须提供 `capabilities.recovery`：`{"kind":"none"}`、
 `{"kind":"shell"}` 或 `{"kind":"tool","name":"tokenless_retrieve"}`。Tool 名称限 1–64 个
-ASCII 字母、数字、下划线或连字符。未知字段、缺失 recovery 和旧的 `retrieval_available`
-布尔字段均会被拒绝，Core 与调用方必须一起更新；协议版本保持 2。只有静态 Tool 能启用
-BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增或改变 Agent 工具。
+ASCII 字母、数字、下划线或连字符。只有静态 Tool 能启用 BeforeModel Schema 的可恢复截断；
+Shell 恢复用于 PostTool，不新增或改变 Agent 工具。
 
 退出码属于 Transport 契约：
 
@@ -136,11 +133,10 @@ BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增�
   stderr，不输出 Response JSON。
 - `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
 
-`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
-并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
-原生形式，使其输出只有一个 PostTool 所有者；其他受支持命令仍可由 RTK 改写。Agent-facing
-`retrieve` 在读取 Stash 前根据 `visible_markers` 授权
-请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
+`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`，低于 0.35.0 的候选会被跳过并继续尝试下一个布局。已识别的 Cargo、pytest、
+npm/Jest、Go 和 Make 构建/测试命令保持原生形式，由 PostTool 独占其输出；其他受支持
+命令仍可由 RTK 改写。Agent-facing `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
+请求 Hash；下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
 ## 随包提供的 RTK 命令
 
@@ -210,7 +206,7 @@ cat tools.json | tokenless compress-schema --batch
 
 - OpenAI function 包装：`{"function": {"name", "description", "parameters"}}`
 - 直接 Schema：`{"name", "description", "parameters"}`
-- Gemini / copilot-shell 包装：`{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`；copilot-shell 的 BeforeModel hook 以该形态下发工具声明（`llm_request.config.tools`）。包装内的声明逐个压缩（参数 schema 优先取 `parametersJsonSchema`，其次取 `parameters`），包装本身及其同级字段原样保留。
+- Gemini / copilot-shell 包装：`{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`；包装内的声明逐个压缩，包装本身及其同级字段原样保留。
 
 输入本身是数组时会自动使用 batch 处理。
 
@@ -309,7 +305,7 @@ JSON 转 TOON：
 echo '{"name":"Alice","age":30}' | tokenless compress-toon --min-toon-chars 0
 ```
 
-短于 500 字符的负载默认原样透传：TOON 对小型 JSON 的节省近乎为零，因此 CLI 应用与 Adapter Hook 相同的最小长度。传入 `--min-toon-chars 0` 可对任意有 token 收益的负载编码。输入会先通过 JSON 校验再做长度判断，因此低于阈值的非法 JSON 仍会以退出码 2 失败。
+短于 500 字符的负载默认原样透传，与 Adapter Hook 的最小长度相同，因为 TOON 对小型 JSON 的节省近乎为零。传入 `--min-toon-chars 0` 可对任意有 token 收益的负载编码。非法 JSON 无论长短都以退出码 2 失败。
 
 TOON 转 JSON：
 
@@ -325,7 +321,7 @@ echo '{"name":"test","value":42}' \
   | tokenless decompress-toon
 ```
 
-`compress-toon` 支持 `--agent-id`、`--session-id`、`--tool-use-id` 和 `--min-toon-chars`。当负载低于最小长度或编码后无收益时会输出原 JSON，且不记录该次统计。这类透传场景退出码仍为 `0`，stderr 上的提示仅供参考：在脚本等自动化场景中，请通过比较 stdout 与输入负载来判断是否发生了编码，不要依赖 stderr。透传和无收益场景会在 stdout 上逐字节原样复现输入（不添加、不去除末尾换行符），任何字节差异都说明负载已被编码；作为兜底，也可以检查 stdout 是否仍为合法 JSON。
+`compress-toon` 支持 `--agent-id`、`--session-id`、`--tool-use-id` 和 `--min-toon-chars`。当负载低于最小长度或编码后无收益时，会以退出码 `0` 逐字节原样输出原 JSON，且不记录该次统计；stderr 上的提示仅供参考。脚本中请通过比较 stdout 与输入来判断是否发生了编码。
 
 ## `retrieve`
 
@@ -373,8 +369,7 @@ Tool Ready 已硬关闭。文本输出只报告这一状态，不会读取规范
 {"tool":"Shell","status":"UNKNOWN","enabled":false}
 ```
 
-`tool` 是指定的工具名、`all` 或 `checklist`。硬关闭契约绝不会包含休眠旧版
-清单的 `tools` 或 `summary` 字段。
+`tool` 是指定的工具名、`all` 或 `checklist`。
 
 报告单个工具对应的硬关闭状态：
 
@@ -397,7 +392,7 @@ tokenless env-check --checklist --json
 tokenless env-check --tool Shell --fix
 ```
 
-> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。如果未来重新设计并启用，保留的旧版实现只会尝试修复缺失的必需依赖。
+> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。
 
 ## `stats`
 

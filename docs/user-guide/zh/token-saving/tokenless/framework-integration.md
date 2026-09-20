@@ -9,20 +9,20 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
-| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
+| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | —（Hook 会运行，工具原样返回） |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
-| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
-| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
+| DeepSeek Harness | `dsh` | — | — | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
+| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | —（Hook 会运行，工具原样返回） |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
 
-“—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
+“—”表示该能力不可用：当前 Adapter 没有注册、当前宿主版本不会运行，或虽然运行但无法生效（见单元格说明）；对应的 Tokenless CLI 命令仍可能可用。
 
-Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook）；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。
+Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 对每个工具定义运行同一个 Hook（MCP 工具不经过该 Hook）；当前 Qwen Code 版本不运行声明的 `BeforeModel` 事件。这些宿主都不会应用结果：共享 Hook 没有 Marker 授权恢复（见[Adapter 处理规则](#adapter-处理规则)），Qwen Code 则根本不运行该事件。只有声明了静态恢复 Tool 的 QwenPaw 和 AgentScope 会替换工具定义。
 
 这些 Adapter 仍会注册 Tool Ready，但会在检查、修复或阻断之前无条件硬退出，任何运行时设置都无法重新启用。工具执行后的失败归因不受影响。
 
@@ -45,14 +45,15 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 | 宿主支持文本替换时的 CSV/TSV 表格 | 整表压紧；数据行超过 32 行的表格在 Stash 支持的恢复可用时可做行缩减 |
 | 路径共享开启且宿主支持文本替换时的 API 搜索结果列表 | 无损搜索路径共享；保留全部已收到命中 |
 | 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
-| 长纯文本、Stack Trace、HTML、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
+| 显式开启 `TOKENLESS_HTML_EXTRACTION_ENABLED`（默认关闭）、宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含 Shell 文件读取）的 HTML 页面 | 把页面正文根转写为 Markdown；收到的页面经 Stash 可取回；否则原样透传 |
+| 长纯文本、Stack Trace、源码、Unknown | 原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
-Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
-无意义地启动子进程。
+Core 策略；Hook 负责把宿主对象映射为协议字段并把结果回填成宿主的形状。
 
-Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
-原样返回 Tools。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
+cosh、Cosh-NG 和 OpenCode 逐工具定义路径共用的 BeforeModel Hook 没有 Marker 授权恢复路径，
+因此 Schema 压缩在该路径原样返回工具。只有直接 `compress-schema` 命令，以及声明了静态恢复
+Tool 的进程内集成（QwenPaw、AgentScope）会应用它。
 
 OpenClaw、Hermes 与 DeepSeek Harness 已把 PostTool 决策委托给 Core。独立
 `compress-response` 命令继续作为显式 JSON 清理入口。
@@ -71,9 +72,8 @@ Core。只有宿主槽支持文本且 Core 找到更小的合法表示时才会�
 `--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的 PostToolUse 契约不能
 替换原始模型可见输出，因此不运行响应压缩或 TOON。
 
-Common Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用。Hermes 为兼容旧宿主版本
-采用阻止后建议重试；最终结果 Hook 会从 Hermes 实际执行的命令中识别带 Attribution 的 RTK
-Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
+RTK 输出不会被二次压缩：共享 Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用，
+Hermes 则从实际执行的命令中识别 RTK Wrapper。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
@@ -95,14 +95,13 @@ dsh --profile web
 和解析后的 DSH home 写入 adapter receipt。后续 status、disable 和 re-enable 会
 继续操作同一棵 profile 目录树。
 
-Plugin 在 DSH 的 `tools/post-execute` Waterfall 上运行，并把包含一个文本块、可替换的
-根调用结果发送给 `tokenless compress`。内容检测、JSON 与 Build Log 压缩、TOON 选择、
-大小门禁、基于工具来源的阈值和最终接受均由 Core 负责。不受支持的内容域与文件内容结果会
-透传。当裸
-`tokenless` 能从 DSH Shell 的 `PATH` 解析到 Core 调用选中的同一个可执行文件时，Marker
-可以提示模型执行一条独立的 `tokenless retrieve` 命令；成功的恢复输出会绕过压缩。多文本块、图片、Code Mode 子调用的
-成功结果，以及后续 Waterfall Listener 已替换的 Canonical Value 均保持不变。CLI 缺失、
-失败或超时也会保留原始内容。
+Plugin 把包含一个文本块、可替换的根调用结果发送给 `tokenless compress`；内容检测、
+压缩、TOON 选择、大小门禁、基于工具来源的阈值和最终接受均由 Core 负责。不受支持的
+内容域与文件内容结果会透传。当裸 `tokenless` 能从 DSH Shell 的 `PATH` 解析到 Core 调用
+选中的同一个可执行文件时，Marker 可以提示模型执行一条独立的 `tokenless retrieve` 命令；
+成功的恢复输出会绕过压缩。多文本块、图片和 Code Mode 子调用的成功结果保持不变，已被
+其他 DSH 策略替换过值的结果不会被压缩（替换值仍是结构化命令失败时只追加诊断），CLI
+缺失、失败或超时也会保留原始内容。
 
 DSH 会从模型 Shell 命令中移除继承的 `TOKENLESS_*` 环境变量。Adapter 会发布选定数据目录
 以及可选统计库和 Stash 库路径的受控别名，让 Core 与 Shell 使用同一份恢复状态。默认状态
@@ -135,10 +134,8 @@ DSH 会从模型 Shell 命令中移除继承的 `TOKENLESS_*` 环境变量。Ada
 | `agentId` | `dsh` | 设置 Tokenless 统计记录中的 Agent Attribution。 |
 
 Plugin 把 DSH 内置的读取/搜索工具映射为 `file_content`，命令工具映射为
-`command_output`，未知工具映射为 `api_response`。这些映射只描述宿主事实，后续策略由
-Core 决定。即使压缩关闭，DSH 原始失败和结构化命令失败仍会交给 Core 做环境诊断。
-后续 Waterfall Listener 替换 Canonical `value` 后，Tokenless 只检查该替换值，且不会对其
-应用内容压缩。
+`command_output`，未知工具映射为 `api_response`；后续策略由 Core 决定。即使压缩关闭，
+DSH 标记的失败以及结构化结果里报非零退出码、信号或超时的命令结果仍会交给 Core 做环境诊断。
 
 完整触发条件（压缩开关、最小响应长度、受支持的压缩域、严格变小保护）与阈值含义见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 
@@ -196,12 +193,11 @@ DeepSeek Harness 按 profile 管理，因此必须至少提供一个 `--profile`
 `dsh --profile <profile>` 使用的名称一致，不带 profile 的通用命令会被拒绝。
 后续 enable 或 re-enable 必须再次列出需要保留的全部 profile。
 
-执行 OpenClaw adapter enable 或 tokenless 的 OpenClaw `install.sh` 即同意
-插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的
-`--accept-capabilities` 参数时传递它，以兼容旧版宿主。独立的 `install.sh`
-也只在安装器仍声明该参数有效时传递 `--dangerously-force-unsafe-install`；
-将其列为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不再收到该参数，
-安全扫描改由 `security.installPolicy` 决定。
+通过 anolisa 或自带的 `install.sh` 启用 OpenClaw Adapter，即同意插件声明的能力；两者都只在宿主
+`plugins install --help` 列出 `--accept-capabilities` 时传递它，旧版宿主仍可安装。
+独立的 `install.sh` 只在安装器仍认为该参数有效的宿主上附加
+`--dangerously-force-unsafe-install`；OpenClaw 2026.6.5 及以上由
+`security.installPolicy` 决定安全扫描。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
@@ -266,7 +262,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 脚本会调用框架自身的 Plugin/Extension 机制；按照脚本输出完成重启。安装脚本缺失、失败或框架版本不兼容时，优先改用 anolisa 管理的安装方式。
 
-在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 和 `rtk` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
+在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动 `tokenless` 和 `rtk` 二进制；较新的宿主由 `security.installPolicy` 决定安全扫描。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略；策略不允许该覆盖参数时，就不要安装此 Plugin。
 
 ### npm + cosh
 
@@ -367,24 +363,19 @@ Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调�
 
 该 Adapter 是一个 QwenPaw Plugin：`anolisa adapter enable tokenless qwenpaw` 和自带的安装脚本都会执行
 `qwenpaw plugin install <bundle> --force`，由 QwenPaw 把插件复制到 `<工作目录>/plugins/tokenless/`，
-并把其 `requirements.txt` 安装进 QwenPaw 自己的 Python 环境。该依赖是对应 GitHub Release 中的
-`anolisa_tokenless` wheel，因此首次安装需要联网。QwenPaw 只在其解释器的包元数据里找不到 `anolisa_tokenless`
-时才运行 pip，所以离线主机可先用 `pip install` 把 wheel 装进 QwenPaw 的 Python 环境；同样的规则意味着已装过的旧版
-wheel 不会被 `plugin install` 升级。因此安装脚本会通过 `qwenpaw` 命令背后的解释器确认 `anolisa_tokenless`
-可导入且具备插件需要的 SDK 接口，没有 wheel 匹配当前平台（`requirements.txt` 列出 Linux x86_64、Linux aarch64
-和 macOS arm64）时安装失败。插件本身也会拒绝在旧版 wheel 上注册并在日志中给出所需的 release，而不是在第一次模型
-调用时报错。插件需要 Tokenless 0.8.0 引入的恢复入口。请在 QwenPaw 的 Python 环境中安装与插件 Release 匹配的
-SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
-`~/.copaw`，否则 `~/.qwenpaw`。没有 `qwenpaw` 命令时安装脚本打印提示并以 0 退出，`make setup` 在未安装 QwenPaw
-的主机上可以完整跑完。
+并把对应 GitHub Release 中的 `anolisa_tokenless` SDK wheel 安装进 QwenPaw 自己的 Python 环境，因此首次安装需要联网。
+QwenPaw 只在找不到该包时才运行 pip，所以离线主机应先自行安装 wheel；已装过的旧版 wheel 也不会被 `plugin install`
+升级。wheel 只提供 Linux x86_64、Linux aarch64 和 macOS arm64，其它平台上安装脚本会在确认 QwenPaw 的 Python
+无法导入 `anolisa_tokenless` 后失败；`PATH` 上没有 `qwenpaw` 命令时，安装脚本只打印提示并以 0 退出，不安装任何内容。
+wheel 缺少插件导入的 SDK 入口（Tokenless 0.8.0 引入）时插件拒绝注册并在日志中给出应安装的 release。工作目录与
+QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的 `~/.copaw`，否则 `~/.qwenpaw`。
 
-正在运行的 QwenPaw 会热加载插件；否则启动 QwenPaw 即可。Schema 压缩和 `tokenless_retrieve` 工具从下一次
-模型调用开始生效；命令重写发生在 QwenPaw 的审批步骤之后，因此已批准的 `execute_shell_command` 会执行改写后的
-命令。只有 QwenPaw 内置工具会被分类：`execute_shell_command` 为命令输出，`read_file`、`recall_history`、`view_image`、
-`view_video` 为文件内容，其余内置工具为 API 响应；Skill、MCP 工具以及后续 QwenPaw 版本新增的工具原样
-透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，且保留结果头部（最近两条工具结果 50000 字节，更早的 3000
-字节，溢出部分写入 `tool_results/`），因此压缩结果末尾的恢复指令只在结果未超出该预算时可见；被省略的内容仍可用
-`tokenless retrieve` 从 Stash 取回。统计记录按 QwenPaw 工作区写入 `<workspace>/.tokenless`，运行 `tokenless stats list --data-dir` 时指向该目录。
+正在运行的 QwenPaw 会热加载插件；否则启动 QwenPaw 即可。Schema 压缩和 `tokenless_retrieve` 工具从下一次模型调用
+开始生效，已批准的 `execute_shell_command` 会执行改写后的命令。只有 QwenPaw 内置工具会被分类：`execute_shell_command`
+为命令输出，`read_file`、`recall_history`、`view_image`、`view_video` 为文件内容，其余内置工具为 API 响应；Skill、MCP
+工具以及后续 QwenPaw 版本新增的工具原样透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，只保留每条结果的头部（最近两条
+预算更大），因此压缩结果末尾的恢复指令可能被截掉；被省略的内容仍可通过 `tokenless_retrieve` 工具，或 `tokenless retrieve --stash-db <workspace>/.tokenless/stash.db` 取回。统计记录按
+QwenPaw 工作区写入 `<workspace>/.tokenless`，运行 `tokenless stats list --data-dir` 时指向该目录。
 
 ## AgentScope 框架集成
 

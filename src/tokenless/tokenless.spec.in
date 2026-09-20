@@ -34,15 +34,15 @@ Provides:       anolisa-component(tokenless)
 
 %description
 Token-Less is an LLM token optimization toolkit that significantly reduces token
-consumption through Schema/Response Compression, TOON Context Compression,
-Command Rewriting, and Tool Ready environment pre-check strategies.
+consumption through Schema/Response Compression, TOON Context Compression and
+Command Rewriting; Tool Ready is registered by adapters but hard-disabled.
 
 Core Features:
 - Schema Compression: Compresses OpenAI Function Calling tool definitions
 - Response Compression: Compresses API/tool responses (removes debug/null/empty)
 - TOON Context Compression: Encodes JSON to TOON format, chained after response compression
 - Command Rewriting: Filters CLI command output via RTK
-- Tool Ready: Pre-execution environment check, auto-fix, and failure attribution
+- Tool Ready: registered by adapters but hard-disabled (silent pass-through)
 - Statistics Tracking: SQLite-based metrics for compression effectiveness
 
 The package includes:
@@ -56,20 +56,20 @@ Native DeepSeek Harness (dsh) plugin bundle is available under
 `anolisa adapter enable tokenless dsh --profile <profile>`.
 Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
 Hermes Agent plugin (response compression, TOON encoding, command rewriting via RTK,
-and Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/hermes/.
+and registered but hard-disabled Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/hermes/.
 Run the install script to register with Hermes: hermes/scripts/install.sh
 QwenPaw plugin (schema compression, response/TOON compression, command rewriting via RTK)
 is available under /usr/share/anolisa/adapters/tokenless/qwenpaw/.
 Run the install script to register with QwenPaw: qwenpaw/scripts/install.sh
-Claude Code plugin (RTK command rewriting, response/TOON compression, and Tool Ready
-environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/claude-code/.
+Claude Code plugin (RTK command rewriting, response/TOON compression, and registered
+but hard-disabled Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/claude-code/.
 Register it with the official `claude plugin marketplace add` / `claude plugin install`
 CLI, or run the install script: claude-code/scripts/install.sh
-Qwen Code plugin (RTK command rewriting, response/TOON compression, and Tool Ready
-environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/qwencode/.
+Qwen Code plugin (RTK command rewriting and registered but hard-disabled Tool Ready;
+the host cannot replace tool output, so responses pass through) is available under /usr/share/anolisa/adapters/tokenless/qwencode/.
 Register it with `qwen extensions link`, or run the install script: qwencode/scripts/install.sh
-OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
-Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
+OpenCode plugin (response/TOON compression, RTK command rewriting, and registered but
+hard-disabled Tool Ready; the schema hook runs but returns tools unchanged) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
 
 %prep

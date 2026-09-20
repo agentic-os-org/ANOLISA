@@ -53,7 +53,7 @@
           {
             "type": "command",
             "name": "tokenless-compress-schema",
-            "description": "Compresses tool schema definitions for token savings",
+            "description": "Schema hook; returns tool definitions unchanged until marker-authorized recovery exists",
             "command": "python3 ${extensionPath}/hooks/compress_schema_hook.py",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }

@@ -25,7 +25,7 @@ Agent adapters are available for:
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, response compression, and Marker-directed recovery via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, Marker-directed recovery, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
-- **OpenCode plugin** — schema/response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **OpenCode plugin** — response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API; the per-tool schema hook runs but returns tools unchanged because the shared hook declares no marker-authorized recovery.
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
 - **DeepSeek Harness plugin** — native response compression, Marker-directed recovery, and environment-error attribution through DSH's `tools/post-execute` seam.
@@ -55,7 +55,7 @@ retrieval, and attribution.
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, Marker-command recovery ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ on Claude Code 2.1.121 or newer |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
-| OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
+| OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema hook runs but returns tools unchanged, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
 | Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
 | QwenPaw plugin | — | Schema compression ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Retrieve Tool recovery ✅ |
 | DeepSeek Harness plugin | — | Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
@@ -689,7 +689,7 @@ replaces the original model-visible response instead of being appended to it.
 | Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
-| Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+| Schema compression | `tool.definition` | Runs per tool definition but returns it unchanged; no marker-authorized recovery | — Pass-through |
 
 Enable the installed plugin through ANOLISA, then restart OpenCode:
 
