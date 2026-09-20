@@ -103,7 +103,8 @@ const MAX_TABLE_COLUMNS: usize = 64;
 /// One Markdown view of a complete HTML document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HtmlView {
-    /// Header line, title, URL, rendered body and end marker.
+    /// Header line, title, URL, rendered body and end marker, followed by
+    /// any text the input carried after the document's `</html>` end tag.
     pub output: String,
     /// `<title>` text, collapsed.
     pub title: Option<String>,
@@ -128,16 +129,19 @@ pub struct HtmlView {
 pub struct HtmlExtractor;
 
 impl HtmlExtractor {
-    /// Renders the page as Markdown. Returns `None` when the rendered body is
-    /// too short to be a page or the markup nests deeper than the parse
-    /// limit; callers keep the original in that case.
+    /// Renders the page as Markdown. Text after the `</html>` end tag is not
+    /// part of the page and follows the end marker as written, except that
+    /// lines imitating the view's wrapper are escaped like page text. Returns
+    /// `None` when the rendered body is too short to be a page or the markup
+    /// nests deeper than the parse limit; callers keep the original then.
     #[must_use]
     pub fn render(&self, input: &str) -> Option<HtmlView> {
-        if nesting_depth(input) > MAX_PARSE_DEPTH {
+        let (document, trailer) = split_trailer(input);
+        if nesting_depth(document) > MAX_PARSE_DEPTH {
             return None;
         }
-        let dom =
-            parse_document(Dom::default(), ParseOpts::default()).one(StrTendril::from_slice(input));
+        let dom = parse_document(Dom::default(), ParseOpts::default())
+            .one(StrTendril::from_slice(document));
         let nodes = dom.nodes.into_inner();
         let html = nodes[0]
             .children
@@ -204,8 +208,9 @@ impl HtmlExtractor {
         if let Some(head) = head {
             renderer.count_removals(head, false);
         }
-        // Escaped once here, where every rendering path ends up, so the
-        // view boundary can only come from the renderer.
+        // Escaped once here, where every rendering path ends up, and once
+        // for the trailer below, so the view boundary can only come from the
+        // renderer.
         let body_markdown =
             escape_wrapper_lines(&renderer.blocks(root, is_sectioning(&nodes[root])));
         if body_markdown.chars().count() < MIN_BODY_CHARS {
@@ -238,6 +243,11 @@ impl HtmlExtractor {
         }
         output.push_str(&body_markdown);
         output.push_str("\n[End page]");
+        let trailer = trailer.trim_start();
+        if !trailer.is_empty() {
+            output.push('\n');
+            output.push_str(&escape_wrapper_lines(trailer));
+        }
         Some(HtmlView {
             output,
             title,
@@ -247,6 +257,20 @@ impl HtmlExtractor {
             outside_root,
         })
     }
+}
+
+/// Splits the input after the first `</html>` end tag that the tokenizer
+/// would see as one, so a literal inside a comment or a script string does
+/// not end the document. The parser would fold anything after the tag into
+/// the body, where a root other than `<body>` drops it from the view: a
+/// build log or grep listing printed after a fetched page would vanish. The
+/// first tag is used because a trailer can itself contain one (a second
+/// page, a grep over the page).
+fn split_trailer(input: &str) -> (&str, &str) {
+    let end = tags(input)
+        .find(|tag| tag.closing && tag.name == "html")
+        .map_or(input.len(), |tag| tag.end);
+    input.split_at(end)
 }
 
 // ---- DOM ----------------------------------------------------------------
@@ -500,48 +524,75 @@ impl TreeSink for Dom {
 /// a `>` inside a quoted attribute value ends the tag early, so whatever
 /// follows it is scanned as content. Neither can hide real nesting.
 fn nesting_depth(input: &str) -> usize {
-    let bytes = input.as_bytes();
-    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
-    let find = |from: usize, needle: &[u8]| {
-        bytes[from..]
-            .windows(needle.len())
-            .position(|w| w.eq_ignore_ascii_case(needle))
-            .map(|at| from + at + needle.len())
-    };
-    while i < bytes.len() {
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        if bytes[i..].starts_with(b"<!--") {
-            i = find(i + 4, b"-->").unwrap_or(bytes.len());
-            continue;
-        }
-        let closing = bytes.get(i + 1) == Some(&b'/');
-        let start = i + 1 + usize::from(closing);
-        let end = start
-            + bytes[start..]
-                .iter()
-                .take_while(|b| b.is_ascii_alphanumeric())
-                .count();
-        if end == start || !bytes[start].is_ascii_alphabetic() {
-            i += 1;
-            continue;
-        }
-        let name = input[start..end].to_ascii_lowercase();
-        i = find(end, b">").unwrap_or(bytes.len());
-        if closing {
+    let (mut depth, mut max) = (0usize, 0usize);
+    for tag in tags(input) {
+        if tag.closing {
             depth = depth.saturating_sub(1);
-        } else if RAW_TEXT.contains(&name.as_str()) {
-            i = find(i, format!("</{name}").as_bytes()).unwrap_or(bytes.len());
-        } else if !VOID_ELEMENTS.contains(&name.as_str())
-            && !SELF_CLOSING_RUN.contains(&name.as_str())
+        } else if !VOID_ELEMENTS.contains(&tag.name.as_str())
+            && !SELF_CLOSING_RUN.contains(&tag.name.as_str())
         {
             depth += 1;
             max = max.max(depth);
         }
     }
     max
+}
+
+/// A tag found by [`tags`]: lowercase name and the offset just past its `>`.
+struct Tag {
+    name: String,
+    closing: bool,
+    end: usize,
+}
+
+/// Scans raw markup for the tags the tokenizer would see, without building
+/// a tree: comments and raw-text elements are skipped whole, so a literal
+/// tag inside `<!-- -->` or a `<script>` string is content, not a tag. An
+/// end tag may carry whitespace or attributes before its `>`.
+fn tags(input: &str) -> impl Iterator<Item = Tag> + '_ {
+    let bytes = input.as_bytes();
+    let find = move |from: usize, needle: &[u8]| {
+        bytes[from..]
+            .windows(needle.len())
+            .position(|w| w.eq_ignore_ascii_case(needle))
+            .map(|at| from + at + needle.len())
+    };
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        while i < bytes.len() {
+            if bytes[i] != b'<' {
+                i += 1;
+                continue;
+            }
+            if bytes[i..].starts_with(b"<!--") {
+                i = find(i + 4, b"-->").unwrap_or(bytes.len());
+                continue;
+            }
+            let closing = bytes.get(i + 1) == Some(&b'/');
+            let start = i + 1 + usize::from(closing);
+            let end = start
+                + bytes[start..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric())
+                    .count();
+            if end == start || !bytes[start].is_ascii_alphabetic() {
+                i += 1;
+                continue;
+            }
+            let name = input[start..end].to_ascii_lowercase();
+            i = find(end, b">").unwrap_or(bytes.len());
+            if !closing && RAW_TEXT.contains(&name.as_str()) {
+                i = find(i, format!("</{name}").as_bytes()).unwrap_or(bytes.len());
+                continue;
+            }
+            return Some(Tag {
+                name,
+                closing,
+                end: i,
+            });
+        }
+        None
+    })
 }
 
 fn find_element(nodes: &[Node], from: usize, local: &str) -> Option<usize> {
@@ -1166,11 +1217,12 @@ fn flush_inline(blocks: &mut Vec<String>, inline: &mut String, open: &mut bool) 
     }
 }
 
-/// Escapes body lines that imitate the view's own wrapper lines. Applied
-/// once to the whole rendered body, so paragraphs, code, table cells and
-/// flattened deep nesting are all covered; an escaped line stays escaped.
+/// Escapes lines that imitate the view's own wrapper lines. Applied once to
+/// the whole rendered body, so paragraphs, code, table cells and flattened
+/// deep nesting are all covered, and once to the trailer; an escaped line
+/// stays escaped. Line terminators are kept as they are.
 fn escape_wrapper_lines(text: &str) -> String {
-    text.lines()
+    text.split_inclusive('\n')
         .map(|line| {
             if line.starts_with("[End page]") || line.starts_with("[HTML page rendered as Markdown")
             {
@@ -1179,8 +1231,7 @@ fn escape_wrapper_lines(text: &str) -> String {
                 line.to_owned()
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// Where to insert a backslash so a line of page text is not read as a

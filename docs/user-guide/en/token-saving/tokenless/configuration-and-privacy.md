@@ -116,12 +116,13 @@ environment variable does not override them.
 The compressor handles complete HTML documents (starting with `<!doctype html` or
 `<html>`) received as successful command output or API responses, for example a page
 fetched with `curl` or returned by an MCP tool. It requires a text replacement slot,
-an available Stash, and a supported recovery method. The page is rendered as a
-Markdown subset: headings, paragraphs, lists, tables, fenced code with its language,
-links with targets, image alt text, quotes, and admonitions. MathML formulas render
-as their TeX annotation or `alttext` between `$` signs; cells spanning rows or columns
-leave empty cells in the slots they cover, and rows are not padded to the widest
-row; paragraph lines that start like a Markdown
+an available Stash, and a supported recovery method. Text after the closing `</html>`
+tag, such as a status code or the output of a following command, is kept after the
+view. The page is rendered as a Markdown subset: headings, paragraphs, lists, tables,
+fenced code with its language, links with targets, image alt text, quotes, and
+admonitions. MathML formulas render as their TeX annotation or `alttext` between `$`
+signs; cells spanning rows or columns leave empty cells in the slots they cover, and
+rows are not padded to the widest row; paragraph lines that start like a Markdown
 heading, list item, quote, rule or code fence are escaped. The content root is
 `<main>`, an element with `role=main`, or the only outermost `<article>` (articles
 nested inside it, such as comments, do not count); otherwise the whole body.

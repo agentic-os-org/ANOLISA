@@ -104,6 +104,52 @@ fn detects_html_documents_but_not_fragments() {
 }
 
 #[test]
+fn html_fragments_inside_other_domains_do_not_make_them_html() {
+    let page = "<!DOCTYPE html>\n<html lang=\"en\">\n<body><main><p>Widget reference</p></main></body>\n</html>";
+    let prefixed_grep = page
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("site/index.html:{}:{line}\n", index + 1))
+        .collect::<String>();
+    assert_eq!(detect(&prefixed_grep), ContentType::SearchResults);
+    let numbered_grep = page
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{}:{line}\n", index + 1))
+        .collect::<String>();
+    assert_ne!(detect(&numbered_grep), ContentType::Html);
+    assert_eq!(
+        detect(&format!("{{\"status\": 200, \"body\": {}}}", serde_json::to_string(page).unwrap())),
+        ContentType::Json
+    );
+    let jest = format!(
+        "$ npm test\n\n> widget@1.4.0 test\n> jest --ci\n\nFAIL src/render.test.js\n  ● render › markup\n\n    - Snapshot  - 1\n    + Received  + 1\n\n    - {page}\n    + <div class=\"widget\"></div>\n\nTests:       1 failed, 7 passed, 8 total\nTime:        2.41 s\n"
+    );
+    assert_eq!(detect(&jest), ContentType::BuildLog);
+    let diff = format!(
+        "diff --git a/site/index.html b/site/index.html\nindex 1111111..2222222 100644\n--- a/site/index.html\n+++ b/site/index.html\n@@ -1,3 +1,3 @@\n {}\n",
+        page.replace('\n', "\n ")
+    );
+    assert_eq!(detect(&diff), ContentType::Diff);
+    let traceback = format!(
+        "Traceback (most recent call last):\n  File \"fetch.py\", line 8, in main\n    raise RuntimeError(body)\nRuntimeError: {}\n",
+        page.replace('\n', "")
+    );
+    assert_eq!(detect(&traceback), ContentType::StackTrace);
+    let csv = format!(
+        "id,title,snippet\n{}",
+        (0..40)
+            .map(|index| format!("{index},Row {index},<p>Widget <b>{index}</b> summary</p>\n"))
+            .collect::<String>()
+    );
+    assert_eq!(detect(&csv), ContentType::Tabular);
+    let sfc = "<template>\n  <div class=\"widget\">{{ title }}</div>\n</template>\n<script setup>\nconst title = 'Widget'\n</script>\n";
+    assert_ne!(detect(sfc), ContentType::Html);
+    let svg = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>\n";
+    assert_ne!(detect(svg), ContentType::Html);
+}
+
+#[test]
 fn detects_tabular_content() {
     for input in [
         "name,value\nalice,1\nbob,2",

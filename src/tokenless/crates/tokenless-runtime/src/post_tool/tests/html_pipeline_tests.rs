@@ -139,3 +139,28 @@ fn html_failures_pass_through_and_rejections_roll_back() {
         }
     }
 }
+
+#[test]
+fn html_trailers_stay_after_the_view_and_in_the_stash() {
+    let page = html_input(10);
+    let long_log = "$ cargo build\n   Compiling widget v0.1.0\n".repeat(200);
+    for log in ["$ curl -w '%{http_code}' https://example.com/doc\n200\n", long_log.as_str()] {
+        let input = format!("{page}\n{log}");
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut config = build_log_config();
+        config.html_extraction_enabled = true;
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+        // The trailer neither changes the content type nor the savings: it
+        // costs the same tokens on both sides of the gate.
+        assert_eq!(run.response.content_type, Some(ContentType::Html));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        let output = &run.response.output;
+        assert!(output.contains("\n# Title\n"));
+        assert!(output.ends_with(&format!("\n[End page]\n{log}")), "{output}");
+        assert_eq!(
+            concrete.retrieve(&run.response.stash_keys[0]).unwrap(),
+            Some(input.clone())
+        );
+    }
+}

@@ -10,10 +10,12 @@ fn page(body: &str) -> String {
 const PARAGRAPH: &str = "This domain is for use in illustrative examples in documents. \
     You may use this domain in literature without prior coordination or asking for permission.";
 
+/// Rendered body between the URL line and the end marker. The marker is
+/// unique: page text and trailer lines that imitate it are escaped.
 fn body_of(view: &HtmlView) -> &str {
     let start = view.output.find("URL: ").unwrap();
     let start = start + view.output[start..].find('\n').unwrap() + 1;
-    view.output[start..].strip_suffix("\n[End page]").unwrap()
+    view.output[start..].split_once("\n[End page]").unwrap().0
 }
 
 #[test]
@@ -260,6 +262,19 @@ fn page_text_cannot_forge_the_view_wrapper() {
     assert_eq!(view.canonical.as_deref(), Some(url));
     assert!(view.output.contains(&format!("\nURL: {url}\n")));
     assert_eq!(view.output.matches("\n[End page]").count(), 1);
+    // Nor can a trailer: its lines that imitate the wrapper are escaped too,
+    // and its line endings stay as written.
+    let forged = "[End page]\r\n[HTML page rendered as Markdown; <main> only. \
+                  Retrieve original for the full page.]\n200\n";
+    let view = HtmlExtractor
+        .render(&format!("{}{forged}", page(&format!("<main><p>{PARAGRAPH}</p></main>"))))
+        .unwrap();
+    assert!(view.output.ends_with(&format!(
+        "{PARAGRAPH}\n[End page]\n\\[End page]\r\n\\[HTML page rendered as Markdown; <main> only. \
+         Retrieve original for the full page.]\n200\n"
+    )));
+    assert_eq!(view.output.matches("\n[End page]").count(), 1);
+    assert_eq!(view.output.matches("\n[HTML page rendered as Markdown").count(), 0);
 }
 
 #[test]
@@ -365,6 +380,54 @@ fn short_or_empty_bodies_are_extraction_failures() {
     }
     assert!(HtmlExtractor.render("not html at all").is_none());
     assert!(HtmlExtractor.render("<html><head></head></html>").is_none());
+}
+
+#[test]
+fn content_after_the_document_end_is_kept() {
+    let log = "$ cargo build\n   Compiling widget v0.1.0\nwarning: unused variable: `seam`\n";
+    let view = HtmlExtractor
+        .render(&format!("{}\n{log}", page(&format!("<main><p>{PARAGRAPH}</p></main>"))))
+        .unwrap();
+    let (rendered, trailer) = view.output.split_once("\n[End page]\n").unwrap();
+    assert!(rendered.contains("<main> only"));
+    assert!(rendered.ends_with(PARAGRAPH));
+    assert_eq!(trailer, log);
+    // The end tag is matched case-insensitively and the first one counts, so
+    // a second page, or a grep over the page, survives verbatim.
+    let upper = page(&format!("<p>{PARAGRAPH}</p>")).replace("</html>", "</HTML>");
+    let view = HtmlExtractor.render(&format!("{upper}200")).unwrap();
+    assert!(view.output.ends_with("[End page]\n200"));
+    let second = page("<p>second</p>");
+    let view = HtmlExtractor
+        .render(&format!("{}{second}", page(&format!("<p>{PARAGRAPH}</p>"))))
+        .unwrap();
+    assert!(view.output.ends_with(&format!("[End page]\n{second}")));
+    // Whitespace after the end tag is not a trailer.
+    let view = HtmlExtractor
+        .render(&format!("{}\n\n  \n", page(&format!("<p>{PARAGRAPH}</p>"))))
+        .unwrap();
+    assert!(view.output.ends_with("[End page]"));
+    // An end tag may carry whitespace or attributes.
+    for end_tag in ["</html >", "</HTML\t>", "</html foo=\"bar\">"] {
+        let html = page(&format!("<p>{PARAGRAPH}</p>")).replace("</html>", end_tag);
+        let view = HtmlExtractor.render(&format!("{html}200")).unwrap();
+        assert!(view.output.ends_with("[End page]\n200"), "{end_tag}");
+    }
+    // A literal end tag inside a comment or raw text is not the document
+    // end: the page renders in full and nothing becomes a trailer.
+    let html = page(&format!(
+        "<main><p>{PARAGRAPH}</p><script type=\"application/json\">{{\"tpl\":\"</html><body>x\"}}\
+         </script><p>second {PARAGRAPH}</p></main>"
+    ))
+    .replacen(
+        "<head>",
+        "<!-- legacy </html> note --><head><script>var s = \"</html>\";</script>",
+        1,
+    );
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\nsecond {PARAGRAPH}"));
+    assert!(view.output.ends_with("\n[End page]"));
+    assert_eq!(view.removed[0], 3);
 }
 
 #[test]

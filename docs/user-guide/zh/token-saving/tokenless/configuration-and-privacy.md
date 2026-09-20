@@ -104,10 +104,11 @@ Rust 使用 `RuntimeConfig.html_extraction_enabled`；Python 使用
 
 压缩器处理成功命令输出或 API 响应中收到的完整 HTML 文档（以 `<!doctype html`
 或 `<html>` 开头），例如 `curl` 抓取的页面或 MCP 工具返回的页面，需要文本替换
-能力、可用的 Stash 和支持的恢复方式。页面转写为 Markdown 子集：标题、段落、
-列表、表格、带语言的围栏代码、带目标的链接、图片 alt、引用和提示框。MathML 公式
-输出其 TeX 注解或 `alttext`，两侧加 `$`；跨行或跨列的单元格在其覆盖的位置留空单元格，
-各行不补齐到最宽行；段落行首形似 Markdown 标题、列表项、引用、分隔线或代码围栏时加
+能力、可用的 Stash 和支持的恢复方式。`</html>` 结束标签之后的文本（如状态码或后续
+命令的输出）保留在视图之后。页面转写为 Markdown 子集：标题、段落、列表、表格、
+带语言的围栏代码、带目标的链接、图片 alt、引用和提示框。MathML 公式输出其 TeX 注解
+或 `alttext`，两侧加 `$`；跨行或跨列的单元格在其覆盖的位置留空单元格，各行不补齐
+到最宽行；段落行首形似 Markdown 标题、列表项、引用、分隔线或代码围栏时加
 转义。正文根为 `<main>`、`role=main` 元素或唯一的最外层 `<article>`（其内部嵌套的
 article，如评论，不计入），否则为整个 body。移除脚本、样式、`noscript`、模板、SVG、iframe、注释、
 `nav`、`aside`、页面级 `header`/`footer`、role 为 navigation、banner、contentinfo、
