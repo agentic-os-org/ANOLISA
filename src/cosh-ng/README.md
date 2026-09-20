@@ -27,6 +27,8 @@ For isolated command execution, use `cosh --isolated -c '<command>'` with Bash.
 Isolated Bash login invocations are rejected with status 2 because Bash cannot
 suppress logout files. See [shell invocation options](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/interactive-mode.md).
 
+Use `cosh-cli login-shell status --user alice` to inspect Linux login-shell registration and an account's shell. Registration, explicit account selection/restoration, and Agent session integration remain separate. Privileged account selection checks target-account execute access before changing the shell. See [Login-shell management](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/login-shell.md).
+
 ## Install
 
 On Alibaba Cloud Linux 4, install cosh-ng from the RPM backend in system scope
