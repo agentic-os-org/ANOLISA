@@ -78,6 +78,7 @@ pub enum Request {
     WorkspaceIdentityV2,
     GuardedCheckpointV2,
     CheckpointEvidenceV2,
+    Unregister,
 }
 
 pub enum Response {
@@ -101,6 +102,8 @@ pub enum Response {
     CheckpointEvidenceV2Ok,
     GuardedCheckpointV2Rejected,
     Error,
+    RecoverWithWarning,
+    UnregisterOk,
 }
 
 pub enum ErrorCode {
@@ -190,6 +193,7 @@ Guarded checkpoint V2 的完整说明见独立的
 | 12 | `reload`     | `ReloadConfig` | 等价于 `systemctl reload ws-ckpt`                                                                  |
 | 13 | `recover`    | `Recover`      | 把工作区还原成普通目录（撤销 init）                                                                  |
 | 14 | `daemon`     | —               | 手工启动 daemon（生产路径走 systemd）                                                                |
+| 15 | `unregister` | `Unregister` | 仅在 live 子卷缺失时移除注册，保留快照、备份与索引归档 |
 
 ### Agent 友好的设计点
 
@@ -225,7 +229,8 @@ ws-ckpt init -w <workspace>
 - **cwd 占用守卫**：在 rsync 之前调用 `guard_cwd_occupants`（含 bind-mount 别名推导），避免 symlink swap 撕掉其他进程的 cwd。扫描失败返回 `CwdScanFailed`（可重试），确认有占用返回 `CwdOccupied`（不可重试）
 - **非 UTF-8 路径拒绝**：canonicalize 后检查 `to_str().is_none()`，拒绝非 UTF-8 路径——lossy 字符串写入 manifest 后 daemon 重启会 IO 失败
 - **故障安全**：BtrfsBase InPlace 模式下先 `rename` 原目录为 `.pre-init-bak`，再用 `cp --reflink=always`（CoW 零拷贝）迁移数据；任何步骤失败都能从 backup 完整恢复用户数据。`backup_owned` 标记保证只有本次 init 创建的 backup 才会被 cleanup 还原，不会覆盖用户的其他数据
-- **wsid 并发锁**：`state.lock_wsid(&ws_id)` 串行化同 ws_id 的 init/recover，防止 SHA256(path) 相同的并发请求竞争 index_dir 和 manifest
+- **初始化与生命周期锁**：init 在读取路径或孤儿备份之前取得 `init_lock`，注册完成后释放；recover/unregister 使用相同锁。锁序为 `init_lock` → `lock_wsid` → workspace `RwLock`，避免路径 rename 窗口与恢复操作竞争。不同工作区的初始化会串行排队。
+- **中断初始化预检**：canonicalize 原路径和创建子卷之前检查 `.pre-init-bak`，使原目录已被改名的情况也能恢复。仅有备份时还原；备份与候选子卷同时存在时拒绝自动迁移，指向显式 recover。后端守卫在当前 init 的失败清理范围之外，防止删除旧子卷。
 
 ### `checkpoint`
 
@@ -394,23 +399,55 @@ ws-ckpt config -w ~/proj --reset               # 删除局部 policy,沿用全�
 ### `recover`
 
 ```bash
-ws-ckpt recover -w <workspace> [--all]
+ws-ckpt recover -w <workspace> [--force]
+ws-ckpt recover --all [--force]
 ```
 
 `init` 的逆操作：把受管工作区还原成普通目录。daemon 内 `backend.recover_workspace()`：
 
-1. 删除 symlink（原路径释放）
+1. 确认 live 子卷可读后，删除 symlink（原路径释放）
 2. `rsync -a --delete` 子卷内容回原路径（恢复为普通目录）
 3. 删除所有 snapshot 子卷（扫描 `snapshots/{ws_id}/`）
 4. 删除 workspace 子卷
 5. 从 `state.json` / `index.json` 摘除登记
 
-`--all` 批量 recover 所有已登记工作区，用于卸载前清场。
+`--all` 批量 recover 所有已登记工作区，用于卸载前清场。未注册且有
+`.pre-init-bak` 的工作区按原路径恢复：还原完整备份，保留候选子卷和快照；子卷可能是
+中断复制后的部分内容，也可能有较新数据，不能据此删除备份。恢复拒绝覆盖非空目录
+和普通文件。进入孤儿恢复前，会按规范化的父目录路径重新核对注册状态，避免别名
+误入孤儿分支。已注册工作区正常 recover 后若仍有备份，将其归档为
+`.pre-init-bak.recovered`（冲突时追加数字后缀，最多尝试 1000 个名称），
+使用不覆盖目标的原子 rename 保留内容并释放原备份名，允许重新 init。
+归档失败会返回包含检查、移动备份指引的警告。
+
+常规响应保持 `RecoverOk { workspace }`；需要用户检查保留数据时返回
+`RecoverWithWarning { workspace, warning }`。`Unregister`、`RecoverWithWarning`
+和 `UnregisterOk` 追加在实际 IPC 枚举末尾，保留旧 bincode 变体编号与字段布局。
+旧客户端不能识别新增操作/响应，使用新恢复路径时应同步更新 ws-ckpt CLI、daemon
+和 cosh-ng。cosh-ng 镜像协议追加相同变体，并将恢复提示作为成功 JSON 的可选
+`meta.warning` 返回；原路径存在性由 daemon 判断，允许中断初始化后的缺失路径。
 
 设计取舍：
 - **有意不加 cwd guard**：recover 是终止性的"拆除"操作，由 CLI 的 `ConfirmationRequired` prompt 守卫（交互式确认 + warning 提示用户自行检查 `/proc/*/cwd`）。不在 daemon 端加 `/proc` scan，避免管理员 `--force` 拆除时被 stale process 阻塞
 - **rsync 失败即 bail**：rsync 失败后不继续删除快照和子卷（issue #674），保留完整数据供重试
-- **wsid 并发锁**：recover 持有 `lock_wsid` 直到 `save_manifest` 完成，阻止同路径的并发 init 竞争同一 index_dir
+- **生命周期锁**：recover 先取得 `init_lock`，再持有 `lock_wsid` 直到 `save_manifest` 完成，阻止并发 init 竞争路径、index_dir 和 manifest
+
+### `unregister`
+
+```bash
+ws-ckpt unregister -w <workspace-or-id> [--force]
+```
+
+仅处理已注册但 live 子卷 `symlink_metadata` 返回 NotFound 的状态；子卷仍存在或
+无法确认时拒绝操作。命令先将 `indexes/<ws_id>` 改名为
+`indexes/<ws_id>.unregistered`（不覆盖已有归档），同步 `indexes/` 目录后，
+在 manifest 锁内持久化移除结果，
+再解除内存注册并移除指向缺失子卷的受管 symlink。持久化失败时还原 active index，
+保留原内存注册和 symlink，允许直接重试。若进程在索引归档后、manifest 提交前退出，
+启动时以 manifest 为准，校验并还原归档中的索引与策略，再注册工作区；
+归档损坏会明确报错。manifest 已提交注销的归档不会复活注册。
+快照目录和 `.pre-init-bak` 保留；响应 `UnregisterOk { workspace, retained_paths }`
+明确表示未恢复数据，并只列出实际存在的保留位置。`--force` 与 recover 一样仅跳过 CLI 确认。
 
 ---
 

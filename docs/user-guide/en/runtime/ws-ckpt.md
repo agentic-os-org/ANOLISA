@@ -82,7 +82,8 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | View/edit configuration |
 | `ws-ckpt plugin install --runtime openclaw\|hermes` | Install runtime plugin |
 | `ws-ckpt plugin uninstall --runtime openclaw\|hermes` | Uninstall runtime plugin |
-| `ws-ckpt recover [-w <workspace> \| --all] [--force]` | Recover from interrupted operations |
+| `ws-ckpt recover [-w <workspace> \| --all] [--force]` | Restore a plain directory or an interrupted initialization backup |
+| `ws-ckpt unregister -w <workspace> [--force]` | Remove a registration only when its live subvolume is missing; restore no data |
 | `ws-ckpt reload` | Reload daemon configuration |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | Start the daemon process |
 
@@ -113,6 +114,54 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # Enable auto-cleanup for workspace
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### Recovering interrupted initialization and stale registrations
+
+Normally, `recover` copies a registered workspace into a plain directory, then
+removes its managed subvolume and snapshots. After interrupted initialization,
+choose the action that matches the remaining state:
+
+| State | Action |
+|-------|--------|
+| Only `<workspace>.pre-init-bak` remains, with no historical subvolume | Run `init` again; it restores the backup before initializing. The original path must be missing, an empty directory, or a symlink. |
+| The workspace is unregistered, with both backup and migrated subvolume present | Run `recover -w <workspace>` to restore the complete backup. Potentially partial or newer subvolumes and snapshots remain, and their locations are reported for inspection. You can then run `init` again. |
+| The workspace is registered but its live subvolume is missing | `recover` reports the missing source. Run `unregister -w <workspace>` to remove the stale registration while retaining recovery material. |
+
+Backup restoration refuses to overwrite a non-empty directory or a regular file.
+Inspect and move any conflicting data first. A `.pre-init-bak` left after a
+registered workspace is recovered moves to `.pre-init-bak.recovered` (with a
+numeric suffix if occupied). Its contents are retained and the location is
+reported, so it does not block the next `init`. Archive failures report the
+backup location and require inspecting and moving it before reinitialization.
+`recover --all` processes registered workspaces only; address an unregistered,
+interrupted initialization by its original workspace path.
+
+```bash
+ws-ckpt recover -w /path/to/workspace --force
+```
+
+`unregister` accepts a registered path or workspace ID and refuses to run while
+the live subvolume exists. It restores no data and deletes neither snapshots nor
+`.pre-init-bak`. The old index moves to
+`<state-dir>/indexes/<ws_id>.unregistered` so a later initialization cannot inherit
+its metadata; an occupied archive location is never overwritten. The command
+lists existing retained locations for later manual recovery or cleanup.
+If the daemon stops after archiving the index but before persisting the
+unregistration, startup restores that index and its policy before loading the
+still-registered workspace. It removes only
+the managed symlink pointing to the missing subvolume, preserving other files or
+directories at the original path. A later initialization allocates a fresh ID
+when snapshots or an archived index still occupy the old ID.
+
+```bash
+ws-ckpt unregister -w /path/to/workspace --force
+mkdir -p /path/to/workspace
+ws-ckpt init -w /path/to/workspace
+```
+
+Both commands ask for confirmation by default. `--force` only skips that prompt;
+it does not permit overwriting conflicting data or unregistering a workspace
+whose live subvolume still exists.
 
 ### diff Output Markers
 

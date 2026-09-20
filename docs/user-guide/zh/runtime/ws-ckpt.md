@@ -82,7 +82,8 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | 查看/编辑配置 |
 | `ws-ckpt plugin install --runtime openclaw\|hermes` | 安装运行时插件 |
 | `ws-ckpt plugin uninstall --runtime openclaw\|hermes` | 卸载运行时插件 |
-| `ws-ckpt recover [-w <workspace> \| --all] [--force]` | 从中断操作中恢复 |
+| `ws-ckpt recover [-w <workspace> \| --all] [--force]` | 将工作区恢复为普通目录，或还原中断初始化的备份 |
+| `ws-ckpt unregister -w <workspace> [--force]` | 仅在子卷丢失时解除注册；不恢复数据 |
 | `ws-ckpt reload` | 重载 daemon 配置 |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | 启动 daemon 进程 |
 
@@ -113,6 +114,45 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # 为工作区启用自动清理
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### 恢复中断的初始化与悬空注册
+
+正常情况下，`recover` 将已注册工作区复制回普通目录，再删除受管子卷和快照。
+如果初始化被中断，按以下状态处理：
+
+| 状态 | 处理方式 |
+|------|----------|
+| 只有 `<workspace>.pre-init-bak`，没有历史子卷 | 重新运行 `init`；它会先还原备份，再初始化。原路径必须不存在、为空目录或为 symlink。 |
+| 未注册，但备份和迁移中的子卷都存在 | 运行 `recover -w <workspace>`，还原完整备份，保留可能不完整或包含较新内容的子卷及快照，并输出位置供检查。随后可以重新 `init`。 |
+| 已注册，但 live 子卷已丢失 | `recover` 会明确报告缺失；运行 `unregister -w <workspace>` 解除悬空注册，保留仍存在的恢复资料。 |
+
+恢复备份不会覆盖非空目录或普通文件。若原路径已有其他数据，先检查并移走这些数据。
+已注册工作区恢复成功后若仍有 `.pre-init-bak`，会将其归档为
+`.pre-init-bak.recovered`（位置已占用时追加数字后缀），保留内容并输出位置，
+避免阻断下一次 `init`。若归档失败，提示会列出备份位置，需要先检查并移走备份再初始化。
+`recover --all` 只处理已注册工作区；未注册的中断初始化必须通过原工作区路径指定。
+
+```bash
+ws-ckpt recover -w /path/to/workspace --force
+```
+
+`unregister` 接受已注册的路径或 workspace ID；当 live 子卷仍存在时会拒绝操作。
+它不会恢复数据，也不会删除快照或 `.pre-init-bak`。原索引移至
+`<state-dir>/indexes/<ws_id>.unregistered`，避免下一次初始化继承旧元数据；若该位置
+已被占用，命令会拒绝覆盖。命令会列出实际存在的保留位置，供后续手工恢复或清理使用。
+若 daemon 在归档索引后、持久化注销前退出，启动时会先还原该索引及其策略，
+再加载仍在注册记录中的工作区。
+仅指向缺失子卷的受管 symlink 会被移除，原路径上的其他文件或目录会保留。
+若快照或索引归档仍占用旧 ID，下一次初始化会分配新的 ID。
+
+```bash
+ws-ckpt unregister -w /path/to/workspace --force
+mkdir -p /path/to/workspace
+ws-ckpt init -w /path/to/workspace
+```
+
+两条命令默认要求交互确认；`--force` 仅跳过确认，不允许覆盖冲突数据，也不会让
+`unregister` 接受仍有 live 子卷的工作区。
 
 ### diff 输出标记
 

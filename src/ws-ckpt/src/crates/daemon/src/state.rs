@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
@@ -56,7 +57,7 @@ pub struct DaemonState {
     /// Distinct from `WorkspaceState::policy_io_mu` (which lives inside an Arc
     /// that recover may unregister). Held across `await`.
     wsid_locks: DashMap<String, Arc<Mutex<()>>>,
-    /// Serializes initialization before paths can change during migration.
+    /// Serializes init and recovery before a workspace ID can be resolved.
     pub(crate) init_lock: Mutex<()>,
     /// Serializes manifest snapshots and writes across different workspaces.
     manifest_save_lock: Mutex<()>,
@@ -171,17 +172,22 @@ impl DaemonState {
             let index_dir = state.index_dir(ws_id);
             let index_path = index_dir.join(INDEX_FILE);
 
-            let index = match tokio::fs::read_to_string(&index_path).await {
-                Ok(content) => match serde_json::from_str::<SnapshotIndex>(&content) {
-                    Ok(idx) => idx,
+            let recovered = Self::restore_interrupted_unregister(&index_dir).await?;
+            let index = if let Some((index, _)) = &recovered {
+                index.clone()
+            } else {
+                match tokio::fs::read_to_string(&index_path).await {
+                    Ok(content) => match serde_json::from_str::<SnapshotIndex>(&content) {
+                        Ok(idx) => idx,
+                        Err(e) => {
+                            warn!("Failed to parse index file {:?}: {}", index_path, e);
+                            SnapshotIndex::new(entry.workspace_path.clone())
+                        }
+                    },
                     Err(e) => {
-                        warn!("Failed to parse index file {:?}: {}", index_path, e);
+                        warn!("Failed to read index file {:?}: {}", index_path, e);
                         SnapshotIndex::new(entry.workspace_path.clone())
                     }
-                },
-                Err(e) => {
-                    warn!("Failed to read index file {:?}: {}", index_path, e);
-                    SnapshotIndex::new(entry.workspace_path.clone())
                 }
             };
 
@@ -204,8 +210,10 @@ impl DaemonState {
             }
             // Shared helper: Missing → inherit-global; Err → fail-safe
             // (auto_cleanup=false + policy_failsafe=true). See [[ws-failsafe]].
-            let (policy, failsafe) =
-                load_workspace_policy_with_failsafe(&index_dir, ws_id, "rebuild");
+            let (policy, failsafe) = match recovered {
+                Some((_, policy)) => (policy, false),
+                None => load_workspace_policy_with_failsafe(&index_dir, ws_id, "rebuild"),
+            };
             state.register_workspace_with_policy(
                 ws_id.clone(),
                 entry.workspace_path.clone(),
@@ -261,9 +269,71 @@ impl DaemonState {
         Ok(state)
     }
 
+    // The manifest is the unregister commit point. An archive for a still-listed
+    // workspace belongs to an interrupted unregister and must remain registered.
+    async fn restore_interrupted_unregister(
+        index_dir: &Path,
+    ) -> anyhow::Result<Option<(SnapshotIndex, WorkspacePolicy)>> {
+        match tokio::fs::symlink_metadata(index_dir).await {
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context(format!("inspect index directory {index_dir:?}")),
+        }
+        let ws_id = index_dir
+            .file_name()
+            .context("index directory has no workspace ID")?;
+        let archive = index_dir.with_file_name(format!("{}.unregistered", ws_id.to_string_lossy()));
+        match tokio::fs::symlink_metadata(&archive).await {
+            Ok(meta) => anyhow::ensure!(
+                meta.is_dir(),
+                "index archive is not a directory: {archive:?}"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).context(format!("inspect index archive {archive:?}")),
+        }
+
+        // Validate before renaming so a corrupt archive also fails visibly on
+        // the next restart, instead of falling back to an empty active index.
+        let content = tokio::fs::read_to_string(archive.join(INDEX_FILE))
+            .await
+            .with_context(|| format!("read interrupted unregister index in {archive:?}"))?;
+        let index = serde_json::from_str(&content)
+            .with_context(|| format!("parse interrupted unregister index in {archive:?}"))?;
+        let policy = match load_workspace_policy(&archive)
+            .with_context(|| format!("load interrupted unregister policy in {archive:?}"))?
+        {
+            LoadPolicyOutcome::Missing => WorkspacePolicy::default(),
+            LoadPolicyOutcome::Loaded(policy) => policy,
+        };
+        tokio::fs::rename(&archive, index_dir)
+            .await
+            .with_context(|| {
+                format!("restore interrupted unregister archive {archive:?} to {index_dir:?}")
+            })?;
+        index_store::sync_parent(index_dir).await?;
+        warn!(
+            "Restored index archive after interrupted unregister: {:?}",
+            index_dir
+        );
+        Ok(Some((index, policy)))
+    }
+
     /// Save current runtime state to state.json (atomic write+rename+fsync)
     pub async fn save_manifest(&self) -> anyhow::Result<()> {
         let _save_guard = self.manifest_save_lock.lock().await;
+        self.write_manifest(None).await
+    }
+
+    /// Persist removal before changing runtime registration or stopping its watcher.
+    /// The caller must hold the workspace mutation lock through this operation.
+    pub(crate) async fn persist_unregister_workspace(&self, ws_id: &str) -> anyhow::Result<()> {
+        let _save_guard = self.manifest_save_lock.lock().await;
+        self.write_manifest(Some(ws_id)).await?;
+        self.unregister_workspace(ws_id).await;
+        Ok(())
+    }
+
+    async fn write_manifest(&self, omitted_ws_id: Option<&str>) -> anyhow::Result<()> {
         let backend_type = self.backend.backend_type();
         let backend = BackendIdentity {
             backend_type,
@@ -287,7 +357,10 @@ impl DaemonState {
             DAEMON_STATE_VERSION,
             backend,
             paths,
-            self.collect_workspace_entries(),
+            self.collect_workspace_entries()
+                .into_iter()
+                .filter(|entry| Some(entry.ws_id.as_str()) != omitted_ws_id)
+                .collect(),
         );
 
         // Perform sync IO in a blocking thread
@@ -947,6 +1020,141 @@ mod tests {
         let restored = restored.read().await;
         assert!(restored.index.snapshots.contains_key("orphan-snapshot"));
         assert!(restored.index.governed_evidence.contains_key("skipped-1"));
+    }
+
+    async fn unregister_restart_fixture(root: &Path) -> DaemonState {
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            root.join("mount"),
+            root.join("test.img"),
+        ));
+        let state = DaemonState::new(test_config(), backend, root.join("state"));
+        let path = root.join("missing-workspace");
+        let mut index = SnapshotIndex::new(path.clone());
+        index.snapshots.insert(
+            "retained-snapshot".to_string(),
+            SnapshotMeta {
+                message: Some("keep this snapshot".to_string()),
+                metadata: None,
+                pinned: true,
+                created_at: Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![],
+            },
+        );
+        tokio::fs::create_dir_all(
+            state
+                .backend
+                .snapshots_root()
+                .join("ws-restart/retained-snapshot"),
+        )
+        .await
+        .unwrap();
+        index_store::save(&state.index_dir("ws-restart"), &index)
+            .await
+            .unwrap();
+        save_workspace_policy(
+            &state.index_dir("ws-restart"),
+            &WorkspacePolicy {
+                auto_cleanup: Some(false),
+                auto_cleanup_keep: Some(CleanupRetention::Count(7)),
+            },
+        )
+        .unwrap();
+        state.register_workspace("ws-restart".to_string(), path, index);
+        state.save_manifest().await.unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn restart_rolls_back_uncommitted_unregister_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(temp.path()).await;
+        let active = state.index_dir("ws-restart");
+        let archive = active.with_file_name("ws-restart.unregistered");
+        tokio::fs::rename(&active, &archive).await.unwrap();
+        // Model termination after archive rename, before manifest replacement.
+        let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let rebuilt = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            state.backend.clone(),
+            state.state_dir.clone(),
+            "persisted",
+        )
+        .await
+        .unwrap();
+        let ws = rebuilt.get_by_wsid("ws-restart").unwrap();
+        let ws = ws.read().await;
+        assert_eq!(ws.index.snapshots.len(), 1);
+        let snapshot = &ws.index.snapshots["retained-snapshot"];
+        assert!(snapshot.pinned);
+        assert!(!snapshot.missing);
+        assert_eq!(snapshot.message.as_deref(), Some("keep this snapshot"));
+        assert_eq!(ws.policy.auto_cleanup, Some(false));
+        assert_eq!(
+            ws.policy.auto_cleanup_keep,
+            Some(CleanupRetention::Count(7))
+        );
+        assert!(!ws.policy_failsafe);
+        assert!(active.join(INDEX_FILE).exists());
+        assert!(active.join("policy.toml").exists());
+        assert!(!archive.exists());
+    }
+
+    #[tokio::test]
+    async fn restart_keeps_committed_unregister_archived() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(temp.path()).await;
+        let active = state.index_dir("ws-restart");
+        let archive = active.with_file_name("ws-restart.unregistered");
+        tokio::fs::rename(&active, &archive).await.unwrap();
+        state
+            .persist_unregister_workspace("ws-restart")
+            .await
+            .unwrap();
+        // Model termination after manifest replacement, before link cleanup.
+        let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let rebuilt = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            state.backend.clone(),
+            state.state_dir.clone(),
+            "persisted",
+        )
+        .await
+        .unwrap();
+        assert!(rebuilt.all_workspaces().is_empty());
+        assert!(!active.exists());
+        assert!(archive.join(INDEX_FILE).exists());
+        assert!(archive.join("policy.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn restart_rejects_corrupt_uncommitted_unregister_archive() {
+        for damaged_file in [INDEX_FILE, "policy.toml"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = unregister_restart_fixture(temp.path()).await;
+            let active = state.index_dir("ws-restart");
+            let archive = active.with_file_name("ws-restart.unregistered");
+            tokio::fs::rename(&active, &archive).await.unwrap();
+            tokio::fs::write(archive.join(damaged_file), "invalid metadata")
+                .await
+                .unwrap();
+            let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+            let result = DaemonState::rebuild_from_persisted(
+                &manifest,
+                test_config(),
+                state.backend.clone(),
+                state.state_dir.clone(),
+                "persisted",
+            )
+            .await;
+            let error = result.err().expect("corrupt archive must stop rebuilding");
+            assert!(error.to_string().contains("interrupted unregister"));
+            assert!(archive.exists());
+            assert!(!active.exists());
+        }
     }
 
     #[test]

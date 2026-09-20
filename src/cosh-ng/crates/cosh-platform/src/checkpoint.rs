@@ -157,7 +157,14 @@ impl CkptClient {
             workspace: workspace.to_string(),
         };
         match self.send_request(&req)? {
-            WsCkptResponse::RecoverOk { workspace } => Ok(CkptRecoverResult { workspace }),
+            WsCkptResponse::RecoverOk { workspace } => Ok(CkptRecoverResult {
+                workspace,
+                warning: None,
+            }),
+            WsCkptResponse::RecoverWithWarning { workspace, warning } => Ok(CkptRecoverResult {
+                workspace,
+                warning: Some(warning),
+            }),
             WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
             _ => Err(unexpected_response()),
         }
@@ -1768,6 +1775,33 @@ mod tests {
         daemon.join().unwrap();
 
         assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recover_preserves_warning_and_historical_success_json() {
+        for warning in [None, Some("Backup retained at /tmp/ws.pre-init-bak")] {
+            let response = match warning {
+                None => WsCkptResponse::RecoverOk {
+                    workspace: "/tmp/ws".into(),
+                },
+                Some(warning) => WsCkptResponse::RecoverWithWarning {
+                    workspace: "/tmp/ws".into(),
+                    warning: warning.into(),
+                },
+            };
+            let (_dir, socket_path, daemon) = spawn_one_shot_daemon(response);
+            let result = trusted_client(&socket_path).recover("/tmp/ws").unwrap();
+            daemon.join().unwrap();
+            assert_eq!(result.warning.as_deref(), warning);
+            let mut expected = serde_json::json!({"workspace": "/tmp/ws"});
+            if let Some(warning) = warning {
+                expected["warning"] = warning.into();
+            }
+            assert_eq!(serde_json::to_value(result).unwrap(), expected);
+            let decoded: CkptRecoverResult = serde_json::from_value(expected).unwrap();
+            assert_eq!(decoded.warning.as_deref(), warning);
+        }
     }
 
     #[cfg(target_os = "linux")]

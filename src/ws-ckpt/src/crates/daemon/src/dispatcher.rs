@@ -182,6 +182,10 @@ pub(crate) async fn dispatch_with_context(
             Err(e) => Err(e),
             Ok(()) => crate::workspace_mgr::recover_workspace(state, &workspace).await,
         },
+        Request::Unregister { workspace } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => crate::workspace_mgr::unregister_missing_workspace(state, &workspace).await,
+        },
         Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
         Request::WorkspaceIdentityV2 { registration_path } => {
             return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;

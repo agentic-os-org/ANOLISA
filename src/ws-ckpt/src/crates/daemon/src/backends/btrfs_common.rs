@@ -17,109 +17,71 @@ pub fn backup_path_for(original_path: &str) -> String {
     format!("{}.pre-init-bak", original_path.trim_end_matches('/'))
 }
 
-/// Recover an orphan `.pre-init-bak` left by an interrupted prior init.
-///
-/// Called by `do_init_storage` in `btrfs_base.rs` and `btrfs_loop.rs` BEFORE
-/// the Step 3 `rename(original_path -> backup_path)`. Two cases handled:
-///
-/// 1. Backup exists + subvol_path does NOT exist:
-///    Prior init was interrupted AFTER Step 3 (rename) but BEFORE Step 4
-///    (data migration). User's original data is sitting in the backup. The
-///    right thing is to rename the backup back to `original_path`, restoring
-///    the user's data, and let the caller proceed with a fresh normal init.
-///    A stale empty directory at `original_path` (e.g., from a fixture's
-///    `rm -rf + mkdir -p`) is removed first; a non-empty dir is refused to
-///    avoid destroying user data.
-///
-/// 2. Backup exists + subvol_path DOES exist:
-///    Prior init completed data migration (Step 4) and may have created the
-///    symlink (Step 5). State is ambiguous (subvol might be valid, symlink
-///    might be dangling, original_path might be a stale dir, etc.). Auto-
-///    recovery would risk data loss, so we bail with an actionable error
-///    pointing at `ws-ckpt recover -w <path> --force` (which we also patch
-///    in this PR to clean orphan backups at the end of recovery).
-///
-/// 3. No backup exists: noop.
+/// Restore a backup only when no previous subvolume can contain newer data.
+/// Call before creating storage and outside cleanup for the current init.
 pub async fn recover_orphan_backup(original_path: &str, subvol_path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(backup_path_for(original_path)).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    let subvol_exists = match tokio::fs::symlink_metadata(subvol_path).await {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e.into()),
+    };
+    if subvol_exists {
+        bail!(
+            "found orphan backup {:?} and existing subvolume {:?} from an interrupted prior init. \
+             Run `ws-ckpt recover -w {:?} --force` to restore the original backup; \
+             the potentially partial or newer subvolume is retained for inspection",
+            backup_path_for(original_path),
+            subvol_path,
+            original_path
+        );
+    }
+    restore_orphan_backup(original_path).await
+}
+
+/// Restore the complete pre-init backup without deleting any migrated storage.
+/// Refuse occupied destinations so both versions of user data survive.
+pub async fn restore_orphan_backup(original_path: &str) -> Result<()> {
     let backup_path = backup_path_for(original_path);
-    if tokio::fs::symlink_metadata(&backup_path).await.is_err() {
-        return Ok(());
+    let backup_meta = tokio::fs::symlink_metadata(&backup_path).await?;
+    if !backup_meta.is_dir() {
+        bail!("orphan backup {:?} is not a regular directory", backup_path);
     }
-
-    let subvol_exists = tokio::fs::metadata(subvol_path)
-        .await
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
-
-    if !subvol_exists {
-        // Case 1: prior init crashed between Step 3 (rename) and Step 4
-        // (data migration). User data is in backup. Restore it back to
-        // original_path so the caller can re-run a clean init.
-        warn!(
-            "init: orphan backup {:?} detected (prior init interrupted before data migration); \
-             restoring user data from backup",
-            backup_path
-        );
-        // Remove stale state at original_path before restoring backup into it.
-        match tokio::fs::symlink_metadata(original_path).await {
-            Ok(m) if m.file_type().is_symlink() => {
-                // dangling or stale symlink — safe to remove
-                let _ = tokio::fs::remove_file(original_path).await;
-            }
-            Ok(m) if m.is_dir() => {
-                let mut entries = tokio::fs::read_dir(original_path).await?;
-                let is_empty = entries.next_entry().await?.is_none();
-                if !is_empty {
-                    bail!(
-                        "found orphan backup {:?} but {:?} is a non-empty directory; \
-                         refusing to overwrite user data. Inspect {:?} (likely contains \
-                         data from interrupted init) and {:?}, move data out of {:?} or \
-                         remove {:?} manually, then re-run init",
-                        backup_path,
-                        original_path,
-                        backup_path,
-                        original_path,
-                        original_path,
-                        backup_path
-                    );
-                }
-                let _ = tokio::fs::remove_dir(original_path).await;
-            }
-            Ok(_) => {
-                bail!(
-                    "found orphan backup {:?} but {:?} is an unexpected file type; \
-                     remove {:?} manually before retrying",
-                    backup_path,
-                    original_path,
-                    original_path
-                );
-            }
-            Err(_) => { /* original_path missing — fine, rename will create it */ }
+    match tokio::fs::symlink_metadata(original_path).await {
+        Ok(m) if m.file_type().is_symlink() => {
+            tokio::fs::remove_file(original_path).await?;
         }
-        tokio::fs::rename(&backup_path, original_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to restore orphan backup {:?} -> {:?}",
-                    backup_path, original_path
-                )
-            })?;
-        info!(
-            "init: restored user data from orphan backup {:?} to {:?}; proceeding with fresh init",
-            backup_path, original_path
-        );
-        return Ok(());
+        Ok(m) if m.is_dir() => {
+            if tokio::fs::read_dir(original_path)
+                .await?
+                .next_entry()
+                .await?
+                .is_some()
+            {
+                bail!("found orphan backup {:?} but {:?} is a non-empty directory; refusing to overwrite user data. Inspect both locations and move or remove the destination before retrying", backup_path, original_path);
+            }
+            tokio::fs::remove_dir(original_path).await?;
+        }
+        Ok(_) => bail!(
+            "cannot restore backup: {:?} is an unexpected file type",
+            original_path
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
-
-    // Case 2: subvol_path exists. Ambiguous state — bail with actionable error.
-    bail!(
-        "found orphan backup {:?} and existing subvolume {:?} from an interrupted prior init. \
-         Run `ws-ckpt recover -w {} --force` to restore user data from the subvolume and clean \
-         up the orphan backup, then re-run init. If `ws-ckpt recover` does not list this workspace, \
-         manually inspect {:?} (likely contains pre-migration user data) and {:?}, move data out \
-         as needed, and remove the backup before retrying",
-        backup_path, subvol_path, original_path, backup_path, subvol_path
-    );
+    tokio::fs::rename(&backup_path, original_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to restore orphan backup {:?} -> {:?}",
+                backup_path, original_path
+            )
+        })?;
+    Ok(())
 }
 
 /// Roll back a failed init_workspace; `backup_owned=true` only when this init created the backup (#673).

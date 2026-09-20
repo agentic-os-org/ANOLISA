@@ -125,6 +125,11 @@ pub enum WsCkptRequest {
         operation_id: String,
         operation_digest: [u8; 32],
     },
+    /// Removes a registration only when its live subvolume is missing.
+    Unregister {
+        /// Registered workspace path or ID.
+        workspace: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -246,6 +251,20 @@ pub enum WsCkptResponse {
     GuardedRollbackV2Rejected {
         code: GuardedRollbackRejectionCodeV2,
         message: String,
+    },
+    /// Recovery succeeded while additional user data remains for inspection.
+    RecoverWithWarning {
+        /// Restored workspace path.
+        workspace: String,
+        /// Locations and reason for retaining additional data.
+        warning: String,
+    },
+    /// Registration removed without restoring data or deleting snapshots.
+    UnregisterOk {
+        /// Original workspace path.
+        workspace: String,
+        /// Locations intentionally retained for manual recovery.
+        retained_paths: Vec<String>,
     },
 }
 
@@ -708,6 +727,9 @@ pub struct CkptInitResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CkptRecoverResult {
     pub workspace: String,
+    /// Additional data retained for inspection after successful recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 // ===========================================================================

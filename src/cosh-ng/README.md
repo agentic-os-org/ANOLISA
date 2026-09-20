@@ -337,6 +337,11 @@ The repository includes fake-adapter conformance coverage for the direct ACP
 path. Run the separate real Codex/Claude adapter checks and manual Terminal
 acceptance before treating a particular ACP installation as production-validated.
 
+`cosh-cli checkpoint recover --workspace <path>` supports recovery of interrupted
+initialization through the ws-ckpt daemon. Successful JSON includes `meta.warning`
+when retained data needs inspection. See
+[workspace checkpoints](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/checkpoint.md).
+
 ## Documentation
 
 - [User guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)

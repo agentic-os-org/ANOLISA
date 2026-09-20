@@ -142,6 +142,10 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
             ws_total: 3,
             ws_with_override: 1,
         },
+        Request::Unregister { workspace } => Response::UnregisterOk {
+            workspace,
+            retained_paths: Vec::new(),
+        },
         Request::Recover { workspace } => Response::RecoverOk { workspace },
         Request::HealthAdvisory => Response::HealthAdvisoryOk {
             over_limit_workspace_count: 0,

@@ -81,12 +81,6 @@ impl BtrfsBaseBackend {
         let orig_gid = orig_meta.gid();
 
         let backup_path = backup_path_for(original_path);
-        // Recover orphan `.pre-init-bak` from an interrupted prior init before
-        // proceeding with Step 3 (rename). If recovery is impossible (ambiguous
-        // state — subvol already exists), recover_orphan_backup returns an
-        // actionable error pointing the user at `ws-ckpt recover`. See
-        // btrfs_common::recover_orphan_backup for the full rationale.
-        recover_orphan_backup(original_path, subvol_path).await?;
 
         tokio::fs::rename(original_path, &backup_path)
             .await
@@ -208,6 +202,8 @@ impl StorageBackend for BtrfsBaseBackend {
         original_path: &str,
         ws_id: &str,
     ) -> anyhow::Result<WorkspaceInfo> {
+        recover_orphan_backup(original_path, &self.data_root.join(ws_id)).await?;
+
         // Resolve symlink to real path to avoid copying the symlink itself
         let resolved = resolve_symlink_path(original_path).await?;
         let resolved_str = resolved.to_string_lossy().to_string();
@@ -302,6 +298,16 @@ impl StorageBackend for BtrfsBaseBackend {
         let subvol_path = self.data_root.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
 
+        // Record subvolume root permissions before rsync
+        let subvol_meta = tokio::fs::metadata(&subvol_path).await.with_context(|| {
+            format!(
+                "cannot recover: subvolume {:?} is missing or unreadable; no data was restored. \
+                 If it was deleted, use `ws-ckpt unregister -w {:?} --force` to remove only \
+                 the registration while retaining backups and snapshots",
+                subvol_path, original_path
+            )
+        })?;
+
         // 1. Remove symlink; refuse if a non-symlink directory occupies the path
         match tokio::fs::symlink_metadata(original_path).await {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -322,10 +328,6 @@ impl StorageBackend for BtrfsBaseBackend {
         // 2. Rsync subvolume contents back to original path (restore as normal directory)
         let src = format!("{}/", subvol_path.to_string_lossy()); // trailing / is important
 
-        // Record subvolume root permissions before rsync
-        let subvol_meta = tokio::fs::metadata(&subvol_path)
-            .await
-            .context("failed to read subvolume metadata")?;
         let sv_uid = subvol_meta.uid();
         let sv_gid = subvol_meta.gid();
         let sv_mode = subvol_meta.mode();
@@ -376,20 +378,8 @@ impl StorageBackend for BtrfsBaseBackend {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
-        // 5. Clean orphan `.pre-init-bak` if it still exists (prior interrupted
-        //    init). Safe to remove at this point — subvol is gone, original_path
-        //    has been restored as a normal directory in steps above.
-        let backup_path = backup_path_for(original_path);
-        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
-            if let Err(e) = tokio::fs::remove_dir_all(&backup_path).await {
-                warn!("failed to clean orphan backup {:?}: {:#}", backup_path, e);
-            } else {
-                info!("cleaned orphan backup {:?} during recover", backup_path);
-            }
-        }
-
-        // NOTE: BtrfsBase does NOT need umount, losetup -d, or img deletion
-        // (that's the key difference from BtrfsLoop)
+        // The backup can contain files absent from an interrupted migration.
+        // Leave it intact; the manager archives it and reports the new location.
 
         Ok(())
     }

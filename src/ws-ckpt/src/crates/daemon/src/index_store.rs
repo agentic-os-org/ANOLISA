@@ -30,6 +30,17 @@ pub async fn save_durable(ws_dir: &Path, index: &SnapshotIndex) -> anyhow::Resul
     Ok(())
 }
 
+/// Persist an index directory rename before publishing its lifecycle change.
+pub async fn sync_parent(index_dir: &Path) -> anyhow::Result<()> {
+    let parent = index_dir
+        .parent()
+        .context("index directory has no parent")?
+        .to_path_buf();
+    tokio::task::spawn_blocking(move || ws_ckpt_common::persist::fsync_dir(&parent))
+        .await
+        .context("index directory sync task failed")?
+}
+
 /// Load a SnapshotIndex from the index.json file on disk.
 pub async fn load(ws_dir: &Path) -> anyhow::Result<SnapshotIndex> {
     let index_path = ws_dir.join(INDEX_FILE);

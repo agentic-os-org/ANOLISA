@@ -15,7 +15,7 @@
 | Command | Required arguments | Purpose |
 |---|---|---|
 | `cosh-cli checkpoint init` | `--workspace <path>` | Initialize a workspace |
-| `cosh-cli checkpoint recover` | `--workspace <path>` | Recover workspace metadata |
+| `cosh-cli checkpoint recover` | `--workspace <path>` | Restore a plain directory or an interrupted initialization backup |
 | `cosh-cli checkpoint create` | `--workspace <path> --id <id>` | Create a snapshot |
 | `cosh-cli checkpoint list` | none (`--workspace` is optional) | List snapshots |
 | `cosh-cli checkpoint restore <id>` | `--workspace <path>` | Restore a snapshot |
@@ -35,6 +35,14 @@ cosh-cli checkpoint restore before-change --workspace /home/agent/project
 ```
 
 Optional controls include `--pin` and `--metadata <json>` on `create`, `--force` and `--workspace <path>` on `delete`, and `--keep <count>` on `cleanup`. `list` and `status` can omit `--workspace` to query all workspaces known to the daemon.
+
+`recover` delegates workspace validation to the daemon, so it also accepts an
+original path that is missing after interrupted initialization. When recovery
+succeeds with migrated data or backups left for inspection, the JSON response
+remains `ok: true` and includes the daemon's message and locations in
+`meta.warning`; ordinary success omits that field. See the
+[ws-ckpt recovery guide](../../../runtime/ws-ckpt.md#recovering-interrupted-initialization-and-stale-registrations)
+for data sources and handling a missing live subvolume.
 
 ## Typical rollback flow
 

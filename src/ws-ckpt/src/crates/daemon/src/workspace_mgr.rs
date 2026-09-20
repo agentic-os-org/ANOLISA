@@ -99,6 +99,63 @@ async fn adopt_existing_subvol(
     }
 }
 
+// Resolve the parent only: an interrupted init may have removed the final
+// directory or left a dangling workspace symlink.
+async fn orphan_workspace_path(workspace: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let path = std::path::Path::new(strip_trailing_slashes(workspace));
+    let Some(name) = path.file_name() else {
+        return Ok(None);
+    };
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let parent = match tokio::fs::canonicalize(parent).await {
+        Ok(parent) => parent,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let original = parent.join(name);
+    let original_str = original
+        .to_str()
+        .context("workspace path is not valid UTF-8")?;
+    match tokio::fs::symlink_metadata(crate::backends::btrfs_common::backup_path_for(original_str))
+        .await
+    {
+        Ok(_) => Ok(Some(original)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// A truncated path hash is not proof of ownership. Candidates block automatic
+// recovery, but are never deleted or copied over the complete original backup.
+async fn orphan_storage_paths(
+    state: &Arc<DaemonState>,
+    original: &str,
+) -> anyhow::Result<Vec<String>> {
+    let base = generate_ws_id_base(original);
+    let mut paths = Vec::new();
+    let mut entries = match tokio::fs::read_dir(state.backend.data_root()).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == base
+            || name
+                .strip_prefix(&format!("{base}-"))
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            paths.push(entry.path().display().to_string());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 // ── init ──
 
 pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<Response> {
@@ -110,9 +167,34 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     }
     let workspace = strip_trailing_slashes(workspace);
     // Lock before resolving aliases or observing the rename-to-symlink gap.
-    // ponytail: init is globally serialized; use stable path identities if
+    // Init is globally serialized; use stable path identities if
     // concurrent initialization of unrelated workspaces becomes necessary.
     let init_guard = state.init_lock.lock().await;
+    if let Some(original) = orphan_workspace_path(workspace).await? {
+        if original.starts_with(state.backend.data_root()) || original == std::path::Path::new("/")
+        {
+            return Ok(error_resp(
+                ErrorCode::InvalidPath,
+                "cannot restore an orphan inside managed storage",
+            ));
+        }
+        let original_str = original
+            .to_str()
+            .context("workspace path is not valid UTF-8")?;
+        if state.get_by_path(&original).is_none() {
+            let candidates = orphan_storage_paths(state, original_str).await?;
+            let subvol = candidates
+                .first()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    state
+                        .backend
+                        .data_root()
+                        .join(generate_ws_id_base(original_str))
+                });
+            crate::backends::btrfs_common::recover_orphan_backup(original_str, &subvol).await?;
+        }
+    }
     // 0. Early check: detect workspace already managed via symlink to our data_root.
     //    This must run before canonicalize(), which would resolve the symlink
     //    and cause the "inside mount_path" guard to reject it.
@@ -359,7 +441,13 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     let base_id = generate_ws_id_base(&abs_path.to_string_lossy());
     let mut ws_id = base_id.clone();
     let mut suffix = 2u32;
-    while data_root.join(&ws_id).exists() {
+    while data_root.join(&ws_id).try_exists()?
+        || state.backend.snapshots_root().join(&ws_id).try_exists()?
+        || state
+            .index_dir(&ws_id)
+            .with_file_name(format!("{}.unregistered", ws_id))
+            .try_exists()?
+    {
         ws_id = format!("{}-{}", base_id, suffix);
         suffix += 1;
     }
@@ -581,15 +669,44 @@ pub async fn recover_workspace(
     state: &Arc<DaemonState>,
     workspace: &str,
 ) -> anyhow::Result<Response> {
+    let _init_guard = state.init_lock.lock().await;
     // 1. resolve workspace (by ID, path, or relative)
-    let ws_lock = match state.resolve_workspace(workspace).await {
-        Some(ws) => ws,
-        None => {
-            return Ok(error_resp(
-                ErrorCode::WorkspaceNotFound,
-                format!("workspace not found: {}", workspace),
-            ));
+    let mut resolved = state.resolve_workspace(workspace).await;
+    if resolved.is_none() {
+        if let Some(original) = orphan_workspace_path(workspace).await? {
+            // Parent aliases can hide a registered workspace from full-path
+            // canonicalization, which follows the final managed symlink.
+            resolved = state.get_by_path(&original);
+            if resolved.is_none() {
+                let original_str = original
+                    .to_str()
+                    .context("workspace path is not valid UTF-8")?;
+                if original.starts_with(state.backend.data_root())
+                    || original == std::path::Path::new("/")
+                {
+                    return Ok(error_resp(
+                        ErrorCode::InvalidPath,
+                        "cannot restore an orphan inside managed storage",
+                    ));
+                }
+                let retained = orphan_storage_paths(state, original_str).await?;
+                crate::backends::btrfs_common::restore_orphan_backup(original_str).await?;
+                return Ok(Response::RecoverWithWarning {
+                    workspace: original_str.to_string(),
+                    warning: format!(
+                        "Restored the pre-init backup. Potentially partial or newer storage remains at {:?}; \
+                         snapshots under {:?} are also retained. Inspect these before removing them. You can run init again.",
+                        retained, state.backend.snapshots_root()
+                    ),
+                });
+            }
         }
+    }
+    let Some(ws_lock) = resolved else {
+        return Ok(error_resp(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace not found: {}", workspace),
+        ));
     };
 
     // Block every mutation of this workspace through unregister, index removal,
@@ -626,8 +743,163 @@ pub async fn recover_workspace(
     }
 
     // 5. return
-    Ok(Response::RecoverOk {
-        workspace: original_path,
+    let backup = crate::backends::btrfs_common::backup_path_for(&original_path);
+    let warning = match archive_recovered_backup(&backup).await {
+        Ok(Some(archive)) => Some(format!(
+            "Pre-init backup archived at {:?}; inspect it before removal. You can run init again.",
+            archive
+        )),
+        Ok(None) => None,
+        Err(error) => Some(format!(
+            "Workspace recovered, but pre-init backup {:?} could not be archived: {error:#}. \
+             Inspect and move this backup to another location before running init again",
+            backup
+        )),
+    };
+    Ok(match warning {
+        Some(warning) => Response::RecoverWithWarning {
+            workspace: original_path,
+            warning,
+        },
+        None => Response::RecoverOk {
+            workspace: original_path,
+        },
+    })
+}
+
+// Keep historical data outside the reserved orphan name so recover -> init
+// does not mistake a completed recovery for an interrupted migration.
+async fn archive_recovered_backup(backup: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let backup = std::path::PathBuf::from(backup);
+    tokio::task::spawn_blocking(move || {
+        match std::fs::symlink_metadata(&backup) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        // Repeated recoveries retain distinct backups; bound name allocation
+        // and never replace even an empty directory or a dangling symlink.
+        for suffix in 0..1000 {
+            let archive = if suffix == 0 {
+                std::path::PathBuf::from(format!("{}.recovered", backup.display()))
+            } else {
+                std::path::PathBuf::from(format!("{}.recovered-{}", backup.display(), suffix))
+            };
+            match nix::fcntl::renameat2(
+                None,
+                backup.as_path(),
+                None,
+                archive.as_path(),
+                nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+            ) {
+                Ok(()) => return Ok(Some(archive)),
+                Err(nix::errno::Errno::EEXIST) => continue,
+                Err(e) => return Err(e).context("failed to archive pre-init backup"),
+            }
+        }
+        anyhow::bail!("all 1000 backup archive names are occupied")
+    })
+    .await
+    .context("backup archive task failed")?
+}
+
+/// Remove stale registration only after proving that the live subvolume is absent.
+/// Keep snapshots and pre-init backups available for manual data recovery.
+pub async fn unregister_missing_workspace(
+    state: &Arc<DaemonState>,
+    workspace: &str,
+) -> anyhow::Result<Response> {
+    let _init_guard = state.init_lock.lock().await;
+    let Some(ws_lock) = state.resolve_workspace(workspace).await else {
+        return Ok(error_resp(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace not found: {}", workspace),
+        ));
+    };
+    let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&ws_lock).await
+    else {
+        return Ok(error_resp(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace not found: {}", workspace),
+        ));
+    };
+    let original = ws_lock.read().await.path.clone();
+    let subvol = state.backend.data_root().join(&ws_id);
+    match tokio::fs::symlink_metadata(&subvol).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("cannot verify that the live subvolume is missing"),
+        Ok(_) => {
+            return Ok(error_resp(
+                ErrorCode::InvalidPath,
+                format!(
+                    "cannot unregister: live subvolume {:?} still exists; use recover",
+                    subvol
+                ),
+            ))
+        }
+    }
+    let index_dir = state.index_dir(&ws_id);
+    // Preserve snapshot metadata outside the active index namespace.
+    let retained_index = index_dir.with_file_name(format!("{}.unregistered", ws_id));
+    let archive_index = index_dir.try_exists()?;
+    if archive_index {
+        if retained_index.try_exists()? {
+            anyhow::bail!(
+                "retained index {:?} already exists; move it before unregistering",
+                retained_index
+            );
+        }
+        tokio::fs::rename(&index_dir, &retained_index).await?;
+    }
+    let persisted = async {
+        if archive_index {
+            // The archive must be durable before the manifest stops reserving
+            // its active index; syncing state_dir alone does not sync indexes/.
+            index_store::sync_parent(&index_dir).await?;
+        }
+        state.persist_unregister_workspace(&ws_id).await
+    }
+    .await;
+    if let Err(error) = persisted {
+        // save_state only returns errors before its atomic rename; runtime state
+        // is unchanged, so restore the active index namespace for a safe retry.
+        if archive_index {
+            tokio::fs::rename(&retained_index, &index_dir).await.with_context(|| {
+                format!("unregister persistence failed ({error:#}); also failed to restore archived index {:?} to {:?}", retained_index, index_dir)
+            })?;
+            index_store::sync_parent(&index_dir).await.with_context(|| {
+                format!("unregister persistence failed ({error:#}); also failed to sync restored index {:?}", index_dir)
+            })?;
+        }
+        return Err(error);
+    }
+    // Only remove our dangling link. Foreign files/directories remain untouched.
+    if tokio::fs::read_link(&original)
+        .await
+        .is_ok_and(|target| target == subvol)
+    {
+        tokio::fs::remove_file(&original).await.with_context(|| {
+            format!("registration removed, but could not remove dangling symlink {:?}; remove it before reinitializing", original)
+        })?;
+    }
+
+    let mut retained_paths = Vec::new();
+    for path in [
+        state.backend.snapshots_root().join(&ws_id),
+        crate::backends::btrfs_common::backup_path_for(&original.to_string_lossy()).into(),
+        retained_index,
+    ] {
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(_) => retained_paths.push(path.display().to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).context("registration removed, but cannot inspect retained data")
+            }
+        }
+    }
+    Ok(Response::UnregisterOk {
+        workspace: original.display().to_string(),
+        retained_paths,
     })
 }
 
@@ -908,6 +1180,7 @@ mod tests {
             let backend = Arc::new(RecorderStubBackend {
                 data_root_path: temp.path().join("mount/data"),
                 snapshots_root_path: temp.path().join("mount/snapshots"),
+                pause_migration: true,
                 ..RecorderStubBackend::new()
             });
             let base_id = generate_ws_id_base(workspace.to_str().unwrap());
@@ -1291,6 +1564,399 @@ mod tests {
         assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    #[tokio::test]
+    async fn orphan_recovery_preserves_complete_backup_and_partial_storage() {
+        for base_backend in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mount = tmp.path().join("mount");
+            let backend: Arc<dyn StorageBackend> = if base_backend {
+                Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
+                    mount.clone(),
+                    crate::backends::btrfs_base::BtrfsBaseScenario::CrossDisk,
+                ))
+            } else {
+                Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+                    mount.clone(),
+                    tmp.path().join("image"),
+                ))
+            };
+            let state = Arc::new(DaemonState::new(
+                DaemonConfig {
+                    mount_path: mount,
+                    ..test_config()
+                },
+                backend,
+                tmp.path().join("state"),
+            ));
+            let original = tmp.path().join("workspace");
+            let original_str = original.to_str().unwrap();
+            let backup = std::path::PathBuf::from(crate::backends::btrfs_common::backup_path_for(
+                original_str,
+            ));
+            tokio::fs::create_dir(&backup).await.unwrap();
+            tokio::fs::write(backup.join("complete"), b"complete original")
+                .await
+                .unwrap();
+            // A suffix from a hash collision must not hide historical storage.
+            let ws_id = format!("{}-2", generate_ws_id_base(original_str));
+            let subvol = state.backend.data_root().join(&ws_id);
+            tokio::fs::create_dir_all(&subvol).await.unwrap();
+            tokio::fs::write(subvol.join("partial"), b"newer or incomplete")
+                .await
+                .unwrap();
+            let snapshots = state.backend.snapshots_root().join(&ws_id);
+            tokio::fs::create_dir_all(&snapshots).await.unwrap();
+            tokio::fs::write(snapshots.join("snapshot"), b"keep")
+                .await
+                .unwrap();
+            let error = init(&state, original_str).await.unwrap_err();
+            assert!(error.to_string().contains("ws-ckpt recover"));
+            // Public backend entry must reject before cleanup deletes old storage.
+            assert!(state
+                .backend
+                .init_workspace(original_str, &ws_id)
+                .await
+                .is_err());
+            assert!(subvol.join("partial").exists());
+            let response = recover_workspace(&state, original_str).await.unwrap();
+            match response {
+                Response::RecoverWithWarning { warning, .. } => {
+                    assert!(warning.contains(subvol.to_str().unwrap()))
+                }
+                other => panic!("expected recovery warning, got {:?}", other),
+            }
+            assert_eq!(
+                tokio::fs::read(original.join("complete")).await.unwrap(),
+                b"complete original"
+            );
+            assert_eq!(
+                tokio::fs::read(subvol.join("partial")).await.unwrap(),
+                b"newer or incomplete"
+            );
+            assert!(snapshots.join("snapshot").exists());
+            assert!(!backup.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn init_restores_backup_before_canonicalizing_missing_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("workspace");
+        let backup = tmp.path().join("workspace.pre-init-bak");
+        tokio::fs::create_dir(&backup).await.unwrap();
+        tokio::fs::write(backup.join("complete"), b"original")
+            .await
+            .unwrap();
+        let backend = Arc::new(RecorderStubBackend::new());
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend,
+            tmp.path().join("state"),
+        ));
+        let response = init(&state, original.to_str().unwrap()).await.unwrap();
+        assert!(
+            matches!(response, Response::InitOk { .. }),
+            "{:?}",
+            response
+        );
+        assert_eq!(
+            tokio::fs::read(original.join("complete")).await.unwrap(),
+            b"original"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[tokio::test]
+    async fn unregister_only_missing_storage_and_preserve_recovery_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = tmp.path().join("mount");
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            mount.clone(),
+            tmp.path().join("image"),
+        ));
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: mount.clone(),
+                ..test_config()
+            },
+            backend,
+            tmp.path().join("state"),
+        ));
+        let original = tmp.path().join("workspace");
+        let ws_id_owned = generate_ws_id_base(original.to_str().unwrap());
+        let ws_id = ws_id_owned.as_str();
+        let subvol = mount.join(ws_id);
+        tokio::fs::create_dir_all(&subvol).await.unwrap();
+        tokio::fs::symlink(&subvol, &original).await.unwrap();
+        state.register_workspace(
+            ws_id.to_string(),
+            original.clone(),
+            SnapshotIndex::new(original.clone()),
+        );
+        let index = state.index_dir(ws_id);
+        tokio::fs::create_dir_all(&index).await.unwrap();
+        tokio::fs::write(index.join("index.json"), b"metadata")
+            .await
+            .unwrap();
+        let snapshots = state.backend.snapshots_root().join(ws_id);
+        tokio::fs::create_dir_all(&snapshots).await.unwrap();
+        tokio::fs::write(snapshots.join("keep"), b"snapshot")
+            .await
+            .unwrap();
+        let response = unregister_missing_workspace(&state, ws_id).await.unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::InvalidPath,
+                ..
+            }
+        ));
+        assert!(state.get_by_wsid(ws_id).is_some());
+        tokio::fs::remove_dir(&subvol).await.unwrap();
+        let error = recover_workspace(&state, ws_id).await.unwrap_err();
+        assert!(format!("{error:#}").contains("ws-ckpt unregister"));
+        assert!(
+            tokio::fs::symlink_metadata(&original).await.is_ok(),
+            "failed recover must preserve dangling symlink"
+        );
+        let response = unregister_missing_workspace(&state, ws_id).await.unwrap();
+        assert!(matches!(response, Response::UnregisterOk { .. }));
+        assert!(state.get_by_wsid(ws_id).is_none());
+        assert!(tokio::fs::symlink_metadata(&original).await.is_err());
+        assert!(!index.exists());
+        assert_eq!(
+            tokio::fs::read(
+                index
+                    .with_file_name(format!("{}.unregistered", ws_id))
+                    .join("index.json")
+            )
+            .await
+            .unwrap(),
+            b"metadata"
+        );
+        assert_eq!(
+            tokio::fs::read(snapshots.join("keep")).await.unwrap(),
+            b"snapshot"
+        );
+        let manifest = tokio::fs::read_to_string(tmp.path().join("state/state.json"))
+            .await
+            .unwrap();
+        assert!(!manifest.contains(ws_id));
+        tokio::fs::create_dir(&original).await.unwrap();
+        let reinit_backend = Arc::new(RecorderStubBackend {
+            data_root_path: mount.clone(),
+            snapshots_root_path: state.backend.snapshots_root().to_path_buf(),
+            ..RecorderStubBackend::new()
+        });
+        let reinit_state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: mount,
+                ..test_config()
+            },
+            reinit_backend,
+            tmp.path().join("state"),
+        ));
+        let response = init(&reinit_state, original.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            matches!(response, Response::InitOk { ws_id: new_id } if new_id == format!("{}-2", ws_id))
+        );
+        assert_eq!(
+            tokio::fs::read(snapshots.join("keep")).await.unwrap(),
+            b"snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn unregister_manifest_failure_preserves_registration_and_allows_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("workspace");
+        let mount = tmp.path().join("mount");
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            mount.clone(),
+            tmp.path().join("image"),
+        ));
+        let state_dir = tmp.path().join("state");
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: mount.clone(),
+                ..test_config()
+            },
+            backend,
+            state_dir.clone(),
+        ));
+        let ws_id = "ws-retry";
+        state.register_workspace(
+            ws_id.to_string(),
+            original.clone(),
+            SnapshotIndex::new(original.clone()),
+        );
+        let registered = state.get_by_wsid(ws_id).unwrap();
+        registered.write().await.policy_failsafe = true;
+        tokio::fs::symlink(mount.join(ws_id), &original)
+            .await
+            .unwrap();
+        let index_dir = state.index_dir(ws_id);
+        tokio::fs::create_dir_all(&index_dir).await.unwrap();
+        tokio::fs::write(index_dir.join("policy.toml"), b"auto_cleanup = false")
+            .await
+            .unwrap();
+        state.save_manifest().await.unwrap();
+        let manifest = tokio::fs::read(state_dir.join("state.json")).await.unwrap();
+        // Fail before atomic_write can rename the manifest into place.
+        tokio::fs::create_dir(state_dir.join("state.json.tmp"))
+            .await
+            .unwrap();
+        assert!(unregister_missing_workspace(&state, ws_id).await.is_err());
+        let still_registered = state.get_by_wsid(ws_id).unwrap();
+        assert!(Arc::ptr_eq(&registered, &still_registered));
+        assert!(still_registered.read().await.policy_failsafe);
+        assert!(state.get_by_path(&original).is_some());
+        assert_eq!(
+            tokio::fs::read(state_dir.join("state.json")).await.unwrap(),
+            manifest
+        );
+        assert!(index_dir.join("policy.toml").exists());
+        assert!(!index_dir.with_file_name("ws-retry.unregistered").exists());
+        assert!(tokio::fs::symlink_metadata(&original).await.is_ok());
+        tokio::fs::remove_dir(state_dir.join("state.json.tmp"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            unregister_missing_workspace(&state, ws_id).await.unwrap(),
+            Response::UnregisterOk { .. }
+        ));
+        assert!(state.get_by_wsid(ws_id).is_none());
+        assert!(index_dir
+            .with_file_name("ws-retry.unregistered")
+            .join("policy.toml")
+            .exists());
+        assert!(!tokio::fs::read_to_string(state_dir.join("state.json"))
+            .await
+            .unwrap()
+            .contains(ws_id));
+    }
+
+    #[tokio::test]
+    async fn registered_recovery_archives_backup_and_allows_reinit_through_aliases() {
+        for use_alias in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let parent = tmp.path().join("parent");
+            tokio::fs::create_dir(&parent).await.unwrap();
+            let original = parent.join("workspace");
+            let alias = tmp.path().join("alias");
+            tokio::fs::symlink(&parent, &alias).await.unwrap();
+            let backend = Arc::new(RecorderStubBackend {
+                data_root_path: tmp.path().join("data"),
+                snapshots_root_path: tmp.path().join("snapshots"),
+                restore_live_directory: true,
+                ..RecorderStubBackend::new()
+            });
+            let ws_id = generate_ws_id_base(original.to_str().unwrap());
+            let live = backend.data_root().join(&ws_id);
+            tokio::fs::create_dir_all(&live).await.unwrap();
+            tokio::fs::write(live.join("payload"), b"new live data")
+                .await
+                .unwrap();
+            tokio::fs::symlink(&live, &original).await.unwrap();
+            let backup = crate::backends::btrfs_common::backup_path_for(original.to_str().unwrap());
+            tokio::fs::create_dir(&backup).await.unwrap();
+            tokio::fs::write(PathBuf::from(&backup).join("payload"), b"old backup")
+                .await
+                .unwrap();
+            // Existing archives, including dangling links and empty directories,
+            // must never be overwritten by a later successful recovery.
+            let occupied = format!("{backup}.recovered");
+            tokio::fs::symlink(tmp.path().join("missing"), &occupied)
+                .await
+                .unwrap();
+            tokio::fs::create_dir(format!("{backup}.recovered-1"))
+                .await
+                .unwrap();
+            let state = Arc::new(DaemonState::new(
+                test_config(),
+                backend.clone(),
+                tmp.path().join("state"),
+            ));
+            state.register_workspace(
+                ws_id.clone(),
+                original.clone(),
+                SnapshotIndex::new(original.clone()),
+            );
+            let input = if use_alias {
+                alias.join("workspace")
+            } else {
+                original.clone()
+            };
+            let response = recover_workspace(&state, input.to_str().unwrap())
+                .await
+                .unwrap();
+            let archive = format!("{backup}.recovered-2");
+            assert!(
+                matches!(response, Response::RecoverWithWarning { warning, .. } if warning.contains(&archive))
+            );
+            assert_eq!(
+                backend.recover_call_count(),
+                1,
+                "aliases must use registered recovery"
+            );
+            assert!(state.get_by_wsid(&ws_id).is_none());
+            assert_eq!(
+                tokio::fs::read(original.join("payload")).await.unwrap(),
+                b"new live data"
+            );
+            assert_eq!(
+                tokio::fs::read(PathBuf::from(&archive).join("payload"))
+                    .await
+                    .unwrap(),
+                b"old backup"
+            );
+            assert!(tokio::fs::read_link(&occupied).await.is_ok());
+            assert!(!PathBuf::from(&backup).exists());
+            assert!(matches!(
+                init(&state, original.to_str().unwrap()).await.unwrap(),
+                Response::InitOk { .. }
+            ));
+            assert_eq!(
+                tokio::fs::read(original.join("payload")).await.unwrap(),
+                b"new live data"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unregister_reports_only_existing_recovery_material() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("workspace");
+        let backend = Arc::new(RecorderStubBackend {
+            data_root_path: tmp.path().join("data"),
+            snapshots_root_path: tmp.path().join("snapshots"),
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend,
+            tmp.path().join("state"),
+        ));
+        let ws_id = "ws-no-index";
+        state.register_workspace(
+            ws_id.into(),
+            original.clone(),
+            SnapshotIndex::new(original.clone()),
+        );
+        let backup = crate::backends::btrfs_common::backup_path_for(original.to_str().unwrap());
+        // A dangling backup link still occupies a retained filesystem entry.
+        tokio::fs::symlink(tmp.path().join("missing"), &backup)
+            .await
+            .unwrap();
+        let response = unregister_missing_workspace(&state, ws_id).await.unwrap();
+        assert!(
+            matches!(response, Response::UnregisterOk { retained_paths, .. } if retained_paths == vec![backup])
+        );
+        assert!(state.get_by_wsid(ws_id).is_none());
+    }
+
     // ── recover tests ──
 
     #[tokio::test]
@@ -1464,6 +2130,8 @@ mod tests {
         snapshots_root_path: PathBuf,
         recover_calls: std::sync::atomic::AtomicUsize,
         init_calls: std::sync::atomic::AtomicUsize,
+        pause_migration: bool,
+        restore_live_directory: bool,
         init_progress: tokio::sync::Semaphore,
         init_continue: tokio::sync::Semaphore,
     }
@@ -1475,6 +2143,8 @@ mod tests {
                 snapshots_root_path: PathBuf::from("/tmp/stub-snapshots"),
                 recover_calls: std::sync::atomic::AtomicUsize::new(0),
                 init_calls: std::sync::atomic::AtomicUsize::new(0),
+                pause_migration: false,
+                restore_live_directory: false,
                 init_progress: tokio::sync::Semaphore::new(0),
                 init_continue: tokio::sync::Semaphore::new(0),
             }
@@ -1495,9 +2165,13 @@ mod tests {
         fn snapshots_root(&self) -> &std::path::Path {
             &self.snapshots_root_path
         }
-        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(&self, ws_id: &str, original: &str) -> anyhow::Result<()> {
             self.recover_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.restore_live_directory {
+                tokio::fs::remove_file(original).await?;
+                tokio::fs::rename(self.data_root().join(ws_id), original).await?;
+            }
             Ok(())
         }
         async fn init_workspace(
@@ -1507,22 +2181,25 @@ mod tests {
         ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
             self.init_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let subvol = self.data_root().join(ws_id);
-            tokio::fs::create_dir_all(&subvol).await?;
-            tokio::fs::create_dir_all(self.snapshots_root().join(ws_id)).await?;
-            self.init_progress.add_permits(1);
-            self.init_continue.acquire().await?.forget();
-            let backup = crate::backends::btrfs_common::backup_path_for(original_path);
-            tokio::fs::rename(original_path, &backup).await?;
-            self.init_progress.add_permits(1);
-            self.init_continue.acquire().await?.forget();
-            tokio::fs::copy(
-                std::path::Path::new(&backup).join("payload"),
-                subvol.join("payload"),
-            )
-            .await?;
-            tokio::fs::symlink(&subvol, original_path).await?;
-            tokio::fs::remove_dir_all(backup).await?;
+            assert!(std::path::Path::new(original_path).is_dir());
+            if self.pause_migration {
+                let subvol = self.data_root().join(ws_id);
+                tokio::fs::create_dir_all(&subvol).await?;
+                tokio::fs::create_dir_all(self.snapshots_root().join(ws_id)).await?;
+                self.init_progress.add_permits(1);
+                self.init_continue.acquire().await?.forget();
+                let backup = crate::backends::btrfs_common::backup_path_for(original_path);
+                tokio::fs::rename(original_path, &backup).await?;
+                self.init_progress.add_permits(1);
+                self.init_continue.acquire().await?.forget();
+                tokio::fs::copy(
+                    std::path::Path::new(&backup).join("payload"),
+                    subvol.join("payload"),
+                )
+                .await?;
+                tokio::fs::symlink(&subvol, original_path).await?;
+                tokio::fs::remove_dir_all(backup).await?;
+            }
             Ok(ws_ckpt_common::WorkspaceInfo {
                 ws_id: ws_id.to_string(),
                 path: original_path.to_string(),

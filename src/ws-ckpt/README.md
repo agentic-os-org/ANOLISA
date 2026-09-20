@@ -111,6 +111,18 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
 
+### Recovering interrupted initialization
+
+`ws-ckpt recover -w <workspace> --force` also handles an unregistered workspace:
+it restores `.pre-init-bak` and retains migrated subvolumes for inspection.
+Successful registered recovery archives leftover backups without blocking the
+next `init`. If a
+registered workspace's live subvolume was deleted externally, use
+`ws-ckpt unregister -w <workspace> --force` to remove its stale registration;
+this restores no data and preserves snapshots and backups. For both commands,
+`--force` only skips interactive confirmation. See the
+[recovery guide](../../docs/user-guide/en/runtime/ws-ckpt.md#recovering-interrupted-initialization-and-stale-registrations).
+
 ### Configuration
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (`/var/lib/ws-ckpt/indexes/<ws_id>/policy.toml`, per-workspace override). The `ws-ckpt config` subcommand scope:
@@ -159,6 +171,8 @@ ws-ckpt reload
 | `status` | Show daemon and workspace status |
 | `config` | View or modify daemon configuration |
 | `reload` | Notify daemon to reload `config.toml` |
+| `recover` | Restore a plain directory or an interrupted initialization backup |
+| `unregister` | Remove a missing-subvolume registration while preserving snapshots and backups |
 | `plugin` | Install/uninstall ws-ckpt Agent runtime plugins (openclaw/hermes) |
 
 The OpenClaw adapter requires OpenClaw >= 2026.2.13. Installation stops rather than leaving a partial integration when the detected version or config capabilities cannot update the tool allowlist safely.

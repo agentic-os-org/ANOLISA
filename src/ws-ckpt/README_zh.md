@@ -109,6 +109,15 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
 
+### 恢复中断的初始化
+
+`ws-ckpt recover -w <workspace> --force` 也能恢复尚未注册的工作区：还原
+`.pre-init-bak`，并保留迁移中的子卷供检查。已注册工作区恢复成功时会归档遗留备份，
+避免阻断下一次 `init`。若已注册工作区的子卷被外部删除，使用
+`ws-ckpt unregister -w <workspace> --force` 解除悬空注册；该操作不恢复数据，
+会保留快照和备份。两条命令的 `--force` 都仅跳过交互确认。
+详见[恢复说明](../../docs/user-guide/zh/runtime/ws-ckpt.md#恢复中断的初始化与悬空注册)。
+
 ### 状态与配置
 
 配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）和**局部**（`/var/lib/ws-ckpt/indexes/<ws_id>/policy.toml`，per-workspace 覆盖）。`ws-ckpt config` 子命令的作用域由 scope 决定：
@@ -157,6 +166,8 @@ ws-ckpt reload
 | `status` | 查看守护进程和工作区状态 |
 | `config` | 查看或修改 daemon 配置（写入 `/etc/ws-ckpt/config.toml`） |
 | `reload` | 通知 daemon 重新加载 `config.toml` |
+| `recover` | 将工作区恢复为普通目录，或还原中断初始化的备份 |
+| `unregister` | 仅在子卷丢失时解除注册，保留快照和备份 |
 | `plugin` | 安装/卸载 ws-ckpt Agent runtime（openclaw/hermes）插件 |
 
 OpenClaw adapter 要求 OpenClaw >= 2026.2.13。若检测到的版本或配置能力无法安全更新工具 allowlist，安装会中止，避免留下不完整的集成。

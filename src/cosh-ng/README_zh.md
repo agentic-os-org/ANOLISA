@@ -303,6 +303,10 @@ catalog 的两个条目都声明拥有本地用户权限，即使 token 位于�
 仓库为 direct ACP path 提供 Fake Adapter conformance coverage。具体安装在投入生产前，仍需
 另行执行真实 Codex/Claude Adapter 检查与人工 Terminal 验收。
 
+`cosh-cli checkpoint recover --workspace <path>` 支持由 ws-ckpt daemon 恢复
+中断初始化；若还有数据保留供检查，成功 JSON 的 `meta.warning` 会说明位置。
+详见[工作区快照](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/checkpoint.md)。
+
 ## 文档
 
 - [用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)

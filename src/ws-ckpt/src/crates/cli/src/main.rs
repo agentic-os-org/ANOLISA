@@ -272,6 +272,16 @@ enum Commands {
         force: bool,
     },
 
+    /// Remove a stale registration when its live subvolume is missing (no data restored)
+    Unregister {
+        /// Registered workspace path or ID
+        #[arg(short, long, value_parser = workspace_value_parser())]
+        workspace: String,
+        /// Skip interactive confirmation
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Install or uninstall the ws-ckpt plugin for an agent runtime
     Plugin {
         #[command(subcommand)]
@@ -532,6 +542,9 @@ async fn run(cli: Cli) -> Result<()> {
             force,
         } => {
             handle_recover(workspace, all, force).await?;
+        }
+        Commands::Unregister { workspace, force } => {
+            handle_unregister(&workspace, force).await?;
         }
         Commands::Plugin { action } => {
             handle_plugin(action)?;
@@ -939,6 +952,10 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
         }
         Response::DeleteOk { target } => {
             println!("\x1b[32m✓ Deleted: {}\x1b[0m", target);
+        }
+        Response::RecoverWithWarning { workspace, warning } => {
+            eprintln!("WARNING: {}", warning);
+            println!("Workspace recovered: {}", workspace);
         }
         Response::RecoverOk { workspace } => {
             println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
@@ -1979,6 +1996,40 @@ async fn handle_reload() -> Result<()> {
     }
 }
 
+async fn handle_unregister(workspace: &str, force: bool) -> Result<()> {
+    let workspace = resolve_workspace_arg(workspace);
+    if !force {
+        println!("Remove the registration for {} only if its live subvolume is missing. No data will be restored; snapshots, backups, and snapshot metadata are retained.", workspace);
+        eprint!("Proceed? [y/N] ");
+        io::stderr().flush()?;
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line)?;
+        if !matches!(line.trim(), "y" | "Y") {
+            println!("Operation cancelled.");
+            return Ok(());
+        }
+    }
+    match send_request_to_daemon(&Request::Unregister { workspace }).await? {
+        Response::UnregisterOk {
+            workspace,
+            retained_paths,
+        } => {
+            println!(
+                "Registration removed: {}. The live subvolume was missing; no data was restored.",
+                workspace
+            );
+            println!(
+                "Retained recovery locations (if present): {}",
+                retained_paths.join(", ")
+            );
+            println!("Restore or create the workspace directory before running init again.");
+        }
+        Response::Error { code, message } => anyhow::bail!("Error [{:?}]: {}", code, message),
+        response => anyhow::bail!("unexpected unregister response: {:?}", response),
+    }
+    Ok(())
+}
+
 /// Handle recover command: single workspace or all workspaces.
 async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Result<()> {
     if workspace.is_none() && !all {
@@ -2036,6 +2087,10 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             };
             let resp = send_request_to_daemon(&req).await?;
             match resp {
+                Response::RecoverWithWarning { workspace, warning } => {
+                    eprintln!("WARNING: {}", warning);
+                    println!("Workspace recovered: {}", workspace);
+                }
                 Response::RecoverOk { workspace } => {
                     println!("Workspace recovered: {}", workspace);
                 }
@@ -2100,7 +2155,7 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         if !force {
             println!("Workspace: {} ({} snapshots)", ws_arg, snapshot_count);
             println!(
-                "This will delete all snapshots and restore the workspace to a normal directory.\n\
+                "This restores a registered workspace and deletes its snapshots. For interrupted, unregistered init, it restores the pre-init backup and retains migrated storage for inspection.\n\
                  WARNING: ws-ckpt does NOT check for processes with cwd inside the workspace before recover.\n\
                  Any such process will have its working directory silently invalidated — verify yourself\n\
                  (e.g. lsof +D <ws>, or ls -l /proc/*/cwd) before confirming."
@@ -2119,6 +2174,10 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         let req = Request::Recover { workspace: ws_arg };
         let resp = send_request_to_daemon(&req).await?;
         match resp {
+            Response::RecoverWithWarning { workspace, warning } => {
+                eprintln!("WARNING: {}", warning);
+                println!("Workspace recovered: {}", workspace);
+            }
             Response::RecoverOk { workspace } => {
                 println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
             }
@@ -3394,6 +3453,16 @@ mod tests {
         // Critical: is_disabled MUST be true even though auto_cleanup=true,
         // because keep is Count(0). That's the whole bug this prevents.
         assert!(s.contains(r#""is_disabled":true"#));
+    }
+
+    #[test]
+    fn parse_unregister_requires_workspace_and_keeps_force_optional() {
+        assert!(Cli::try_parse_from(["ws-ckpt", "unregister"]).is_err());
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "unregister", "-w", "/tmp/ws", "--force"]).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Unregister { workspace, force: true } if workspace == "/tmp/ws")
+        );
     }
 
     // ── Recover CLI parsing tests ──

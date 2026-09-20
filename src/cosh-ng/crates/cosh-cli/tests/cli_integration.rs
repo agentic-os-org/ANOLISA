@@ -18,14 +18,13 @@ fn cosh_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cosh-cli"))
 }
 
-fn spawn_checkpoint_skipped_daemon(
-    reason: &str,
+fn spawn_checkpoint_response_daemon(
+    payload: Vec<u8>,
 ) -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("ws-ckpt.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let reason = reason.to_string();
     let handle = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
         let (mut stream, _) = loop {
@@ -41,17 +40,18 @@ fn spawn_checkpoint_skipped_daemon(
                 Err(error) => panic!("fake ws-ckpt daemon failed to accept connection: {error}"),
             }
         };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut len_buf = [0_u8; 4];
         stream.read_exact(&mut len_buf).unwrap();
         let request_len = u32::from_le_bytes(len_buf) as usize;
         let mut request = vec![0_u8; request_len];
         stream.read_exact(&mut request).unwrap();
 
-        let mut payload = Vec::new();
-        // Zero-based wire index 11 is WsCkptResponse::CheckpointSkipped.
-        payload.extend_from_slice(&11_u32.to_le_bytes());
-        payload.extend_from_slice(&(reason.len() as u64).to_le_bytes());
-        payload.extend_from_slice(reason.as_bytes());
         stream
             .write_all(&(payload.len() as u32).to_le_bytes())
             .unwrap();
@@ -60,6 +60,17 @@ fn spawn_checkpoint_skipped_daemon(
 
     let socket_path = socket_path.to_string_lossy().into_owned();
     (dir, socket_path, handle)
+}
+
+fn spawn_checkpoint_skipped_daemon(
+    reason: &str,
+) -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
+    let mut payload = Vec::new();
+    // Zero-based wire index 11 is WsCkptResponse::CheckpointSkipped.
+    payload.extend_from_slice(&11_u32.to_le_bytes());
+    payload.extend_from_slice(&(reason.len() as u64).to_le_bytes());
+    payload.extend_from_slice(reason.as_bytes());
+    spawn_checkpoint_response_daemon(payload)
 }
 
 fn systemctl_query_available() -> bool {
@@ -1297,6 +1308,62 @@ fn test_checkpoint_restore_daemon_unavailable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_recover_warning_uses_meta_and_preserves_success_data() {
+    for warning in [None, Some("Backup retained at /tmp/ws.pre-init-bak")] {
+        // RecoverOk retains wire index 12; RecoverWithWarning was appended at 26.
+        let variant: u32 = if warning.is_some() { 26 } else { 12 };
+        let workspace = "/tmp/ws";
+        let mut payload = variant.to_le_bytes().to_vec();
+        for value in std::iter::once(workspace).chain(warning) {
+            payload.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            payload.extend_from_slice(value.as_bytes());
+        }
+        let (_directory, socket, daemon) = spawn_checkpoint_response_daemon(payload);
+        let output = cosh_bin()
+            .args([
+                "checkpoint",
+                "recover",
+                "--workspace",
+                workspace,
+                "--socket",
+                &socket,
+            ])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"], serde_json::json!({"workspace": workspace}));
+        assert_eq!(json["meta"]["subsystem"], "checkpoint");
+        match warning {
+            Some(warning) => assert_eq!(json["meta"]["warning"], warning),
+            None => assert!(json["meta"].get("warning").is_none()),
+        }
+        assert!(json.get("error").is_none());
+    }
+}
+
+#[test]
+fn test_checkpoint_recover_missing_workspace_reaches_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "recover",
+            "--workspace",
+            dir.path().join("missing-workspace").to_str().unwrap(),
+            "--socket",
+            dir.path().join("missing.sock").to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute cosh-cli");
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
 }
 

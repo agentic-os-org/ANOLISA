@@ -8,7 +8,7 @@ use cosh_platform::detect::Distro;
 use cosh_types::checkpoint::DEFAULT_SOCKET_PATH;
 use cosh_types::error::{CoshError, ErrorCode};
 
-use crate::{build_meta, print_failure, print_success};
+use crate::{build_meta, build_meta_with_warning, print_failure, print_success};
 
 #[derive(Subcommand)]
 pub enum CheckpointCommands {
@@ -161,13 +161,16 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             }
         }
         CheckpointCommands::Recover { workspace, socket } => {
-            if let Err(e) = validate_workspace_exists(&workspace) {
-                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
-            }
             let client = CkptClient::new(&socket);
             match client.recover(&workspace) {
-                Ok(result) => {
-                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                Ok(mut result) => {
+                    let meta = match result.warning.take() {
+                        Some(warning) => {
+                            build_meta_with_warning("checkpoint", distro, start, dry_run, &warning)
+                        }
+                        None => build_meta("checkpoint", distro, start, dry_run),
+                    };
+                    print_success(result, meta)
                 }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }

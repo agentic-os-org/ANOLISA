@@ -187,6 +187,11 @@ pub enum Request {
         operation_id: String,
         operation_digest: [u8; 32],
     },
+    /// Remove a registration only when its live subvolume is missing.
+    Unregister {
+        /// Registered workspace path or ID.
+        workspace: String,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -341,6 +346,20 @@ pub enum Response {
     GuardedRollbackV2Rejected {
         code: GuardedRollbackRejectionCodeV2,
         message: String,
+    },
+    /// Recovery succeeded while additional user data remains for inspection.
+    RecoverWithWarning {
+        /// Restored workspace path.
+        workspace: String,
+        /// Locations and reason for retaining additional data.
+        warning: String,
+    },
+    /// Registration removed without restoring data or deleting snapshots.
+    UnregisterOk {
+        /// Original workspace path.
+        workspace: String,
+        /// Locations intentionally retained for manual recovery.
+        retained_paths: Vec<String>,
     },
 }
 
@@ -2763,7 +2782,7 @@ mod tests {
         };
         let decoded = round_trip_response(&resp);
         match decoded {
-            Response::RecoverOk { workspace } => assert_eq!(workspace, "/home/user/project"),
+            Response::RecoverOk { workspace, .. } => assert_eq!(workspace, "/home/user/project"),
             _ => panic!("expected RecoverOk variant"),
         }
     }
@@ -3276,6 +3295,48 @@ mod tests {
         assert_eq!(idx.snapshots["k"].parent_id, None);
         assert_eq!(idx.head.as_deref(), Some("m"));
         assert!(idx.snapshots["n"].parent_id.as_deref() == Some("m"));
+    }
+
+    #[test]
+    fn recovery_protocol_extensions_preserve_existing_wire_layout() {
+        let requests = [
+            Request::Recover {
+                workspace: "/ws".into(),
+            },
+            Request::Unregister {
+                workspace: "/ws".into(),
+            },
+        ];
+        for (request, tag) in requests.iter().zip([13_u32, 25]) {
+            let encoded = bincode::serialize(request).unwrap();
+            assert_eq!(&encoded[..4], &tag.to_le_bytes());
+            let decoded: Request = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(encoded, bincode::serialize(&decoded).unwrap());
+        }
+        let responses = [
+            Response::RecoverOk {
+                workspace: "/ws".into(),
+            },
+            Response::RecoverWithWarning {
+                workspace: "/ws".into(),
+                warning: "retained".into(),
+            },
+            Response::UnregisterOk {
+                workspace: "/ws".into(),
+                retained_paths: vec!["/backup".into()],
+            },
+        ];
+        for (response, tag) in responses.iter().zip([12_u32, 26, 27]) {
+            let encoded = bincode::serialize(response).unwrap();
+            assert_eq!(&encoded[..4], &tag.to_le_bytes());
+            let decoded: Response = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(encoded, bincode::serialize(&decoded).unwrap());
+        }
+        // A pre-extension RecoverOk payload is exactly its tag and string.
+        assert_eq!(
+            bincode::serialize(&responses[0]).unwrap(),
+            bincode::serialize(&(12_u32, "/ws")).unwrap()
+        );
     }
 
     #[test]
