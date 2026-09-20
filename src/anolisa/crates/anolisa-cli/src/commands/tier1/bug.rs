@@ -1188,8 +1188,7 @@ mod tests {
             objects: vec![object],
             ..InstalledState::default()
         };
-        state
-            .save(&layout.state_dir.join("installed.toml"))
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
             .expect("save state");
     }
 
