@@ -84,7 +84,7 @@ async fn run(
     cli: Cli,
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
-) -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
+) -> (ExitCode, Option<sinks::DurableSinks>) {
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
@@ -111,7 +111,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let (finalizer, event_sinks) = match event_finalizer(telemetry) {
+    let (finalizer, durable_sinks) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
             telemetry.report(&format!(
@@ -125,7 +125,7 @@ async fn run(
         Ok(bridge) => bridge,
         Err(error) => {
             report_error(telemetry, &error);
-            return (ExitCode::FAILURE, Some(event_sinks));
+            return (ExitCode::FAILURE, Some(durable_sinks));
         }
     };
     let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
@@ -137,7 +137,7 @@ async fn run(
         recover_and_start_skills(&skill_sec, &actions, &skill_worker, executor, telemetry)
     {
         report_error(telemetry, &error);
-        return (ExitCode::FAILURE, Some(event_sinks));
+        return (ExitCode::FAILURE, Some(durable_sinks));
     }
     let policy_runtime = start_policy_runtime(repository.clone(), telemetry);
     let enqueuer: Arc<dyn asc_pap::BindingReconcileEnqueuer> = policy_runtime.as_ref().map_or_else(
@@ -154,7 +154,11 @@ async fn run(
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
-        DaemonDispatcher::new(pap, policy_for_handler, actions),
+        DaemonDispatcher::new(pap, policy_for_handler, actions).with_observability(
+            asc_daemon_core::ObservabilityService::new(Arc::new(sinks::ObservabilitySinkAdapter(
+                Arc::clone(&durable_sinks.observability),
+            ))),
+        ),
         skillfs.clone(),
     ));
     telemetry
@@ -189,7 +193,7 @@ async fn run(
         telemetry.report("asc-daemon: background worker drain failed or timed out");
         ExitCode::FAILURE
     };
-    (exit_code, Some(event_sinks))
+    (exit_code, Some(durable_sinks))
 }
 
 fn start_policy_runtime(
@@ -270,8 +274,12 @@ async fn drain_runtimes(
 
 fn event_finalizer(
     telemetry: &asc_observability::TelemetryRuntime,
-) -> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
+) -> Result<(Finalizer, sinks::DurableSinks), asc_event_sink::SinkError> {
     let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
+    let observability_sinks = Arc::new(asc_event_sink::ConfiguredObservabilitySinks::new(
+        jsonl_path.with_file_name("observability.jsonl"),
+        sqlite_path.with_file_name("observability.db"),
+    ));
     let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
     sinks.warm_sqlite()?;
     if let Err(error) = sinks.warm_jsonl() {
@@ -289,7 +297,10 @@ fn event_finalizer(
             )),
             Arc::new(sinks::LifecycleDiagnostics(telemetry.reporter())),
         ),
-        sinks,
+        sinks::DurableSinks {
+            security: sinks,
+            observability: observability_sinks,
+        },
     ))
 }
 

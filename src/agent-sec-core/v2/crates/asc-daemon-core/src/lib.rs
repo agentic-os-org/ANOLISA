@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod observability;
+pub use observability::{ObservabilityService, ObservabilitySink, ObservabilityWriteError};
 mod action;
 mod identity;
 pub use action::ActionService;

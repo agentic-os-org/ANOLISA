@@ -74,7 +74,7 @@ rather than deprecated here:
 
 `cargo test` runs tests multi-threaded in one process, so anything touching
 process-global state must be serialized. Only `asc-event-sink` has such state —
-the four `OnceLock` sink slots — and all fifteen of its stateful tests take
+the security-event `RwLock` slots — and its stateful tests take
 `test_support::serial()`, a process-wide `Mutex`. No `--test-threads=1` is
 needed anywhere.
 
@@ -83,8 +83,7 @@ needed anywhere.
 | `asc-event-sink/src/lib.rs` | `merely_linking_this_crate_initializes_nothing` |
 | `asc-event-sink/src/singletons.rs` | `an_untouched_slot_reports_nothing_initialized`, `repeated_access_returns_the_same_instance`, `a_reset_slot_forgets_its_value_without_closing_it` |
 | `asc-event-sink/src/security_events.rs` | `both_paths_receive_the_event`, `a_broken_jsonl_path_does_not_stop_the_sqlite_insert`, `a_broken_database_does_not_stop_the_jsonl_append`, `both_paths_broken_is_still_silent` |
-| `asc-event-sink/src/observability.rs` | `both_paths_receive_the_record`, `a_broken_jsonl_path_surfaces_and_skips_the_sqlite_insert`, `a_broken_database_surfaces_after_the_jsonl_append` |
-| `asc-event-sink/src/shutdown.rs` | `shutting_down_untouched_sinks_creates_nothing`, `shutdown_runs_the_maintenance_pass_once_per_window`, `no_shutdown_means_no_maintenance`, `both_streams_are_closed` |
+| `asc-event-sink/src/shutdown.rs` | `shutting_down_untouched_sinks_creates_nothing`, `shutdown_runs_the_maintenance_pass_once_per_window`, `no_shutdown_means_no_maintenance` |
 
 Everything else takes an explicit `TempDir` path through a constructor argument
 and reads no environment variable. `asc-security-events::config` — the one place
@@ -147,7 +146,7 @@ Beyond v1: `tmp_tier_rejects_a_directory_owned_by_another_uid` — v1 resolves t
 | `jsonl_failure_does_not_block_sqlite` | 1:1 | `security_events::tests::a_broken_jsonl_path_does_not_stop_the_sqlite_insert` |
 | `sqlite_failure_does_not_block_jsonl` | 1:1 | `security_events::tests::a_broken_database_does_not_stop_the_jsonl_append` |
 
-Beyond v1: the four `shutdown::tests` (v1 relies on `atexit` and never tests the
+Beyond v1: the three `shutdown::tests` (v1 relies on `atexit` and never tests the
 close path), `singletons::tests::an_untouched_slot_reports_nothing_initialized`,
 `a_reset_slot_forgets_its_value_without_closing_it`, `tests::the_shared_sinks_are_send`,
 and the three `api_parity` meta-tests.
@@ -532,7 +531,7 @@ two `summary::tests`.
 | `observability_sqlite_writer_prunes_on_close_not_write` | 1:1 | `observability_store::close_runs_retention_through_the_maintenance_gate` |
 | `observability_sqlite_writer_closes_through_maintenance_gate` | merged | `observability_store::close_runs_retention_through_the_maintenance_gate` |
 | `observability_sqlite_writer_uses_schema_version_fast_path` | 1:1 | `v1_fixtures::an_observability_fixture_keeps_its_only_revision` |
-| `record_observability_dual_writes_jsonl_and_sqlite` | 1:1 | `asc-event-sink observability::tests::both_paths_receive_the_record` |
+| `record_observability_dual_writes_jsonl_and_sqlite` | 1:1 | `asc-event-sink configured::observability_tests::both_paths_receive_the_record` |
 | `observability_writer_indexes_llm_call_correlation_only` | merged | `observability_store::the_correlation_columns_follow_the_hook_metadata_shape` |
 | `observability_writer_indexes_tool_call_correlation_only` | merged | `observability_store::the_correlation_columns_follow_the_hook_metadata_shape` |
 
@@ -620,3 +619,13 @@ itself, and are not part of this migration:
 | `test_review.py` | 21 | Textual TUI. |
 | `test_session_report.py` | 8 | Report composition on top of the reader. |
 | hooks (`qoder`, `qwen`, `cosh`, `codex`, `hermes`), `telemetry/`, `daemon/test_security_query_handler.py`, `e2e/cli/`, skill-ledger suites | — | All call `log_event` / `record_observability`; the sink contract they rely on is covered by `asc-event-sink`. |
+
+## Observability sink ownership cleanup
+
+The V2 global observability accessors and write entry point are retired in favor
+of `ConfiguredObservabilitySinks`. The three write-order/failure tests now live in
+`configured::observability_tests`, use isolated paths, and need no global lock.
+The success case also checks lazy construction, no-op close before initialization,
+and maintenance on close. The former global `both_streams_are_closed` test is
+removed; configured observability shutdown is covered there and by the daemon
+restart E2E. V1 Python APIs and external CLI/RPC/storage contracts are unchanged.

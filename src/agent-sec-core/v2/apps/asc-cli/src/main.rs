@@ -83,7 +83,7 @@ fn main() -> ExitCode {
             eprintln!("{input}");
             ExitCode::FAILURE
         }
-        Err(error @ RunError::Input(InputError::EmptyCode)) => {
+        Err(error @ RunError::Input(InputError::EmptyCode | InputError::Observability(_))) => {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
@@ -173,6 +173,9 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             |output| cli.after_success(&request, output),
         )
         .map_err(RunError::Output)
+    } else if cli.is_observability_record() {
+        asc_cli::output::render_observability_record(&response, &mut io::stderr())
+            .map_err(RunError::Output)
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
             .map_err(RunError::Output)
