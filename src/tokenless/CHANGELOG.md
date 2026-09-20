@@ -9,6 +9,23 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-20
+
+### Added
+
+- Git diff context cropping can now retain all changed lines and file metadata while reducing surrounding context, with the received original available through recovery. Enable it with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; it is disabled by default and requires text replacement and recovery support ([#3299](https://github.com/alibaba/anolisa/pull/3299)).
+- Complete HTML pages from command or API results can now be rendered as Markdown with original recovery and counts of removed page elements. Enable it with `TOKENLESS_HTML_EXTRACTION_ENABLED=1` or SDK `html_extraction_enabled=True`; it is disabled by default, requires text replacement and recovery support, and preserves file reads, including HTML printed by shell file-reading commands ([#3306](https://github.com/alibaba/anolisa/pull/3306)).
+
+### Changed
+
+- npm installation now automatically enables the Claude Code adapter when the Claude CLI is available, and prints retry instructions when registration cannot finish ([#2193](https://github.com/alibaba/anolisa/pull/2193)).
+- QwenPaw installation now checks the matching SDK wheel before handing over the plugin bundle and reports a confirmed missing asset with its version and URL. Offline or mirrored installations can skip the probe with `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` ([#3289](https://github.com/alibaba/anolisa/pull/3289)).
+
+### Fixed
+
+- Claude Code detection now retries a staged plugin within a bounded settling window with backoff, reducing false “not installed” results while the host registry catches up ([#3272](https://github.com/alibaba/anolisa/pull/3272)).
+- Raw packages now declare and include the OpenCode adapter and adapter manifest, enabling ANOLISA to discover and manage the bundled plugin. Restart OpenCode after enabling or disabling it ([#3324](https://github.com/alibaba/anolisa/pull/3324), [#3346](https://github.com/alibaba/anolisa/pull/3346)).
+
 ## [0.8.2] - 2026-09-15
 
 ### Added

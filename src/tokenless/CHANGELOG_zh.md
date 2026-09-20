@@ -9,6 +9,23 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.3] - 2026-09-20
+
+### 新增
+
+- Git diff 上下文裁剪可在保留全部变更行和文件元数据的同时缩减周边上下文，并支持恢复收到的原始内容。通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；默认关闭，要求宿主支持文本替换和原文恢复（[#3299](https://github.com/alibaba/anolisa/pull/3299)）。
+- 命令或 API 返回的完整 HTML 页面可渲染为 Markdown，提供原文恢复及被移除页面元素的计数。通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=1` 或 SDK `html_extraction_enabled=True` 启用；默认关闭，要求宿主支持文本替换和原文恢复，文件读取保持原样，包括通过 Shell 文件读取命令输出的 HTML（[#3306](https://github.com/alibaba/anolisa/pull/3306)）。
+
+### 变更
+
+- npm 安装在 Claude CLI 可用时自动启用 Claude Code 适配器，注册未完成时给出重试指引（[#2193](https://github.com/alibaba/anolisa/pull/2193)）。
+- QwenPaw 安装在交付插件包前检查对应 SDK wheel，确认资源缺失时报告版本和 URL。离线或镜像环境可通过 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测（[#3289](https://github.com/alibaba/anolisa/pull/3289)）。
+
+### 修复
+
+- Claude Code 检测在有界等待窗口内退避重试已部署插件，减少宿主注册表尚未更新时误报“未安装”的情况（[#3272](https://github.com/alibaba/anolisa/pull/3272)）。
+- Raw 包现在声明并包含 OpenCode 适配器和适配器清单，使 ANOLISA 能发现并管理随包提供的插件。启用或禁用后需重启 OpenCode（[#3324](https://github.com/alibaba/anolisa/pull/3324)、[#3346](https://github.com/alibaba/anolisa/pull/3346)）。
+
 ## [0.8.2] - 2026-09-15
 
 ### 新增
