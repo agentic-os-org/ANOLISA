@@ -107,8 +107,8 @@ pub struct HtmlView {
     pub output: String,
     /// `<title>` text, collapsed.
     pub title: Option<String>,
-    /// `<link rel="canonical">` target, trimmed, with tabs and newlines
-    /// dropped as the URL parser drops them.
+    /// `<link rel="canonical">` target, normalized as the URL parser reads
+    /// it: controls and whitespace trimmed, tabs and newlines dropped.
     pub canonical: Option<String>,
     /// Removed element counts by category, in the order of the header labels:
     /// script, style, noscript, template, svg, iframe, comment, nav, header,
@@ -166,10 +166,7 @@ impl HtmlExtractor {
                     && node
                         .attr("rel")
                         .is_some_and(|rel| rel.split_ascii_whitespace().any(|r| r == "canonical")))
-                .then(|| {
-                    node.attr("href")
-                        .map(|href| url_text(href.trim()).into_owned())
-                })
+                .then(|| node.attr("href").map(|href| url_text(href).into_owned()))
                 .flatten()
                 .filter(|href| !href.is_empty())
             })
@@ -1021,11 +1018,15 @@ impl Renderer<'_> {
                     if alt.is_empty() {
                         return;
                     }
-                    match node.attr("src").map(|src| url_text(src.trim())) {
-                        Some(src) if !src.is_empty() && !has_scheme(&src, "data") => {
-                            let _ = write!(out, "![{alt}]({})", link_target(&src));
+                    if !brackets_balanced(&alt) {
+                        out.push_str(&alt);
+                        return;
+                    }
+                    match node.attr("src").and_then(destination) {
+                        Some(target) => {
+                            let _ = write!(out, "![{alt}]({target})");
                         }
-                        _ => {
+                        None => {
                             let _ = write!(out, "![{alt}]");
                         }
                     }
@@ -1034,13 +1035,9 @@ impl Renderer<'_> {
                     let mut text = String::new();
                     self.inline_children(id, &mut text, in_sectioning);
                     let text = text.trim();
-                    let href = node
-                        .attr("href")
-                        .map(|href| url_text(href.trim()))
-                        .filter(|href| !href.is_empty() && !has_scheme(href, "javascript"));
-                    match href {
-                        Some(href) if !text.is_empty() => {
-                            let _ = write!(out, "[{text}]({})", link_target(&href));
+                    match node.attr("href").and_then(destination) {
+                        Some(target) if !text.is_empty() && brackets_balanced(text) => {
+                            let _ = write!(out, "[{text}]({target})");
                         }
                         _ => out.push_str(text),
                     }
@@ -1217,10 +1214,12 @@ fn block_marker_escape(line: &str) -> Option<usize> {
     escaped.then_some(0)
 }
 
-/// A URL from page markup with tabs and newlines dropped, as the URL parser
-/// drops them. Every URL the view prints goes through here, so none of them
-/// can start a new line.
+/// A URL from page markup as the URL parser reads it: control characters
+/// and whitespace stripped from both ends, tabs and newlines dropped
+/// throughout. Every URL the view prints goes through here, so none of them
+/// can start a new line or hide its scheme behind a control character.
 fn url_text(url: &str) -> std::borrow::Cow<'_, str> {
+    let url = url.trim_matches(|c: char| c.is_ascii_control() || c.is_whitespace());
     if url.contains(['\t', '\n', '\r']) {
         url.replace(['\t', '\n', '\r'], "").into()
     } else {
@@ -1228,28 +1227,66 @@ fn url_text(url: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Whether a URL normalized by `url_text` carries the given scheme. Schemes
-/// are ASCII case-insensitive, and the check runs after normalization so a
-/// tab or newline inside the scheme cannot hide it.
-fn has_scheme(url: &str, scheme: &str) -> bool {
-    url.split_once(':')
-        .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(scheme))
+/// The Markdown destination for a page URL, or `None` when the view does not
+/// link it: nothing left after normalization, or a `javascript:` or `data:`
+/// scheme, checked case-insensitively on the normalized URL so nothing can
+/// hide it. Scripts must not run from the view and data blobs would bloat
+/// it; the link text or alt text stays. Backslashes are escaped in either
+/// form; a target with whitespace, parentheses or angle brackets takes the
+/// `<…>` form, inside which angle brackets are escaped too.
+fn destination(url: &str) -> Option<String> {
+    let url = url_text(url);
+    let scheme = url.split_once(':').map(|(scheme, _)| scheme);
+    if url.is_empty()
+        || scheme.is_some_and(|scheme| {
+            scheme.eq_ignore_ascii_case("javascript") || scheme.eq_ignore_ascii_case("data")
+        })
+    {
+        return None;
+    }
+    let escaped = url.replace('\\', "\\\\");
+    Some(
+        if url.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>')) {
+            format!("<{}>", escaped.replace('<', "\\<").replace('>', "\\>"))
+        } else {
+            escaped
+        },
+    )
 }
 
-/// A link destination as Markdown can carry it: a target with whitespace,
-/// parentheses or angle brackets is wrapped in `<…>`, inside which
-/// backslashes and angle brackets are backslash-escaped.
-fn link_target(target: &str) -> std::borrow::Cow<'_, str> {
-    let target = url_text(target);
-    if target.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>')) {
-        let escaped = target
-            .replace('\\', "\\\\")
-            .replace('<', "\\<")
-            .replace('>', "\\>");
-        format!("<{escaped}>").into()
-    } else {
-        target
+/// Whether text can sit between `[` and `]`: brackets outside code spans
+/// must nest and close, or Markdown drops the whole link. Text failing this
+/// is written without its link instead.
+fn brackets_balanced(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => {
+                // Skip a code span; an unclosed backtick run is literal text.
+                let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+                let ticks = &text[i..i + run];
+                i += run;
+                if let Some(end) = text[i..].find(ticks) {
+                    i += end + run;
+                }
+            }
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b']' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
     }
+    depth == 0
 }
 
 /// A `colspan`/`rowspan` value; missing, unparsable and zero mean 1.

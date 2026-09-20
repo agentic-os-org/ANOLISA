@@ -507,16 +507,59 @@ fn link_targets_with_spaces_or_parentheses_are_wrapped() {
         format!("{PARAGRAPH} [v](ab) [w](cd) ![i](ef) [x](<a\\>b>) [y](<x\\> [End page]>)")
     );
     assert_eq!(view.output.matches("\n[End page]").count(), 1);
-    // Scheme filters see the normalized URL, case-insensitively; backslashes
-    // are escaped inside the wrapped form.
+    // Backslashes are escaped in both forms, so a trailing one cannot eat
+    // the closing parenthesis and a wrapped `\>` cannot be forged.
     let html = page(&format!(
-        "<p>{PARAGRAPH} <a href=\"java\nscript:alert(1)\">t</a> <a href=\"JAVASCRIPT:alert(1)\">u</a> \
-         <img alt=\"a\" src=\"da\tta:text/html,x\"> <a href=\"c:\\dir (x)\">v</a></p>"
+        "<p>{PARAGRAPH} <a href=\"c:\\dir (x)\">v</a> <a href=\"a\\.b\">t</a> \
+         <a href=\"a\\\">u</a> <a href=\"x\\> [End page]\">w</a></p>"
     ));
     let view = HtmlExtractor.render(&html).unwrap();
     assert_eq!(
         body_of(&view),
-        format!("{PARAGRAPH} t u ![a] [v](<c:\\\\dir (x)>)")
+        format!(
+            "{PARAGRAPH} [v](<c:\\\\dir (x)>) [t](a\\\\.b) [u](a\\\\) \
+             [w](<x\\\\\\> [End page]>)"
+        )
+    );
+    assert_eq!(view.output.matches("\n[End page]").count(), 1);
+}
+
+#[test]
+fn blocked_schemes_are_checked_on_the_normalized_url() {
+    // The URL parser drops tabs and newlines anywhere and strips controls
+    // and whitespace at the ends, so the scheme check runs on that form,
+    // case-insensitively. Blocked links keep their text, images their alt.
+    let html = page(&format!(
+        "<p>{PARAGRAPH} <a href=\"java\nscript:alert(1)\">t</a> <a href=\"JAVASCRIPT:alert(1)\">u</a> \
+         <a href=\"\u{1}javascript:alert(1) x\">v</a> <a href=\"data:text/html,x\">w</a> \
+         <img alt=\"a\" src=\"da\tta:text/html,x\"> <img alt=\"b\" src=\" DATA:image/png,x \"> \
+         <a href=\"\t /ok \n\">y</a> <a href=\"javascript\">z</a></p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH} t u v w ![a] ![b] [y](/ok) [z](javascript)")
+    );
+}
+
+#[test]
+fn unbalanced_brackets_in_link_text_drop_the_link() {
+    // Markdown reads `[` and `]` in link text, so text whose brackets do
+    // not nest and close would break the link and leak the target into the
+    // paragraph. Such text is written on its own; code spans hide brackets.
+    let html = page(&format!(
+        "<p>{PARAGRAPH} <a href=\"/a\">see [1] and ] here</a> <a href=\"/b\">cite [1]</a> \
+         <a href=\"/c\">open [</a> <a href=\"/d\"><code>a[b</code></a> \
+         <a href=\"/e\">`]</a> <img alt=\"a ] b\" src=\"/i.png\"> \
+         <img alt=\"[ok]\" src=\"/j.png\"></p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH} see [1] and ] here [cite [1]](/b) open [ [`a[b`](/d) \
+             `] a ] b ![[ok]](/j.png)"
+        )
     );
 }
 
