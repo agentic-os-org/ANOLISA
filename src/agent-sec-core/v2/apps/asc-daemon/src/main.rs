@@ -53,7 +53,7 @@ fn main() -> ExitCode {
         Ok(lease) => lease,
         Err(problem) => {
             report_error(&telemetry, &problem);
-            telemetry.shutdown(Duration::from_millis(2000));
+            telemetry.shutdown(Duration::from_secs(2));
             return ExitCode::FAILURE;
         }
     };
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
-    telemetry.shutdown(Duration::from_millis(2000));
+    telemetry.shutdown(Duration::from_secs(2));
     outcome
 }
 
