@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+### Added
+
+- `skillfs mount --config mount.toml` now combines ordered skill sources in
+  one mount. Earlier sources win whole skill directories; multi-source mounts
+  are read-only and require remounting after configuration changes or adding
+  or removing skills
+  ([#3200](https://github.com/agentic-os-org/ANOLISA/pull/3200)).
+- An optional Kubernetes deployment seeds read-only skill packages into a
+  private writable source for Ledger scanning and activation. The new
+  `--read-only` option prevents writes through the agent-visible mount;
+  missing or invalid activation keeps skills hidden
+  ([#3182](https://github.com/agentic-os-org/ANOLISA/pull/3182)).
+
+### Changed
+
+- Both Debian and Alibaba Cloud Linux 4 sidecar images now supervise real
+  FUSE reads and attempt remounts after repeated failures, with bounded
+  retries. Workloads must reopen failed handles after recovery
+  ([#2701](https://github.com/agentic-os-org/ANOLISA/pull/2701)).
+- Read-only transformed `SKILL.md` handles now retain their captured content
+  across source edits, while new opens read the updated content. A bounded
+  cache reuses transformation results across attribute queries and opens.
+  Separately, new captured handles that would exceed the mount-wide 64 MiB or
+  1,024-handle budget fail to open with `ENOMEM`; closing captured handles frees
+  capacity
+  ([#3202](https://github.com/agentic-os-org/ANOLISA/pull/3202)).
+
 ## [0.4.2] - 2026-08-27
 
 ### Added
