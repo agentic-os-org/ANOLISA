@@ -65,6 +65,12 @@ impl InterruptionStore {
 
     fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Migration must run before any index that references the added
+        // column: on databases created before conversation_id existed,
+        // creating that index first fails and the `?` below would return
+        // before this migration ever ran (issue #3314).
+        let _ =
+            conn.execute_batch("ALTER TABLE interruption_events ADD COLUMN conversation_id TEXT;");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS interruption_events (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,9 +100,6 @@ impl InterruptionStore {
                 exited_at_ns  INTEGER NOT NULL
             );",
         )?;
-        // Migration: add conversation_id column for existing databases
-        let _ =
-            conn.execute_batch("ALTER TABLE interruption_events ADD COLUMN conversation_id TEXT;");
         Ok(())
     }
 
@@ -1035,6 +1038,72 @@ mod tests {
             detail: None,
             resolved: false,
         }
+    }
+
+    #[test]
+    fn test_old_schema_db_is_migrated_before_index_creation() {
+        // Reproduces issue #3314: a database created before conversation_id
+        // existed must have the column added before any index on it is
+        // created. With the old ordering the CREATE INDEX aborts the batch
+        // and the store never initializes.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_legacy_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let legacy_schema = "CREATE TABLE interruption_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interruption_id TEXT NOT NULL UNIQUE,
+            session_id TEXT, trace_id TEXT, call_id TEXT, pid INTEGER,
+            agent_name TEXT, interruption_type TEXT NOT NULL, severity TEXT NOT NULL,
+            occurred_at_ns INTEGER NOT NULL, detail TEXT,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP)";
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(legacy_schema).unwrap();
+        }
+        InterruptionStore::new_with_path(&path)
+            .expect("store must initialize on a pre-conversation_id database");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let column: Option<String> = conn
+            .prepare("PRAGMA table_info(interruption_events)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .flatten()
+            .find(|name| name == "conversation_id");
+        assert_eq!(column.as_deref(), Some("conversation_id"));
+        let index: Option<String> = conn
+            .prepare("PRAGMA index_list(interruption_events)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .flatten()
+            .find(|name| name == "idx_interruption_conversation");
+        assert_eq!(index.as_deref(), Some("idx_interruption_conversation"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reopening_migrated_db_is_idempotent() {
+        // Opening the same database twice must not regress: the duplicate-column
+        // ALTER error on the second open is ignored by design, and the store
+        // keeps working. Guards the fresh-database path of the #3314 fix.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_reopen_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        InterruptionStore::new_with_path(&path).expect("first open");
+        InterruptionStore::new_with_path(&path).expect("reopen with duplicate-column ALTER");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
