@@ -9,6 +9,36 @@
 
 ## [未发布]
 
+## [0.3.13] - 2026-09-20
+
+### 变更
+
+- RPM 安装、更新、卸载和依赖预检现在支持 Yum 3 与 DNF 4。
+  ANOLISA 优先使用 `yum`，仅在其不存在时使用 `dnf`；指定版本仍按精确版本处理，
+  遇到版本锁等系统限制时会报错，不再静默选择其他版本
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318))。
+- RPM 候选软件包查询现在直接读取并校验配置仓库的元数据，无需 `dnf repoquery`。
+  仓库访问遵循 `/etc/yum.conf` 中的代理和私有 CA 配置，该文件不存在时使用
+  `/etc/dnf/dnf.conf`。未配置 RPM 仓库时，本地软件包查询和 Raw 安装也可正常执行；
+  已配置仓库的错误仍会报告
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318)、
+  [#3353](https://github.com/agentic-os-org/ANOLISA/pull/3353))。
+- Raw 安装发现组件没有适用于当前操作系统与架构的可安装产物时，现在会明确显示
+  请求的平台并列出已发布的其他平台，`--json` 错误也包含这些信息，
+  便于区分平台缺失与组件名称不存在
+  ([#3326](https://github.com/agentic-os-org/ANOLISA/pull/3326))。
+
+### 修复
+
+- 运行依赖检查、自动安装依赖和 `anolisa doctor` 现在统一通过 `ID` 与 `ID_LIKE`
+  识别 RPM 和 Debian 衍生发行版。无法识别软件包体系时，会提供手动安装指引，
+  不再根据 `PATH` 选择无关的软件包管理器
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318))。
+- 云元数据收集遇到单个字段返回 HTTP 错误或空响应时，现在会继续读取其他字段，
+  保留遥测快照中仍可获取的实例信息。连接或传输失败时，仍会停止向不可达端点
+  发起后续查询
+  ([#3308](https://github.com/agentic-os-org/ANOLISA/pull/3308))。
+
 ## [0.3.12] - 2026-09-16
 
 ### 变更

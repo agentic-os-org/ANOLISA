@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-09-20
+
+### Changed
+
+- RPM installs, updates, removals, and dependency preflight checks now support
+  Yum 3 and DNF 4. ANOLISA prefers `yum` and uses `dnf` only when `yum` is absent;
+  requested versions remain exact, and system restrictions such as version locks
+  cause a failure instead of silently selecting another version
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318)).
+- RPM candidate queries now read and validate the configured repository metadata
+  directly, without requiring `dnf repoquery`. Repository access honors proxy and
+  private CA settings in `/etc/yum.conf`, or `/etc/dnf/dnf.conf` when the former
+  is absent. Local package queries and Raw installs also work without a configured
+  RPM repository; errors from a configured repository are still reported
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318),
+  [#3353](https://github.com/agentic-os-org/ANOLISA/pull/3353)).
+- Raw installs now name the requested platform and list published alternatives
+  when the component has no installable artifact for the host OS and architecture,
+  including in `--json` errors, making platform gaps distinguishable from unknown
+  component names
+  ([#3326](https://github.com/agentic-os-org/ANOLISA/pull/3326)).
+
+### Fixed
+
+- Runtime dependency checks, provisioning, and `anolisa doctor` now consistently
+  recognize RPM and Debian derivative distributions through `ID` and `ID_LIKE`.
+  Unsupported package families receive manual installation guidance instead of
+  selecting an unrelated package manager from `PATH`
+  ([#3318](https://github.com/agentic-os-org/ANOLISA/pull/3318)).
+- Cloud metadata collection now continues reading other fields after an HTTP
+  error or empty response for one key, preserving available instance information
+  in telemetry snapshots. Connection and transfer failures still stop subsequent
+  queries to an unreachable endpoint
+  ([#3308](https://github.com/agentic-os-org/ANOLISA/pull/3308)).
+
 ## [0.3.12] - 2026-09-16
 
 ### Changed
