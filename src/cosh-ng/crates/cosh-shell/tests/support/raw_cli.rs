@@ -928,6 +928,7 @@ fn configure_raw_cli_command(command: &mut Command) {
     let home = temp_shell_home("default-home");
     let git_work_tree = raw_cli_git_fixture();
     command
+        .env_remove("COSH_SHELL_STATUS_SYMBOLS")
         .env("COSH_SHELL_ISOLATED", "1")
         .env("COSH_SHELL_INTEGRATION", "enhanced")
         .env("COSH_SHELL_RAW_SHELL", "bash")
