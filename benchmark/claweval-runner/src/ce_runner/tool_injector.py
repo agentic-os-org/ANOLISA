@@ -26,7 +26,9 @@ Key conventions (from openclaw native MCP runtime):
   - Agent uses ``tools.alsoAllow`` to make MCP tools visible (``tools.allow``
     cannot expose MCP tools — gateway limitation)
   - Agent uses ``tools.deny`` to block all built-in tools (exec, read, write,
-    etc.) so agent CANNOT access host filesystem (anti-cheat isolation)
+    etc.) so agent CANNOT access host filesystem (anti-cheat isolation), plus
+    the agent-memory plugin tools so agent CANNOT reach the host's persistent
+    memory across tasks
   - ``tools.exec`` policy enables MCP tool execution through the bridge
   - No ``openclaw-mcp-adapter`` plugin needed
 
@@ -73,6 +75,26 @@ _DENY_BUILTIN_TOOLS = [
     "session_status", "memory_get", "memory_search",
 ]
 
+# ANOLISA agent-memory OpenClaw plugin tools to deny — keeps an eval agent off
+# the host's persistent memory. Like the stock ``memory-core`` entries in
+# ``_DENY_BUILTIN_TOOLS``, these are plugin tools registered on the gateway by
+# plain name rather than MCP tools, so the ``<serverKey>__*`` wildcards from
+# ``_build_deny_list`` never match them. The store behind them outlives the
+# task, the run, and the gateway restart: without this deny an agent can recall
+# what an earlier task recorded and leave answers behind for the next one. Both
+# spellings stay denied — agent-memory 0.2.8 namespaces its read/search tools
+# as ``anolisa_memory_*``, while 0.2.7 and older registered them as
+# ``memory_get`` / ``memory_search``, names the built-in list already blocks
+# together with the host ``memory-core`` tools of the same name.
+_DENY_MEMORY_PLUGIN_TOOLS = [
+    "anolisa_memory_search", "anolisa_memory_get",
+    "memory_observe", "memory_get_context",
+]
+
+# Every host-side tool name an injected agent denies. Single source for
+# ``build_agent_tools`` so the production and test paths cannot drift.
+_DENY_HOST_TOOLS = [*_DENY_BUILTIN_TOOLS, *_DENY_MEMORY_PLUGIN_TOOLS]
+
 
 def build_agent_tools(
     mock_mcp_name: str | None = None,
@@ -85,6 +107,9 @@ def build_agent_tools(
 
     Stateless, shared helper used by both production injection code and tests
     so the agent configuration cannot drift between them.
+
+    ``deny`` always starts from ``_DENY_HOST_TOOLS`` (gateway built-ins plus
+    the agent-memory plugin tools) before ``extra_deny`` is appended.
 
     Args:
         mock_mcp_name: Mock MCP server key (for building the allow list).
@@ -104,7 +129,7 @@ def build_agent_tools(
         allowed = ToolInjector._build_allowlist(
             mock_mcp_name, mock_tool_names, sandbox_mcp_name,
         )
-    deny = list(_DENY_BUILTIN_TOOLS)
+    deny = list(_DENY_HOST_TOOLS)
     if extra_deny:
         deny.extend(extra_deny)
     return {
