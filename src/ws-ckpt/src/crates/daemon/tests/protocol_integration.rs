@@ -11,8 +11,8 @@ use tokio::net::{UnixListener, UnixStream};
 use ws_ckpt_common::{
     decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry,
     EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
-    GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, Request, Response,
-    SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceGenerationTokenV2, WorkspaceInfo,
+    GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, RecoveryPreview, Request,
+    Response, SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceGenerationTokenV2, WorkspaceInfo,
     WorkspacePolicy,
 };
 
@@ -147,6 +147,17 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
             retained_paths: Vec::new(),
         },
         Request::Recover { workspace } => Response::RecoverOk { workspace },
+        Request::RecoverPreview { workspace } => Response::RecoverPreviewOk {
+            preview: RecoveryPreview {
+                ws_id: Some("ws-test".into()),
+                registration_path: workspace,
+                snapshot_count: 3,
+                confirmation_digest: [7; 32],
+            },
+        },
+        Request::RecoverConfirmed { preview } => Response::RecoverOk {
+            workspace: preview.registration_path,
+        },
         Request::HealthAdvisory => Response::HealthAdvisoryOk {
             over_limit_workspace_count: 0,
             fs_total_bytes: 1_000_000_000,

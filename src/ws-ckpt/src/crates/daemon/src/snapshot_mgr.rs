@@ -783,7 +783,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let backend: Arc<dyn StorageBackend> =
                 Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
-                    temp.path().to_path_buf(),
+                    temp.path().join("data"),
                     temp.path().join("test.img"),
                 ));
             let state = Arc::new(DaemonState::new(
@@ -791,15 +791,17 @@ mod tests {
                 backend,
                 temp.path().join("state"),
             ));
-            let subvol = temp.path().join(ws_id);
+            let subvol = state.backend.data_root().join(ws_id);
             std::fs::create_dir_all(&subvol).unwrap();
             let ws_link = temp.path().join("ws-link");
             std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
-            state.register_workspace(
-                ws_id.to_string(),
-                ws_link.clone(),
-                SnapshotIndex::new(ws_link.clone()),
-            );
+            state
+                .register_workspace(
+                    ws_id.to_string(),
+                    ws_link.clone(),
+                    SnapshotIndex::new(ws_link.clone()),
+                )
+                .unwrap();
             Self {
                 _temp: temp,
                 state,
@@ -964,8 +966,12 @@ mod tests {
         // completed — and must report the registration live.
         let fx = GuardFixture::new("ws-swap");
         let arc = fx.state.get_by_wsid(&fx.ws_id).unwrap();
-        let live = fx._temp.path().join(&fx.ws_id);
-        let tmp = fx._temp.path().join(format!("{}.rollback-tmp", fx.ws_id));
+        let live = fx.state.backend.data_root().join(&fx.ws_id);
+        let tmp = fx
+            .state
+            .backend
+            .data_root()
+            .join(format!("{}.rollback-tmp", fx.ws_id));
 
         let (mid_swap, swapped) = tokio::sync::oneshot::channel::<()>();
         let writer_arc = arc.clone();
@@ -1032,11 +1038,13 @@ mod tests {
         std::fs::create_dir(&subvol).unwrap();
         let ws_link = temp.path().join("ws-link");
         std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
-        state.register_workspace(
-            ws_id.to_string(),
-            ws_link.clone(),
-            SnapshotIndex::new(ws_link),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_link.clone(),
+                SnapshotIndex::new(ws_link),
+            )
+            .unwrap();
         let arc = state.get_by_wsid(ws_id).unwrap();
 
         let probe_state = state.clone();
@@ -1679,7 +1687,9 @@ mod tests {
         index
             .snapshots
             .insert("snap-from".to_string(), make_snapshot_meta(false));
-        state.register_workspace("ws-diff-live".to_string(), ws_link.clone(), index);
+        state
+            .register_workspace("ws-diff-live".to_string(), ws_link.clone(), index)
+            .unwrap();
 
         let resp = diff_snapshots(&state, "ws-diff-live", "snap-from", None)
             .await
@@ -1910,11 +1920,13 @@ mod tests {
         std::fs::write(subvol.join("content"), b"non-empty").unwrap();
         let ws_path = tmp.path().join("ws-link");
         std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
-        state.register_workspace(
-            ws_id.to_string(),
-            ws_path.clone(),
-            chain_index(&ws_path, ws_id, 2),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                chain_index(&ws_path, ws_id, 2),
+            )
+            .unwrap();
 
         let cleanup_state = state.clone();
         let cleanup =
@@ -2038,7 +2050,9 @@ mod tests {
             };
         }
         idx.head = Some("snap-5".to_string());
-        state.register_workspace("ws-partial".to_string(), ws_path.clone(), idx);
+        state
+            .register_workspace("ws-partial".to_string(), ws_path.clone(), idx)
+            .unwrap();
 
         // keep=0 → all 5 are removal candidates. cleanup_snapshots returns
         // Ok(Response) for routing errors (e.g. WorkspaceNotFound) but Err
@@ -2154,7 +2168,9 @@ mod tests {
         let ws_path = tmp.path().join("ws-nf-link");
         std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
         let idx = chain_index(&ws_path, "ws-nf", 3);
-        state.register_workspace("ws-nf".to_string(), ws_path.clone(), idx);
+        state
+            .register_workspace("ws-nf".to_string(), ws_path.clone(), idx)
+            .unwrap();
 
         // keep=0 → all three selected; snap-2 comes back NotFound. NotFound
         // is not a failure → no bail, the CLI stays exit-zero.

@@ -113,6 +113,10 @@ ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 
 ### Recovering interrupted initialization
 
+Recovery confirmation uses the daemon-resolved workspace and snapshot count.
+If the recovery target or snapshot set changes before execution, confirm again.
+Update the CLI and daemon together to use this confirmation protocol.
+
 `ws-ckpt recover -w <workspace> --force` also handles an unregistered workspace:
 it restores `.pre-init-bak` and retains migrated subvolumes for inspection.
 Successful registered recovery archives leftover backups without blocking the

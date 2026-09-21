@@ -117,6 +117,15 @@ ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cl
 
 ### Recovering interrupted initialization and stale registrations
 
+Recovery confirmation comes from the daemon: aliases, parent symlinks and `..`
+resolve to the same registered workspace. The prompt shows its registered path
+and the number of snapshot directories that recovery will delete, including
+snapshots absent from the index. Execution uses that resolved workspace ID and
+rechecks the target and deletion set; if either changed, run the command again
+and confirm the new preview. `--force` skips the interactive prompt but still
+uses this preview and revalidation. Update the CLI and daemon together; an older
+daemon that does not support recovery preview cannot execute this CLI flow.
+
 Normally, `recover` copies a registered workspace into a plain directory, then
 removes its managed subvolume and snapshots. After interrupted initialization,
 choose the action that matches the remaining state:

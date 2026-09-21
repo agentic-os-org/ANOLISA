@@ -182,6 +182,14 @@ pub(crate) async fn dispatch_with_context(
             Err(e) => Err(e),
             Ok(()) => crate::workspace_mgr::recover_workspace(state, &workspace).await,
         },
+        Request::RecoverPreview { workspace } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => crate::recover_preview::preview(state, &workspace).await,
+        },
+        Request::RecoverConfirmed { preview } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => crate::workspace_mgr::recover_workspace_confirmed(state, &preview).await,
+        },
         Request::Unregister { workspace } => match state.ensure_bootstrapped().await {
             Err(e) => Err(e),
             Ok(()) => crate::workspace_mgr::unregister_missing_workspace(state, &workspace).await,
@@ -564,6 +572,8 @@ struct PolicyCtx {
     ws_id: String,
     index_dir: std::path::PathBuf,
     policy_io_mu: Arc<tokio::sync::Mutex<()>>,
+    // Prevent recover/re-init from replacing this registration during policy I/O.
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// Resolve `workspace` → [`PolicyCtx`], or return a ready-to-send
@@ -584,6 +594,15 @@ async fn resolve_ws_for_policy(
             });
         }
     };
+    let Some((_, mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await else {
+        return Err(Response::Error {
+            code: ErrorCode::WorkspaceNotFound,
+            message: format!("workspace not found: {}", workspace),
+        });
+    };
+    if let Some(error) = state.detached_registration_error(&arc).await {
+        return Err(error);
+    }
     let (ws_id, policy_io_mu) = {
         let ws = arc.read().await;
         (ws.ws_id.clone(), ws.policy_io_mu.clone())
@@ -594,6 +613,7 @@ async fn resolve_ws_for_policy(
         ws_id,
         index_dir,
         policy_io_mu,
+        _mutation_guard: mutation_guard,
     })
 }
 
@@ -643,16 +663,16 @@ async fn delete_policy_blocking(index_dir: std::path::PathBuf) -> Result<(), Str
 ///
 /// Lock discipline (see [[ws-lock-no-fs-loops]]): the ws RwLock is held ONLY
 /// for in-memory commit; the unlink + parent fsync runs unlocked. PATCH/RESET
-/// serialization uses a per-ws narrow `policy_io_mu` so concurrent
-/// checkpoint/list/status are not blocked by a slow disk.
+/// serialization uses `policy_io_mu` under the workspace mutation lock so
+/// recovery cannot invalidate the registration during policy persistence.
 async fn handle_reset_workspace_policy(state: &Arc<DaemonState>, workspace: &str) -> Response {
     let ctx = match resolve_ws_for_policy(state, workspace).await {
         Ok(c) => c,
         Err(resp) => return resp,
     };
 
-    // (1) Serialize PATCH/RESET on this ws via the narrow mutex; does NOT
-    //     block readers/checkpoint on the ws RwLock.
+    // (1) Serialize policy persistence after acquiring the lifecycle mutex;
+    //     readers remain independent of the workspace RwLock.
     let _io_guard = ctx.policy_io_mu.lock().await;
 
     // (2) Slow fs op runs WITHOUT the ws lock.
@@ -1133,7 +1153,7 @@ mod tests {
     // ── Detached-registration guard at the dispatch layer ──
     //
     // Real topology: BtrfsBaseBackend on a tempdir (data_root =
-    // `<tmp>/ws-ckpt-data`), a `ws-<id>` directory inside it as the
+    // `<tmp>/data/ws-ckpt-data`), a `ws-<id>` directory inside it as the
     // live-subvolume stand-in, and a workspace symlink pointing at it.
 
     /// Returns (state, ws_id, workspace symlink, tempdir to keep alive).
@@ -1141,7 +1161,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let backend: Arc<dyn StorageBackend> =
             Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
-                temp.path().to_path_buf(),
+                temp.path().join("data"),
                 crate::backends::btrfs_base::BtrfsBaseScenario::InPlace,
             ));
         let state = Arc::new(DaemonState::new(
@@ -1149,15 +1169,17 @@ mod tests {
             backend,
             temp.path().join("state"),
         ));
-        let subvol = temp.path().join("ws-ckpt-data").join(ws_id);
+        let subvol = state.backend.data_root().join(ws_id);
         std::fs::create_dir_all(&subvol).unwrap();
         let ws_link = temp.path().join("ws-link");
         std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
-        state.register_workspace(
-            ws_id.to_string(),
-            ws_link.clone(),
-            ws_ckpt_common::SnapshotIndex::new(ws_link.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_link.clone(),
+                ws_ckpt_common::SnapshotIndex::new(ws_link.clone()),
+            )
+            .unwrap();
         (state, ws_id.to_string(), ws_link, temp)
     }
 
@@ -1193,6 +1215,90 @@ mod tests {
         // The checkpoint path must fail loudly instead of auto-initing over
         // the replacement directory or snapshotting the stale subvolume.
         assert_detach_hint(resp, "dispatch checkpoint");
+    }
+
+    #[tokio::test]
+    async fn dispatch_equivalent_paths_refuse_retargeted_registration() {
+        let (state, ws_a, link_a, temp) = live_topology("ws-A");
+        let live_b = state.backend.data_root().join("ws-B");
+        let link_b = temp.path().join("repo-B");
+        std::fs::create_dir(&live_b).unwrap();
+        std::os::unix::fs::symlink(&live_b, &link_b).unwrap();
+        state
+            .register_workspace(
+                "ws-B".into(),
+                link_b.clone(),
+                ws_ckpt_common::SnapshotIndex::new(link_b.clone()),
+            )
+            .unwrap();
+        std::fs::remove_file(&link_a).unwrap();
+        std::os::unix::fs::symlink(&live_b, &link_a).unwrap();
+        std::fs::create_dir(temp.path().join("tmp")).unwrap();
+        let parent_alias = temp.path().join("parent-alias");
+        std::os::unix::fs::symlink(temp.path(), &parent_alias).unwrap();
+        let mut relative = PathBuf::new();
+        for _ in std::env::current_dir().unwrap().components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(link_a.strip_prefix("/").unwrap());
+        for path in [
+            temp.path().join("tmp/../ws-link"),
+            parent_alias.join("ws-link"),
+            relative,
+        ] {
+            let workspace = path.to_string_lossy().to_string();
+            let requests = [
+                Request::Checkpoint {
+                    workspace: workspace.clone(),
+                    id: "must-not-create".into(),
+                    message: None,
+                    metadata: None,
+                    pin: false,
+                },
+                Request::Rollback {
+                    workspace,
+                    to: Some("must-not-restore".into()),
+                    num_ancestors: None,
+                },
+            ];
+            for request in requests {
+                let response = dispatch(&state, request).await;
+                assert!(
+                    matches!(response, Response::Error { code: ErrorCode::InternalError, ref message }
+                    if message.contains(&format!("ws_id={ws_a}")) && message.contains("recover")),
+                    "{path:?}: {response:?}"
+                );
+            }
+        }
+        let b = state.get_by_wsid("ws-B").unwrap();
+        assert!(b.read().await.index.snapshots.is_empty());
+        assert!(std::fs::read_dir(&live_b).unwrap().next().is_none());
+        assert_eq!(std::fs::read_link(&link_b).unwrap(), live_b);
+
+        // A symlink before '..' changes its parent semantically: lexical
+        // cancellation would incorrectly select the detached registration A.
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("child")).unwrap();
+        std::os::unix::fs::symlink(&live_b, elsewhere.join("ws-link")).unwrap();
+        let jump = temp.path().join("jump");
+        std::os::unix::fs::symlink(elsewhere.join("child"), &jump).unwrap();
+        let workspace = jump.join("../ws-link").to_string_lossy().to_string();
+        let resolved = state.resolve_workspace(&workspace).await.unwrap();
+        assert_eq!(resolved.read().await.ws_id, "ws-B");
+        assert!(matches!(
+            dispatch(
+                &state,
+                Request::Checkpoint {
+                    workspace,
+                    id: "valid-alias".into(),
+                    message: None,
+                    metadata: None,
+                    pin: false,
+                }
+            )
+            .await,
+            Response::CheckpointSkipped { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1257,6 +1363,226 @@ mod tests {
             }
             other => panic!("expected StatusOk, got {other:?}"),
         }
+    }
+
+    fn recovery_snapshot() -> ws_ckpt_common::SnapshotMeta {
+        ws_ckpt_common::SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: None,
+            child_ids: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_preview_resolves_aliases_and_detached_registration_without_mutation() {
+        let (state, ws_id, ws_link, temp) = live_topology("ws-preview");
+        let arc = state.get_by_wsid(&ws_id).unwrap();
+        arc.write()
+            .await
+            .index
+            .snapshots
+            .insert("snap-1".into(), recovery_snapshot());
+        let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
+        std::fs::create_dir_all(snapshot_dir.join("snap-1")).unwrap();
+        std::fs::create_dir(snapshot_dir.join("unindexed-snapshot")).unwrap();
+        let parent_alias = temp.path().join("parent-alias");
+        std::os::unix::fs::symlink(temp.path(), &parent_alias).unwrap();
+        std::fs::create_dir(temp.path().join("tmp")).unwrap();
+        let alias = temp.path().join("workspace-alias");
+        std::os::unix::fs::symlink(&ws_link, &alias).unwrap();
+        let mut relative = PathBuf::new();
+        for _ in std::env::current_dir().unwrap().components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(ws_link.strip_prefix("/").unwrap());
+        let paths = [
+            ws_id.clone(),
+            ws_link.display().to_string(),
+            alias.display().to_string(),
+            parent_alias.join("ws-link").display().to_string(),
+            temp.path().join("tmp/../ws-link").display().to_string(),
+            relative.display().to_string(),
+            state.backend.data_root().join(&ws_id).display().to_string(),
+        ];
+        let mut baseline = None;
+        for workspace in paths {
+            let response = dispatch(&state, Request::RecoverPreview { workspace }).await;
+            let Response::RecoverPreviewOk { preview } = response else {
+                panic!("expected recovery preview: {response:?}");
+            };
+            assert_eq!(preview.ws_id.as_deref(), Some(ws_id.as_str()));
+            assert_eq!(preview.registration_path, ws_link.display().to_string());
+            assert_eq!(preview.snapshot_count, 2);
+            if let Some(expected) = &baseline {
+                assert_eq!(&preview, expected);
+            }
+            baseline = Some(preview);
+        }
+        std::fs::remove_file(&ws_link).unwrap();
+        std::fs::create_dir(&ws_link).unwrap();
+        let response = dispatch(
+            &state,
+            Request::RecoverPreview {
+                workspace: parent_alias.join("ws-link").display().to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, Response::RecoverPreviewOk { ref preview } if Some(preview) == baseline.as_ref())
+        );
+        let response = dispatch(&state, Request::Status { workspace: None }).await;
+        assert!(matches!(response, Response::StatusOk { report }
+            if report.workspaces.len() == 1 && report.workspaces[0].snapshot_count == 1));
+        assert_eq!(arc.read().await.index.snapshots.len(), 1);
+        assert_eq!(state.all_workspaces().len(), 1);
+        assert!(ws_link.is_dir());
+    }
+
+    #[tokio::test]
+    async fn confirmed_recovery_refuses_snapshot_changes_before_backend_execution() {
+        let (state, ws_id, _, _temp) = live_topology("ws-stale-preview");
+        let response = dispatch(
+            &state,
+            Request::RecoverPreview {
+                workspace: ws_id.clone(),
+            },
+        )
+        .await;
+        let Response::RecoverPreviewOk { preview } = response else {
+            panic!("{response:?}")
+        };
+        let arc = state.get_by_wsid(&ws_id).unwrap();
+        arc.write()
+            .await
+            .index
+            .snapshots
+            .insert("new-snapshot".into(), recovery_snapshot());
+        let response = dispatch(&state, Request::RecoverConfirmed { preview }).await;
+        assert!(
+            matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::ConfirmationRequired,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        assert!(state.get_by_wsid(&ws_id).is_some());
+        assert!(state.backend.data_root().join(ws_id).is_dir());
+        assert_eq!(arc.read().await.index.snapshots.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn orphan_recovery_preview_refuses_replaced_backup_then_restores_confirmed_copy() {
+        let (state, _, _, temp) = live_topology("ws-unrelated");
+        let original = temp.path().join("orphan");
+        let backup = PathBuf::from(crate::backends::btrfs_common::backup_path_for(
+            original.to_str().unwrap(),
+        ));
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("old-data"), "original").unwrap();
+        let parent_alias = temp.path().join("parent-alias");
+        std::os::unix::fs::symlink(temp.path(), &parent_alias).unwrap();
+        let request = Request::RecoverPreview {
+            workspace: parent_alias.join("orphan").display().to_string(),
+        };
+        let response = dispatch(&state, request.clone()).await;
+        let Response::RecoverPreviewOk { preview } = response else {
+            panic!("{response:?}")
+        };
+        assert_eq!(preview.ws_id, None);
+        assert_eq!(preview.registration_path, original.display().to_string());
+        assert_eq!(preview.snapshot_count, 0);
+        assert!(!original.exists());
+        let preserved = temp.path().join("preserved-backup");
+        std::fs::rename(&backup, &preserved).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("new-data"), "replacement").unwrap();
+        let response = dispatch(&state, Request::RecoverConfirmed { preview }).await;
+        assert!(
+            matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::ConfirmationRequired,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        assert!(backup.join("new-data").is_file());
+        assert!(!original.exists());
+        let response = dispatch(&state, request).await;
+        let Response::RecoverPreviewOk { preview } = response else {
+            panic!("{response:?}")
+        };
+        let response = dispatch(&state, Request::RecoverConfirmed { preview }).await;
+        assert!(
+            matches!(response, Response::RecoverWithWarning { workspace, .. }
+            if workspace == original.display().to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(original.join("new-data")).unwrap(),
+            "replacement"
+        );
+        assert!(preserved.join("old-data").is_file());
+        assert!(!backup.exists());
+        assert_eq!(state.all_workspaces().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn policy_requests_refuse_detached_registration_and_keep_policy_unchanged() {
+        let (state, ws_id, ws_link, _temp) = live_topology("ws-policy-detached");
+        std::fs::remove_file(&ws_link).unwrap();
+        std::fs::create_dir(&ws_link).unwrap();
+        for request in [
+            Request::GetWorkspacePolicy {
+                workspace: ws_id.clone(),
+            },
+            Request::ResetWorkspacePolicy {
+                workspace: ws_id.clone(),
+            },
+            Request::ReloadWorkspacePolicy {
+                workspace: ws_id.clone(),
+            },
+            Request::PatchWorkspacePolicy {
+                workspace: ws_id.clone(),
+                auto_cleanup: PolicyFieldOp::Set(true),
+                auto_cleanup_keep: PolicyFieldOp::Unchanged,
+            },
+        ] {
+            assert_detach_hint(dispatch(&state, request).await, "policy request");
+        }
+        assert!(state
+            .get_by_wsid(&ws_id)
+            .unwrap()
+            .read()
+            .await
+            .policy
+            .is_empty());
+        assert!(!state.index_dir(&ws_id).join("policy.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn policy_context_holds_lifecycle_lock_until_request_finishes() {
+        let (state, ws_id, _, _temp) = live_topology("ws-policy-lock");
+        let ctx = resolve_ws_for_policy(&state, &ws_id).await.unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            state.lock_wsid(&ws_id)
+        )
+        .await
+        .is_err());
+        drop(ctx);
+        let guard =
+            tokio::time::timeout(std::time::Duration::from_secs(1), state.lock_wsid(&ws_id))
+                .await
+                .unwrap();
+        drop(guard);
     }
 
     #[tokio::test]
@@ -1328,18 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_get_workspace_policy_returns_global_default_for_clean_ws() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/clean");
-        state.register_workspace(
-            "ws-clean".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-clean");
         let req = Request::GetWorkspacePolicy {
             workspace: "ws-clean".to_string(),
         };
@@ -1362,18 +1677,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_patch_then_get_workspace_policy_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/patchget");
-        state.register_workspace(
-            "ws-patchget".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-patchget");
 
         // Patch sets both fields (Patch is the only write path, Reset the only delete path).
         let patch_req = Request::PatchWorkspacePolicy {
@@ -1413,18 +1717,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_reset_workspace_policy_deletes_file_and_inherits_global() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/reset");
-        state.register_workspace(
-            "ws-reset".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-reset");
 
         // First Patch a real policy so there's a file to delete.
         let _ = dispatch(
@@ -1458,18 +1751,7 @@ mod tests {
     async fn dispatch_reset_workspace_policy_is_idempotent_on_empty_policy() {
         // Calling Reset on a ws with no override must still succeed and converge
         // (file absent, memory default) — disk is always touched, ENOENT short-circuits.
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/reset-noop");
-        state.register_workspace(
-            "ws-reset-noop".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-reset-noop");
         // No prior Patch — policy is default, file does not exist.
         assert!(!state
             .index_dir("ws-reset-noop")
@@ -1496,23 +1778,16 @@ mod tests {
     async fn dispatch_patch_workspace_policy_refuses_when_failsafe() {
         // Boot-time fail-safe must not be mistaken for user intent: PATCH that
         // doesn't explicitly set auto_cleanup would silently persist Some(false).
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/failsafe");
-        state.register_workspace_with_policy(
-            "ws-failsafe".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-            WorkspacePolicy {
+        let (state, _, _, _temp) = live_topology("ws-failsafe");
+        {
+            let arc = state.get_by_wsid("ws-failsafe").unwrap();
+            let mut ws = arc.write().await;
+            ws.policy = WorkspacePolicy {
                 auto_cleanup: Some(false),
                 auto_cleanup_keep: None,
-            },
-            true,
-        );
+            };
+            ws.policy_failsafe = true;
+        }
 
         let patch_req = Request::PatchWorkspacePolicy {
             workspace: "ws-failsafe".to_string(),
@@ -1556,18 +1831,7 @@ mod tests {
     async fn dispatch_patch_workspace_policy_sequential_accumulates() {
         // Smoke test for Patch semantics under sequential application.
         // The concurrent guarantee is exercised separately below.
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/patch-seq");
-        state.register_workspace(
-            "ws-patch-seq".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-patch-seq");
 
         let r1 = dispatch(
             &state,
@@ -1628,18 +1892,7 @@ mod tests {
         // Issue #14: spawn two real concurrent Patches on disjoint fields and
         // assert both edits survive (a sequential test would pass even without
         // the lock). Multi-thread runtime so they actually race on the RwLock.
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/patch-conc");
-        state.register_workspace(
-            "ws-patch-conc".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-patch-conc");
 
         // Several iterations to reduce schedule-luck flakiness: without the
         // lock, at least one is likely to expose the race.
@@ -1715,18 +1968,7 @@ mod tests {
         // RESET; whichever wins the mutex first commits its memory before the
         // other proceeds. The final result is whatever the *second* op writes
         // — never a torn state, never a deadlock.
-        let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(DaemonState::new(
-            test_config(),
-            test_backend(),
-            tmp.path().to_path_buf(),
-        ));
-        let path = PathBuf::from("/ws/patch-vs-reset");
-        state.register_workspace(
-            "ws-patch-vs-reset".to_string(),
-            path.clone(),
-            ws_ckpt_common::SnapshotIndex::new(path),
-        );
+        let (state, _, _, _temp) = live_topology("ws-patch-vs-reset");
 
         // 16 iters: enough for both interleavings (patch-then-reset and
         // reset-then-patch) to actually occur under different schedules.

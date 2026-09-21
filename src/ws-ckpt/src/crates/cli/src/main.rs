@@ -11,10 +11,11 @@ use tokio::net::UnixStream;
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
     ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
-    DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
-    GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, OVERVIEW_JSON_SCHEMA,
+    RecoveryPreview, Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
+    DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH, GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE,
+    OVERVIEW_JSON_SCHEMA,
 };
 
 use std::cell::RefCell;
@@ -2030,6 +2031,24 @@ async fn handle_unregister(workspace: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+// Every destructive recovery uses daemon-resolved metadata, including --force.
+async fn preview_recovery(workspace: String) -> Result<RecoveryPreview> {
+    let response = send_request_to_daemon(&Request::RecoverPreview { workspace })
+        .await
+        .context("Cannot preview recovery; ensure the daemon supports recovery preview")?;
+    recovery_preview_from_response(response)
+}
+
+fn recovery_preview_from_response(response: Response) -> Result<RecoveryPreview> {
+    match response {
+        Response::RecoverPreviewOk { preview } => Ok(preview),
+        Response::Error { code, message } => {
+            anyhow::bail!("Recovery preview failed [{code:?}]: {message}")
+        }
+        _ => anyhow::bail!("Daemon did not return a recovery preview; upgrade/restart the daemon before recovering"),
+    }
+}
+
 /// Handle recover command: single workspace or all workspaces.
 async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Result<()> {
     if workspace.is_none() && !all {
@@ -2058,10 +2077,17 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             return Ok(());
         }
 
+        let mut previews = Vec::with_capacity(workspaces.len());
+        for ws in &workspaces {
+            previews.push(preview_recovery(ws.ws_id.clone()).await?);
+        }
         if !force {
-            println!("Recovering {} workspace(s):", workspaces.len());
-            for ws in &workspaces {
-                println!("  {} ({} snapshots)", ws.path, ws.snapshot_count);
+            println!("Recovering {} workspace(s):", previews.len());
+            for preview in &previews {
+                println!(
+                    "  {} ({} snapshots)",
+                    preview.registration_path, preview.snapshot_count
+                );
             }
             println!(
                 "This will delete all snapshots and restore all workspaces to normal directories.\n\
@@ -2081,9 +2107,9 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         }
 
         let mut failed: usize = 0;
-        for ws in &workspaces {
-            let req = Request::Recover {
-                workspace: ws.path.clone(),
+        for preview in &previews {
+            let req = Request::RecoverConfirmed {
+                preview: preview.clone(),
             };
             let resp = send_request_to_daemon(&req).await?;
             match resp {
@@ -2097,12 +2123,15 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
                 Response::Error { code, message } => {
                     eprintln!(
                         "\x1b[31mError [{:?}] recovering {}: {}\x1b[0m",
-                        code, ws.path, message
+                        code, preview.registration_path, message
                     );
                     failed += 1;
                 }
                 _ => {
-                    eprintln!("\x1b[33mUnexpected response for {}\x1b[0m", ws.path);
+                    eprintln!(
+                        "\x1b[33mUnexpected response for {}\x1b[0m",
+                        preview.registration_path
+                    );
                     failed += 1;
                 }
             }
@@ -2125,35 +2154,13 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         // Single workspace mode
         let ws_arg = resolve_workspace_arg(workspace.as_deref().unwrap());
 
-        // Snapshot count comes from the GLOBAL status, not `Status -w`: the
-        // per-workspace form now refuses detached registrations (the very
-        // state recover exists to repair), which would abort this flow before
-        // the Recover request is ever sent. Global status lists detached
-        // workspaces too, so the confirm prompt keeps its metadata either way.
-        // Match both path and ws_id: the daemon resolves `recover -w` either
-        // way, and a count of 0 for the ID form would understate what the
-        // confirmation is about to delete.
-        let status_req = Request::Status { workspace: None };
-        let status_resp = send_request_to_daemon(&status_req).await?;
-        let snapshot_count = match &status_resp {
-            Response::StatusOk { report } => report
-                .workspaces
-                .iter()
-                .find(|w| {
-                    w.ws_id == ws_arg
-                        || w.path.trim_end_matches('/') == ws_arg.trim_end_matches('/')
-                })
-                .map(|w| w.snapshot_count)
-                .unwrap_or(0),
-            Response::Error { code, message } => {
-                eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
-                process::exit(1);
-            }
-            _ => 0,
-        };
+        let preview = preview_recovery(ws_arg).await?;
 
         if !force {
-            println!("Workspace: {} ({} snapshots)", ws_arg, snapshot_count);
+            println!(
+                "Workspace: {} ({} snapshots)",
+                preview.registration_path, preview.snapshot_count
+            );
             println!(
                 "This restores a registered workspace and deletes its snapshots. For interrupted, unregistered init, it restores the pre-init backup and retains migrated storage for inspection.\n\
                  WARNING: ws-ckpt does NOT check for processes with cwd inside the workspace before recover.\n\
@@ -2171,7 +2178,7 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             }
         }
 
-        let req = Request::Recover { workspace: ws_arg };
+        let req = Request::RecoverConfirmed { preview };
         let resp = send_request_to_daemon(&req).await?;
         match resp {
             Response::RecoverWithWarning { workspace, warning } => {
@@ -3463,6 +3470,34 @@ mod tests {
         assert!(
             matches!(cli.command, Commands::Unregister { workspace, force: true } if workspace == "/tmp/ws")
         );
+    }
+
+    #[test]
+    fn recovery_confirmation_uses_daemon_identity_and_refuses_missing_preview() {
+        let preview = RecoveryPreview {
+            ws_id: Some("ws-actual".into()),
+            registration_path: "/real-parent/repo".into(),
+            snapshot_count: 19,
+            confirmation_digest: [7; 32],
+        };
+        let received = recovery_preview_from_response(Response::RecoverPreviewOk {
+            preview: preview.clone(),
+        })
+        .unwrap();
+        assert_eq!(received, preview);
+        assert!(recovery_preview_from_response(Response::RecoverOk {
+            workspace: "/alias-parent/repo".into(),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("upgrade/restart"));
+        assert!(recovery_preview_from_response(Response::Error {
+            code: ErrorCode::WorkspaceNotFound,
+            message: "registration disappeared".into(),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("registration disappeared"));
     }
 
     // ── Recover CLI parsing tests ──

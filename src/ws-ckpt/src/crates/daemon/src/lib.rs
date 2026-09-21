@@ -7,6 +7,7 @@ pub mod index_store;
 pub mod listener;
 mod lockfile;
 pub mod ops_log;
+mod recover_preview;
 pub mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod seccomp;

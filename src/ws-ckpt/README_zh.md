@@ -111,6 +111,9 @@ ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 
 ### 恢复中断的初始化
 
+恢复确认使用 daemon 解析的工作区和快照数量。若执行前恢复目标或快照集合发生变化，
+需要重新确认。使用此确认协议时，请同步更新 CLI 和 daemon。
+
 `ws-ckpt recover -w <workspace> --force` 也能恢复尚未注册的工作区：还原
 `.pre-init-bak`，并保留迁移中的子卷供检查。已注册工作区恢复成功时会归档遗留备份，
 避免阻断下一次 `init`。若已注册工作区的子卷被外部删除，使用

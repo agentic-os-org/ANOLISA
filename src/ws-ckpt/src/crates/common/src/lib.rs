@@ -192,6 +192,14 @@ pub enum Request {
         /// Registered workspace path or ID.
         workspace: String,
     },
+    /// Resolve recovery's exact target and deletion scope before confirmation.
+    RecoverPreview {
+        workspace: String,
+    },
+    /// Recover only if the daemon's preview still describes the same target.
+    RecoverConfirmed {
+        preview: RecoveryPreview,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -361,6 +369,23 @@ pub enum Response {
         /// Locations intentionally retained for manual recovery.
         retained_paths: Vec<String>,
     },
+    /// Recovery identity and snapshot scope to display before confirmation.
+    RecoverPreviewOk {
+        preview: RecoveryPreview,
+    },
+}
+
+/// Daemon-resolved recovery target; execution revalidates it under lifecycle locks.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPreview {
+    /// Registered workspace ID, or `None` for an interrupted, unregistered init.
+    pub ws_id: Option<String>,
+    /// User-visible restoration destination, never a managed storage alias.
+    pub registration_path: String,
+    /// Number of on-disk snapshot directories that recovery will delete.
+    pub snapshot_count: u32,
+    /// Fingerprint of the target and snapshot set; stale confirmation is refused.
+    pub confirmation_digest: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -3299,6 +3324,12 @@ mod tests {
 
     #[test]
     fn recovery_protocol_extensions_preserve_existing_wire_layout() {
+        let preview = RecoveryPreview {
+            ws_id: Some("ws-preview".into()),
+            registration_path: "/ws".into(),
+            snapshot_count: 7,
+            confirmation_digest: [9; 32],
+        };
         let requests = [
             Request::Recover {
                 workspace: "/ws".into(),
@@ -3306,8 +3337,14 @@ mod tests {
             Request::Unregister {
                 workspace: "/ws".into(),
             },
+            Request::RecoverPreview {
+                workspace: "/alias/ws".into(),
+            },
+            Request::RecoverConfirmed {
+                preview: preview.clone(),
+            },
         ];
-        for (request, tag) in requests.iter().zip([13_u32, 25]) {
+        for (request, tag) in requests.iter().zip([13_u32, 25, 26, 27]) {
             let encoded = bincode::serialize(request).unwrap();
             assert_eq!(&encoded[..4], &tag.to_le_bytes());
             let decoded: Request = bincode::deserialize(&encoded).unwrap();
@@ -3325,8 +3362,9 @@ mod tests {
                 workspace: "/ws".into(),
                 retained_paths: vec!["/backup".into()],
             },
+            Response::RecoverPreviewOk { preview },
         ];
-        for (response, tag) in responses.iter().zip([12_u32, 26, 27]) {
+        for (response, tag) in responses.iter().zip([12_u32, 26, 27, 28]) {
             let encoded = bincode::serialize(response).unwrap();
             assert_eq!(&encoded[..4], &tag.to_le_bytes());
             let decoded: Response = bincode::deserialize(&encoded).unwrap();
