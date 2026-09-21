@@ -64,11 +64,11 @@ export const AgentHealthNotifier: React.FC = () => {
   }, [poll]);
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-none">
       {toasts.map(t => (
         <div
           key={t.id}
-          className="bg-red-600 text-white text-xs px-4 py-2 rounded shadow-lg animate-pulse pointer-events-auto"
+          className="bg-red-600 text-white text-sm px-5 py-3 rounded-lg shadow-xl animate-pulse pointer-events-auto"
         >
           {t.message}
         </div>
