@@ -1,15 +1,4 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
-import type {
-  PluginHookAgentContext,
-  PluginHookAgentEndEvent,
-  PluginHookAfterToolCallEvent,
-  PluginHookBeforeToolCallEvent,
-  PluginHookLlmInputEvent,
-  PluginHookLlmOutputEvent,
-  PluginHookModelCallEndedEvent,
-  PluginHookModelCallStartedEvent,
-  PluginHookToolContext,
-} from "openclaw/plugin-sdk/plugin-runtime";
 import type { SecurityCapability } from "../types.js";
 import { envFlagEnabled, recordOpenClawObservability } from "../utils.js";
 import type { CliResult } from "../utils.js";
@@ -26,17 +15,6 @@ const OBSERVABILITY_PRIORITY = 1000;
 const OBSERVABILITY_LATE_PRIORITY = -10_000;
 const LOG_DETAIL_MAX_CHARS = 1000;
 
-type ObservabilityHookEvent =
-  | PluginHookLlmInputEvent
-  | PluginHookLlmOutputEvent
-  | PluginHookModelCallStartedEvent
-  | PluginHookModelCallEndedEvent
-  | PluginHookAgentEndEvent
-  | PluginHookBeforeToolCallEvent
-  | PluginHookAfterToolCallEvent;
-
-type ObservabilityHookContext = PluginHookAgentContext | PluginHookToolContext;
-
 export const observability: SecurityCapability = {
   id: "observability",
   name: "OpenClaw Observability",
@@ -45,58 +23,37 @@ export const observability: SecurityCapability = {
     const hookEnabled = envFlagEnabled("OBSERVABILITY_HOOK_ENABLED", true);
     api.on(
       "llm_input",
-      (
-        event: PluginHookLlmInputEvent,
-        ctx: PluginHookAgentContext,
-      ) => observeHook(api, hookEnabled, "llm_input", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "llm_input", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
       "model_call_started",
-      (
-        event: PluginHookModelCallStartedEvent,
-        ctx: PluginHookAgentContext,
-      ) => observeHook(api, hookEnabled, "model_call_started", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "model_call_started", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
       "model_call_ended",
-      (
-        event: PluginHookModelCallEndedEvent,
-        ctx: PluginHookAgentContext,
-      ) => observeHook(api, hookEnabled, "model_call_ended", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "model_call_ended", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
       "llm_output",
-      (
-        event: PluginHookLlmOutputEvent,
-        ctx: PluginHookAgentContext,
-      ) => observeHook(api, hookEnabled, "llm_output", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "llm_output", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
       "agent_end",
-      (
-        event: PluginHookAgentEndEvent,
-        ctx: PluginHookAgentContext,
-      ) => observeHook(api, hookEnabled, "agent_end", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "agent_end", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
       "before_tool_call",
-      (
-        event: PluginHookBeforeToolCallEvent,
-        ctx: PluginHookToolContext,
-      ) => observeHook(api, hookEnabled, "before_tool_call", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "before_tool_call", event, ctx),
       { priority: OBSERVABILITY_LATE_PRIORITY },
     );
     api.on(
       "after_tool_call",
-      (
-        event: PluginHookAfterToolCallEvent,
-        ctx: PluginHookToolContext,
-      ) => observeHook(api, hookEnabled, "after_tool_call", event, ctx),
+      (event, ctx) => observeHook(api, hookEnabled, "after_tool_call", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
   },
@@ -106,8 +63,8 @@ function observeHook(
   api: OpenClawPluginApi,
   hookEnabled: boolean,
   hookName: ObservabilityHookName,
-  event: ObservabilityHookEvent,
-  ctx: ObservabilityHookContext,
+  event: unknown,
+  ctx: unknown,
 ): void {
   if (!hookEnabled) {
     return;

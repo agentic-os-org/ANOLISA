@@ -199,6 +199,9 @@ async function runPilot() {
     agentSecCliOverrideFile,
   };
 
+  // The daemon requires its socket's parent to be private, including when
+  // --workdir names a directory that does not exist yet.
+  await fs.mkdir(workdir, { recursive: true, mode: 0o700 });
   await fs.mkdir(logsDir, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.mkdir(binDir, { recursive: true });

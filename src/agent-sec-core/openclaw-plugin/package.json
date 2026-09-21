@@ -42,7 +42,7 @@
   "devDependencies": {
     "@types/node": ">=22",
     "c8": "^10.1.0",
-    "openclaw": "2026.5.7",
+    "openclaw": "2026.8.1",
     "tsx": "^4.21.0",
     "typescript": "^5.8.0"
   }

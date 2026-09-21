@@ -23,6 +23,7 @@ MIN_CONVERSATION_ACCESS_VERSION="2026.4.24"
 OPENCLAW_INSTALL_HELP=""
 OPENCLAW_INSTALL_SUPPORTS_UNSAFE=0
 OPENCLAW_INSTALL_REQUIRES_UNSAFE=0
+OPENCLAW_INSTALL_ACCEPT_CAPABILITIES=0
 OPENCLAW_INSPECT_HELP=""
 OPENCLAW_INSPECT_SUPPORTS_RUNTIME=0
 VERIFY_RUNTIME_TMPDIR=""
@@ -192,10 +193,11 @@ verify_openclaw_install_cli() {
         OPENCLAW_INSTALL_SUPPORTS_UNSAFE=1
     fi
 
-    # Treat help output as the CLI contract: if the current OpenClaw installer
-    # advertises the compatibility flag, pass it on the first install attempt
-    # so deploy.sh remains a single-shot install command for all supported hosts.
-    if [[ "$OPENCLAW_INSTALL_SUPPORTS_UNSAFE" == "1" ]]; then
+    # Modern hosts require consent for this plugin's declared surface. Their
+    # legacy unsafe-install flag is a no-op; older hosts still need that flag.
+    if [[ "$install_help_normalized" == *"--accept-capabilities"* ]]; then
+        OPENCLAW_INSTALL_ACCEPT_CAPABILITIES=1
+    elif [[ "$OPENCLAW_INSTALL_SUPPORTS_UNSAFE" == "1" ]]; then
         OPENCLAW_INSTALL_REQUIRES_UNSAFE=1
     fi
 }
@@ -212,7 +214,10 @@ verify_openclaw_inspect_cli() {
 install_plugin() {
     local install_args=("plugins" "install" "$PLUGIN_DIR" "--force")
 
-    if [[ "$OPENCLAW_INSTALL_REQUIRES_UNSAFE" == "1" ]]; then
+    if [[ "$OPENCLAW_INSTALL_ACCEPT_CAPABILITIES" == "1" ]]; then
+        echo "Install policy: accepting the declared capabilities of agent-sec."
+        install_args+=("--accept-capabilities")
+    elif [[ "$OPENCLAW_INSTALL_REQUIRES_UNSAFE" == "1" ]]; then
         echo "安装策略: OpenClaw ${OPENCLAW_VERSION_DETECTED} 安装器暴露 legacy --dangerously-force-unsafe-install，首次安装将使用该兼容参数。"
         echo "安装策略: deploy.sh 按当前 CLI help 暴露的参数执行，不基于版本或文案语义推断。"
         install_args+=("--dangerously-force-unsafe-install")

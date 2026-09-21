@@ -394,7 +394,7 @@ async function runPromptPolicyCase({
       },
     ),
   );
-  const records = await waitForSessionRecords(turn.sessionFile, 15_000);
+  const records = await waitForSessionRecords(turn.readRecords, 15_000);
   const cliCalls = await readJsonLinesSince(cliLogPath, cliCallStart);
   const promptCall = findCliCall(cliCalls, {
     subcommand: "scan-prompt",
@@ -535,7 +535,7 @@ async function runCodeApprovalPolicyCase({
         timeoutMs: 5_000,
       });
       if (approval) {
-        const recordsBeforeResolve = await readSessionRecords(turn.sessionFile);
+        const recordsBeforeResolve = await turn.readRecords();
         preResolveToolExecuted = sessionHasSuccessfulToolOutput(
           recordsBeforeResolve,
           POLICY_CODE_DENY_OUTPUT,
@@ -564,7 +564,7 @@ async function runCodeApprovalPolicyCase({
       ),
     );
 
-    const records = await waitForSessionRecords(turn.sessionFile, 15_000);
+    const records = await waitForSessionRecords(turn.readRecords, 15_000);
     const cliCalls = await readJsonLinesSince(cliLogPath, cliCallStart);
     const codeCall = findCliCall(cliCalls, {
       subcommand: "scan-code",
@@ -934,6 +934,7 @@ async function runGatewayPolicyTurn({ callGatewayRpc, caseName, gatewayToken, ga
     send,
     sessionFile: createSession?.entry?.sessionFile,
     sessionKey,
+    readRecords: () => readSessionRecords({ callGatewayRpc, sessionKey, gatewayToken, gatewayUrl }),
   };
 }
 
@@ -1109,11 +1110,11 @@ function summarizeToolResultErrors(records) {
     });
 }
 
-async function waitForSessionRecords(sessionFile, timeoutMs) {
+async function waitForSessionRecords(readRecords, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let records = [];
   while (Date.now() < deadline) {
-    records = await readSessionRecords(sessionFile);
+    records = await readRecords();
     if (records.length > 0) {
       return records;
     }
@@ -1122,9 +1123,19 @@ async function waitForSessionRecords(sessionFile, timeoutMs) {
   return records;
 }
 
-async function readSessionRecords(sessionFile) {
-  if (!sessionFile) return [];
-  return await readJsonLines(sessionFile);
+export async function readSessionRecords({ callGatewayRpc, sessionKey, gatewayToken, gatewayUrl }) {
+  // sessions.get works with both legacy JSONL and OpenClaw 2.0 SQLite storage.
+  // Keep the assertion record shape independent of the host's on-disk format.
+  const payload = unwrapGatewayPayload(await callGatewayRpc(
+    "policy-session-records",
+    "sessions.get",
+    { key: sessionKey, limit: 200 },
+    { gatewayToken, gatewayUrl },
+  ));
+  if (!Array.isArray(payload?.messages)) {
+    throw new Error("sessions.get did not return a messages array");
+  }
+  return payload.messages.map((message) => ({ type: "message", message }));
 }
 
 function sessionContainsText(records, expected) {
