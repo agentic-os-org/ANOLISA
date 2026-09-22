@@ -10,6 +10,7 @@ use super::result::AggregatedResult;
 use crate::chrome_trace::export_trace_events;
 use crate::config::{DEFAULT_CONNECTION_CAPACITY, RuntimeLimits};
 use crate::parser::{ParseResult, ParsedMessage};
+use crate::runtime_metrics::StageTimer;
 use std::time::{Duration, Instant};
 
 /// Unified aggregator for all event types
@@ -96,6 +97,7 @@ impl Aggregator {
 
     /// Process parse result
     pub fn process_result(&mut self, result: ParseResult) -> Vec<AggregatedResult> {
+        let timer = StageTimer::start("aggregator");
         log::trace!(
             "Aggregating parsed results({}): {}",
             result.messages.len(),
@@ -153,6 +155,7 @@ impl Aggregator {
             export_trace_events(r);
         }
 
+        timer.record_outputs(results.len());
         results
     }
 

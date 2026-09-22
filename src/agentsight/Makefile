@@ -107,6 +107,10 @@ test-raw-package: ## Validate Linux and macOS raw package assembly
 test: test-rpm-packaging test-raw-package ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
 
+.PHONY: bench
+bench: ## Run stable userspace performance benchmarks
+	cd $(CURDIR) && cargo bench --bench pipeline
+
 .PHONY: test-rpm-packaging
 test-rpm-packaging: ## Validate the portable RPM payload contract
 	cd $(CURDIR) && bash scripts/test-rpm-packaging.sh

@@ -25,6 +25,7 @@ anyhow = "1.0.86"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
+criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }
 ctrlc = "3.4"
 dirs = "6"
 ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
@@ -33,6 +34,8 @@ fs2 = "0.4"
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -105,6 +108,7 @@ sysinfo = "0.33"
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
+criterion = { workspace = true }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -145,6 +149,12 @@ async-trait = { workspace = true }
 cached = "0.52.0"
 futures = { workspace = true }
 log4rs = "1.3.0"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false
 
 [profile.dev]
 debug-assertions = false

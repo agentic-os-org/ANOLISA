@@ -434,6 +434,7 @@ impl Analyzer {
     /// `AnalysisResult::Token` for SSE streams containing token usage,
     /// or `AnalysisResult::Message` for parsed LLM API request/response bodies.
     pub fn analyze_aggregated(&self, result: &AggregatedResult) -> Vec<AnalysisResult> {
+        let timer = crate::runtime_metrics::StageTimer::start("analyzer");
         log::debug!("Analyzing aggregated result({})", result.result_type());
         let mut results = Vec::new();
 
@@ -442,6 +443,7 @@ impl Analyzer {
             if let Some(record) = self.audit.analyze(result) {
                 results.push(AnalysisResult::Audit(record));
             }
+            timer.record_outputs(results.len());
             return results;
         }
 
@@ -559,6 +561,7 @@ impl Analyzer {
             }
         }
 
+        timer.record_outputs(results.len());
         results
     }
 

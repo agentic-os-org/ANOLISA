@@ -11,6 +11,7 @@ use crate::analyzer::AnalysisResult;
 use crate::analyzer::token::TokenParser;
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
+use crate::runtime_metrics::StageTimer;
 use crate::storage::sqlite::{PendingCallInfo, PendingOrigin, SseEnrichment};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +115,7 @@ impl GenAIBuilder {
         response_mapper: &ResponseSessionMapper,
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
+        let timer = StageTimer::start("genai");
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
@@ -202,13 +204,12 @@ impl GenAIBuilder {
             events.push(GenAISemanticEvent::LLMCall(llm_call));
         }
 
-        (
-            BuildOutput {
-                events,
-                pending_response_id,
-            },
-            pending,
-        )
+        let output = BuildOutput {
+            events,
+            pending_response_id,
+        };
+        timer.record_outputs(output.events.len());
+        (output, pending)
     }
 
     /// Build a `PendingCallInfo` directly from a raw `ParsedRequest` and

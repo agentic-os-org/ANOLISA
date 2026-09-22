@@ -106,6 +106,7 @@ CROSS_CUTTING = {
     "token_breakdown", # token analysis helpers
     "ecs_metadata",    # shared ECS metadata client primitives
     "private_sqlite",  # private state-file creation shared by control modules
+    "runtime_metrics",  # low-overhead instrumentation shared by pipeline stages
 }
 
 # Known violations: (source_file_relative_to_src, target_module, reason)

@@ -15,6 +15,7 @@ use crate::parser::proctrace::ProcTraceParser;
 use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::proctrace::VariableEvent;
 use crate::probes::sslsniff::SslEvent;
+use crate::runtime_metrics::StageTimer;
 use std::rc::Rc;
 
 /// Unified parser for SSL and process events
@@ -184,8 +185,9 @@ impl Parser {
 
     /// Parse unified Event
     pub fn parse_event(&self, event: Event) -> ParseResult {
+        let timer = StageTimer::start("parser");
         log::trace!("Parsing event({:?})", event.event_type());
-        match event {
+        let result = match event {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
             Event::ProcMon(_) => ParseResult {
@@ -200,7 +202,9 @@ impl Parser {
             Event::UdpDns(_) => ParseResult {
                 messages: Vec::new(),
             },
-        }
+        };
+        timer.record_outputs(result.messages.len());
+        result
     }
 
     /// Get reference to HTTP parser
