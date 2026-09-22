@@ -20,7 +20,9 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from swe_runner.agents import get_agent
+import pytest
+
+from swe_runner.agents import AgentEnvironmentError, get_agent
 from swe_runner.agents.openclaw.adapter import (
     OpenClawAdapter,
     build_openclaw_agent_id,
@@ -51,6 +53,7 @@ def make_settings(
     tokenless: bool = False,
     use_skill: bool = False,
     per_case_prompt: bool = False,
+    base_config: Path | None = None,
 ) -> Settings:
     return Settings(
         agent=AgentConfig(
@@ -61,6 +64,7 @@ def make_settings(
             tokenless=tokenless,
             use_skill=use_skill,
             per_case_prompt=per_case_prompt,
+            base_config=base_config,
         ),
         output={"output_dir": tmp_path / "run"},
     )
@@ -87,6 +91,37 @@ def test_profile_manager_copies_base_config_and_creates_symlink(tmp_path: Path) 
 
     assert not profile.link_path.exists()
     assert profile.directory.exists()
+
+
+def test_profile_manager_rejects_missing_explicit_base_config(tmp_path: Path) -> None:
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+    manager = OpenClawCaseProfileManager(
+        output_dir=tmp_path / "run",
+        base_config_path=tmp_path / "absent-openclaw.json",
+        profile_link_root=link_root,
+    )
+
+    with pytest.raises(AgentEnvironmentError, match="base config not found"):
+        manager.prepare("django__django-13448")
+
+
+def test_profile_manager_uses_empty_config_when_only_the_default_base_config_is_missing(tmp_path: Path) -> None:
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+    manager = OpenClawCaseProfileManager(
+        output_dir=tmp_path / "run",
+        base_config_path=None,
+        profile_link_root=link_root,
+    )
+
+    with patch(
+        "swe_runner.agents.openclaw.profile.resolve_openclaw_config_path",
+        return_value=tmp_path / "absent-openclaw.json",
+    ):
+        profile = manager.prepare("django__django-13448")
+
+    assert json.loads(profile.config_path.read_text(encoding="utf-8")) == {}
 
 
 def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: Path) -> None:
@@ -170,6 +205,48 @@ def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: P
         "label=openclaw.sessionKey=agent:django__django-13448:main",
     ] in commands
     assert ["docker", "rm", "-f", "stale-container"] in commands
+
+
+def test_prepare_prefers_settings_base_config_over_adapter_default(tmp_path: Path) -> None:
+    def write_marked_config(path: Path, marker: str) -> Path:
+        path.write_text(json.dumps({"agents": {"list": [{"id": "main"}]}, "marker": marker}), encoding="utf-8")
+        return path
+
+    adapter_config = write_marked_config(tmp_path / "adapter-openclaw.json", "adapter")
+    settings_config = write_marked_config(tmp_path / "settings-openclaw.json", "settings")
+    workspace_root = tmp_path / "workspace"
+    openclaw_workspace_root = workspace_root / "openclaw-workspace"
+    work_dir = workspace_root / "repo"
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+
+    def fake_prepare_workspace(*args: object, **kwargs: object) -> Path:
+        work_dir.mkdir(parents=True)
+        return work_dir
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:2] == ["docker", "ps"]:
+            return CommandResult(args=tuple(cmd), returncode=0, stdout="", stderr="")
+        return CommandResult(
+            args=tuple(cmd),
+            returncode=0,
+            stdout=json.dumps({"sandbox": {"workspaceRoot": str(openclaw_workspace_root)}}),
+            stderr="",
+        )
+
+    agent = OpenClawAdapter(base_config_path=adapter_config, profile_link_root=link_root)
+    with (
+        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
+        patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
+        patch("swe_runner.agents.openclaw.adapter.build_openclaw_prompt", return_value="fix the bug"),
+        patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
+    ):
+        prepared = agent.prepare(make_instance(), make_settings(tmp_path, base_config=settings_config))
+
+    config = json.loads(Path(prepared.metadata["openclaw_config_path"]).read_text(encoding="utf-8"))
+
+    assert config["marker"] == "settings"
 
 
 def test_prepare_writes_skill_agents_when_skill_enabled(tmp_path: Path) -> None:
@@ -483,7 +560,10 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
         "[tokenless:rtk] rewrite: ls /testbed -> rtk ls /testbed"
     ]
     assert evidence["session"]["exec_tool_call_count"] == 1
-    assert evidence["trajectory"]["tokenless_status"] == "loaded"
+    assert evidence["schema_version"] == 2
+    assert evidence["trajectory"]["status"] == "loaded"
+    # A tokenless arm must not inherit a context engine from the copied host config.
+    assert evidence["config"]["context_engine_slot"] is None
 
 
 def test_run_writes_error_log_for_nonzero_openclaw_exit(tmp_path: Path) -> None:

@@ -1,0 +1,35 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "bench-qwen/qwen3-coder-plus"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "bench-qwen": {
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "apiKey": "${DASHSCOPE_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "models": [
+          {
+            "id": "qwen3-coder-plus",
+            "name": "Qwen3 Coder Plus",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000000,
+            "maxTokens": 65536
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "slots": {
+      "memory": "none"
+    }
+  }
+}
