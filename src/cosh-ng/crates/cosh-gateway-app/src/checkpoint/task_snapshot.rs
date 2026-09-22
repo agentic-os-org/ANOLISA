@@ -2,17 +2,17 @@ impl TaskSnapshotAdapter {
     pub(crate) fn admit(
         socket_path: PathBuf,
         registration_path: &Path,
-        workspace: WorkspaceRef,
+        workspaces: TrustedWorkspaceResolver,
         owner_uid: u32,
     ) -> Result<Self, CheckpointAdmissionError> {
         Ok(Self {
             endpoint: CheckpointEndpoint::admit(socket_path, registration_path, owner_uid)?,
-            workspace,
+            workspaces,
         })
     }
 
     fn validate_request(&self, request: &TaskSnapshotProviderRequest) -> Result<(), ContractError> {
-        if request.workspace != self.workspace {
+        if &request.workspace != self.workspaces.workspace_ref() {
             return Err(pre_runtime_checkpoint_error(
                 "checkpoint_workspace_mismatch",
                 ErrorCategory::InvalidRequest,
@@ -174,26 +174,43 @@ impl TaskSnapshotDriver for TaskSnapshotAdapter {
             operation_id.as_str(),
             operation_digest,
         ) {
-            Ok(_) => Ok(TaskSnapshotProviderSwitchResult::Switched(
-                TaskSnapshotProviderSwitch {
-                    from: BoundedOpaque::new(hex_bytes(&binding.generation))
-                        .map_err(|_| checkpoint_error("checkpoint_switch_result_invalid", false))?,
-                    to: request.snapshot_id.clone(),
-                },
-            )),
+            Ok(_) => {
+                if self.workspaces.refresh_after_snapshot_switch().is_err() {
+                    return Ok(TaskSnapshotProviderSwitchResult::PossiblyApplied {
+                        error: pre_runtime_checkpoint_error(
+                            "checkpoint_workspace_refresh_failed",
+                            ErrorCategory::RuntimeUnavailable,
+                            false,
+                            "Snapshot switched but workspace refresh failed; new Tasks are blocked; repair the workspace and restart Gateway",
+                        ),
+                    });
+                }
+                Ok(TaskSnapshotProviderSwitchResult::Switched(
+                    TaskSnapshotProviderSwitch {
+                        from: BoundedOpaque::new(hex_bytes(&binding.generation)).map_err(|_| {
+                            checkpoint_error("checkpoint_switch_result_invalid", false)
+                        })?,
+                        to: request.snapshot_id.clone(),
+                    },
+                ))
+            }
             Err(failure) if failure.effect == CkptRequestEffect::KnownNoEffect => {
                 Ok(TaskSnapshotProviderSwitchResult::Rejected {
                     reason: bounded_text(&failure.error.message)?,
                 })
             }
-            Err(failure) => Ok(TaskSnapshotProviderSwitchResult::PossiblyApplied {
-                error: pre_runtime_checkpoint_error(
-                    "checkpoint_switch_uncertain",
-                    ErrorCategory::Transport,
-                    false,
-                    &failure.error.message,
-                ),
-            }),
+            Err(failure) => {
+                // An uncertain rollback may already have removed the admitted inode.
+                let _ = self.workspaces.invalidate_after_snapshot_switch();
+                Ok(TaskSnapshotProviderSwitchResult::PossiblyApplied {
+                    error: pre_runtime_checkpoint_error(
+                        "checkpoint_switch_uncertain",
+                        ErrorCategory::Transport,
+                        false,
+                        &failure.error.message,
+                    ),
+                })
+            }
         }
     }
 }

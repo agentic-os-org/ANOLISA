@@ -28,6 +28,7 @@ enum DaemonReply {
     CreatedWithWrongPath,
     GuardedPreviewFromRequest(Vec<DiffEntry>),
     GuardedRollbackFromRequest,
+    ReplaceWorkspace(PathBuf, bool),
 }
 
 #[test]
@@ -54,11 +55,16 @@ fn task_snapshot_preview_recovery_and_switch_use_exact_ids() {
         DaemonReply::GuardedRollbackFromRequest,
     ]);
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let workspace = pre_runtime_workspace();
+    let workspaces = TrustedWorkspaceResolver::new(
+        GatewayCapabilityProfile::task_only_v1().governed_target(),
+        directory.path(),
+    )
+    .unwrap();
+    let workspace = workspaces.workspace_ref().clone();
     let mut adapter = TaskSnapshotAdapter::admit(
         PathBuf::from(socket_path),
         Path::new("/workspace"),
-        workspace.clone(),
+        workspaces,
         nix::unistd::Uid::effective().as_raw(),
     )
     .unwrap();
@@ -152,13 +158,27 @@ fn spawn_daemon(
 
 fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptResponse {
     match reply {
+        DaemonReply::ReplaceWorkspace(workspace, recreate) => {
+            let old = workspace.with_extension("rollback-tmp");
+            std::fs::rename(&workspace, &old).unwrap();
+            if recreate {
+                std::fs::create_dir(&workspace).unwrap();
+            }
+            std::fs::remove_dir_all(old).unwrap();
+            daemon_response(DaemonReply::GuardedRollbackFromRequest, request)
+        }
         DaemonReply::Response(response) => *response,
-        DaemonReply::Identity => WsCkptResponse::WorkspaceIdentityV2Ok {
-            protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
-            ws_id: "ws-abc123".to_owned(),
-            registered_path: "/workspace".to_owned(),
-            generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
-        },
+        DaemonReply::Identity => {
+            let WsCkptRequest::WorkspaceIdentityV2 { registration_path } = request else {
+                panic!("expected workspace identity request")
+            };
+            WsCkptResponse::WorkspaceIdentityV2Ok {
+                protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                ws_id: "ws-abc123".to_owned(),
+                registered_path: registration_path.clone(),
+                generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+            }
+        }
         DaemonReply::CreatedFromRequest | DaemonReply::SkippedFromRequest(_) => {
             let WsCkptRequest::GuardedCheckpointV2 {
                 ws_id,
@@ -281,11 +301,16 @@ fn task_switch_recovery_rejects_wrong_registered_path_evidence() {
         DaemonReply::CreatedWithWrongPath,
     ]);
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let workspace = pre_runtime_workspace();
+    let workspaces = TrustedWorkspaceResolver::new(
+        GatewayCapabilityProfile::task_only_v1().governed_target(),
+        directory.path(),
+    )
+    .unwrap();
+    let workspace = workspaces.workspace_ref().clone();
     let mut adapter = TaskSnapshotAdapter::admit(
         PathBuf::from(socket_path),
         Path::new("/workspace"),
-        workspace.clone(),
+        workspaces,
         nix::unistd::Uid::effective().as_raw(),
     )
     .unwrap();
@@ -987,4 +1012,135 @@ fn approval_checkpoint_possibly_applied_reconciles_evidence_without_second_creat
     assert_eq!(evidence_checkpoint, guarded_checkpoint);
     assert_eq!(evidence_digest, guarded_digest);
     drop(directory);
+}
+
+#[test]
+fn task_snapshot_switch_refreshes_shared_binding_or_blocks_new_runtimes() {
+    for recreate in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let target = GatewayCapabilityProfile::task_only_v1().governed_target();
+        let workspaces = TrustedWorkspaceResolver::new(target.clone(), &workspace).unwrap();
+        let original = workspaces.resolve(&target).unwrap();
+        let (directory, socket_path, daemon) = spawn_daemon(vec![
+            DaemonReply::Identity,
+            DaemonReply::Identity,
+            DaemonReply::GuardedPreviewFromRequest(vec![]),
+            DaemonReply::Identity,
+            DaemonReply::GuardedPreviewFromRequest(vec![]),
+            DaemonReply::ReplaceWorkspace(workspace.clone(), recreate),
+        ]);
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut adapter = TaskSnapshotAdapter::admit(
+            PathBuf::from(socket_path),
+            &workspace,
+            workspaces.clone(),
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .unwrap();
+        let request = TaskSnapshotProviderRequest {
+            task_id: TaskId::new(),
+            snapshot_id: CheckpointId::new(),
+            workspace: workspaces.workspace_ref().clone(),
+        };
+        let preview = adapter.preview(&request).unwrap();
+        let result = adapter
+            .switch(
+                &request,
+                &preview.preview_digest,
+                &CheckpointId::new(),
+                &digest(9),
+            )
+            .unwrap();
+        if recreate {
+            assert!(matches!(
+                result,
+                TaskSnapshotProviderSwitchResult::Switched(_)
+            ));
+            let refreshed = workspaces.resolve(&target).unwrap();
+            assert_ne!(refreshed.identity(), original.identity());
+            assert_eq!(
+                refreshed.identity(),
+                cosh_gateway::runtime::PinnedDirectory::pin(&workspace)
+                    .unwrap()
+                    .identity()
+            );
+            assert_eq!(refreshed.reference(), original.reference());
+        } else {
+            assert!(
+                matches!(result, TaskSnapshotProviderSwitchResult::PossiblyApplied { error }
+                if error.code.as_str() == "checkpoint_workspace_refresh_failed")
+            );
+            assert!(workspaces.resolve(&target).is_err());
+        }
+        assert_eq!(daemon.join().unwrap().len(), 6);
+    }
+}
+
+#[test]
+fn task_snapshot_rejection_preserves_binding_but_uncertain_switch_invalidates_it() {
+    for rejected in [true, false] {
+        let response = if rejected {
+            WsCkptResponse::GuardedRollbackV2Rejected {
+                code: cosh_types::checkpoint::GuardedRollbackRejectionCodeV2::GenerationMismatch,
+                message: "generation changed".to_owned(),
+            }
+        } else {
+            // A reply without matching rollback evidence cannot prove the outcome.
+            WsCkptResponse::InitOk {
+                ws_id: "unexpected".to_owned(),
+            }
+        };
+        let (directory, socket_path, daemon) = spawn_daemon(vec![
+            DaemonReply::Identity,
+            DaemonReply::Identity,
+            DaemonReply::GuardedPreviewFromRequest(vec![]),
+            DaemonReply::Identity,
+            DaemonReply::GuardedPreviewFromRequest(vec![]),
+            DaemonReply::Response(Box::new(response)),
+        ]);
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = GatewayCapabilityProfile::task_only_v1().governed_target();
+        let workspaces = TrustedWorkspaceResolver::new(target.clone(), directory.path()).unwrap();
+        let original = workspaces.resolve(&target).unwrap();
+        let mut adapter = TaskSnapshotAdapter::admit(
+            PathBuf::from(socket_path),
+            Path::new("/workspace"),
+            workspaces.clone(),
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .unwrap();
+        let request = TaskSnapshotProviderRequest {
+            task_id: TaskId::new(),
+            snapshot_id: CheckpointId::new(),
+            workspace: workspaces.workspace_ref().clone(),
+        };
+        let preview = adapter.preview(&request).unwrap();
+        let result = adapter
+            .switch(
+                &request,
+                &preview.preview_digest,
+                &CheckpointId::new(),
+                &digest(9),
+            )
+            .unwrap();
+        if rejected {
+            assert!(matches!(
+                result,
+                TaskSnapshotProviderSwitchResult::Rejected { .. }
+            ));
+            assert_eq!(
+                workspaces.resolve(&target).unwrap().identity(),
+                original.identity()
+            );
+        } else {
+            assert!(matches!(
+                result,
+                TaskSnapshotProviderSwitchResult::PossiblyApplied { .. }
+            ));
+            assert!(workspaces.resolve(&target).is_err());
+        }
+        assert_eq!(daemon.join().unwrap().len(), 6);
+    }
 }

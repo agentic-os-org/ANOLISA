@@ -221,9 +221,12 @@ impl ResolvedAcpRuntimeProfile {
     /// Builds a fresh supervised launch specification for this pinned profile.
     #[must_use]
     pub fn launch_spec(&self) -> RuntimeLaunchSpec {
+        self.launch_spec_in(self.workspace.clone())
+    }
+
+    pub(crate) fn launch_spec_in(&self, workspace: PinnedDirectory) -> RuntimeLaunchSpec {
         let profile = self.profile.profile();
-        let mut spec =
-            RuntimeLaunchSpec::from_pinned_script(self.executable.clone(), self.workspace.clone());
+        let mut spec = RuntimeLaunchSpec::from_pinned_script(self.executable.clone(), workspace);
         spec.arguments = profile.arguments.iter().map(OsString::from).collect();
         spec.environment.clone_from(&self.environment);
         spec
