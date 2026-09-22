@@ -357,7 +357,16 @@ dest = "{datadir}/adapters/{component}/openclaw/"
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/openclaw-plugin/"
+managed_packages = ["agent-sec-openclaw-hook", "agent-sec-skills"]
 ```
+
+`managed_packages` lists additional RPMs whose file inventories own the
+adapter bundle or any declared materialized sources (for example, shared
+skills). The component package recorded in installed state is always queried
+implicitly. ANOLISA merges these inventories before it verifies or copies
+adapter inputs; duplicate paths and unavailable packages remain fail-closed.
+This is required for metapackages whose own `%files` list is empty while their
+adapter payload is split across subpackages.
 
 Selection follows the component's installed provenance recorded in
 state:
