@@ -143,7 +143,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Sep 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Verify RPM adapter bundles and shared skills across declared subpackages.
+- Redact repository credentials and paths from RPM transaction diagnostics.
+
+* Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.14-1
 - Manage OpenCode local plugins with recoverable enable and disable operations.
 - Include local cosh-ng diagnostic bundle summaries in bug reports.
 - Diagnose visible system installations and warn on unreadable cross-scope logs.

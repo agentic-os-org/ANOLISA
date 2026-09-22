@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-09-22
+
+### Fixed
+
+- RPM-installed adapters can now verify and use files split across declared
+  subpackages, including adapter bundles and shared skills. Missing packages or
+  unverifiable files still stop activation instead of accepting unverified inputs
+  ([#3417](https://github.com/agentic-os-org/ANOLISA/pull/3417)).
+- RPM transaction and upgrade preflight errors now redact repository credentials,
+  paths, and query strings from native package-manager diagnostics, including
+  configured URLs containing whitespace. HTTP(S) origins remain visible for
+  troubleshooting
+  ([#3431](https://github.com/agentic-os-org/ANOLISA/pull/3431)).
+
 ## [0.3.14] - 2026-09-20
 
 ### Added
