@@ -32,6 +32,10 @@ pub enum BackendError {
     /// Kernel attachment or runtime state management failed.
     #[error("kernel enforcement failed: {0}")]
     KernelFailure(String),
+    /// The runtime environment cannot host enforcement at all (e.g. the
+    /// enforcer runs in a PID namespace without host PID visibility).
+    #[error("unsupported enforcement environment: {0}")]
+    UnsupportedEnvironment(String),
 }
 
 /// Privileged policy lifecycle and violation source.
