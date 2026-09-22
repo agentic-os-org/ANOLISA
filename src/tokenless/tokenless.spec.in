@@ -502,6 +502,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Tue Sep 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.4-1
+- Add standalone installation and receipt-based uninstall with ownership protection
+- Preserve shared adapters during npm installs and recognize removed Codex plugins
+- Keep command output after the HTML document in extracted page views
+- Correct HTML depth checks for SVG pages and avoid slow malformed-page scans
+
 * Sun Sep 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.3-1
 - Add opt-in recoverable Git diff cropping and HTML page rendering
 - Auto-enable the npm Claude Code adapter and check QwenPaw SDK wheel availability

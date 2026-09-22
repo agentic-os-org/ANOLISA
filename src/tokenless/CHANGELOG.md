@@ -9,6 +9,22 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-22
+
+### Added
+
+- Add a standalone installer and an `install-tokenless` OS Skill entry point alongside npm installation. The installer chooses npm or a Linux-only source build before installation starts, records owned paths for uninstall, and restores the previous installation if replacement fails. Source builds install only the CLI; npm also provides RTK and adapters ([#2322](https://github.com/alibaba/anolisa/pull/2322)).
+
+### Changed
+
+- npm installation now requires Node.js 16.7 or newer and preserves shared adapter resources owned by another installation. Users can explicitly replace them with `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1`; otherwise, the installer reports the bundled adapter location ([#2322](https://github.com/alibaba/anolisa/pull/2322)).
+- Standalone uninstall removes only resources still owned by its install receipt, preserves runtime data unless `--purge` is requested, and retains adapter resources when framework deregistration cannot be verified. Codex plugins listed as `not installed` are recognized as successfully removed, so repeated uninstall can complete ([#2322](https://github.com/alibaba/anolisa/pull/2322), [#3412](https://github.com/alibaba/anolisa/pull/3412)).
+
+### Fixed
+
+- HTML extraction now keeps command output after the page's `</html>` end tag, such as build logs and HTTP status codes, after the rendered page instead of losing it. Text that imitates the page wrapper is escaped, and original recovery remains available ([#3386](https://github.com/alibaba/anolisa/pull/3386)).
+- HTML extraction no longer rejects shallow pages containing many self-closing SVG elements as excessively nested. Depth limits now follow the parsed page, and malformed markup or wide tables no longer trigger repeated scans that can delay tool results ([#3396](https://github.com/alibaba/anolisa/pull/3396)).
+
 ## [0.8.3] - 2026-09-20
 
 ### Added
