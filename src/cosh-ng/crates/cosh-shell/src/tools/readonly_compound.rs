@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::broker;
 use super::command_risk::CommandShape;
 use super::command_risk_parser::{parse_command, SegmentConnector};
+use super::readonly_interceptor::build_interceptor_step;
 use super::readonly_pipeline::{
     error, limit_clean_text, wait_child_with_deadline, ReadonlyPipelineConfig,
     ReadonlyPipelineError, ReadonlyPipelineOutput,
@@ -36,6 +37,13 @@ pub(crate) struct ReadonlyCompoundStep {
     pub(crate) argv: Vec<String>,
     /// Connect stderr to the null device rather than capturing it.
     pub(crate) suppress_stderr: bool,
+    /// Env assignments injected after the executor's `env_clear` and
+    /// passthrough allowlist. Populated only by interceptor wrappers,
+    /// whose spec gates which command-text keys may appear here at
+    /// plan-build time, plus trusted process-level session config the
+    /// command did not carry; values are passed verbatim and never
+    /// re-parsed.
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// Builds a readonly argv plan without overriding the caller's risk policy.
@@ -44,6 +52,8 @@ pub(crate) struct ReadonlyCompoundStep {
 ///
 /// A simple command with exclusively `2>` / `2>>` null sinks uses one step
 /// with null stderr. All other simple commands keep their existing route.
+/// An interceptor-wrapped simple command (`readonly_interceptor`) is
+/// peeled for assessment and kept for execution before both routes.
 /// Compound eligibility rules (design §2):
 /// 1. shape is `AndOrList` or `Sequence` (all other shapes fail closed);
 /// 2. no null-redirections were stripped by the parser (stripping loses
@@ -77,6 +87,9 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
     let parsed = parse_command(command);
     let suppress_stderr =
         parsed.shape == CommandShape::Simple && parsed.null_redirections.is_stderr_only();
+    if let Some(step) = build_interceptor_step(&parsed) {
+        return Some(ReadonlyCompoundPlan { steps: vec![step] });
+    }
     let segments = if suppress_stderr {
         if parsed.requires_shell_expansion {
             return None;
@@ -102,14 +115,7 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
             return None;
         }
         let argv = &segment[0];
-        if argv.is_empty()
-            || argv.iter().any(|token| token.contains(['$', '`']))
-            // ponytail: ambiguous escapes/comments stay manual until the parser models them.
-            || (suppress_stderr && argv.iter().any(|token| token.contains(['\\', '\n', '\r', '#'])))
-            || CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
-            || segment_reads_stdin(argv)
-            || !broker::configured_readonly_command(argv)
-        {
+        if !eligible_readonly_argv(argv, suppress_stderr) {
             return None;
         }
         let program = resolve_trusted_executable(&argv[0])?;
@@ -122,9 +128,27 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
             program,
             argv: argv.clone(),
             suppress_stderr,
+            env: Vec::new(),
         });
     }
     Some(ReadonlyCompoundPlan { steps })
+}
+
+/// Shared payload predicate for every plan step: readonly allowlist,
+/// no expansion markers, no context-observing or stdin-reading
+/// commands. The ponytail escape/comment rejection applies only on the
+/// stderr-suppressed path, where ambiguous tokens stay manual until
+/// the parser models them.
+pub(super) fn eligible_readonly_argv(argv: &[String], suppress_stderr: bool) -> bool {
+    !argv.is_empty()
+        && !argv.iter().any(|token| token.contains(['$', '`']))
+        && !(suppress_stderr
+            && argv
+                .iter()
+                .any(|token| token.contains(['\\', '\n', '\r', '#'])))
+        && !CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
+        && !segment_reads_stdin(argv)
+        && broker::configured_readonly_command(argv)
 }
 
 /// Runs a compound plan with bash list semantics: `&&` runs the next
@@ -172,7 +196,7 @@ pub(crate) fn run_readonly_compound(
 /// `PATH` closes the shadowing hole where a user-writable directory
 /// earlier in `PATH` provides a fake `pwd`/`cat` that would run without
 /// approval under an allowlisted name.
-const TRUSTED_EXECUTABLE_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+pub(super) const TRUSTED_EXECUTABLE_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /// Environment keys passed through from the cosh process to a compound
 /// step. Everything else is cleared: the step must not observe the
@@ -286,6 +310,12 @@ fn run_compound_steps(
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        // Wrapper-declared assignments (e.g. TOKENLESS_* for rtk):
+        // keys were gated by the interceptor spec at plan-build time,
+        // values are data passed verbatim.
+        for (key, value) in &step.env {
+            command.env(key, value);
         }
         // Each step leads its own process group so a deadline expiry
         // can reap the whole descendant tree, not just the direct
@@ -590,4 +620,38 @@ fn append_bounded_text(
     exhausted: &mut bool,
 ) {
     append_step_output(aggregate, text.as_bytes(), false, config, exhausted);
+}
+
+/// Test-only surface for the lib-only regression module
+/// (`tools/readonly_interceptor_tests.rs`, declared from `lib.rs`):
+/// keeps `SegmentConnector` and `TRUSTED_EXECUTABLE_DIRS` private to
+/// the `tools` tree while the crate-root tests build steps through
+/// these wrappers. Absent from production builds.
+#[cfg(test)]
+#[allow(dead_code)] // compiled but unused in the bin test target
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    use super::{ReadonlyCompoundStep, SegmentConnector, TRUSTED_EXECUTABLE_DIRS};
+
+    pub(crate) fn trusted_executable_dirs() -> &'static [&'static str] {
+        TRUSTED_EXECUTABLE_DIRS
+    }
+
+    /// Single-step constructor with `;` connector and live stderr —
+    /// the shape the executor env-injection test needs, without
+    /// naming the private connector type.
+    pub(crate) fn seq_step(
+        program: PathBuf,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> ReadonlyCompoundStep {
+        ReadonlyCompoundStep {
+            connector: SegmentConnector::Seq,
+            program,
+            argv,
+            suppress_stderr: false,
+            env,
+        }
+    }
 }
