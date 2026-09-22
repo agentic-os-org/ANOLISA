@@ -23,6 +23,7 @@ enum DaemonReply {
     Response(Box<WsCkptResponse>),
     Identity,
     CreatedFromRequest,
+    SkippedFromRequest(String),
     EvidenceFromRequest,
     CreatedWithWrongPath,
     GuardedPreviewFromRequest(Vec<DiffEntry>),
@@ -158,7 +159,7 @@ fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptRespons
             registered_path: "/workspace".to_owned(),
             generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
         },
-        DaemonReply::CreatedFromRequest => {
+        DaemonReply::CreatedFromRequest | DaemonReply::SkippedFromRequest(_) => {
             let WsCkptRequest::GuardedCheckpointV2 {
                 ws_id,
                 expected_generation,
@@ -169,14 +170,16 @@ fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptRespons
             else {
                 panic!("expected guarded checkpoint request")
             };
-            WsCkptResponse::GuardedCheckpointV2Ok {
-                evidence: guarded_evidence(
-                    ws_id,
-                    *expected_generation,
-                    checkpoint_id,
-                    *operation_digest,
-                ),
+            let mut evidence = guarded_evidence(
+                ws_id,
+                *expected_generation,
+                checkpoint_id,
+                *operation_digest,
+            );
+            if let DaemonReply::SkippedFromRequest(reason) = reply {
+                evidence.outcome = GuardedCheckpointOutcomeV2::Skipped { reason };
             }
+            WsCkptResponse::GuardedCheckpointV2Ok { evidence }
         }
         DaemonReply::EvidenceFromRequest => {
             let WsCkptRequest::CheckpointEvidenceV2 {
@@ -633,6 +636,52 @@ fn pre_runtime_create_dispatches_guarded_checkpoint_once() {
         1
     );
     drop(directory);
+}
+
+#[test]
+fn pre_runtime_skipped_checkpoint_explains_how_to_resubmit_safely() {
+    for (provider_reason, empty_workspace) in [
+        ("Empty workspace, no snapshot created.", true),
+        ("daemon-private reason for skipping", false),
+    ] {
+        let (directory, socket_path, daemon) = spawn_daemon(vec![
+            DaemonReply::Identity,
+            DaemonReply::Identity,
+            DaemonReply::SkippedFromRequest(provider_reason.to_owned()),
+        ]);
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace = pre_runtime_workspace();
+        let mut adapter = PreRuntimeCheckpointAdapter::admit(
+            PathBuf::from(socket_path),
+            Path::new("/workspace"),
+            workspace.clone(),
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .unwrap();
+        let request = pre_runtime_request(workspace);
+        let binding = adapter.prepare_baseline(&request).unwrap();
+
+        let PreRuntimeCheckpointCreateResult::KnownNoEffect { reason } =
+            adapter.create_baseline(&request, &binding).unwrap()
+        else {
+            panic!("a skipped checkpoint must not authorize a required baseline")
+        };
+        let message = reason.as_str();
+        assert_eq!(message.contains("empty workspace"), empty_workspace);
+        assert_eq!(
+            message.contains("Upgrade ws-ckpt or add a file"),
+            empty_workspace
+        );
+        assert!(message.contains("submit a new Task"));
+        assert!(message.contains("checkpoint=off"));
+        assert!(!message.contains("daemon-private"));
+        let requests = daemon.join().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "skip must not trigger an automatic retry"
+        );
+    }
 }
 
 #[test]

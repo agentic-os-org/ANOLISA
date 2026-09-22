@@ -243,6 +243,13 @@ development integration，但保留持久 Task state，供后续 setup 复用。
   baseline，也不建立逐 effect barrier。Workspace checkpoint 不保护 host、credential、
   network、cloud 或其他 external effect。
 
+  当前 ws-ckpt 支持将空 workspace 保存为快照。旧 daemon 可能跳过它；此时 `On` 会在
+  Runtime 启动前使 Task 失败，因为没有可恢复的快照。升级 ws-ckpt 或向 workspace 添加
+  文件后，使用新的 idempotency key 提交新 Task。若无需 checkpoint 保护，也可使用
+  `--checkpoint off` 提交新 Task。失败的 Task 保持终态（`retryable=false`）：`retry`
+  用于恢复 suspended Run，不会重建失败的 baseline。`Auto` 可以在已知 skip 后继续，
+  并记录 downgrade；`On` 不会静默变成 `Off`。
+
   托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
   `write_file`。每次写入都必须先经过 Runtime-native permission decision、适用的持久
   checkpoint barrier 与 Gateway approval，之后 Core 才执行。Pinned workspace 会拒绝

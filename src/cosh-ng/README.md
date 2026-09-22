@@ -275,6 +275,12 @@ does not authorize the effect. `On` fails closed unless exact checkpoint
 evidence exists, while `Off` creates neither the baseline nor per-effect
 barriers.
 
+Empty workspaces are valid checkpoint state in current ws-ckpt. If an older
+daemon skips the initial snapshot, `On` stops the Task before Runtime launch.
+Upgrade ws-ckpt or add a file and submit a new Task, or explicitly select `Off`
+when checkpoint protection is not needed. The failed Task is terminal;
+`retry` does not rebuild a failed baseline.
+
 Managed Core uses the closed `workspace-write-v1` profile. It exposes only
 `ask_user_question` and `write_file`; every write is a Runtime-native permission
 decision, and Core executes it only after Gateway approval and any required

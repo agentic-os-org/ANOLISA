@@ -248,6 +248,10 @@ Checkpoint policy 同时作用于 Runtime 启动前和获批的 Runtime-native e
 error 或 uncertain result 不能授权 effect。`On` 只有在存在准确 checkpoint evidence 时才
 放行，否则 fail closed；`Off` 既不创建 baseline，也不建立逐 effect barrier。
 
+当前 ws-ckpt 支持为空 workspace 创建 checkpoint。若旧 daemon 跳过初始快照，`On`
+会在 Runtime 启动前终止 Task。升级 ws-ckpt 或添加文件后提交新 Task；若无需 checkpoint
+保护，也可显式选择 `Off`。失败的 Task 已进入终态，`retry` 不会重建失败的 baseline。
+
 托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
 `write_file`。每次写入都是 Runtime-native permission decision；只有 Gateway approval
 以及所需 checkpoint barrier 完成后，Core 才会执行。现有 pinned workspace filesystem
