@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/ws-ckpt",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "ws-ckpt based workspace checkpoint and rollback plugin for OpenClaw",
   "type": "module",
   "main": "./dist/src/index.js",

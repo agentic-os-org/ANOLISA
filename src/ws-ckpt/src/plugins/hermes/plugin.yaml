@@ -1,5 +1,5 @@
 name: ws-ckpt
-version: "0.4.5"
+version: "0.5.0"
 description: "Workspace checkpoint on each conversation turn via ws-ckpt daemon"
 provides_tools:
   - ws-ckpt-config

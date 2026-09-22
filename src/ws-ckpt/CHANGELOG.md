@@ -2,6 +2,27 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.5.0
+
+### Added
+- Unified workspace path identity, conflicting alias registrations are rejected at init
+- Workspaces whose init or unregister was interrupted are recovered on daemon restart
+- Added guarded rollback V2 protocol and evidence wire variants used by cosh-ng governed tasks, cosh-ng requires ws-ckpt daemon 0.5.0 or newer
+
+### Changed
+- OpenClaw tool allowlists are now managed through the OpenClaw config CLI, requiring OpenClaw 2026.2.13 or newer (#3221)
+- `/etc/ws-ckpt/config.toml` is now RPM `%config(noreplace)`: upgrades keep admin edits and land new defaults as `.rpmnew`; erase keeps a modified config as `.rpmsave`, restore it manually after reinstall (#3070)
+
+### Fixed
+- Fixed empty workspaces being skipped instead of snapshotted
+- Fixed checkpoint/rollback silently succeeding on a detached workspace directory, now failing fast with a recovery hint (#3059)
+- Fixed `recover --all` exiting 0 when individual workspaces failed (#3069)
+- Fixed `rpm -e` wiping the last remaining snapshot copies when recover failed (#3069)
+- Fixed checkpoint failures under disk-space pressure by reclaiming deleted subvolumes (#3053)
+- Fixed a race when two clients initialize the same workspace concurrently
+- Fixed adapter discovery for raw installation layouts
+- Fixed OpenClaw plugin install to probe the installed CLI before accepting capabilities (#3116)
+
 ## 0.4.5
 
 ### Added
