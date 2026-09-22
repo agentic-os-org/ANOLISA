@@ -103,6 +103,7 @@ def _validate_hooks_dir(path: str) -> str | None:
 # real call sites (``bind`` only checks arity and parameter names, so nothing
 # is ever called here).
 _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
+    ("rtk_rewriting_enabled", (), {}),
     # on_compress_pre_tool:
     #   build_pre_tool_request(args, AGENT_ID, tool_name, "command",
     #                          session_id, tool_call_id,
@@ -297,6 +298,7 @@ from hook_utils import (
     is_file_read_command,
     is_tokenless_retrieve_command,
     resolve_binary,
+    rtk_rewriting_enabled,
     run_compress,
     tokenless_retrieve_command_available,
 )
@@ -426,6 +428,8 @@ def on_pre_tool_call(
     **kwargs: Any,
 ) -> dict[str, str] | None:
     """Ask Core for an RTK rewrite and translate it to a Hermes block."""
+    if not rtk_rewriting_enabled():
+        return None
     if tool_name not in _SHELL_TOOLS or not isinstance(args, dict):
         return None
     tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)

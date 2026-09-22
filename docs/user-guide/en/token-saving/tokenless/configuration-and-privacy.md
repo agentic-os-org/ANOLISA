@@ -16,6 +16,22 @@ An empty environment variable is treated as unset. For Boolean environment varia
 
 There is one current implementation exception: when both `TOKENLESS_STATS_ENABLED` and `TOKENLESS_SLS_ENABLED` are non-empty, the config file is skipped completely. In that branch, compression uses `TOKENLESS_COMPRESSION_ENABLED` when set and otherwise defaults to `true`. If you export both recording variables, export the compression variable explicitly as well.
 
+## Optional RTK command rewriting
+
+RTK command rewriting is disabled by default in automatic Agent integrations and the Python SDK.
+To opt in, set `TOKENLESS_RTK_ENABLED=1` in the host Agent's environment before starting it.
+Python callers can instead use `TokenlessConfig(rtk_enabled=True)` or AgentScope 2.x
+`TokenlessMiddleware(rtk_enabled=True)`; OpenClaw accepts `rtk_enabled: true` in the Tokenless
+plugin configuration.
+A non-empty environment variable overrides explicit SDK/plugin configuration: `1`, `true`, and
+`yes` enable rewriting (case-insensitively); all other non-empty values disable it. An empty
+variable is unset. This switch is not a `~/.tokenless/config.json` field.
+
+With rewriting disabled, commands reach host approval unchanged; RTK-specific token savings are
+lost, while BeforeModel, PostTool, and Retrieve retain their existing behavior. Hosts still
+control approvals when rewriting is enabled, and may request approval for the rewritten command.
+Direct `rtk` calls and low-level Protocol v2 PreTool requests are unchanged.
+
 ## Configuration file
 
 Configuration path:
@@ -338,7 +354,7 @@ The OpenClaw plugin also provides framework-level options:
 The OpenClaw plugin does not compress tool schemas or provide content retrieval. Results that cannot
 be safely optimized without retrieval pass through unchanged.
 
-RTK, the OpenClaw-side Tool Ready registration gate, and PostTool default to on; verbose logging
+RTK defaults to off. The OpenClaw-side Tool Ready registration gate and PostTool default to on; verbose logging
 defaults to off. The Tool Ready option currently has no operational effect because Tokenless
 hard-disables the underlying check. Tokenless automatically decides whether JSON cleanup or TOON is
 useful and which tool outputs must pass through unchanged. The removed

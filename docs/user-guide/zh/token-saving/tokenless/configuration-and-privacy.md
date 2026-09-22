@@ -16,6 +16,20 @@ Tokenless 默认启用压缩、本地统计和 SLS 度量。由于本地统计�
 
 当前实现有一个例外：当 `TOKENLESS_STATS_ENABLED` 和 `TOKENLESS_SLS_ENABLED` 都是非空值时，代码会完全跳过配置文件。在这个分支中，压缩开关优先使用 `TOKENLESS_COMPRESSION_ENABLED`；未设置时直接默认为 `true`。如果同时导出两个记录开关，也应显式导出压缩开关。
 
+## 可选 RTK 命令重写
+
+自动 Agent 集成和 Python SDK 默认关闭 RTK 命令重写。
+如需启用，在启动宿主 Agent 前，在它继承的环境中设置 `TOKENLESS_RTK_ENABLED=1`。
+Python 也可以使用 `TokenlessConfig(rtk_enabled=True)`，或 AgentScope 2.x 的
+`TokenlessMiddleware(rtk_enabled=True)`；OpenClaw 可在 Tokenless 插件配置中设置
+`rtk_enabled: true`。
+非空环境变量优先于显式 SDK/插件配置：`1`、`true`、`yes`（不区分大小写）表示开启，
+其他非空值表示关闭，空值视为未设置。此开关不是 `~/.tokenless/config.json` 字段。
+
+关闭重写后，原始命令直接进入宿主审批，失去 RTK 专用过滤带来的 token 收益；
+BeforeModel、PostTool 和 Retrieve 保持原有行为。显式开启后仍由宿主决定审批，
+重写后的命令可能触发额外审批。直接调用 `rtk` 或底层 Protocol v2 PreTool 请求不受影响。
+
 ## 配置文件
 
 配置路径：
@@ -312,7 +326,7 @@ OpenClaw Plugin 还提供框架级选项：
 OpenClaw Plugin 不压缩工具 Schema，也不提供内容恢复。无法在不恢复内容的情况下安全优化的
 结果会原样透传。
 
-RTK、OpenClaw 侧的 Tool Ready 注册门槛和 PostTool 默认开启，verbose 日志默认关闭。由于
+RTK 默认关闭；OpenClaw 侧的 Tool Ready 注册门槛和 PostTool 默认开启，verbose 日志默认关闭。由于
 Tokenless 已硬关闭底层检查，Tool Ready 选项当前没有实际效果。Tokenless 会自动判断 JSON
 清理或 TOON 是否有收益，以及哪些工具输出必须原样透传。已经删除的
 `response_compression_enabled`、`toon_compression_enabled`、`skip_tools` 和 `shell_tools` 不再

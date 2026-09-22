@@ -167,12 +167,17 @@ class TokenlessConfig:
 
     data_dir: str | os.PathLike[str] | None = None
     retrieve_tool_name: str = "tokenless_retrieve"
-    rtk_enabled: bool = True
+    rtk_enabled: bool = False
     search_path_sharing_enabled: bool = True
     diff_compression_enabled: bool = False
     html_extraction_enabled: bool = False
 
     def __post_init__(self) -> None:
+        rtk_override = os.environ.get("TOKENLESS_RTK_ENABLED", "")
+        if rtk_override:
+            object.__setattr__(
+                self, "rtk_enabled", rtk_override.lower() in {"1", "true", "yes"}
+            )
         try:
             RecoveryMethod.tool(self.retrieve_tool_name)
         except ValueError as error:
@@ -360,7 +365,11 @@ class TokenlessSdk:
     async def pre_tool(self, request: PreToolRequest) -> PreToolResponse:
         """Runs the Core PreTool service with the packaged RTK executable."""
         if self._rtk_path is None:
-            raise RuntimeError("Tokenless RTK is disabled")
+            return PreToolResponse(
+                arguments=dict(request.arguments),
+                action=PreToolAction.PASSTHROUGH,
+                output_optimization=OutputOptimization.NONE,
+            )
         response = await asyncio.to_thread(
             self.runtime._pre_tool_json,
             _json_dumps(

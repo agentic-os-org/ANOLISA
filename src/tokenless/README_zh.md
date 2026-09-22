@@ -10,6 +10,18 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
+自动 Agent 集成和 Python SDK 默认关闭 RTK 命令重写。
+如需启用，在启动宿主 Agent 前，在它继承的环境中设置 `TOKENLESS_RTK_ENABLED=1`。
+Python 也可以使用 `TokenlessConfig(rtk_enabled=True)`，或 AgentScope 2.x 的
+`TokenlessMiddleware(rtk_enabled=True)`；OpenClaw 可在 Tokenless 插件配置中设置
+`rtk_enabled: true`。
+非空环境变量优先于显式 SDK/插件配置：`1`、`true`、`yes`（不区分大小写）表示开启，
+其他非空值表示关闭，空值视为未设置。此开关不是 `~/.tokenless/config.json` 字段。
+
+关闭重写后，原始命令直接进入宿主审批，失去 RTK 专用过滤带来的 token 收益；
+BeforeModel、PostTool 和 Retrieve 保持原有行为。显式开启后仍由宿主决定审批，
+重写后的命令可能触发额外审批。直接调用 `rtk` 或底层 Protocol v2 PreTool 请求不受影响。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
@@ -486,7 +498,7 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 不同的绝对 `data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非
 应用有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
 
-两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
+两个 AgentScope Adapter 都支持可选的 RTK 命令改写，并启用 Schema 压缩、响应压缩、TOON、恢复、
 环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。
 宿主对象和流式 chunk 保持不变，只转换复制后的调用参数和最终模型可见文本。Tool Ready
 仍保持硬关闭。

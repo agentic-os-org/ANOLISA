@@ -290,7 +290,7 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 
 ### OpenClaw
 
-安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写，默认关闭 TOON。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩；RTK 重写需通过 `TOKENLESS_RTK_ENABLED=1` 或插件配置 `rtk_enabled: true` 显式启用。TOON 默认关闭。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
 
 ### Hermes
 
