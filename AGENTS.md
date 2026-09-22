@@ -2,6 +2,12 @@
 
 This file provides context for AI coding assistants (Qoder, Claude, etc.) working in this repository.
 
+For a directory-by-directory map, see [Repository layout](README.md#repository-layout)
+([中文](README_zh.md#仓库目录)). Start here for contribution rules, then follow the
+component paths below to any scoped `AGENTS.md`. Source location and component
+identity are separate: directory moves must preserve package names, release tags,
+and existing build and test entry points.
+
 ## 1. Project Overview
 
 **ANOLISA** is a monorepo for an Agentic OS — a server-side operating layer designed for AI agent workloads.
