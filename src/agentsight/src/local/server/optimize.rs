@@ -26,6 +26,11 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// LLM ranking budget for semantic session search, in seconds. Separate
+    /// from the analysis path (which has no budget): a slow reasoning model
+    /// should raise this without affecting long-running optimization jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -72,6 +77,13 @@ impl OptLlmConfig {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("OPENAI_MODEL").ok())
             .unwrap_or_else(|| "gpt-4o".to_string())
+    }
+
+    fn search_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.search_timeout_secs
+                .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        )
     }
 
     fn masked_api_key(&self) -> Option<String> {
@@ -466,10 +478,16 @@ pub async fn semantic_search_sessions(
     let client = match data.optimize.build_client() {
         Ok(c) => c,
         Err(_) => {
+            // Same contract as the Linux endpoint: degrade to empty, but make
+            // the most common cause (unconfigured LLM) attributable.
+            log::warn!(
+                "semantic_search: LLM not configured (missing API key), returning empty results"
+            );
             return HttpResponse::Ok()
                 .json(semantic_search::SemanticSearchResponse { results: vec![] });
         }
     };
+    let timeout = data.optimize.snapshot().search_timeout();
     let request = body.into_inner();
 
     // Sessions labelled `useless` are out of retrieval scope; same filter as
@@ -490,7 +508,7 @@ pub async fn semantic_search_sessions(
         },
         None => request,
     };
-    semantic_search::handle_semantic_search(&client, &request).await
+    semantic_search::handle_semantic_search(&client, &request, timeout).await
 }
 
 #[cfg(test)]
@@ -588,6 +606,7 @@ mod tests {
             api_key: Some("sk-testkey".to_string()),
             base_url: Some("https://test.api.com".to_string()),
             model: Some("test-model".to_string()),
+            search_timeout_secs: None,
         };
         config.save(&tmp).unwrap();
 
@@ -630,5 +649,22 @@ mod tests {
         let state = OptimizeState::init(&tmp);
         assert!(state.store.is_some());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn search_timeout_defaults_to_shared_default() {
+        assert_eq!(
+            OptLlmConfig::default().search_timeout(),
+            std::time::Duration::from_secs(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn search_timeout_secs_round_trips_and_stays_absent_when_unset() {
+        let config: OptLlmConfig =
+            serde_json::from_str(r#"{"search_timeout_secs": 30}"#).expect("deserialize");
+        assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
+        let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
+        assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
     }
 }

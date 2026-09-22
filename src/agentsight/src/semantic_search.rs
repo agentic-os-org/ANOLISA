@@ -17,6 +17,10 @@ const SEMANTIC_SEARCH_SYSTEM_PROMPT: &str = "你是一个会话搜索助手。�
 仅返回 JSON 数组: [{\"session_id\": \"...\", \"relevance\": \"high|medium\", \"reason\": \"一句话理由\"}]。\
 如果没有相关会话，返回空数组 []。";
 
+/// Default LLM ranking budget. Slow reasoning models legitimately exceed
+/// this; deployments raise it via `search_timeout_secs` in the optimization
+/// LLM config rather than losing search results silently.
+pub const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 5;
 /// Maximum candidate sessions accepted per request (bounds deserialization).
 pub const MAX_CANDIDATES: usize = 200;
 /// Maximum characters of the user query forwarded to the LLM.
@@ -125,23 +129,39 @@ fn normalize_results(mut items: Vec<SemanticSearchResult>) -> Vec<SemanticSearch
 /// Ask the configured LLM to rank `candidates` by semantic relevance to `query`.
 ///
 /// Returns the normalized, relevance-ordered results, or an empty vector on
-/// timeout, LLM error, or unparseable output so callers degrade silently.
+/// timeout, LLM error, or unparseable output. Degrading to empty stays
+/// deliberate — search keeps working (as "no matches") when the LLM is slow
+/// or down — but every degraded path logs a WARN so an empty page is
+/// attributable after the fact.
 pub async fn rank_sessions(
     client: &LlmClient,
     query: &str,
     candidates: &[SemanticSearchCandidate],
+    timeout: std::time::Duration,
 ) -> Vec<SemanticSearchResult> {
     let messages = build_ranking_messages(query, candidates);
 
     let parsed = actix_web::rt::time::timeout(
-        std::time::Duration::from_secs(5),
-        client.chat_json_parsed::<Vec<SemanticSearchResult>>(messages),
+        timeout,
+        client.chat_json_parsed_labeled::<Vec<SemanticSearchResult>>(
+            messages,
+            Some("semantic_search"),
+        ),
     )
     .await;
 
     match parsed {
         Ok(Ok(items)) => normalize_results(items),
-        _ => vec![],
+        Ok(Err(error)) => {
+            log::warn!("semantic_search: LLM ranking failed, returning empty results: {error}");
+            vec![]
+        }
+        Err(_) => {
+            log::warn!(
+                "semantic_search: LLM ranking timed out after {timeout:?}, returning empty results"
+            );
+            vec![]
+        }
     }
 }
 
@@ -178,6 +198,7 @@ pub fn filter_excluded(
 pub async fn handle_semantic_search(
     client: &LlmClient,
     request: &SemanticSearchRequest,
+    timeout: std::time::Duration,
 ) -> HttpResponse {
     if request.candidates.len() > MAX_CANDIDATES {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -190,7 +211,7 @@ pub async fn handle_semantic_search(
     if request.candidates.len() <= 5 {
         return HttpResponse::Ok().json(SemanticSearchResponse { results: vec![] });
     }
-    let results = rank_sessions(client, &request.query, &request.candidates).await;
+    let results = rank_sessions(client, &request.query, &request.candidates, timeout).await;
     HttpResponse::Ok().json(SemanticSearchResponse { results })
 }
 
@@ -326,8 +347,11 @@ mod tests {
                 })
                 .collect(),
         };
-        let response =
-            actix_web::rt::System::new().block_on(handle_semantic_search(&client, &request));
+        let response = actix_web::rt::System::new().block_on(handle_semantic_search(
+            &client,
+            &request,
+            std::time::Duration::from_secs(5),
+        ));
         assert_eq!(response.status(), 400);
     }
 
@@ -345,8 +369,118 @@ mod tests {
                 })
                 .collect(),
         };
-        let response =
-            actix_web::rt::System::new().block_on(handle_semantic_search(&client, &request));
+        let response = actix_web::rt::System::new().block_on(handle_semantic_search(
+            &client,
+            &request,
+            std::time::Duration::from_secs(5),
+        ));
         assert_eq!(response.status(), 200);
+    }
+
+    fn candidate(session_id: &str) -> SemanticSearchCandidate {
+        SemanticSearchCandidate {
+            session_id: session_id.into(),
+            first_message: None,
+            last_message: None,
+            project: None,
+        }
+    }
+
+    /// Log-capturing logger for asserting the degradation WARNs. Installed
+    /// once per test process (the global logger allows a single install);
+    /// parallel tests may append their own records, which is harmless for
+    /// `contains` assertions.
+    struct CaptureLogger {
+        lines: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            self.lines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("{}", record.args()));
+        }
+        fn flush(&self) {}
+    }
+
+    fn captured_logs() -> &'static std::sync::Mutex<Vec<String>> {
+        static LOGGER: std::sync::OnceLock<&'static CaptureLogger> = std::sync::OnceLock::new();
+        let logger = LOGGER.get_or_init(|| {
+            let logger: &'static CaptureLogger = Box::leak(Box::new(CaptureLogger {
+                lines: std::sync::Mutex::new(Vec::new()),
+            }));
+            if log::set_logger(logger).is_ok() {
+                log::set_max_level(log::LevelFilter::Debug);
+            }
+            logger
+        });
+        &logger.lines
+    }
+
+    /// Accepts one connection and holds it without responding, so the
+    /// client-side timeout — not the server — ends the request. The read
+    /// unblocks when the cancelled request drops the socket.
+    fn hanging_server() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind hanging server");
+        let addr = listener.local_addr().expect("hanging server addr");
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = std::io::Read::read(&mut &stream, &mut [0u8; 1024]);
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[test]
+    fn degraded_ranking_logs_warn_on_llm_failure() {
+        let captured = captured_logs();
+        // 127.0.0.1:1 refuses immediately, exercising the LLM-error branch.
+        let client = dummy_client();
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "q",
+            &[candidate("s1")],
+            std::time::Duration::from_secs(30),
+        ));
+        assert!(results.is_empty());
+        let lines = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("semantic_search: LLM ranking failed")),
+            "expected degradation WARN, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn hanging_llm_endpoint_times_out_within_budget_and_logs_warn() {
+        let captured = captured_logs();
+        let client = LlmClient::with_config(hanging_server(), "test-key", "test-model");
+        let start = std::time::Instant::now();
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "q",
+            &[candidate("s1")],
+            std::time::Duration::from_millis(100),
+        ));
+        let elapsed = start.elapsed();
+        assert!(results.is_empty());
+        // A 100ms budget vs the previous hardcoded 5s: ignoring the parameter
+        // overshoots this bound by 40x even on a slow CI machine.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "ranking outlived its timeout budget: {elapsed:?}"
+        );
+        let lines = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("semantic_search: LLM ranking timed out")),
+            "expected timeout WARN, got: {lines:?}"
+        );
     }
 }
