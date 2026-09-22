@@ -726,7 +726,9 @@ impl AdapterBackendsSpec {
     /// backends]` table is then omitted on serialization so round-tripped
     /// contracts without it stay byte-stable.
     pub fn is_empty(&self) -> bool {
-        self.rpm.as_ref().is_none_or(|r| r.resource_root.is_none())
+        self.rpm
+            .as_ref()
+            .is_none_or(AdapterRpmBackendSpec::is_empty)
     }
 }
 
@@ -742,6 +744,16 @@ pub struct AdapterRpmBackendSpec {
     /// writes under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_root: Option<String>,
+    /// Additional RPM packages whose file inventories contain this adapter's
+    /// bundle or materialized sources. The component package remains implicit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_packages: Vec<String>,
+}
+
+impl AdapterRpmBackendSpec {
+    fn is_empty(&self) -> bool {
+        self.resource_root.is_none() && self.managed_packages.is_empty()
+    }
 }
 
 /// Compatibility metadata for an adapter entry. Lets packaging and the
@@ -2890,10 +2902,9 @@ mod tests {
     }
 
     #[test]
-    fn adapter_backends_rpm_resource_root_parses_and_round_trips() {
-        // `[adapters.backends.rpm]` declares the read-only resource root an
-        // RPM install provides; it must parse alongside the raw `dest` and
-        // survive round-trip so snapshotted contracts keep both roots.
+    fn adapter_backends_rpm_metadata_parses_and_round_trips() {
+        // `[adapters.backends.rpm]` declares both the read-only resource root
+        // and additional owning packages; both must survive round-trip.
         let toml_text = r#"
             [component]
             name = "sec-core"
@@ -2906,6 +2917,7 @@ mod tests {
 
             [adapters.backends.rpm]
             resource_root = "/opt/agent-sec/openclaw-plugin/"
+            managed_packages = ["agent-sec-openclaw-hook", "agent-sec-skills"]
         "#;
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
         let a = &m.adapters[0];
@@ -2920,12 +2932,16 @@ mod tests {
                 .and_then(|rpm| rpm.resource_root.as_deref()),
             Some("/opt/agent-sec/openclaw-plugin/")
         );
+        assert_eq!(
+            a.backends.rpm.as_ref().unwrap().managed_packages,
+            ["agent-sec-openclaw-hook", "agent-sec-skills"]
+        );
 
         let serialized = toml::to_string_pretty(&m).expect("serialize");
         let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
         assert_eq!(
             m.adapters, m2.adapters,
-            "round-trip must preserve backend resource roots"
+            "round-trip must preserve RPM adapter metadata"
         );
     }
 

@@ -13,7 +13,7 @@ repository = "https://github.com/alibaba/anolisa"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.2.17"
+min_anolisa_version = "0.3.15"
 
 [backends.rpm]
 package = "agent-sec-core"
@@ -151,6 +151,7 @@ detect = { binary = "openclaw" }
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/openclaw-plugin/"
+managed_packages = ["agent-sec-openclaw-hook", "agent-sec-skills"]
 
 [adapters.compat]
 framework_version = ">=2026.4.14"
@@ -197,6 +198,7 @@ detect = { binary = "hermes" }
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/hermes-plugin/src/"
+managed_packages = ["agent-sec-hermes-hook", "agent-sec-skills"]
 
 [adapters.bundle]
 schema = 1
@@ -235,6 +237,7 @@ detect = { binary = "codex" }
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/codex-plugin/hooks-plugin/"
+managed_packages = ["agent-sec-codex-hook"]
 
 [adapters.bundle]
 schema = 1
@@ -253,6 +256,7 @@ detect = { binary = "qodercli" }
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/qoder-plugin/"
+managed_packages = ["agent-sec-qoder-hook"]
 
 [adapters.bundle]
 schema = 1
@@ -271,6 +275,7 @@ detect = { binary = "qwen" }
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/qwen-code-extension/"
+managed_packages = ["agent-sec-qwen-code-hook"]
 
 [adapters.bundle]
 schema = 1
@@ -289,6 +294,7 @@ detect = { binary = "cosh" }
 
 [adapters.backends.rpm]
 resource_root = "{datadir}/extensions/agent-sec-core/"
+managed_packages = ["agent-sec-cosh-hook"]
 
 [adapters.bundle]
 schema = 1

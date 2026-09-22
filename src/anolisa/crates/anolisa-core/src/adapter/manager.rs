@@ -1074,7 +1074,8 @@ impl AdapterManager {
                 let next_files = if mappings.is_empty() {
                     Vec::new()
                 } else {
-                    let inventory = self.managed_inventory(component, &state, &framework)?;
+                    let inventory =
+                        self.managed_inventory(component, &state, &framework, &manifest)?;
                     materialized_files(&inventory, &mappings).map_err(|reason| {
                         AdapterError::InvalidAdapterInput {
                             component: component.to_string(),
@@ -1141,7 +1142,7 @@ impl AdapterManager {
             ctx.adapter_type.as_deref(),
             &ctx.declared_skills,
         );
-        let managed_inventory = self.managed_inventory(component, &state, &framework)?;
+        let managed_inventory = self.managed_inventory(component, &state, &framework, &manifest)?;
         let revision =
             source_revision(&managed_inventory, &resource_root, &mappings).map_err(|reason| {
                 AdapterError::InvalidAdapterInput {
@@ -1783,6 +1784,8 @@ impl AdapterManager {
                     self.current_source_revision(
                         component,
                         current_state,
+                        &manifest,
+                        framework,
                         &resource_root,
                         &mappings,
                     )
@@ -1949,18 +1952,22 @@ impl AdapterManager {
         component: &str,
         current_state: &StateStore,
         framework: &str,
+        manifest: &ComponentManifest,
     ) -> Result<ManagedInventory, AdapterError> {
         let installation = self
             .find_component_installation(component, current_state)?
             .ok_or_else(|| AdapterError::ComponentNotInstalled {
                 component: component.to_string(),
             })?;
-        inventory_for_installation(&installation, self.package_files.as_ref()).map_err(|reason| {
-            AdapterError::InvalidAdapterInput {
-                component: component.to_string(),
-                framework: framework.to_string(),
-                reason,
-            }
+        inventory_for_installation(
+            &installation,
+            self.package_files.as_ref(),
+            declared_rpm_managed_packages(manifest, framework),
+        )
+        .map_err(|reason| AdapterError::InvalidAdapterInput {
+            component: component.to_string(),
+            framework: framework.to_string(),
+            reason,
         })
     }
 
@@ -1968,6 +1975,8 @@ impl AdapterManager {
         &self,
         component: &str,
         current_state: &StateStore,
+        manifest: &ComponentManifest,
+        framework: &str,
         resource_root: &Path,
         mappings: &[super::managed_files::MaterializedMapping],
     ) -> Result<super::claim::AdapterSourceRevision, String> {
@@ -1975,7 +1984,11 @@ impl AdapterManager {
             .find_component_installation(component, current_state)
             .map_err(|err| format!("installed component state unavailable: {err}"))?
             .ok_or_else(|| format!("component '{component}' is not installed"))?;
-        let inventory = inventory_for_installation(&installation, self.package_files.as_ref())?;
+        let inventory = inventory_for_installation(
+            &installation,
+            self.package_files.as_ref(),
+            declared_rpm_managed_packages(manifest, framework),
+        )?;
         source_revision(&inventory, resource_root, mappings)
     }
 
@@ -3658,6 +3671,19 @@ fn declared_frameworks(manifest: &ComponentManifest) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+fn declared_rpm_managed_packages<'a>(
+    manifest: &'a ComponentManifest,
+    framework: &str,
+) -> &'a [String] {
+    manifest
+        .adapters
+        .iter()
+        .find(|adapter| adapter.framework.as_deref().map(str::trim) == Some(framework))
+        .and_then(|adapter| adapter.backends.rpm.as_ref())
+        .map(|rpm| rpm.managed_packages.as_slice())
+        .unwrap_or_default()
 }
 
 /// Extract the `dest` from the first `[[adapters]]` entry whose
