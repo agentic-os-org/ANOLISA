@@ -738,7 +738,7 @@ jobs:
 
           add_component_context() {
             case "$1" in
-              anolisa) add_context_file "src/anolisa/AGENTS.md" ;;
+              anolisa) add_context_file "distribution/anolisa/AGENTS.md" ;;
               agent-sec-core) add_context_file "src/agent-sec-core/AGENTS.md" ;;
               agentsight) add_context_file "src/agentsight/AGENTS.md" ;;
               skillfs) add_context_file "src/skillfs/AGENTS.md" ;;
@@ -750,8 +750,13 @@ jobs:
           add_component_review_guidance() {
             local component_name="$1"
             [[ "$component_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 0
+            local component_root="src/${component_name}"
+            case "$component_name" in
+              anolisa) component_root="distribution/anolisa" ;;
+              copilot-shell) component_root="deprecated/copilot-shell" ;;
+            esac
             add_review_guidance_file \
-              "src/${component_name}/develop-skills/${component_name}-code-review/SKILL.md"
+              "${component_root}/develop-skills/${component_name}-code-review/SKILL.md"
           }
 
           add_context_file() {
@@ -795,7 +800,7 @@ jobs:
             if grep -qE '^(docs/|.*README.*|.*CHANGELOG.*|.*CONTRIBUTING.*|specs/)' "$files_file"; then
               [[ "$component" == "general" ]] && component="docs"
             fi
-            if grep -qE '^src/anolisa/' "$files_file"; then [[ "$component" == "general" ]] && component="anolisa"; fi
+            if grep -qE '^distribution/anolisa/' "$files_file"; then [[ "$component" == "general" ]] && component="anolisa"; fi
             if grep -qE '^src/tokenless/' "$files_file"; then [[ "$component" == "general" ]] && component="tokenless"; fi
             if grep -qE '^src/agent-sec-core/' "$files_file"; then [[ "$component" == "general" ]] && component="agent-sec-core"; fi
             if grep -qE '^src/agentsight/' "$files_file"; then [[ "$component" == "general" ]] && component="agentsight"; fi
@@ -803,7 +808,7 @@ jobs:
             if grep -qE '^src/skillfs/' "$files_file"; then [[ "$component" == "general" ]] && component="skillfs"; fi
             if grep -qE '^src/ws-ckpt/' "$files_file"; then [[ "$component" == "general" ]] && component="ws-ckpt"; fi
             if grep -qE '^src/os-skills/' "$files_file"; then [[ "$component" == "general" ]] && component="os-skills"; fi
-            if grep -qE '^src/copilot-shell/' "$files_file"; then [[ "$component" == "general" ]] && component="copilot-shell"; fi
+            if grep -qE '^deprecated/copilot-shell/' "$files_file"; then [[ "$component" == "general" ]] && component="copilot-shell"; fi
             if grep -qE '^src/cosh-ng/' "$files_file"; then [[ "$component" == "general" ]] && component="cosh-ng"; fi
             if grep -qE '^src/blaze/' "$files_file"; then [[ "$component" == "general" ]] && component="blaze"; fi
             if grep -qE '^src/ktuner/' "$files_file"; then [[ "$component" == "general" ]] && component="ktuner"; fi
@@ -815,8 +820,8 @@ jobs:
             [[ -n "$changed_file" ]] || continue
             add_nearest_agents "$changed_file"
             case "$changed_file" in
-              src/*/*)
-                changed_component="${changed_file#src/}"
+              src/*/*|distribution/anolisa/*|deprecated/copilot-shell/*)
+                changed_component="${changed_file#*/}"
                 changed_component="${changed_component%%/*}"
                 add_component_review_guidance "$changed_component"
                 ;;

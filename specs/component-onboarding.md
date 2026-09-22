@@ -1,7 +1,13 @@
 # Component Onboarding Standard
 
 > Canonical checklist and rules for introducing a new component into the ANOLISA monorepo.
-> Both human contributors and AI agents MUST follow this specification when adding a new `src/<name>/` component.
+> Both human contributors and AI agents MUST follow this specification when adding a new component.
+
+`src/<name>/` is the default location for runtime components. Distribution tooling
+lives under `distribution/`; retained deprecated components live under
+`deprecated/`. In the examples below, substitute the component's actual registered
+path from `.github/components.json`. Moving a component does not change its scope,
+package name, release tag, or required CI and ownership registrations.
 
 ## Agent Navigation
 
@@ -95,7 +101,7 @@ Include these based on the component's form and characteristics:
 | Complex architecture (multi-crate, non-trivial constraints) | Scoped AGENTS.md + register in §11 | `src/<name>/AGENTS.md` + `AGENTS.md` §11 table | More than 1 crate, or has design constraints that differ from global conventions |
 | User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/user-entrypoint/<name>.md` | Component has CLI subcommands or user-visible behavior |
 | Agent-callable (can be invoked by cosh/agent directly) | Skill registration | `src/os-skills/<domain>/<name>/SKILL.md` | Tool is designed for agent autonomous invocation |
-| Daemon / needs packaging | Component contract | `.anolisa/component.toml` | Has systemd service, RPM spec, or runtime directories. See `src/anolisa/docs/COMPONENT_CONTRACT.md` for schema |
+| Daemon / needs packaging | Component contract | `.anolisa/component.toml` | Has systemd service, RPM spec, or runtime directories. See `distribution/anolisa/docs/COMPONENT_CONTRACT.md` for schema |
 | Pinned toolchain | rust-toolchain.toml | `src/<name>/rust-toolchain.toml` | Requires a Rust version different from repo default |
 | Runtime configuration | Example configs | `src/<name>/examples/` | Has TOML/JSON/YAML config that users must understand |
 | Bilingual pair (Chinese) | `README_zh.md` + `CHANGELOG_zh.md` | `src/<name>/` | Required before first release per documentation-standard §1; may be deferred if contributor is non-Chinese speaker |
@@ -181,7 +187,7 @@ Before approving a new-component PR, verify:
 
 Planned invariants for a `check-component-registry` CI job:
 
-- Every directory in `src/*/` (excluding `src/os-skills/` and `src/benchmark/`) has README.md + CHANGELOG.md
+- Every registered component root in `src/`, `distribution/`, or `deprecated/` (excluding `src/os-skills/`) has README.md + CHANGELOG.md
 - The set of scopes in `commitlint.config.json` is a superset of component scopes in `AGENTS.md` §6
 - The set of scopes in `prelint.yml` includes all scopes from `commitlint.config.json`
 - `ci.yaml` has a detect-changes path filter for every `src/<name>/` listed in AGENTS.md §1

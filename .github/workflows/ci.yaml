@@ -122,7 +122,7 @@ jobs:
           BLAZE=false
 
           # Path-based detection
-          if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
+          if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
             COPILOT_SHELL=true
           fi
           if echo "$CHANGED" | grep -q "^src/agent-sec-core/"; then
@@ -140,7 +140,7 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
             AGENT_MEMORY=true
           fi
-          if echo "$CHANGED" | grep -q "^src/anolisa/"; then
+          if echo "$CHANGED" | grep -q "^distribution/anolisa/"; then
             ANOLISA=true
           fi
           if echo "$CHANGED" | grep -q "^src/skillfs/"; then
@@ -257,33 +257,33 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - name: Install dependencies
-        run: cd src/copilot-shell && npm ci
+        run: cd deprecated/copilot-shell && npm ci
 
       - name: Check formatting
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm run format
           git diff --exit-code
 
       - name: Lint
-        run: cd src/copilot-shell && npm run lint:ci
+        run: cd deprecated/copilot-shell && npm run lint:ci
 
       - name: Build
-        run: cd src/copilot-shell && npm run build
+        run: cd deprecated/copilot-shell && npm run build
 
       - name: Type check
-        run: cd src/copilot-shell && npm run typecheck
+        run: cd deprecated/copilot-shell && npm run typecheck
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-dist-nodejs20
           path: |
-            src/copilot-shell/packages/*/dist/**/*
-            src/copilot-shell/package-lock.json
+            deprecated/copilot-shell/packages/*/dist/**/*
+            deprecated/copilot-shell/package-lock.json
           retention-days: 1
 
   # =========================================================================
@@ -301,7 +301,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
@@ -310,13 +310,13 @@ jobs:
 
       - name: Install and build
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm ci
           npm run build
 
       - name: Run cli tests
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/cli
 
   test-copilot-shell-core:
@@ -331,7 +331,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
@@ -340,13 +340,13 @@ jobs:
 
       - name: Install and build
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm ci
           npm run build
 
       - name: Run core tests
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/core
 
   # =========================================================================
@@ -1125,7 +1125,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src/anolisa
+          workspaces: distribution/anolisa
 
       - uses: actions/setup-node@v4
         with:
@@ -1133,41 +1133,41 @@ jobs:
 
       - name: Validate npm packaging
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           node npm/tests/platforms.test.js
           node npm/scripts/package-npm.js --validate
 
       - name: Validate nightly E2E harness
         run: |
-          bash -n src/anolisa/tests/nightly/raw-lifecycle.sh
-          src/anolisa/tests/nightly/raw-lifecycle.sh --list
+          bash -n distribution/anolisa/tests/nightly/raw-lifecycle.sh
+          distribution/anolisa/tests/nightly/raw-lifecycle.sh --list
           REPO_CONFIG=$(mktemp)
           trap 'rm -f "$REPO_CONFIG"' EXIT
-          cp src/anolisa/manifests/repo.toml "$REPO_CONFIG"
+          cp distribution/anolisa/manifests/repo.toml "$REPO_CONFIG"
           ANOLISA_E2E_REPO_CONFIG_PATH="$REPO_CONFIG" \
             ANOLISA_RAW_REPO_URL="https://mirror.example.com/raw/v1/" \
-            src/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
+            distribution/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
           grep -Fx 'base_url = "https://mirror.example.com/raw/v1/"' \
             "$REPO_CONFIG"
 
       - name: Check formatting
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo fmt --all --check
 
       - name: Lint
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run documentation tests
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo test --workspace --doc --locked
 
       - name: Run tests with coverage
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           mkdir -p coverage
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --all-targets --locked --no-report
@@ -1181,7 +1181,7 @@ jobs:
       - name: Publish coverage summary
         id: coverage
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           LINE_COVERAGE=$(node -e '
             const report = require("./coverage/coverage.json");
             process.stdout.write(String(report.data[0].totals.lines.percent));
@@ -1199,7 +1199,7 @@ jobs:
             printf '| Lines | **%.2f%%** |\n' "$LINE_COVERAGE"
             printf '| Functions | %.2f%% |\n' "$FUNCTION_COVERAGE"
             echo ""
-            echo "Coverage is reported for the full \`src/anolisa\` Rust workspace."
+            echo "Coverage is reported for the full \`distribution/anolisa\` Rust workspace."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage reports
@@ -1208,8 +1208,8 @@ jobs:
         with:
           name: anolisa-coverage
           path: |
-            src/anolisa/coverage/coverage.json
-            src/anolisa/coverage/lcov.info
+            distribution/anolisa/coverage/coverage.json
+            distribution/anolisa/coverage/lcov.info
           if-no-files-found: warn
           retention-days: 14
 

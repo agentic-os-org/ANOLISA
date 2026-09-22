@@ -52,7 +52,7 @@ runs:
         SUFFIX="${{ inputs.artifact-suffix }}"
 
         case "$COMPONENT" in
-          copilot-shell)  SRC_DIR="src/copilot-shell" ;;
+          copilot-shell)  SRC_DIR="deprecated/copilot-shell" ;;
           cosh-ng)        SRC_DIR="src/cosh-ng" ;;
           agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
           agentsight)     SRC_DIR="src/agentsight" ;;
@@ -62,7 +62,7 @@ runs:
           agent-memory)   SRC_DIR="src/agent-memory" ;;
           skillfs)        SRC_DIR="src/skillfs" ;;
           ktuner)         SRC_DIR="src/ktuner" ;;
-          anolisa)        SRC_DIR="src/anolisa" ;;
+          anolisa)        SRC_DIR="distribution/anolisa" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"
             exit 1

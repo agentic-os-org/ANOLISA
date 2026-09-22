@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 # Component paths
 # ---------------------------------------------------------------------------
-/src/copilot-shell/                     @kongche-jbw @samchu-zsl    # auto-label: component:cosh
+/deprecated/copilot-shell/              @kongche-jbw @samchu-zsl    # auto-label: component:cosh
 /src/agentsight/                        @chengshuyi @jfeng18 @viron-xiao # auto-label: component:sight
 /src/agent-sec-core/                    @edonyzpc @kid9             # auto-label: component:sec-core
 /src/agent-sec-core/agent-sec-cli/      @RemindD @edonyzpc          # auto-label: component:sec-core
@@ -34,7 +34,7 @@
 /src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
 /src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
 /src/agent-memory/                      @ikunkun-sys                # auto-label: component:memory
-/src/anolisa/                           @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
+/distribution/anolisa/                  @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
 /src/cosh-ng/                           @zkl123                     # auto-label: component:cosh-ng
 /src/cosh-ng/crates/cosh-shell/         @SunnyQjm                   # auto-label: component:cosh-ng
 

@@ -8,14 +8,14 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
-| **copilot-shell** (`cosh`) | `src/copilot-shell/` | TypeScript / Node.js | All |
+| **copilot-shell** (`cosh`) | `deprecated/copilot-shell/` | TypeScript / Node.js | All |
 | **cosh-ng** | `src/cosh-ng/` | Rust | Linux (full); macOS (limited functionality) |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux (full); macOS (trajectory/serve only) |
 | **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
-| **anolisa** | `src/anolisa/` | Rust | Linux + macOS (arm64) |
+| **anolisa** | `distribution/anolisa/` | Rust | Linux + macOS (arm64) |
 | **SkillFS** (`skillfs`) | `src/skillfs/` | Rust / FUSE | Linux only |
 | **ws-ckpt** | `src/ws-ckpt/` | Rust + TypeScript | Linux only |
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
@@ -39,7 +39,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 ./tests/run-all-tests.sh --filter sight   # agentsight only
 
 # copilot-shell (per-component)
-cd src/copilot-shell
+cd deprecated/copilot-shell
 make deps      # npm install + husky hooks (use make deps-ci in CI)
 make build
 make lint
@@ -86,7 +86,7 @@ make test        # cargo test --locked
 make smoke       # end-to-end MCP stdio smoke test
 
 # anolisa (per-component)
-cd src/anolisa
+cd distribution/anolisa
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
@@ -213,7 +213,7 @@ Summary:
 
 ## 5. TypeScript Conventions
 
-> Detailed config in `src/copilot-shell/`.
+> Detailed config in `deprecated/copilot-shell/`.
 
 - **Linting**: ESLint
 - **Formatting**: Prettier
@@ -281,7 +281,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 
 | Changed path | Scope |
 |---|---|
-| `src/copilot-shell/` | `cosh` |
+| `deprecated/copilot-shell/` | `cosh` |
 | `src/cosh-ng/` | `cosh-ng` |
 | `src/agent-sec-core/` | `sec-core` |
 | `src/os-skills/` | `skill` |
@@ -289,7 +289,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 | `src/tokenless/` | `tokenless` |
 | `src/ws-ckpt/` | `ckpt` |
 | `src/agent-memory/` | `memory` |
-| `src/anolisa/` | `anolisa` |
+| `distribution/anolisa/` | `anolisa` |
 | `src/skillfs/` | `skillfs` |
 | `src/ktuner/` | `ktuner` |
 | `src/blaze/` | `blaze` |
@@ -356,7 +356,7 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 |-----------|-------------|-------|
 | **agentsight** | [`src/agentsight/AGENTS.md`](src/agentsight/AGENTS.md) | eBPF probes, data pipeline architecture, module map, FFI constraints, API endpoints |
 | **agent-sec-core** | [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md) | Python environment, ruff/black rules, hermes-plugin, capability system |
-| **anolisa** | [`src/anolisa/AGENTS.md`](src/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
+| **anolisa** | [`distribution/anolisa/AGENTS.md`](distribution/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
 | **blaze** | [`src/blaze/AGENTS.md`](src/blaze/AGENTS.md) | Two-crate workspace, sandbox backends, daemon lifecycle |

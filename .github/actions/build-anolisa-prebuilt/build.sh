@@ -117,7 +117,7 @@ WORKTREE_READY=1
 git -C "$SOURCE_REPO" worktree lock --reason 'ANOLISA CLI prebuilt package build' \
     "$FIXED_WORKTREE"
 
-COMPONENT_ROOT="$FIXED_WORKTREE/src/anolisa"
+COMPONENT_ROOT="$FIXED_WORKTREE/distribution/anolisa"
 SOURCE_VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/prebuilt/verify-release.py" \
         "$COMPONENT_ROOT" --os "$TARGET_OS" --arch "$TARGET_ARCH"
@@ -151,7 +151,7 @@ cargo metadata \
         --release \
         --locked \
         --package anolisa-cli \
-        --manifest-path src/anolisa/Cargo.toml
+        --manifest-path distribution/anolisa/Cargo.toml
 )
 
 BIN_DIR="$COMPONENT_ROOT/target/$RUST_TARGET/release"

@@ -7,7 +7,7 @@ version: 2
 updates:
   # copilot-shell (npm)
   - package-ecosystem: "npm"
-    directory: "/src/copilot-shell"
+    directory: "/deprecated/copilot-shell"
     schedule:
       interval: "weekly"
     target-branch: "main"

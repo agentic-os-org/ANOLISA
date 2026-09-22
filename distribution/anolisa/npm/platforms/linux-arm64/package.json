@@ -1,0 +1,17 @@
+{
+  "name": "@anolisa/cli-linux-arm64",
+  "version": "0.3.14",
+  "description": "ANOLISA CLI native binary for Linux aarch64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "distribution/anolisa"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin/"
+  ],
+  "preferUnplugged": true
+}

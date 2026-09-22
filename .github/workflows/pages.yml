@@ -15,8 +15,23 @@ on:
       - 'src/**/README.md'
       - 'src/**/package.json'
       - 'src/**/pyproject.toml'
-      - 'src/anolisa/manifests/**'
-      - 'src/anolisa/crates/anolisa-cli/src/commands.rs'
+      - 'distribution/anolisa/**/CHANGELOG*.md'
+      - 'distribution/anolisa/**/Cargo.toml'
+      - 'distribution/anolisa/**/README.md'
+      - 'distribution/anolisa/**/package.json'
+      - 'distribution/anolisa/**/pyproject.toml'
+      - 'deprecated/copilot-shell/**/CHANGELOG*.md'
+      - 'deprecated/copilot-shell/**/Cargo.toml'
+      - 'deprecated/copilot-shell/**/README.md'
+      - 'deprecated/copilot-shell/**/package.json'
+      - 'deprecated/copilot-shell/**/pyproject.toml'
+      - 'benchmark/**/CHANGELOG*.md'
+      - 'benchmark/**/Cargo.toml'
+      - 'benchmark/**/README.md'
+      - 'benchmark/**/package.json'
+      - 'benchmark/**/pyproject.toml'
+      - 'distribution/anolisa/manifests/**'
+      - 'distribution/anolisa/crates/anolisa-cli/src/commands.rs'
       - 'src/tokenless/crates/tokenless-cli/src/main.rs'
   pull_request:
     branches: [main]
@@ -32,8 +47,23 @@ on:
       - 'src/**/README.md'
       - 'src/**/package.json'
       - 'src/**/pyproject.toml'
-      - 'src/anolisa/manifests/**'
-      - 'src/anolisa/crates/anolisa-cli/src/commands.rs'
+      - 'distribution/anolisa/**/CHANGELOG*.md'
+      - 'distribution/anolisa/**/Cargo.toml'
+      - 'distribution/anolisa/**/README.md'
+      - 'distribution/anolisa/**/package.json'
+      - 'distribution/anolisa/**/pyproject.toml'
+      - 'deprecated/copilot-shell/**/CHANGELOG*.md'
+      - 'deprecated/copilot-shell/**/Cargo.toml'
+      - 'deprecated/copilot-shell/**/README.md'
+      - 'deprecated/copilot-shell/**/package.json'
+      - 'deprecated/copilot-shell/**/pyproject.toml'
+      - 'benchmark/**/CHANGELOG*.md'
+      - 'benchmark/**/Cargo.toml'
+      - 'benchmark/**/README.md'
+      - 'benchmark/**/package.json'
+      - 'benchmark/**/pyproject.toml'
+      - 'distribution/anolisa/manifests/**'
+      - 'distribution/anolisa/crates/anolisa-cli/src/commands.rs'
       - 'src/tokenless/crates/tokenless-cli/src/main.rs'
   workflow_dispatch:
 
@@ -86,6 +116,9 @@ jobs:
 
       - name: Install website dependencies
         run: npm ci --prefix website
+
+      - name: Test repository layout generation
+        run: npm run test:layout --prefix website
 
       - name: Validate bilingual sources
         run: npm run validate:locales --prefix website

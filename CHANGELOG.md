@@ -387,9 +387,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 For detailed changelogs of individual components, see:
 
 **User Entrypoint**
-- [copilot-shell](src/copilot-shell/CHANGELOG.md)
+- [copilot-shell](deprecated/copilot-shell/CHANGELOG.md)
 - [cosh-ng](src/cosh-ng/CHANGELOG.md)
-- [anolisa](src/anolisa/CHANGELOG.md)
+- [anolisa](distribution/anolisa/CHANGELOG.md)
 - [os-skills](src/os-skills/CHANGELOG.md)
 
 **Token Saving**

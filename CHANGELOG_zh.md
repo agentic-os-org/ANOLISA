@@ -380,9 +380,9 @@
 各组件详细变更日志请参阅：
 
 **用户入口**
-- [copilot-shell](src/copilot-shell/CHANGELOG.md)
+- [copilot-shell](deprecated/copilot-shell/CHANGELOG.md)
 - [cosh-ng](src/cosh-ng/CHANGELOG.md)
-- [anolisa](src/anolisa/CHANGELOG.md)
+- [anolisa](distribution/anolisa/CHANGELOG.md)
 - [os-skills](src/os-skills/CHANGELOG.md)
 
 **Token 节省**

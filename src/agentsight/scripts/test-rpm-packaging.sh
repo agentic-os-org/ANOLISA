@@ -163,15 +163,15 @@ require_literal src/agentsight/scripts/agentsight-enforcer.service "PartOf=agent
 require_literal src/agentsight/scripts/agentsight.service "UMask=0077"
 require_literal src/agentsight/scripts/agentsight-enforcer.service "UMask=0077"
 
-require_literal src/anolisa/manifests/components/agentsight/component.toml \
+require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'source = "bin/agentsight-enforcer"'
-require_literal src/anolisa/manifests/components/agentsight/component.toml \
+require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'target = "{bindir}/agentsight-enforcer"'
-require_literal src/anolisa/manifests/components/agentsight/component.toml \
+require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'source = "share/anolisa/agentsight/agentsight-enforcer.service"'
-require_literal src/anolisa/manifests/components/agentsight/component.toml \
+require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'target = "{unitdir}/agentsight-enforcer.service"'
-require_literal src/anolisa/manifests/components/agentsight/component.toml \
+require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'unit = "agentsight-enforcer.service"'
 
 require_count src/agentsight/tests/security_pipeline.rs \

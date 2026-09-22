@@ -20,7 +20,7 @@ BUILD_DIR="${SCRIPT_DIR}/rpmbuild"
 RPMBUILD="${RPMBUILD:-rpmbuild}"
 
 # Source directories
-SHELL_DIR="${ROOT_DIR}/src/copilot-shell"
+SHELL_DIR="${ROOT_DIR}/deprecated/copilot-shell"
 SEC_DIR="${ROOT_DIR}/src/agent-sec-core"
 SKILLS_DIR="${ROOT_DIR}/src/os-skills"
 SIGHT_DIR="${ROOT_DIR}/src/agentsight"
@@ -29,7 +29,7 @@ MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
 KTUNER_DIR="${ROOT_DIR}/src/ktuner"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
-SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
+SANDBOX_PKG_DIR="${ROOT_DIR}/distribution/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
 GVISOR_RELEASE="${GVISOR_RELEASE:-20260601}"
@@ -753,7 +753,7 @@ build_anolisa() {
 
         # Both source archives must share this snapshot so a dirty worktree
         # cannot pair committed sources with dependencies from another revision.
-        git -C "$ROOT_DIR" archive --format=tar HEAD:src/anolisa |
+        git -C "$ROOT_DIR" archive --format=tar HEAD:distribution/anolisa |
             tar -xf - -C "$extract_dir"
 
         local spec_in="${extract_dir}/anolisa.spec.in"

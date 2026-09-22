@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-CATALOG="src/anolisa/manifests/components/tokenless/component.toml"
+CATALOG="distribution/anolisa/manifests/components/tokenless/component.toml"
 VERSION=$(grep '^version' src/tokenless/Cargo.toml | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
 
 WORK_DIR=$(mktemp -d)
