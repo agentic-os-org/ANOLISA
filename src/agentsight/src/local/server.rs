@@ -536,6 +536,8 @@ mod tests {
                 std::process::id(),
                 std::thread::current().name().unwrap_or("test")
             )),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
         });
         App::new()
             .app_data(local_state)

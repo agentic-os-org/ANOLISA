@@ -281,6 +281,8 @@ mod tests {
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(store)),
             db_path: PathBuf::from("/nonexistent/trajectories.db"),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
         })
     }
 
@@ -291,6 +293,8 @@ mod tests {
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(Some(store))),
             db_path,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
         })
     }
 
