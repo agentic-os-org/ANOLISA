@@ -1060,6 +1060,85 @@ fn upgrade_non_root_preview_warns_without_running_dnf() {
 }
 
 #[test]
+fn upgrade_preview_redacts_configured_repo_credentials_from_preflight_error() {
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
+    use anolisa_platform::rpm_repo::RpmRepoSource;
+    use anolisa_platform::rpm_transaction::RpmTransaction;
+
+    struct CredentialEchoRunner<'a>(&'a str);
+
+    impl CommandRunner for CredentialEchoRunner<'_> {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            assert_eq!(program, "dnf");
+            assert!(args.contains(&"--assumeno"));
+            let repo_arg = format!("--repofrompath=anolisa-configured,{}", self.0);
+            assert!(args.contains(&repo_arg.as_str()));
+            Ok(CommandOutput {
+                code: Some(1),
+                stdout: format!("Added anolisa-configured repo from {}\n", self.0),
+                stderr: "No match for argument: copilot-shell".to_string(),
+            })
+        }
+    }
+
+    for base_url in [
+        "http://testuser:fakepassword123@repo.example.internal/anolisa/",
+        "http://testuser:secret tail@repo.example.internal/private",
+        "http://repo.example.internal/private secret-token",
+    ] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = system_ctx(tmp.path().to_path_buf());
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let host = FakeHost::default();
+        let txn = RpmTransaction::with_runner_and_repo(
+            CredentialEchoRunner(base_url),
+            RpmRepoSource::new("anolisa-configured", base_url, Some(true)),
+        );
+        let plan = UpgradePlan {
+            installs: vec![PlannedInstall {
+                name: "cosh".to_string(),
+                package: "copilot-shell".to_string(),
+            }],
+            ..UpgradePlan::default()
+        };
+
+        let result = run_upgrade_with_deps(
+            &ctx,
+            &layout,
+            &plan,
+            &host,
+            &txn,
+            true,
+            true,
+            COMMAND,
+            &NoopReporter,
+        )
+        .expect("preview renders the sanitized preflight failure");
+
+        let reason = &result.errors[0].reason;
+        assert!(reason.starts_with("dnf install preflight failed"));
+        let sanitized = concat!(
+            "Added anolisa-configured repo from http://repo.example.internal\n",
+            "No match for argument: copilot-shell"
+        );
+        assert!(
+            reason.contains(sanitized),
+            "preflight diagnostic was not sanitized: {reason}"
+        );
+        for secret in [
+            "testuser",
+            "fakepassword123",
+            "secret",
+            "tail@",
+            "/anolisa/",
+            "/private",
+        ] {
+            assert!(!reason.contains(secret), "{secret:?} leaked: {reason}");
+        }
+    }
+}
+
+#[test]
 fn upgrade_rejects_pending_rpm_claim_before_any_transaction() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());

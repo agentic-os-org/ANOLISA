@@ -284,10 +284,10 @@ impl<R: CommandRunner> RpmTransaction<R> {
                             command: tool.program.into(),
                             operation: verb.into(),
                             code: out.code,
-                            stderr: format!(
+                            stderr: self.redact_repo_diagnostic(&format!(
                                 "requested update {spec} was not applied; check native exclusions or version locks: {}{}",
                                 out.stdout, out.stderr
-                            ),
+                            )),
                         });
                     }
                 }
@@ -296,7 +296,7 @@ impl<R: CommandRunner> RpmTransaction<R> {
         }
 
         // Native tools can put the actual refusal on stdout and only warnings on stderr.
-        let detail = format!("{}{}", out.stdout, out.stderr);
+        let detail = self.redact_repo_diagnostic(&format!("{}{}", out.stdout, out.stderr));
         Err(PackageTransactionError::TransactionFailed {
             command: tool.program.to_string(),
             operation: verb.to_string(),
@@ -345,6 +345,12 @@ impl<R: CommandRunner> RpmTransaction<R> {
         }
         args.extend(packages.iter().map(|p| (*p).to_string()));
         args
+    }
+
+    fn redact_repo_diagnostic(&self, detail: &str) -> String {
+        self.repo
+            .as_ref()
+            .map_or_else(|| detail.to_string(), |repo| repo.redact_diagnostic(detail))
     }
 }
 
@@ -410,7 +416,7 @@ impl<R: CommandRunner> PackageTransaction for RpmTransaction<R> {
             command: tool.program.to_string(),
             operation: "install preflight".to_string(),
             code: out.code,
-            stderr: format!("{}{}", out.stdout, out.stderr),
+            stderr: self.redact_repo_diagnostic(&format!("{}{}", out.stdout, out.stderr)),
         })
     }
 

@@ -37,6 +37,11 @@ impl RpmRepoSource {
         self.gpgcheck
     }
 
+    /// Reduces URLs in native-tool diagnostics to non-secret origins.
+    pub(crate) fn redact_diagnostic(&self, text: &str) -> String {
+        redact_url_runs(text, &self.base_url)
+    }
+
     /// DNF options for **write transactions** (`install`/`update`/`remove`).
     ///
     /// This does **not**
@@ -56,5 +61,101 @@ impl RpmRepoSource {
                 if gpgcheck { "1" } else { "0" }
             ));
         }
+    }
+}
+
+fn redact_url_runs(text: &str, known_url: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = next_url_start(rest) {
+        out.push_str(&rest[..at]);
+        let matched = &rest[at..];
+        // DNF echoes the configured value verbatim, including embedded whitespace.
+        let known_len = if matched.starts_with(known_url) {
+            known_url.len()
+        } else {
+            0
+        };
+        let end = matched[known_len..]
+            .find(char::is_whitespace)
+            .map_or(matched.len(), |offset| known_len + offset);
+        let url = &matched[..end];
+        out.push_str(&diagnostic_origin(url));
+        rest = &matched[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn next_url_start(text: &str) -> Option<usize> {
+    let lowercase = text.to_ascii_lowercase();
+    ["http://", "https://", "file://"]
+        .into_iter()
+        .filter_map(|scheme| lowercase.find(scheme))
+        .min()
+}
+
+fn diagnostic_origin(value: &str) -> String {
+    match url::Url::parse(value) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url.origin().ascii_serialization(),
+        Ok(url) if url.scheme() == "file" => "file://<local>".to_string(),
+        _ => "<repository>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpmRepoSource;
+
+    #[test]
+    fn diagnostic_redaction_consumes_whitespace_in_configured_urls() {
+        for (base_url, origin) in [
+            (
+                "http://testuser:secret tail@repo.example.internal/private",
+                "http://repo.example.internal",
+            ),
+            (
+                "http://repo.example.internal/private secret-token",
+                "http://repo.example.internal",
+            ),
+            (
+                "https://testuser:secret\ttail@repo.example.internal/private\nsecret-token",
+                "https://repo.example.internal",
+            ),
+            ("file:///private repo/secret-token", "file://<local>"),
+        ] {
+            let repo = RpmRepoSource::new("private", base_url, None);
+            let text = format!(
+                "Added repo from {base_url}\nFailed to fetch {base_url}/repodata/repomd.xml: unavailable; mirror https://user:secret@mirror.example/private"
+            );
+
+            assert_eq!(
+                repo.redact_diagnostic(&text),
+                format!(
+                    "Added repo from {origin}\nFailed to fetch {origin} unavailable; mirror https://mirror.example"
+                ),
+                "configured URL: {base_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_redaction_reduces_all_urls_to_origins() {
+        let repo = RpmRepoSource::new(
+            "private",
+            "https://user:encoded%2Fsecret@repo.example/private/path?token=known",
+            None,
+        );
+        let text = "Configured HTTPS://user:decoded-secret@repo.example/private/path and redirected to https://mirror-user:mirror-secret@mirror.example/cache/item";
+
+        let redacted = repo.redact_diagnostic(text);
+
+        assert_eq!(
+            redacted,
+            "Configured https://repo.example and redirected to https://mirror.example"
+        );
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("/private/"));
+        assert!(!redacted.contains("/cache/"));
     }
 }
