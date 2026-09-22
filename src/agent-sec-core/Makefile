@@ -217,6 +217,14 @@ BUILD_DIR ?= target
 CLI_WHEEL_BUILD_DIR ?= agent-sec-cli/target/wheels
 CLI_WHEEL_PATTERN := agent_sec_cli-*.whl
 
+# The normal targets retain their network-enabled developer workflow. RPM builds
+# select OFFLINE_BUILD through build-all-v2-offline after Source1 supplies every
+# Cargo crate and npm package cache entry.
+OFFLINE_BUILD ?= 0
+CARGO_OFFLINE_FLAGS = $(if $(filter 1,$(OFFLINE_BUILD)),--offline,)
+CARGO_BUILD_ENV = $(if $(filter 1,$(OFFLINE_BUILD)),CARGO_HOME="$(abspath $(BUILD_DIR)/cargo-home)",)
+NPM_INSTALL = $(if $(filter 1,$(OFFLINE_BUILD)),npm ci --offline --include=dev --cache .npm-cache --no-audit --no-fund,npm install --include=dev)
+
 # Component targets shared by the V1 and V2 aggregates. Only the CLI/daemon
 # build differs between them, so one list prevents the two aggregates from
 # drifting apart as components are added. $(1) is the CLI slot; its position is
@@ -245,7 +253,7 @@ endef
 
 .PHONY: build-sandbox
 build-sandbox: ## Build linux-sandbox binary
-	cd linux-sandbox && cargo build --release
+	cd linux-sandbox && $(CARGO_BUILD_ENV) cargo build --release --locked $(CARGO_OFFLINE_FLAGS)
 	install -d -m 0755 $(BUILD_DIR)
 	cp -p linux-sandbox/target/release/linux-sandbox $(BUILD_DIR)/
 
@@ -261,7 +269,7 @@ build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
 
 .PHONY: build-cli-v2
 build-cli-v2: ## Build V2 Rust CLI and daemon binaries
-	cd v2 && cargo build --release --locked --workspace
+	cd v2 && $(CARGO_BUILD_ENV) cargo build --release --locked $(CARGO_OFFLINE_FLAGS) --workspace
 	install -d -m 0755 $(V2_BIN_BUILD_DIR)
 	cp -p v2/target/release/agent-sec-cli v2/target/release/agent-sec-daemon \
 		$(V2_BIN_BUILD_DIR)/
@@ -272,7 +280,7 @@ setup: ## Install all dependencies (including dev), create .venv
 
 .PHONY: build-openclaw-plugin
 build-openclaw-plugin: ## Build openclaw-plugin TypeScript sources
-	cd openclaw-plugin && NODE_ENV=development npm install --include=dev && npm run build
+	cd openclaw-plugin && NODE_ENV=development $(NPM_INSTALL) && npm run build
 	install -d -m 0755 $(BUILD_DIR)/openclaw-plugin/dist
 	install -d -m 0755 $(BUILD_DIR)/openclaw-plugin/scripts
 	cp openclaw-plugin/openclaw.plugin.json $(BUILD_DIR)/openclaw-plugin/
@@ -332,6 +340,11 @@ build-all: $(call component_build_targets,build-cli) ## Build all components
 .PHONY: build-all-v2
 build-all-v2: $(call component_build_targets,build-cli-v2) ## Build all components with the V2 Rust CLI/daemon
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
+
+.PHONY: build-all-v2-offline
+build-all-v2-offline: OFFLINE_BUILD := 1
+build-all-v2-offline: $(call component_build_targets,build-cli-v2) ## Build V2 components from vendored dependencies only
+	@echo "📦 Offline V2 artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
 export-requirements: ## Re-export agent-sec-cli/requirements.txt from uv.lock
