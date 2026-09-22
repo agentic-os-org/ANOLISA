@@ -145,6 +145,11 @@ struct FixturePackageFiles {
     root: PathBuf,
 }
 
+struct SplitRpmPackageFiles {
+    adapter_package: String,
+    adapter_root: PathBuf,
+}
+
 impl PackageFileQuery for FixturePackageFiles {
     fn query_file_inventory(
         &self,
@@ -153,6 +158,29 @@ impl PackageFileQuery for FixturePackageFiles {
         Ok(PackageFileInventory {
             digest_algorithm: PackageFileDigestAlgorithm::Sha256,
             files: fixture_package_files(&self.root),
+        })
+    }
+}
+
+impl PackageFileQuery for SplitRpmPackageFiles {
+    fn query_file_inventory(
+        &self,
+        package: &str,
+    ) -> Result<PackageFileInventory, PackageQueryError> {
+        let files = if package == COMPONENT {
+            Vec::new()
+        } else if package == self.adapter_package {
+            fixture_package_files(&self.adapter_root)
+        } else {
+            return Err(PackageQueryError::QueryFailed {
+                command: "rpm".into(),
+                code: Some(1),
+                stderr: format!("unexpected package {package}"),
+            });
+        };
+        Ok(PackageFileInventory {
+            digest_algorithm: PackageFileDigestAlgorithm::Sha256,
+            files,
         })
     }
 }
@@ -442,6 +470,36 @@ resource_root = "{rpm_root}/"
     }
 }
 
+fn declare_rpm_managed_packages(world: &World, packages: &[&str]) {
+    let rendered = packages
+        .iter()
+        .map(|package| format!("\"{package}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        let contract = std::fs::read_to_string(&path).expect("read contract");
+        let contract = contract.replacen(
+            "[adapters.backends.rpm]\n",
+            &format!("[adapters.backends.rpm]\nmanaged_packages = [{rendered}]\n"),
+            1,
+        );
+        std::fs::write(path, contract).expect("write contract");
+    }
+}
+
 fn write_exec(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write script");
     let mut perms = std::fs::metadata(path).expect("meta").permissions();
@@ -457,6 +515,41 @@ fn stage_cosh_bundle(root: &Path) {
     std::fs::create_dir_all(root.join("hooks")).expect("hooks");
     std::fs::write(root.join("cosh-extension.json"), br#"{"name":"tokenless"}"#).expect("manifest");
     std::fs::write(root.join("hooks/run-hook.sh"), b"#!/bin/sh\n").expect("hook");
+}
+
+#[test]
+fn cosh_rpm_enable_uses_declared_subpackage_inventory() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "cosh",
+        "extension",
+        "{datadir}/adapters/{component}/cosh/",
+        stage_cosh_bundle,
+    );
+    declare_rpm_managed_packages(&world, &["tokenless-cosh-hook"]);
+    let cosh_home = world.prefix.join("cosh-home");
+    std::fs::create_dir_all(&cosh_home).expect("cosh home");
+    guard.set("COSH_HOME", &cosh_home);
+
+    let mut manager = AdapterManager::new(
+        world.layout.clone(),
+        Some(world.user_home.clone()),
+        "tester".to_string(),
+    );
+    manager.set_package_file_query(Box::new(SplitRpmPackageFiles {
+        adapter_package: "tokenless-cosh-hook".to_string(),
+        adapter_root: world.resource_root.clone(),
+    }));
+
+    manager
+        .enable(COMPONENT, Some("cosh"), false)
+        .expect("subpackage-owned RPM adapter enables");
+
+    assert!(
+        cosh_home
+            .join("extensions/tokenless/cosh-extension.json")
+            .is_file()
+    );
 }
 
 #[test]

@@ -357,7 +357,7 @@ fi
 grep -Fq 'ExecStart="{bindir}/agent-sec-daemon" serve' "$TMP/service"
 grep -Fq 'ReadWritePaths="{datadir}"' "$TMP/service"
 grep -Fq 'render = "anolisa-paths-v1"' "$TMP/contract.toml"
-grep -Fq 'min_anolisa_version = "0.2.17"' "$TMP/contract.toml"
+grep -Fq 'min_anolisa_version = "0.3.15"' "$TMP/contract.toml"
 grep -Fq 'framework_version = ">=2026.4.14"' "$TMP/contract.toml"
 grep -Fq 'framework_version = ">=2026.4.24"' "$TMP/contract.toml"
 grep -Fq 'name = "systemd"' "$TMP/contract.toml"

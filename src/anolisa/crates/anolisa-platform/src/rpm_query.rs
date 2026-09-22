@@ -148,7 +148,7 @@ impl<R: CommandRunner + Send + Sync> PackageFileQuery for RpmPackageQuery<R> {
     ) -> Result<PackageFileInventory, PackageQueryError> {
         let out = self
             .runner
-            .run(RPM, &["-q", "--qf", FILE_INVENTORY_QF, package])
+            .run(RPM, &["-q", "--qf", FILE_INVENTORY_QF, "--", package])
             .map_err(|e| map_spawn_error(e, RPM))?;
         if out.code != Some(0) {
             let detail = if out.stderr.trim().is_empty() {
@@ -947,7 +947,7 @@ mod tests {
 
             expected_package: "adapter-pkg".to_string(),
             expected_args: Some(
-                ["-q", "--qf", FILE_INVENTORY_QF, "adapter-pkg"]
+                ["-q", "--qf", FILE_INVENTORY_QF, "--", "adapter-pkg"]
                     .iter()
                     .map(|value| (*value).to_string())
                     .collect(),
@@ -978,6 +978,26 @@ mod tests {
             inventory.files[1].link_target.as_deref(),
             Some("../adapter/a'b")
         );
+    }
+
+    #[test]
+    fn file_inventory_terminates_options_before_package_name() {
+        let package = "--pipe=id";
+        let query = RpmPackageQuery::with_runner(FakeCommandRunner {
+            rpm: Some(ok_out(Some(0), "8\n", "")),
+            expected_package: package.to_string(),
+            expected_args: Some(
+                ["-q", "--qf", FILE_INVENTORY_QF, "--", package]
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+            ),
+        });
+
+        let inventory = query
+            .query_file_inventory(package)
+            .expect("leading-dash package remains an operand");
+        assert!(inventory.files.is_empty());
     }
 
     #[test]

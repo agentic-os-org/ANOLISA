@@ -1,6 +1,6 @@
 //! Package-owned adapter input revisions and materialized-file verification.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use anolisa_platform::pkg_files::{PackageFileDigestAlgorithm, PackageFileKind, PackageFileQuery};
@@ -69,9 +69,14 @@ pub enum ManagedMatch {
 }
 
 /// Load the package manager's authoritative file inventory for an installation.
+///
+/// RPM-backed adapters may declare extra packages whose files belong to the
+/// same logical component. Their inventories are merged with the installed
+/// component package before adapter roots are scoped and verified.
 pub fn inventory_for_installation(
     installation: &Installation,
     rpm_query: &dyn PackageFileQuery,
+    managed_packages: &[String],
 ) -> Result<ManagedInventory, String> {
     let mut files = match &installation.binding {
         ProviderBinding::Owned { artifact } => artifact
@@ -97,19 +102,23 @@ pub fn inventory_for_installation(
             let PackageIdentity::Resolved { name } = package else {
                 return Err("native package identity is unresolved; re-enable the adapter".into());
             };
-            let inventory = rpm_query.query_file_inventory(name).map_err(|err| {
-                format!("native package file query failed: {err}; re-enable the adapter")
-            })?;
-            if inventory.digest_algorithm != PackageFileDigestAlgorithm::Sha256 {
-                return Err(format!(
-                    "native package uses unsupported file digest algorithm {:?}; re-enable the adapter",
-                    inventory.digest_algorithm
-                ));
-            }
-            inventory
-                .files
-                .into_iter()
-                .filter_map(|file| {
+            let packages = std::iter::once(name.as_str())
+                .chain(managed_packages.iter().map(String::as_str))
+                .collect::<BTreeSet<_>>();
+            let mut managed = Vec::new();
+            for package in packages {
+                let inventory = rpm_query.query_file_inventory(package).map_err(|err| {
+                    format!(
+                        "native package file query failed for '{package}': {err}; re-enable the adapter"
+                    )
+                })?;
+                if inventory.digest_algorithm != PackageFileDigestAlgorithm::Sha256 {
+                    return Err(format!(
+                        "native package '{package}' uses unsupported file digest algorithm {:?}; re-enable the adapter",
+                        inventory.digest_algorithm
+                    ));
+                }
+                managed.extend(inventory.files.into_iter().filter_map(|file| {
                     let (kind, sha256, symlink_target) = match file.kind {
                         PackageFileKind::Regular => (ManagedInventoryKind::File, file.digest, None),
                         PackageFileKind::Symlink => (
@@ -126,8 +135,9 @@ pub fn inventory_for_installation(
                         sha256,
                         symlink_target,
                     })
-                })
-                .collect()
+                }));
+            }
+            managed
         }
     };
 
@@ -885,6 +895,24 @@ mod tests {
 
     struct FileQuery(Result<PackageFileInventory, &'static str>);
 
+    struct PackageQueries(BTreeMap<String, PackageFileInventory>);
+
+    impl PackageFileQuery for PackageQueries {
+        fn query_file_inventory(
+            &self,
+            package: &str,
+        ) -> Result<PackageFileInventory, PackageQueryError> {
+            self.0
+                .get(package)
+                .cloned()
+                .ok_or_else(|| PackageQueryError::QueryFailed {
+                    command: "rpm".into(),
+                    code: Some(1),
+                    stderr: format!("unknown package {package}"),
+                })
+        }
+    }
+
     impl PackageFileQuery for FileQuery {
         fn query_file_inventory(
             &self,
@@ -1056,9 +1084,12 @@ mod tests {
             external_record,
         ]);
 
-        let inventory =
-            inventory_for_installation(&installation, &FileQuery(Err("raw must not query rpm")))
-                .expect("raw inventory");
+        let inventory = inventory_for_installation(
+            &installation,
+            &FileQuery(Err("raw must not query rpm")),
+            &[],
+        )
+        .expect("raw inventory");
         let revision = source_revision(&inventory, &root, &[]).expect("source revision");
         assert_eq!(revision.files.len(), 1);
         assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
@@ -1328,6 +1359,70 @@ mod tests {
     }
 
     #[test]
+    fn rpm_inventory_aggregates_declared_managed_packages() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let adapter = tmp.path().join("adapter/plugin.json");
+        let skill = tmp.path().join("skills/audit/SKILL.md");
+        std::fs::create_dir_all(adapter.parent().expect("adapter parent")).expect("adapter dir");
+        std::fs::create_dir_all(skill.parent().expect("skill parent")).expect("skill dir");
+        std::fs::write(&adapter, b"plugin").expect("adapter file");
+        std::fs::write(&skill, b"skill").expect("skill file");
+
+        let query = PackageQueries(BTreeMap::from([
+            (
+                "tokenless".to_string(),
+                PackageFileInventory {
+                    digest_algorithm: PackageFileDigestAlgorithm::Sha256,
+                    files: Vec::new(),
+                },
+            ),
+            (
+                "tokenless-adapter".to_string(),
+                PackageFileInventory {
+                    digest_algorithm: PackageFileDigestAlgorithm::Sha256,
+                    files: vec![PackageFile {
+                        path: adapter.display().to_string(),
+                        kind: PackageFileKind::Regular,
+                        digest: Some(sha256(b"plugin")),
+                        link_target: None,
+                    }],
+                },
+            ),
+            (
+                "tokenless-skills".to_string(),
+                PackageFileInventory {
+                    digest_algorithm: PackageFileDigestAlgorithm::Sha256,
+                    files: vec![PackageFile {
+                        path: skill.display().to_string(),
+                        kind: PackageFileKind::Regular,
+                        digest: Some(sha256(b"skill")),
+                        link_target: None,
+                    }],
+                },
+            ),
+        ]));
+
+        let inventory = inventory_for_installation(
+            &rpm_installation(),
+            &query,
+            &[
+                "tokenless-adapter".to_string(),
+                "tokenless-skills".to_string(),
+            ],
+        )
+        .expect("aggregate package inventory");
+
+        assert_eq!(
+            inventory
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            vec![adapter, skill]
+        );
+    }
+
+    #[test]
     fn rpm_inventory_is_authoritative_and_rejects_unverifiable_metadata() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = tmp.path().join("adapter.py");
@@ -1342,8 +1437,9 @@ mod tests {
                 link_target: None,
             }],
         };
-        let managed = inventory_for_installation(&rpm_installation(), &FileQuery(Ok(inventory)))
-            .expect("rpm inventory");
+        let managed =
+            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(inventory)), &[])
+                .expect("rpm inventory");
         assert_eq!(managed.files.len(), 1);
         let revision = source_revision(&managed, tmp.path(), &[]).expect("rpm revision");
         assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
@@ -1363,8 +1459,9 @@ mod tests {
                 link_target: None,
             }],
         };
-        let managed = inventory_for_installation(&rpm_installation(), &FileQuery(Ok(empty_digest)))
-            .expect("the package inventory remains queryable");
+        let managed =
+            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(empty_digest)), &[])
+                .expect("the package inventory remains queryable");
         assert!(
             source_revision(&managed, tmp.path(), &[])
                 .expect_err("an adapter file without a digest is unverifiable")
@@ -1376,14 +1473,18 @@ mod tests {
             files: Vec::new(),
         };
         assert!(
-            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(unsupported)),)
+            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(unsupported)), &[])
                 .expect_err("unsupported digest must remain unknown")
                 .contains("unsupported")
         );
         assert!(
-            inventory_for_installation(&rpm_installation(), &FileQuery(Err("rpmdb unavailable")),)
-                .expect_err("query failure must remain unknown")
-                .contains("query failed")
+            inventory_for_installation(
+                &rpm_installation(),
+                &FileQuery(Err("rpmdb unavailable")),
+                &[],
+            )
+            .expect_err("query failure must remain unknown")
+            .contains("query failed")
         );
     }
 
@@ -1418,7 +1519,7 @@ mod tests {
             ],
         };
         let mut managed =
-            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(inventory)))
+            inventory_for_installation(&rpm_installation(), &FileQuery(Ok(inventory)), &[])
                 .expect("rpm inventory");
 
         assert!(
