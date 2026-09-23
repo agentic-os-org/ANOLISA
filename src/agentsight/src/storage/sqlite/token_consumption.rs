@@ -6,10 +6,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, ConnectionOptions, checkpoint_truncate, open_connection,
+};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::connection::{create_connection, default_base_path, wal_checkpoint};
 use crate::analyzer::TokenConsumptionBreakdown;
 
 /// A row stored in the token_consumption table (excludes per_message and output_per_block)
@@ -113,7 +115,7 @@ impl TokenConsumptionStore {
     /// Create store with custom table name
     pub fn with_table(path: impl Into<PathBuf>, table_name: &str) -> anyhow::Result<Self> {
         let path = path.into();
-        let conn = create_connection(&path)?;
+        let conn = open_connection(&path, ConnectionOptions::default())?;
         let table_name = table_name.to_string();
 
         conn.execute_batch(&format!(
@@ -141,7 +143,7 @@ impl TokenConsumptionStore {
 
     /// Default storage path
     pub fn default_path() -> PathBuf {
-        default_base_path().join("agentsight.db")
+        crate::config::default_base_path().join("agentsight.db")
     }
 
     /// Insert a `TokenConsumptionBreakdown` record.
@@ -368,9 +370,12 @@ impl TokenConsumptionStore {
         Ok(deleted)
     }
 
-    /// Execute WAL checkpoint to flush WAL data back to the main database file
+    /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn)
+        match checkpoint_truncate(&self.conn)? {
+            CheckpointOutcome::Completed => Ok(()),
+            CheckpointOutcome::Busy => anyhow::bail!("WAL checkpoint remained busy"),
+        }
     }
 
     /// Number of stored records

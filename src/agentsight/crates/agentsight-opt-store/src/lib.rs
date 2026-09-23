@@ -3,18 +3,28 @@
 //! One row per analyzed session; each analysis dimension is stored as a JSON
 //! string column so the schema stays stable while dimension payloads evolve.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agentsight_sqlite_lifecycle::{
+    checkpoint_truncate, enforce_size_policy, measure_database, open_connection,
+    retention_cutoff_ns, CheckpointOutcome, ConnectionMode, ConnectionOptions, MaintenanceReport,
+    MaintenanceStatus, SizeBasis, SizePolicy,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Errors produced by [`OptimizationStore`].
 #[derive(Debug, thiserror::Error)]
 pub enum OptStoreError {
+    /// Shared lifecycle operation failed.
+    #[error(transparent)]
+    Lifecycle(#[from] agentsight_sqlite_lifecycle::LifecycleError),
+    /// SQLite schema or query failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Another thread poisoned the database connection lock.
     #[error("store mutex poisoned")]
     Poisoned,
 }
@@ -59,9 +69,28 @@ pub struct OptimizationRecord {
     pub updated_at_ns: i64,
 }
 
+/// Retention and capacity limits for optimization results.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptimizationMaintenancePolicy {
+    /// Maximum result age in days; zero disables age retention.
+    pub retention_days: u64,
+    /// Maximum logical database size in MiB; zero disables size maintenance.
+    pub max_db_size_mb: u64,
+}
+
+/// Result of one optimization maintenance pass.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimizationMaintenanceReport {
+    /// Rows removed by age retention.
+    pub expired_results: usize,
+    /// Result of capacity enforcement.
+    pub size: MaintenanceReport,
+}
+
 /// Thread-safe store over a dedicated `optimization.db`.
 pub struct OptimizationStore {
     conn: Mutex<Connection>,
+    db_path: PathBuf,
 }
 
 impl OptimizationStore {
@@ -71,9 +100,7 @@ impl OptimizationStore {
     /// Returns [`OptStoreError::Sqlite`] if the database cannot be opened or
     /// the schema cannot be created.
     pub fn new_with_path(path: &Path) -> Result<Self, OptStoreError> {
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.busy_timeout(std::time::Duration::from_millis(500))?;
+        let conn = open_connection(path, ConnectionOptions::default())?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS optimization_results (
                 session_id TEXT PRIMARY KEY,
@@ -91,6 +118,26 @@ impl OptimizationStore {
         Self::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+        })
+    }
+
+    /// Opens an existing optimization database without creating or modifying it.
+    ///
+    /// # Errors
+    /// Returns an error when the database is absent or cannot be opened read-only.
+    pub fn open_read_only_existing(path: &Path) -> Result<Self, OptStoreError> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
         })
     }
 
@@ -201,6 +248,85 @@ impl OptimizationStore {
             params![cutoff_ns],
         )?;
         Ok(removed)
+    }
+
+    /// Applies age retention and trims oldest results to 90% of the size limit.
+    ///
+    /// # Errors
+    /// Returns an error on lifecycle, SQLite, or mutex failure.
+    pub fn maintain(
+        &self,
+        policy: OptimizationMaintenancePolicy,
+    ) -> Result<OptimizationMaintenanceReport, OptStoreError> {
+        let expired_results = if policy.retention_days == 0 {
+            0
+        } else {
+            let cutoff =
+                retention_cutoff_ns(u64::try_from(now_ns()).unwrap_or(0), policy.retention_days)?;
+            self.prune_before(i64::try_from(cutoff).unwrap_or(i64::MAX))?
+        };
+        if expired_results > 0 && self.checkpoint()? == CheckpointOutcome::Busy {
+            let snapshot = self.size_snapshot()?;
+            return Ok(OptimizationMaintenanceReport {
+                expired_results,
+                size: MaintenanceReport {
+                    status: MaintenanceStatus::CheckpointBusy,
+                    rounds: 0,
+                    deleted_rows: 0,
+                    before: snapshot,
+                    after: snapshot,
+                },
+            });
+        }
+
+        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        let size = enforce_size_policy::<OptStoreError>(
+            SizePolicy {
+                limit_bytes,
+                trigger_bytes: limit_bytes,
+                target_bytes: limit_bytes.saturating_mul(9) / 10,
+                trigger_basis: SizeBasis::Physical,
+                target_basis: SizeBasis::Logical,
+                max_rounds: 20,
+                max_stalled_rounds: 3,
+            },
+            || self.size_snapshot(),
+            |fraction| self.delete_oldest_fraction(fraction),
+            || self.checkpoint(),
+        )?;
+        Ok(OptimizationMaintenanceReport {
+            expired_results,
+            size,
+        })
+    }
+
+    fn delete_oldest_fraction(&self, fraction: f64) -> Result<usize, OptStoreError> {
+        let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM optimization_results", [], |row| {
+                row.get(0)
+            })?;
+        if count == 0 || fraction <= 0.0 {
+            return Ok(0);
+        }
+        let limit = ((count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1);
+        Ok(conn.execute(
+            "DELETE FROM optimization_results WHERE session_id IN (
+                SELECT session_id FROM optimization_results
+                ORDER BY updated_at_ns ASC, session_id ASC LIMIT ?1
+            )",
+            params![limit],
+        )?)
+    }
+
+    fn size_snapshot(&self) -> Result<agentsight_sqlite_lifecycle::SizeSnapshot, OptStoreError> {
+        let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
+        measure_database(&self.db_path, &conn).map_err(Into::into)
+    }
+
+    fn checkpoint(&self) -> Result<CheckpointOutcome, OptStoreError> {
+        let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
+        checkpoint_truncate(&conn).map_err(Into::into)
     }
 
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OptimizationRecord> {
@@ -386,5 +512,72 @@ mod tests {
         store.save_dimension("s1", Dimension::Perf, "{}").unwrap();
         assert_eq!(store.prune_before(i64::MAX).unwrap(), 1);
         assert!(store.get("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_only_open_requires_an_existing_database() {
+        let path = temp_path("read-only");
+        assert!(matches!(
+            OptimizationStore::open_read_only_existing(&path),
+            Err(OptStoreError::Lifecycle(
+                agentsight_sqlite_lifecycle::LifecycleError::DatabaseMissing(_)
+            ))
+        ));
+
+        let writable = OptimizationStore::new_with_path(&path).unwrap();
+        writable
+            .save_dimension("session", Dimension::Perf, "{}")
+            .unwrap();
+        drop(writable);
+
+        let read_only = OptimizationStore::open_read_only_existing(&path).unwrap();
+        assert!(read_only.get("session").unwrap().is_some());
+    }
+
+    #[test]
+    fn maintenance_applies_age_retention() {
+        let (store, _path) = temp_store();
+        store
+            .save_dimension("expired", Dimension::Perf, "{}")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE optimization_results SET updated_at_ns = 1 WHERE session_id = ?1",
+                params!["expired"],
+            )
+            .unwrap();
+        }
+
+        let report = store
+            .maintain(OptimizationMaintenancePolicy {
+                retention_days: 1,
+                max_db_size_mb: 0,
+            })
+            .unwrap();
+
+        assert_eq!(report.expired_results, 1);
+        assert!(store.get("expired").unwrap().is_none());
+    }
+
+    #[test]
+    fn maintenance_trims_oldest_results_to_size_target() {
+        let (store, _path) = temp_store();
+        let payload = "x".repeat(20_000);
+        for index in 0..100 {
+            store
+                .save_dimension(&format!("session-{index:03}"), Dimension::Perf, &payload)
+                .unwrap();
+        }
+
+        let report = store
+            .maintain(OptimizationMaintenancePolicy {
+                retention_days: 0,
+                max_db_size_mb: 1,
+            })
+            .unwrap();
+
+        assert!(report.size.deleted_rows > 0);
+        assert!(store.get("session-099").unwrap().is_some());
     }
 }

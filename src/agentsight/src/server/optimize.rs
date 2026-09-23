@@ -177,6 +177,24 @@ impl OptimizeState {
         })
     }
 
+    /// Applies the configured retention and capacity policy to optimization results.
+    pub(super) fn maintain_storage(
+        &self,
+        policy: crate::config::PeriodicStoragePolicy,
+    ) -> Result<Option<agentsight_opt_store::OptimizationMaintenanceReport>, String> {
+        self.store
+            .as_ref()
+            .map(|store| {
+                store
+                    .maintain(agentsight_opt_store::OptimizationMaintenancePolicy {
+                        retention_days: policy.retention_days,
+                        max_db_size_mb: policy.max_db_size_mb,
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+
     pub(crate) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
@@ -269,9 +287,12 @@ fn load_trajectory(
     trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
-    let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
-        HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-    })?;
+    let store =
+        GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default())
+            .map_err(|e| {
+                HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()}))
+            })?;
     let events = store.get_events_by_session(session_id).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;

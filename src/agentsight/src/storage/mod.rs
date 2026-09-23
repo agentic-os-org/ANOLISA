@@ -31,9 +31,6 @@ pub use sqlite::{
     // Token storage
     TokenStore,
     Trend,
-    // Connection utilities
-    create_connection,
-    default_base_path,
     format_tokens,
     format_tokens_with_commas,
 };

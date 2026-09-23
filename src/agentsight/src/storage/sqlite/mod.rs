@@ -5,10 +5,8 @@
 //! - `token`: Token usage persistence and querying
 //! - `token_consumption`: TokenConsumptionBreakdown persistence and querying
 //! - `http`: HTTP request/response persistence
-//! - `connection`: Shared connection management utilities
 
 pub mod audit;
-pub mod connection;
 pub mod genai;
 pub mod http;
 pub mod interruption;
@@ -45,9 +43,6 @@ pub use interruption::{
     InterruptionRecord, InterruptionStore, InterruptionTypeStat, UNASSIGNED_CONVERSATION_ID,
     UNASSIGNED_SESSION_ID,
 };
-
-// Re-export connection utilities
-pub use connection::{create_connection, default_base_path, sibling_db_path};
 
 // Re-export tokenless stats storage
 pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};

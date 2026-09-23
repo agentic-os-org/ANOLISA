@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
+agentsight-sqlite-lifecycle = { path = "../agentsight-sqlite-lifecycle" }
 log = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

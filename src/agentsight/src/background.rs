@@ -262,7 +262,13 @@ mod tests {
         // stop already false -> loop must exit promptly without running the body.
         let stop = Arc::new(AtomicBool::new(false));
         let dir = tmp_dir("stale1");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&dir.join("test.db")).unwrap());
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("test.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .unwrap(),
+        );
         let start = std::time::Instant::now();
         stale_scanner_loop(&store, &stop, 1);
         // First sleep_or_stop call sleeps ~1s then sees stop=false and returns.
@@ -274,7 +280,13 @@ mod tests {
         use crate::storage::sqlite::{PendingCallInfo, PendingOrigin};
 
         let dir = tmp_dir("stale2");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&dir.join("test.db")).unwrap());
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("test.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .unwrap(),
+        );
 
         // Seed a pending row with an old timestamp so it counts as stale.
         let old_ts_ns = 1_000_000_000u64; // ~1970, definitely older than 300s ago

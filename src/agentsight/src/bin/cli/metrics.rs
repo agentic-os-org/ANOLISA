@@ -16,7 +16,10 @@ impl MetricsCommand {
             std::process::exit(1);
         }
 
-        let store = match GenAISqliteStore::new_with_path(&db_path) {
+        let store = match GenAISqliteStore::new_with_path(
+            &db_path,
+            agentsight::config::InsertStoragePolicy::default(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("Error opening database {db_path:?}: {e}");

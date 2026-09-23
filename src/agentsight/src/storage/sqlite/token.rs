@@ -2,6 +2,9 @@
 //!
 //! Uses SQLite for persistent storage of token usage records.
 
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, ConnectionOptions, checkpoint_truncate, open_connection,
+};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
 use rusqlite::{Connection, params};
@@ -9,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::connection::{create_connection, default_base_path, wal_checkpoint};
 use crate::analyzer::TokenRecord;
 
 /// Time period for queries
@@ -226,19 +228,26 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
-    /// Create a new token store with default table name
+    /// Create a new token store with default table name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened or initialized.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         Self::with_table(path, "token_records")
     }
 
-    /// Create a new token store with custom table name
+    /// Create a new token store with custom table name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened or initialized.
     pub fn with_table(path: impl Into<PathBuf>, table_name: &str) -> Result<Self> {
         let path = path.into();
-        let conn =
-            create_connection(&path).context("Failed to open SQLite database for token store")?;
+        let conn = open_connection(&path, ConnectionOptions::default())
+            .context("Failed to open SQLite database for token store")?;
         let table_name = table_name.to_string();
 
-        // Create table if not exists
         let create_table_sql = format!(
             "CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,7 +268,6 @@ impl TokenStore {
         conn.execute(&create_table_sql, [])
             .context("Failed to create token table")?;
 
-        // Create index on timestamp for efficient range queries
         conn.execute(
             &format!(
                 "CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp ON {table_name}(timestamp_ns)"
@@ -268,7 +276,6 @@ impl TokenStore {
         )
         .context("Failed to create timestamp index")?;
 
-        // Create index on agent for breakdown queries
         conn.execute(
             &format!("CREATE INDEX IF NOT EXISTS idx_{table_name}_agent ON {table_name}(agent)"),
             [],
@@ -280,7 +287,7 @@ impl TokenStore {
 
     /// Get default storage path
     pub fn default_path() -> PathBuf {
-        default_base_path().join("tokens.db")
+        crate::config::default_base_path().join("tokens.db")
     }
 
     /// Insert a token record (unified interface, matches AuditStore)
@@ -499,9 +506,12 @@ impl TokenStore {
         Ok(deleted)
     }
 
-    /// Execute WAL checkpoint to flush WAL data back to the main database file
+    /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn)
+        match checkpoint_truncate(&self.conn)? {
+            CheckpointOutcome::Completed => Ok(()),
+            CheckpointOutcome::Busy => anyhow::bail!("WAL checkpoint remained busy"),
+        }
     }
 }
 

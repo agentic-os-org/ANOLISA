@@ -17,6 +17,8 @@ read them.
 | `interruption_events.db` | Detected interruptions with their type, severity, and evidence |
 | `optimization.db` | Results of Dashboard optimization analyses |
 | `trajectories.db` | ATIF v1.7 trajectories, only when `features.trajectory_collection` is enabled |
+| `.agentsight-private/security.db` | Security events, cases, evidence, and containment state |
+| `.agentsight-private/enforcement.db` | Enforcement bindings, violations, and transitions |
 | `.agentsight-private/reuse.db` | Trajectory reuse labels, human decisions, LLM verdicts, and label audit events |
 | `.agentsight-private/causal.db` | Durable causal-attribution cases |
 | `.dashboard_token` | The Dashboard access token (64 hex characters, root-only) |
@@ -27,24 +29,30 @@ read them.
 how you browse a copy or an archive. The tracer itself always writes to the default directory.
 
 > `serve --db <path>` resolves every sibling store from the `--db` directory — GenAI events, the
-> interruption store, the trajectory store, and the health checker all follow it. The private reuse
-> and causal stores follow from its `.agentsight-private/` subdirectory. So an archived copy is shown
-> in isolation, without mixing in the live host's data. Put the sibling `.db` files and, when present,
-> `.agentsight-private/` directory beside the file you pass. A bare relative `--db name.db` uses the
-> current directory.
+> interruption store, the trajectory store, and the health checker all follow it. The private
+> security, enforcement, reuse, and causal stores follow from its `.agentsight-private/`
+> subdirectory. So an archived copy is shown in isolation, without mixing in the live host's data.
+> Put the sibling `.db` files and, when present, `.agentsight-private/` directory beside the file you
+> pass. A bare relative `--db name.db` uses the current directory.
 
 > These files contain full prompts and model responses. Treat them as sensitive: keep the directory
 > permissions as installed, and be careful when copying them off the host.
 
 ## Retention and size limits
 
-| Store | Limit | How to change it |
+| Store | Default policy | Configuration |
 |---|---|---|
-| `genai_events.db` | 200 MB by default; pruning starts at 90% of the cap and removes the oldest LLM calls and process-resource samples | `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` in the service environment |
-| `interruption_events.db` | 30 days and 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
+| `agentsight.db` | 30 days, 500 MiB, checked every 1,000 writes | `storage.primary` |
+| `genai_events.db` | 30 days, 200 MiB, checked on each write; includes evaluation results | `storage.genai` |
+| `interruption_events.db` | 30 days, 100 MiB, checked every 60 seconds | `storage.interruptions` |
+| `trajectories.db` | 30 days, 500 MiB, checked every 300 seconds | `storage.trajectories` |
+| `optimization.db` | 30 days, 200 MiB, checked every 300 seconds | `storage.optimization` |
+| `.agentsight-private/security.db` | 30 days, 200 MiB, checked every hour while preserving active case graphs | `storage.security_audit` |
+| `.agentsight-private/enforcement.db` | Latest 100,000 violation rows | Fixed row bound |
 
-The limit is a logical-data cap (physical file size minus free pages); pruning
-removes the oldest records first until the logical size fits. The physical file
+Set a retention, size, or check interval to `0` to disable that rule. The size limit is a
+logical-data cap (physical file size minus free pages); pruning removes the oldest eligible records
+first until the logical size fits. The physical file
 does not shrink after pruning: freed pages go to the freelist and are reused by
 future writes, so the file stabilizes at its historical peak. To return disk
 space to the filesystem, run `sudo sqlite3 /var/log/sysak/.agentsight/<db>
@@ -55,16 +63,19 @@ file, so stop the service first to avoid tripping the cgroup memory limit.
 > persistent. Without a volume mount, every container restart wipes all data —
 > see [Containers and sidecars](deployment.md#containers-and-sidecars).
 
-To raise the GenAI cap for the packaged service:
+To change the limits, edit the `storage` section in `/etc/agentsight/config.json` and reload the
+service. The Settings page shows the effective policy plus physical and logical usage for every
+store.
+
+Check current usage from the API:
 
 ```bash
-sudo systemctl edit agentsight.service
-# [Service]
-# Environment=AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500
-sudo systemctl restart agentsight.service
+TOKEN=$(sudo cat /var/log/sysak/.agentsight/.dashboard_token)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/status \
+  | python3 -m json.tool
 ```
 
-Check current usage:
+You can also inspect the directory directly:
 
 ```bash
 sudo du -sh /var/log/sysak/.agentsight
@@ -113,6 +124,7 @@ Endpoint groups in 0.11:
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
 | Reuse labels | `POST /api/reuse/triage`, `GET /api/reuse/sessions`, `POST /api/reuse/sessions/{session_id}/label`, `POST /api/reuse/sessions/labels:batch-confirm`, `GET /api/reuse/label-stats`, `POST /api/reuse/judge` | Rule triage and human label decisions. The judge requires `features.reuse_llm_judge=true` and configured LLM credentials; it makes billed model calls |
 | Preferences | `GET /api/preferences`, `/export`, `/turns` | User preference analysis, Markdown export, and source user turns for agent-side reasoning |
+| Storage | `GET /api/storage/status` | Effective SQLite policies and physical/logical usage; paths are not returned |
 | Skill metrics | `GET /api/skill-metrics`, `/downloads`, `/loads`, `/usage-ratio`, `/distribution`, `/hotness` | Skill adoption |
 | Optimization | `POST /api/optimize/sessions/{id}/{dimension}`, `GET /api/optimize/results`, `GET` and `POST /api/optimize/config` | LLM-assisted analysis |
 | Quality and attribution | `POST /api/grader/evaluate`, `GET /api/grader/latest`, `POST /api/causal-attribution` | Session quality scoring, root-cause attribution |

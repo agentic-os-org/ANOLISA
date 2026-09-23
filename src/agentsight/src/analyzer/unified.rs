@@ -1742,7 +1742,11 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .unwrap();
         if let Some(info) = pending.as_ref() {
             store.insert_pending(info).unwrap();
         }
@@ -1811,7 +1815,11 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("agentsight_native_sse_{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .unwrap();
         if let Some(info) = pending.as_ref() {
             store.insert_pending(info).unwrap();
         }

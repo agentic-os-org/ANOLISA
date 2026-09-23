@@ -14,7 +14,7 @@ use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use agentsight_trajectory_collector::TrajectoryStore;
 use include_dir::{Dir, include_dir};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 /// Shared state for the macOS local server.
@@ -53,7 +53,7 @@ impl LocalState {
             return None;
         }
 
-        match TrajectoryStore::new_with_path(&self.db_path) {
+        match TrajectoryStore::open_read_only_existing(&self.db_path) {
             Ok(store) => {
                 let mut guard = self
                     .trajectory_store
@@ -263,6 +263,16 @@ async fn export_atif_unavailable() -> impl Responder {
     }))
 }
 
+/// GET /api/storage/status — local trajectory and optimization databases.
+#[get("/api/storage/status")]
+async fn storage_status(state: web::Data<LocalState>) -> impl Responder {
+    let base = state.db_path.parent().unwrap_or_else(|| Path::new("."));
+    HttpResponse::Ok().json(crate::storage_status::collect_local_storage_status(
+        &state.db_path,
+        &base.join(crate::config::OPTIMIZATION_DB_NAME),
+    ))
+}
+
 /// Catch-all for any other unregistered /api/* path — returns empty array
 /// to avoid breaking frontend list iteration.
 #[get("/api/{tail:.*}")]
@@ -377,7 +387,7 @@ pub async fn run_server(
         .join("agentsight")
         .join("trajectories.db");
     let initial_store: Option<Arc<TrajectoryStore>> = if db_path.exists() {
-        match TrajectoryStore::new_with_path(&db_path) {
+        match TrajectoryStore::open_read_only_existing(&db_path) {
             Ok(store) => {
                 log::info!("Trajectory store initialized at {db_path:?}");
                 Some(Arc::new(store))
@@ -481,6 +491,7 @@ pub async fn run_server(
             .service(preferences::get_preferences)
             .service(preferences::get_preference_turns)
             .service(export_atif_unavailable)
+            .service(storage_status)
             // Catch-all for unregistered API endpoints (returns empty array)
             .service(api_fallback)
             // Frontend static files (catch-all, must be last)

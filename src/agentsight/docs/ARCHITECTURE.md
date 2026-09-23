@@ -85,7 +85,7 @@ graph TB
 | **L3: Aggregate** | `src/aggregator/` | 请求-响应关联、进程生命周期聚合 | → L2 |
 | **L4: Analyze** | `src/analyzer/`, `src/tokenizer/` | Token 提取、审计记录、消息解析 | → L3, L2 |
 | **L5: Semantic** | `src/genai/`, `src/atif/` | 语义事件构建、轨迹格式导出 | → L4, L3, L2, Cross |
-| **L6: Persist** | `src/storage/` | SQLite 持久化、SLS 远程导出 | → L4, L5 |
+| **L6: Persist** | `src/storage/`、`src/storage_status.rs`、`crates/agentsight-sqlite-lifecycle/` | 业务数据持久化与跨平台只读状态；独立 leaf crate 统一 SQLite 连接、容量计量、checkpoint 与清理策略驱动 | → L4, L5；lifecycle crate 不依赖业务层 |
 | **L7: Serve and Control** | `src/server/`, `src/health/`, `src/agent_sec/`, `src/grader/`, `src/security/`, `src/enforcement/` | HTTP API、前端、agent-sec daemon 代理、健康检查、会话质量评估、安全审计与特权执行协调 | → L6, L5, L7 control peers |
 | **L8: Entry** | `src/bin/`, `src/unified.rs`, `src/config.rs` | CLI 入口、编排器、配置 | → L1-L7 |
 | **Cross** | `src/discovery/` | Agent 进程发现与匹配 | 被 L1, L8 使用 |
@@ -103,6 +103,7 @@ graph LR
     tokenizer[tokenizer]
     genai[genai]
     storage[storage]
+    sqlite_lifecycle[agentsight-sqlite-lifecycle]
     discovery[discovery]
     health[health]
     atif[atif]
@@ -140,6 +141,8 @@ graph LR
     storage --> analyzer
     storage --> genai
     storage --> security
+    storage --> sqlite_lifecycle
+    grader --> sqlite_lifecycle
     grader --> storage
     server --> storage
     server --> health

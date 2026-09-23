@@ -44,19 +44,17 @@ impl TokenCommand {
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
-        // Validate custom data file exists
         if self.data_file.is_some()
-            && let Err(e) = agentsight::check_data_file(data_path)
+            && let Err(error) = agentsight::check_data_file(data_path)
         {
-            eprintln!("{e}");
+            eprintln!("{error}");
             std::process::exit(1);
         }
 
-        // Open token store
         let store = match TokenStore::new(data_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to open token database: {e}");
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("Failed to open token database: {error}");
                 std::process::exit(1);
             }
         };

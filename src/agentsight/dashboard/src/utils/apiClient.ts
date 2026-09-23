@@ -2043,6 +2043,56 @@ export async function login(token: string): Promise<boolean> {
   return res.ok;
 }
 
+// ─── Storage status API ─────────────────────────────────────────────────────
+
+export type StorageAvailability = 'present' | 'missing' | 'error' | 'external';
+export type StorageCoverage = 'full' | 'row_bounded' | 'unmanaged' | 'external';
+export type StorageSizeState =
+  | 'within_policy'
+  | 'cleanup_due'
+  | 'reusable_capacity'
+  | 'disabled'
+  | 'unknown';
+
+export interface StorageSizeStatus {
+  database_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  freelist_bytes: number;
+  physical_bytes: number;
+  logical_bytes: number;
+}
+
+export interface StoragePolicyStatus {
+  retention_days: number;
+  size_limit_bytes: number;
+  cleanup_trigger_bytes: number;
+  cleanup_target_bytes: number;
+  check_interval: number;
+  check_interval_unit: 'inserts' | 'seconds' | 'none' | 'external' | string;
+  enforced_by: string;
+}
+
+export interface StorageStoreStatus {
+  id: string;
+  availability: StorageAvailability;
+  size: StorageSizeStatus | null;
+  policy: StoragePolicyStatus;
+  coverage: StorageCoverage;
+  size_state: StorageSizeState;
+}
+
+export interface StorageStatusResponse {
+  schema_version: number;
+  observed_at_unix_ms: number;
+  stores: StorageStoreStatus[];
+}
+
+/** Read effective SQLite policies and current disk allocation. */
+export async function fetchStorageStatus(): Promise<StorageStatusResponse> {
+  return apiFetch<StorageStatusResponse>(`${API_BASE}/api/storage/status`);
+}
+
 // ─── Optimization analysis API ───────────────────────────────────────────────
 
 export type OptimizeDimension =

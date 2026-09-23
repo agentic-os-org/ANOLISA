@@ -42,7 +42,9 @@ mod latency_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         {
             let conn = store.conn.lock().unwrap();
             for (call_id, agent, start) in [
@@ -128,7 +130,9 @@ mod latency_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         {
             let conn = store.conn.lock().unwrap();
             for (call_id, agent, start, first, is_sse) in [
@@ -169,7 +173,9 @@ mod latency_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         {
             let conn = store.conn.lock().unwrap();
             conn.execute(
