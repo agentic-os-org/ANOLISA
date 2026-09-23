@@ -263,5 +263,6 @@ export interface OptimizeLlmConfig {
   api_key: string | null;
   base_url: string;
   model: string;
+  semantic_search_timeout_secs: number;
   configured: boolean;
 }

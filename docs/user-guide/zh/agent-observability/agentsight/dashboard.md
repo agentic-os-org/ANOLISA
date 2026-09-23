@@ -158,8 +158,9 @@ SQLite 存储卡片会分别展示每个数据库当前生效的保留与容量�
 逻辑占用会扣除可复用的 freelist 页面，因此物理文件较大时仍可能符合策略；卡片不会据此声称后台清理任务
 一定健康。数据来自需要认证的 `GET /api/storage/status`，接口不会返回文件路径。
 
-本页也用于配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key）。Key 回读时会脱敏，
-保存在数据库旁边的 `optimization_config.json`。
+本页也用于配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key 以及语义搜索排序超时）。
+排序超时时会返回空结果，并在服务端记录警告日志。Key 回读时会脱敏，保存在数据库旁边的
+`optimization_config.json`。
 
 ## 语言
 

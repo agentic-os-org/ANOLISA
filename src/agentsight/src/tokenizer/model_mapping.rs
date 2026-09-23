@@ -95,6 +95,9 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qwen3.5-plus", "Qwen/Qwen3.5-397B-A17B");
     m.insert("qwen3.5-turbo", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("qwen3.5-max", "Qwen/Qwen2.5-72B-Instruct");
+    // DashScope's proprietary qwen3.8-max has no downloadable public
+    // tokenizer; use the stable Qwen2.5 tokenizer for fallback counting.
+    m.insert("qwen3.8-max", "Qwen/Qwen2.5-72B-Instruct");
 
     // ============== DeepSeek Models ==============
     m.insert("deepseek-chat", "deepseek-ai/DeepSeek-V3");
@@ -282,8 +285,9 @@ pub fn map_to_hf_model_id(model_name: &str) -> &str {
         return model_name;
     }
 
-    // Return original name - will fail at download time with clear error
-    "Qwen/Qwen3.5-397B-A17B"
+    // Unknown providers use the stable Qwen tokenizer as a conservative
+    // fallback so token accounting remains available when no exact mapping exists.
+    "Qwen/Qwen2.5-72B-Instruct"
 }
 
 /// Check if a model name has a known mapping to HuggingFace.
@@ -344,6 +348,11 @@ mod tests {
             map_to_hf_model_id("qwen2.5-7b-instruct"),
             "Qwen/Qwen2.5-7B-Instruct"
         );
+        assert_eq!(
+            map_to_hf_model_id("qwen3.8-max"),
+            "Qwen/Qwen2.5-72B-Instruct"
+        );
+        assert!(has_mapping("qwen3.8-max"));
     }
 
     #[test]
@@ -382,10 +391,10 @@ mod tests {
 
     #[test]
     fn test_unknown_model() {
-        // Unknown model - should return default fallback
+        // Unknown models use the stable fallback tokenizer.
         assert_eq!(
             map_to_hf_model_id("some-unknown-model"),
-            "Qwen/Qwen3.5-397B-A17B"
+            "Qwen/Qwen2.5-72B-Instruct"
         );
     }
 

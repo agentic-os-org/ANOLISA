@@ -141,6 +141,7 @@ export const LlmConfigForm: React.FC = () => {
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [customModel, setCustomModel] = useState('');
+  const [semanticSearchTimeoutSecs, setSemanticSearchTimeoutSecs] = useState('5');
   const [isKnownModel, setIsKnownModel] = useState(true);
   const [showKey, setShowKey] = useState(false);
 
@@ -154,6 +155,7 @@ export const LlmConfigForm: React.FC = () => {
         setConfig(data);
         setBaseUrl(data.base_url);
         setModel(data.model);
+        setSemanticSearchTimeoutSecs(String(data.semantic_search_timeout_secs));
 
         // Auto-detect provider
         const pid = detectProvider(data.base_url);
@@ -204,11 +206,23 @@ export const LlmConfigForm: React.FC = () => {
     setError(null);
 
     const effectiveModel = isKnownModel ? model : customModel;
+    const timeoutSecs = Number(semanticSearchTimeoutSecs);
+    if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
+      setError(t('opt.llm.semanticSearchTimeout.invalid'));
+      setSaving(false);
+      return;
+    }
 
     try {
-      const body: { api_key?: string; base_url?: string; model?: string } = {
+      const body: {
+        api_key?: string;
+        base_url?: string;
+        model?: string;
+        semantic_search_timeout_secs?: number;
+      } = {
         base_url: baseUrl,
         model: effectiveModel,
+        semantic_search_timeout_secs: timeoutSecs,
       };
       // Omit api_key when unchanged; keys containing masking dots are ignored by the backend.
       if (apiKey.trim()) {
@@ -307,6 +321,24 @@ export const LlmConfigForm: React.FC = () => {
             </div>
             <p className="text-xs text-gray-400 mt-1">
               {config?.api_key ? t('opt.llm.apiKey.keepUnchanged') : t('opt.llm.apiKey.hint')}
+            </p>
+          </div>
+
+          {/* Semantic search deadline */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('opt.llm.semanticSearchTimeout.label')}
+            </label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              className={inputCls}
+              value={semanticSearchTimeoutSecs}
+              onChange={(e) => setSemanticSearchTimeoutSecs(e.target.value)}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              {t('opt.llm.semanticSearchTimeout.hint')}
             </p>
           </div>
 

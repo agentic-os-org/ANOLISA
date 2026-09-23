@@ -2164,6 +2164,7 @@ export async function saveOptimizeConfig(body: {
   api_key?: string;
   base_url?: string;
   model?: string;
+  semantic_search_timeout_secs?: number;
 }): Promise<OptimizeLlmConfig> {
   return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`, {
     method: 'POST',

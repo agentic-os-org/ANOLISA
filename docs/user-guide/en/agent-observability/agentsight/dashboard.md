@@ -179,8 +179,9 @@ worker is healthy. The data comes from authenticated `GET /api/storage/status`, 
 filesystem paths.
 
 This page also configures the LLM used by optimization and semantic search (provider, base URL,
-model, API key). The key is masked when read back and stored in `optimization_config.json` next to
-the databases.
+model, API key, and the semantic-search ranking timeout). A timed-out ranking returns no results and
+is recorded as a server warning. The key is masked when read back and stored in
+`optimization_config.json` next to the databases.
 
 ## Language
 

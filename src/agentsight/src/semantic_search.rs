@@ -25,6 +25,8 @@ pub const MAX_QUERY_CHARS: usize = 500;
 const MAX_MESSAGE_CHARS: usize = 100;
 /// Number of candidates actually included in the LLM prompt.
 const RANKED_CANDIDATES: usize = 50;
+/// Default deadline for one semantic-search LLM ranking request.
+pub const DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS: u64 = 5;
 
 /// A candidate session summary sent by the dashboard for semantic ranking.
 #[derive(Debug, Deserialize)]
@@ -125,23 +127,45 @@ fn normalize_results(mut items: Vec<SemanticSearchResult>) -> Vec<SemanticSearch
 /// Ask the configured LLM to rank `candidates` by semantic relevance to `query`.
 ///
 /// Returns the normalized, relevance-ordered results, or an empty vector on
-/// timeout, LLM error, or unparseable output so callers degrade silently.
+/// timeout, LLM error, or unparseable output so callers preserve the existing
+/// HTTP response contract while the server records why it degraded.
 pub async fn rank_sessions(
     client: &LlmClient,
     query: &str,
     candidates: &[SemanticSearchCandidate],
+    timeout_secs: u64,
 ) -> Vec<SemanticSearchResult> {
     let messages = build_ranking_messages(query, candidates);
 
     let parsed = actix_web::rt::time::timeout(
-        std::time::Duration::from_secs(5),
-        client.chat_json_parsed::<Vec<SemanticSearchResult>>(messages),
+        std::time::Duration::from_secs(timeout_secs),
+        client.chat_json_parsed_labeled::<Vec<SemanticSearchResult>>(
+            messages,
+            Some("semantic-search"),
+        ),
     )
     .await;
 
     match parsed {
         Ok(Ok(items)) => normalize_results(items),
-        _ => vec![],
+        Err(_) => {
+            log::warn!(
+                "Semantic search ranking timed out after {timeout_secs}s; returning no results"
+            );
+            vec![]
+        }
+        Ok(Err(error)) => {
+            let failure = if error
+                .chain()
+                .any(|cause| cause.to_string().contains("JSON parse failed after"))
+            {
+                "response parse failure"
+            } else {
+                "LLM request failure"
+            };
+            log::warn!("Semantic search ranking {failure}; returning no results: {error:#}");
+            vec![]
+        }
     }
 }
 
@@ -178,6 +202,7 @@ pub fn filter_excluded(
 pub async fn handle_semantic_search(
     client: &LlmClient,
     request: &SemanticSearchRequest,
+    timeout_secs: u64,
 ) -> HttpResponse {
     if request.candidates.len() > MAX_CANDIDATES {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -190,7 +215,7 @@ pub async fn handle_semantic_search(
     if request.candidates.len() <= 5 {
         return HttpResponse::Ok().json(SemanticSearchResponse { results: vec![] });
     }
-    let results = rank_sessions(client, &request.query, &request.candidates).await;
+    let results = rank_sessions(client, &request.query, &request.candidates, timeout_secs).await;
     HttpResponse::Ok().json(SemanticSearchResponse { results })
 }
 
@@ -312,6 +337,84 @@ mod tests {
         LlmClient::with_config("http://127.0.0.1:1/v1", "test-key", "test-model")
     }
 
+    fn ranking_candidates() -> Vec<SemanticSearchCandidate> {
+        (0..6)
+            .map(|i| SemanticSearchCandidate {
+                session_id: format!("sess-{i}"),
+                first_message: None,
+                last_message: None,
+                project: None,
+            })
+            .collect()
+    }
+
+    fn spawn_mock_llm(
+        response_body: &'static str,
+        delay: std::time::Duration,
+        requests: usize,
+    ) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                std::thread::sleep(delay);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .unwrap();
+            }
+        });
+        format!("http://{address}/v1")
+    }
+
+    #[test]
+    fn handle_semantic_search_degrades_after_llm_request_failure() {
+        let request = SemanticSearchRequest {
+            query: "test".into(),
+            candidates: ranking_candidates(),
+        };
+        let response = actix_web::rt::System::new().block_on(handle_semantic_search(
+            &dummy_client(),
+            &request,
+            DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS,
+        ));
+        assert_eq!(response.status(), 200);
+    }
+
+    #[test]
+    fn rank_sessions_degrades_after_timeout() {
+        let base_url = spawn_mock_llm("[]", std::time::Duration::from_millis(50), 1);
+        let client = LlmClient::with_config(base_url, "test-key", "test-model");
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "test",
+            &ranking_candidates(),
+            0,
+        ));
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn rank_sessions_degrades_after_unparseable_response() {
+        let base_url = spawn_mock_llm("not-json", std::time::Duration::ZERO, 3);
+        let client = LlmClient::with_config(base_url, "test-key", "test-model");
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "test",
+            &ranking_candidates(),
+            DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS,
+        ));
+        assert!(results.is_empty());
+    }
+
     #[test]
     fn handle_semantic_search_rejects_too_many_candidates() {
         let client = dummy_client();
@@ -326,8 +429,11 @@ mod tests {
                 })
                 .collect(),
         };
-        let response =
-            actix_web::rt::System::new().block_on(handle_semantic_search(&client, &request));
+        let response = actix_web::rt::System::new().block_on(handle_semantic_search(
+            &client,
+            &request,
+            DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS,
+        ));
         assert_eq!(response.status(), 400);
     }
 
@@ -345,8 +451,11 @@ mod tests {
                 })
                 .collect(),
         };
-        let response =
-            actix_web::rt::System::new().block_on(handle_semantic_search(&client, &request));
+        let response = actix_web::rt::System::new().block_on(handle_semantic_search(
+            &client,
+            &request,
+            DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS,
+        ));
         assert_eq!(response.status(), 200);
     }
 }

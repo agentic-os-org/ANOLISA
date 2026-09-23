@@ -26,6 +26,9 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Deadline for semantic-search ranking requests in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -72,6 +75,12 @@ impl OptLlmConfig {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("OPENAI_MODEL").ok())
             .unwrap_or_else(|| "gpt-4o".to_string())
+    }
+
+    fn effective_semantic_search_timeout_secs(&self) -> u64 {
+        self.semantic_search_timeout_secs
+            .filter(|timeout_secs| *timeout_secs > 0)
+            .unwrap_or(semantic_search::DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS)
     }
 
     fn masked_api_key(&self) -> Option<String> {
@@ -134,6 +143,10 @@ impl OptimizeState {
         );
         client.set_temperature(0.0);
         Ok(client)
+    }
+
+    fn semantic_search_timeout_secs(&self) -> u64 {
+        self.snapshot().effective_semantic_search_timeout_secs()
     }
 }
 
@@ -394,6 +407,7 @@ pub async fn get_optimize_config(data: web::Data<OptimizeAppState>) -> impl Resp
         "api_key": config.masked_api_key(),
         "base_url": config.effective_base_url(),
         "model": config.effective_model(),
+        "semantic_search_timeout_secs": config.effective_semantic_search_timeout_secs(),
         "configured": config.effective_api_key().is_some(),
     }))
 }
@@ -403,6 +417,7 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub semantic_search_timeout_secs: Option<u64>,
 }
 
 /// POST /api/optimize/config
@@ -435,6 +450,11 @@ pub async fn update_optimize_config(
         {
             config.model = Some(model.clone());
         }
+        if let Some(timeout_secs) = body.semantic_search_timeout_secs
+            && timeout_secs > 0
+        {
+            config.semantic_search_timeout_secs = Some(timeout_secs);
+        }
         config.clone()
     };
 
@@ -448,6 +468,7 @@ pub async fn update_optimize_config(
         "api_key": updated.masked_api_key(),
         "base_url": updated.effective_base_url(),
         "model": updated.effective_model(),
+        "semantic_search_timeout_secs": updated.effective_semantic_search_timeout_secs(),
         "configured": updated.effective_api_key().is_some(),
     }))
 }
@@ -490,7 +511,12 @@ pub async fn semantic_search_sessions(
         },
         None => request,
     };
-    semantic_search::handle_semantic_search(&client, &request).await
+    semantic_search::handle_semantic_search(
+        &client,
+        &request,
+        data.optimize.semantic_search_timeout_secs(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -533,6 +559,19 @@ mod tests {
     fn test_opt_llm_config_effective_model_default() {
         let config = OptLlmConfig::default();
         assert_eq!(config.effective_model(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_opt_llm_config_semantic_search_timeout_defaults_and_overrides() {
+        assert_eq!(
+            OptLlmConfig::default().effective_semantic_search_timeout_secs(),
+            semantic_search::DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS
+        );
+        let config = OptLlmConfig {
+            semantic_search_timeout_secs: Some(12),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_semantic_search_timeout_secs(), 12);
     }
 
     #[test]
@@ -588,6 +627,7 @@ mod tests {
             api_key: Some("sk-testkey".to_string()),
             base_url: Some("https://test.api.com".to_string()),
             model: Some("test-model".to_string()),
+            semantic_search_timeout_secs: Some(12),
         };
         config.save(&tmp).unwrap();
 
@@ -595,6 +635,7 @@ mod tests {
         assert_eq!(loaded.api_key.as_deref(), Some("sk-testkey"));
         assert_eq!(loaded.base_url.as_deref(), Some("https://test.api.com"));
         assert_eq!(loaded.model.as_deref(), Some("test-model"));
+        assert_eq!(loaded.semantic_search_timeout_secs, Some(12));
         let _ = std::fs::remove_file(&tmp);
     }
 

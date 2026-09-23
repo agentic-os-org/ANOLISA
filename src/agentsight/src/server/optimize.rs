@@ -45,6 +45,9 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Deadline for semantic-search ranking requests in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -119,6 +122,12 @@ impl OptLlmConfig {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("OPENAI_MODEL").ok())
             .unwrap_or_else(|| "gpt-4o".into())
+    }
+
+    fn effective_semantic_search_timeout_secs(&self) -> u64 {
+        self.semantic_search_timeout_secs
+            .filter(|timeout_secs| *timeout_secs > 0)
+            .unwrap_or(semantic_search::DEFAULT_SEMANTIC_SEARCH_TIMEOUT_SECS)
     }
 
     /// Mask the API key for display: first 6 and last 4 chars.
@@ -215,6 +224,10 @@ impl OptimizeState {
         client.set_temperature(0.0);
         Ok(client)
     }
+
+    fn semantic_search_timeout_secs(&self) -> u64 {
+        self.snapshot().effective_semantic_search_timeout_secs()
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -272,7 +285,8 @@ pub async fn semantic_search_sessions(
         },
         None => request,
     };
-    semantic_search::handle_semantic_search(&client, &request).await
+    semantic_search::handle_semantic_search(&client, &request, state.semantic_search_timeout_secs())
+        .await
 }
 
 /// Load a session's captured events and build the ATIF trajectory that the
@@ -929,6 +943,7 @@ pub async fn get_optimize_config(data: web::Data<AppState>) -> impl Responder {
         "api_key": config.masked_api_key(),
         "base_url": config.effective_base_url(),
         "model": config.effective_model(),
+        "semantic_search_timeout_secs": config.effective_semantic_search_timeout_secs(),
         "configured": config.effective_api_key().is_some(),
     }))
 }
@@ -939,6 +954,7 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub semantic_search_timeout_secs: Option<u64>,
 }
 
 /// POST /api/optimize/config — update LLM config (persisted to disk).
@@ -975,6 +991,11 @@ pub async fn update_optimize_config(
                 config.model = Some(model.clone());
             }
         }
+        if let Some(timeout_secs) = body.semantic_search_timeout_secs {
+            if timeout_secs > 0 {
+                config.semantic_search_timeout_secs = Some(timeout_secs);
+            }
+        }
         config.clone()
     };
 
@@ -988,6 +1009,7 @@ pub async fn update_optimize_config(
         "api_key": updated.masked_api_key(),
         "base_url": updated.effective_base_url(),
         "model": updated.effective_model(),
+        "semantic_search_timeout_secs": updated.effective_semantic_search_timeout_secs(),
         "configured": updated.effective_api_key().is_some(),
     }))
 }
@@ -1030,6 +1052,7 @@ mod tests {
             api_key: Some("sk-1234567890abcd".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            semantic_search_timeout_secs: Some(12),
         };
 
         assert_eq!(
@@ -1039,6 +1062,7 @@ mod tests {
         assert_eq!(config.effective_base_url(), "http://localhost/v1");
         assert_eq!(config.effective_model(), "test-model");
         assert_eq!(config.masked_api_key().as_deref(), Some("sk-123••••abcd"));
+        assert_eq!(config.effective_semantic_search_timeout_secs(), 12);
     }
 
     #[test]
@@ -1047,6 +1071,7 @@ mod tests {
             api_key: Some("short".into()),
             base_url: Some(String::new()),
             model: Some(String::new()),
+            semantic_search_timeout_secs: None,
         };
 
         assert_eq!(config.effective_api_key().as_deref(), Some("short"));
@@ -1063,6 +1088,7 @@ mod tests {
             api_key: Some("sk-super-secret-key".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            semantic_search_timeout_secs: Some(12),
         };
         config.save(&path).unwrap();
 
@@ -1076,6 +1102,7 @@ mod tests {
         assert!(!needs_reseal);
         assert_eq!(loaded.api_key.as_deref(), Some("sk-super-secret-key"));
         assert_eq!(loaded.model.as_deref(), Some("test-model"));
+        assert_eq!(loaded.semantic_search_timeout_secs, Some(12));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
