@@ -99,6 +99,11 @@ Shell，同时仍可获得命令执行后的洞察。再次按下即可返回 As
 （或单次会话使用 `COSH_SHELL_STATUS_SYMBOLS=1`）后，每个提示符上方会显示
 `◇`（Assisted）或 `◌`（Shell-only）状态行。默认关闭。
 
+登录时，`cosh-shell` 会在后台检查托管安装的 `cosh-ng` 是否有可用更新，并在
+下一个空闲提示符处显示提示。该检查默认开启；设置 `COSH_SHELL_UPGRADE_CHECK=off`
+可在下一次会话禁用检查。完整的关闭取值与缓存路径见
+[登录升级提示](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#登录升级提示)。
+
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
 
 ```bash

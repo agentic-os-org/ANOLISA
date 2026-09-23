@@ -948,10 +948,9 @@ fn cancelled_and_reaped_probe_stays_idle_despite_overdue_checks() {
 }
 
 #[test]
-fn ecs_refresh_message_is_appended_and_bilingual() {
+fn ecs_refresh_message_is_bilingual() {
     use crate::config::Language;
-    let id = *MessageId::ALL.last().unwrap();
-    assert_eq!(format!("{id:?}"), "AuthEcsRefreshing");
+    let id = MessageId::AuthEcsRefreshing;
     assert_eq!(id as usize, MessageId::AuthEcsCancelHint as usize + 1);
     assert_eq!(
         I18n::new(Language::EnUs).t(id),

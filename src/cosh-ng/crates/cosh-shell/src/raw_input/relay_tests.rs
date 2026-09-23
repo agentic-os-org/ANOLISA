@@ -2190,6 +2190,7 @@ fn zsh_native_slash_tab_is_handed_to_shell_immediately() {
             RawInputEvent::PtyUserWrite {
                 generation,
                 line_submits,
+                ..
             } => Some((*generation, *line_submits)),
             _ => None,
         })

@@ -1,16 +1,80 @@
 //! Raw input event delivery into the OSC parser and terminal display.
 
+use std::fs::File;
 use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::raw_input::RawInputEvent;
+use crate::raw_input::{write_all_pty, RawInputEvent};
 
 use super::{
     clear_prompt_ghost_line, OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR,
     SAVE_CURSOR,
 };
+
+/// Private Readline binding installed by the Bash marker script. Writing it
+/// after a prompt boundary queues the resulting marker behind prior typeahead.
+const PROMPT_IDLE_PROBE: &[u8] = b"\x1b[102~";
+
+/// Publishes a prompt snapshot only after the current PTY batch is drained.
+pub(super) fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
+    if pty_drained {
+        parser.publish_quiescent_prompt_snapshot();
+    }
+}
+
+/// Applies prompt-boundary evidence before the runtime observes the cut.
+pub(super) fn apply_prompt_boundary_evidence(
+    parser: &mut OscParser,
+    prompt_replay: &mut PromptReplayTracker,
+    blocked_prompt_generation: &mut Option<u64>,
+) -> bool {
+    let hold_prompt_occupancy = prompt_replay.observe_prompt_boundary();
+    let has_unconsumed_submit = prompt_replay.has_unconsumed_submit();
+    *blocked_prompt_generation = (has_unconsumed_submit || hold_prompt_occupancy)
+        .then(|| prompt_replay.last_written_generation());
+
+    if hold_prompt_occupancy {
+        parser.push_shell_prompt_input_barrier();
+    }
+    hold_prompt_occupancy
+}
+
+/// Records a prompt boundary and queues an idle probe when unclassified input
+/// still owns the prompt.
+pub(super) fn apply_prompt_boundary_and_arm_idle_probe(
+    master: &mut File,
+    parser: &mut OscParser,
+    prompt_replay: &mut PromptReplayTracker,
+    blocked_prompt_generation: &mut Option<u64>,
+) -> io::Result<()> {
+    let hold_prompt_occupancy =
+        apply_prompt_boundary_evidence(parser, prompt_replay, blocked_prompt_generation);
+    if hold_prompt_occupancy
+        && parser.supports_prompt_idle_probe()
+        && prompt_replay.arm_idle_probe()
+    {
+        write_all_pty(master, PROMPT_IDLE_PROBE)?;
+    }
+    Ok(())
+}
+
+/// Applies the trusted marker emitted when Bash Readline consumes the private
+/// probe queued behind all user input known at the preceding prompt boundary.
+pub(super) fn apply_prompt_idle_evidence(
+    parser: &mut OscParser,
+    prompt_replay: &mut PromptReplayTracker,
+    blocked_prompt_generation: &mut Option<u64>,
+) {
+    if !parser.take_prompt_idle_probe() || !prompt_replay.observe_idle_probe() {
+        return;
+    }
+    let no_input_after_boundary = blocked_prompt_generation
+        .take()
+        .is_some_and(|generation| generation == prompt_replay.last_written_generation());
+    parser.push_reconciled_shell_prompt_state(no_input_after_boundary);
+}
 
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
@@ -124,11 +188,13 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 // Any user bytes reaching the PTY invalidate the
                 // prompt-cwd report: submit-detection is a documented
                 // heuristic (CR/LF/Ctrl-O only), so a custom
-                // `accept-line` binding must not slip past the
-                // barrier. The parser collapses consecutive writes
-                // into one event per prompt.
-                parser.push_shell_pty_input_event();
-                prompt_replay.observe_user_write(generation, line_submits)
+                // `accept-line` binding must not slip past either
+                // evidence barrier. Repeated writes may collapse, so prompt
+                // occupancy remains closed until the shell proves it is idle.
+                let probe_supported = parser.supports_prompt_idle_probe();
+                parser.push_shell_pty_input_events();
+                parser.push_shell_prompt_submits(line_submits);
+                prompt_replay.observe_user_write(generation, line_submits, probe_supported);
             }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),

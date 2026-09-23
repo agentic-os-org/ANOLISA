@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
+use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -56,6 +56,16 @@ impl TerminalSession {
         Self::spawn_with_startup_env(shell, integration, cols, &[], extra_envs)
     }
 
+    pub(crate) fn spawn_for_shell_with_startup_env(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        files: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_with_startup_env(shell, integration, cols, files, extra_envs)
+    }
+
     fn spawn_with_startup_env(
         shell: &str,
         integration: &str,
@@ -86,8 +96,25 @@ impl TerminalSession {
         )
         .unwrap();
         for (name, contents) in files {
-            fs::write(root.path().join(name), contents).expect("write startup fixture");
+            let path = root.path().join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create startup fixture directory");
+            }
+            fs::write(&path, contents).expect("write startup fixture");
+            if name.starts_with("bin/") {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                    .expect("make startup fixture executable");
+            }
         }
+        let expanded_envs: Vec<(&str, String)> = extra_envs
+            .iter()
+            .map(|(key, value)| {
+                (
+                    *key,
+                    value.replace("$HOME", &root.path().display().to_string()),
+                )
+            })
+            .collect();
         let size = libc::winsize {
             ws_row: ROWS,
             ws_col: cols,
@@ -124,7 +151,7 @@ impl TerminalSession {
             .env("COSH_SHELL_STARTUP_BANNER", "0")
             .env("COSH_SHELL_HEALTH_SCAN", "disabled")
             .env("COSH_RECOMMENDATIONS_ENABLED", "0")
-            .envs(extra_envs.iter().map(|(key, value)| (*key, *value)))
+            .envs(expanded_envs.iter().map(|(key, value)| (*key, value)))
             .current_dir(root.path())
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    update_input_mode, update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction,
-    UserPtyInputGeneration,
+    update_input_mode, update_locked_input_mode, write_all_pty, RawInputEvent, RawInputMode,
+    RawObserverAction, UserPtyInputGeneration,
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
@@ -36,7 +36,11 @@ use activity::{
 };
 pub(super) use activity::{DriverCompletion, RawActionWatchdog};
 use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
-use input_events::{candidate_display_columns, drain_raw_input_events, write_no_wrap_overlay};
+use input_events::{
+    apply_prompt_boundary_and_arm_idle_probe, apply_prompt_idle_evidence,
+    candidate_display_columns, drain_raw_input_events, publish_prompt_snapshot_if_drained,
+    write_no_wrap_overlay,
+};
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
     emit_interactive_hint_if_waiting, InputWaitStatus, InteractiveHintKind, SentinelThrottle,
@@ -52,12 +56,6 @@ use terminal_size::sync_outer_terminal_winsize;
 const SAVE_CURSOR: &str = "\x1b7";
 const RESTORE_CURSOR: &str = "\x1b8";
 const PTY_READ_BATCH_BYTES: usize = 256 * 1024;
-
-fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
-    if pty_drained {
-        parser.publish_quiescent_prompt_snapshot();
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
@@ -92,6 +90,7 @@ where
     let mut display_start = parser.display_position();
     let mut native_candidate_echoed_len = 0;
     let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
+    let mut blocked_prompt_generation = None;
     let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
@@ -205,6 +204,11 @@ where
                     )? {
                         request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
                     }
+                    apply_prompt_idle_evidence(
+                        parser,
+                        &mut prompt_replay,
+                        &mut blocked_prompt_generation,
+                    );
                     let display_cuts = parser.drain_intervention_display_cuts();
                     for (cut, cut_kind) in display_cuts {
                         let cut = cut.min(parser.display_position());
@@ -214,7 +218,12 @@ where
                         // just the prompt repaint replay dedup strips.
                         match cut_kind {
                             DisplayCutKind::PromptBoundary => {
-                                prompt_replay.observe_prompt_boundary();
+                                apply_prompt_boundary_and_arm_idle_probe(
+                                    master,
+                                    parser,
+                                    &mut prompt_replay,
+                                    &mut blocked_prompt_generation,
+                                )?;
                                 // #1932: the soft-newline upgrade submitted a
                                 // synthetic empty line for this boundary; its
                                 // accept echo is visually blank, so drop it
@@ -427,16 +436,19 @@ where
         }
         input_readiness.acknowledge_if_ready(output, input_mode)?;
         publish_prompt_snapshot_if_drained(parser, pty_drained);
-        // The PTY is drained (WouldBlock) at this point: write off
-        // submissions a foreground program consumed once the shell has
-        // painted a prompt after the last boundary and idles at it. A bare
-        // precmd is not enough — the user's PROMPT_COMMAND and PS1 paint run
-        // after the marker, so silence alone must never clear the ledger.
-        prompt_replay.reconcile_idle_at_prompt(
+        // A quiet painted prompt can settle counted submits consumed by a
+        // foreground program. Unclassified bindings use the in-band probe.
+        let reconciled_prompt_occupancy = prompt_replay.reconcile_idle_at_prompt(
             parser.has_active_foreground_command(),
             parser.has_prompt_painted_since_ready(),
             last_pty_output,
         );
+        if reconciled_prompt_occupancy {
+            let no_input_after_boundary = blocked_prompt_generation
+                .take()
+                .is_some_and(|generation| generation == prompt_replay.last_written_generation());
+            parser.push_reconciled_shell_prompt_state(no_input_after_boundary);
+        }
         let foreground_command_active = parser.has_active_foreground_command();
         let activity = wait_for_relay_activity(
             master.as_raw_fd(),

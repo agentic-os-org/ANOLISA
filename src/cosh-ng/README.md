@@ -108,6 +108,12 @@ Status symbols are optional: set `shell.status_symbols = true` in `config.toml`
 (or `COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇` (Assisted) or
 `◌` (Shell-only) status line above each prompt. They are off by default.
 
+At login, `cosh-shell` checks in the background whether a managed `cosh-ng`
+update is available and shows a notice at the next idle prompt. The check is
+on by default; set `COSH_SHELL_UPGRADE_CHECK=off` to disable it for the next
+session. See [Login upgrade notice](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#login-upgrade-notice)
+for all opt-out values and the cache path.
+
 Start Native explicitly when the session must have no Cosh hooks, observation,
 or insights:
 

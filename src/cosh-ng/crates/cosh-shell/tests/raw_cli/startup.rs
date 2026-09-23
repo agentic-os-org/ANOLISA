@@ -1,5 +1,9 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::support::terminal_screen::TerminalSession;
 use ratatui::text::Span;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 #[test]
 fn help_flag_writes_to_stdout_not_stderr() {
@@ -127,6 +131,477 @@ fn raw_cli_startup_banner_renders_when_enabled() {
     assert!(!output.contains("cosh-osc$ ╭ · cosh-shell"), "{output}");
     assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
     assert!(!output.contains("Thinking..."), "{output}");
+}
+
+#[test]
+fn raw_cli_startup_banner_renders_cached_upgrade_notice() {
+    let directory = temp_shell_home("startup-upgrade-cache");
+    let cache = directory.join("upgrade-check.json");
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell"))
+        .expect("canonical cosh-shell executable");
+    let fixture = serde_json::json!({
+        "version": 1,
+        "checked_at": 0,
+        "executable": executable,
+        "method": "anolisa",
+        "notice": {
+            "package": "cosh-ng",
+            "current": "0.1.0",
+            "latest": "99.0.0",
+            "command": "anolisa update cosh-ng"
+        }
+    });
+    fs::write(
+        &cache,
+        serde_json::to_vec(&fixture).expect("serialize upgrade cache"),
+    )
+    .expect("write upgrade cache");
+    let cache = cache.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK_CACHE", &cache),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+    );
+
+    assert!(output.contains("Update available: cosh-ng"), "{output}");
+    assert!(
+        output.contains(&format!("cosh-ng {} → 99.0.0", env!("CARGO_PKG_VERSION"))),
+        "{output}"
+    );
+    assert!(!output.contains("cosh-ng 0.1.0 → 99.0.0"), "{output}");
+    assert!(output.contains("anolisa update cosh-ng"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+const UPGRADE_PROBE_RELEASE_MARKER: &str = "upgrade-probe-release";
+#[cfg(target_os = "linux")]
+const UPGRADE_PROBE_PID_FILE: &str = "upgrade-probe.pid";
+
+/// Spawns bash with a fake system-scope anolisa whose status probe records its PID in
+/// `UPGRADE_PROBE_PID_FILE` and blocks until the test writes `UPGRADE_PROBE_RELEASE_MARKER`,
+/// so the first login has no cache and the probe result lands after the banner.
+#[cfg(target_os = "linux")]
+fn spawn_with_gated_upgrade_probe() -> TerminalSession {
+    spawn_with_gated_upgrade_probe_inputrc(None)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_with_gated_upgrade_probe_inputrc(inputrc: Option<&str>) -> TerminalSession {
+    spawn_with_gated_upgrade_probe_for_shell("bash", inputrc)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_with_gated_upgrade_probe_for_shell(shell: &str, inputrc: Option<&str>) -> TerminalSession {
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell"))
+        .expect("canonical cosh-shell executable");
+    let marker = UPGRADE_PROBE_RELEASE_MARKER;
+    let pid_file = UPGRADE_PROBE_PID_FILE;
+    let status = serde_json::json!({
+        "ok": true,
+        "data": {
+            "components": [{
+                "active": true,
+                "scope": "system",
+                "health": [{ "name": format!("integrity:{}", executable.display()) }]
+            }]
+        }
+    });
+    let update = serde_json::json!({
+        "ok": true,
+        "data": {
+            "package": "cosh-ng",
+            "to_version": "99.0.0",
+            "plan": ["update cosh-ng"]
+        }
+    });
+    // A system record probed from a non-root session only succeeds with an explicit scope;
+    // the default user-mode update is rejected like anolisa rejects read-only system records.
+    let anolisa = format!(
+        "#!/bin/sh\ncase \"$*\" in\n  'status cosh-ng --json')\n    printf '%s\\n' \"$$\" > \"$HOME/{pid_file}\"\n    while [ ! -f \"$HOME/{marker}\" ]; do sleep 0.01; done\n    printf '%s\\n' '{status}'\n    ;;\n  '--install-mode system update cosh-ng --dry-run --json')\n    printf '%s\\n' '{update}'\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n"
+    );
+    let path = "$HOME/bin:/usr/bin:/bin";
+    let mut files = vec![("bin/anolisa", anolisa.as_str())];
+    if let Some(inputrc) = inputrc {
+        files.push(("inputrc", inputrc));
+    }
+    // Wide enough that the notice panel keeps the scoped command on one row.
+    TerminalSession::spawn_for_shell_with_startup_env(
+        shell,
+        "enhanced",
+        200,
+        &files,
+        &[
+            ("PATH", path),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK_CACHE", "$HOME/upgrade-cache.json"),
+        ],
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn release_upgrade_probe(session: &TerminalSession) {
+    fs::write(
+        session.home().join(UPGRADE_PROBE_RELEASE_MARKER),
+        "release probe",
+    )
+    .expect("release upgrade probe");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session.home().join("upgrade-cache.json").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "upgrade probe result was not delivered"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_renders_at_an_idle_prompt_without_input() {
+    let mut session = spawn_with_gated_upgrade_probe();
+    session.wait_screen("startup banner before upgrade probe completes", |screen| {
+        let contents = screen.contents();
+        contents.contains("╭ · cosh-shell") && !contents.contains("Update available: cosh-ng")
+    });
+    release_upgrade_probe(&session);
+
+    session.wait_screen("idle prompt renders deferred upgrade notice", |screen| {
+        let contents = screen.contents();
+        contents.contains("Update available: cosh-ng")
+            && contents.contains("sudo anolisa --install-mode system update cosh-ng")
+    });
+    session.finish();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_waits_until_the_next_prompt_after_input() {
+    assert_upgrade_notice_waits_for_the_prompt_after("echo draft-preserved");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_waits_until_the_next_prompt_after_a_failed_command() {
+    assert_upgrade_notice_waits_for_the_prompt_after("echo draft-preserved; false");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_preserves_input_after_a_completed_command() {
+    let mut session = spawn_with_gated_upgrade_probe();
+
+    session.send(b"printf 'first-command-done\\n'\n");
+    session.wait_screen("first command reaches its next prompt", |screen| {
+        let contents = screen.contents();
+        contents.contains("first-command-done") && contents.trim_end().ends_with("screen$")
+    });
+
+    let draft = "echo second-command-draft";
+    session.send(draft.as_bytes());
+    session.wait_screen("second command draft", |screen| {
+        screen.contents().contains(draft)
+    });
+    let prompt_column = session.prompt().len() as u16;
+    session.send(b"\x01");
+    session.wait_screen("second draft reports input empty", |screen| {
+        screen.contents().contains(draft) && screen.cursor_position().1 == prompt_column
+    });
+
+    release_upgrade_probe(&session);
+    thread::sleep(Duration::from_millis(1500));
+
+    // Force the fixture to drain output produced by the idle poll. Before the
+    // prompt barrier fix, that poll inserted the notice into this active draft.
+    session.send(b"\x05");
+    session.wait_screen("completed probe preserves the second draft", |screen| {
+        let contents = screen.contents();
+        contents.contains(draft) && !contents.contains("Update available: cosh-ng")
+    });
+
+    session.send(b"\n");
+    session.wait_screen(
+        "following prompt renders deferred upgrade notice",
+        |screen| screen.contents().contains("Update available: cosh-ng"),
+    );
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_waits_for_consecutive_custom_accept_line_typeahead() {
+    let inputrc = "set editing-mode emacs\nset enable-bracketed-paste on\n\"\\C-x\": accept-line\n";
+    let mut session = spawn_with_gated_upgrade_probe_inputrc(Some(inputrc));
+
+    session.send(b"printf 'A-%s\\n' started; sleep 2; printf 'A-%s\\n' done\n");
+    session.wait_screen("first command is still running", |screen| {
+        screen.contents().contains("A-started")
+    });
+
+    session.send(b"sleep 1; printf 'B-%s\\n' done\x18");
+    session.send(b"sleep 1; printf 'C-%s\\n' done\x18");
+    release_upgrade_probe(&session);
+
+    session.wait_screen(
+        "notice follows consecutive custom accept-line typeahead",
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("C-done") && contents.contains("Update available: cosh-ng")
+        },
+    );
+    let contents = session.screen().contents();
+    let command_output = contents
+        .rfind("C-done")
+        .expect("last queued command output");
+    let notice = contents
+        .rfind("Update available: cosh-ng")
+        .expect("deferred upgrade notice");
+    assert!(
+        command_output < notice,
+        "upgrade notice rendered before consecutive custom accept-line commands completed:\n{contents}"
+    );
+
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_waits_for_two_custom_accept_lines_from_idle_prompt() {
+    // Starting at an idle prompt means `at_main_prompt` is already true, so a
+    // guard that only closed on away-prompt bytes let both Ctrl-X submits slip
+    // past: the first precmd re-marked the shell idle, and the deferred notice
+    // raced in between the two queued commands. The in-band Readline probe
+    // must hold occupancy for any zero-count write, regardless of prompt state.
+    let inputrc = "set editing-mode emacs\nset enable-bracketed-paste on\n\"\\C-x\": accept-line\n";
+    let mut session = spawn_with_gated_upgrade_probe_inputrc(Some(inputrc));
+    session.wait_screen("startup banner before upgrade probe completes", |screen| {
+        screen.contents().contains("╭ · cosh-shell")
+    });
+
+    // Both commands are submitted via the custom Ctrl-X binding; byte counting
+    // reports zero submissions, so only the idle probe can prove consumption.
+    session.send(b"sleep 1; printf 'B-%s\\n' done\x18");
+    session.send(b"sleep 1; printf 'C-%s\\n' done\x18");
+    release_upgrade_probe(&session);
+
+    session.wait_screen(
+        "notice follows consecutive custom accept-line writes from idle prompt",
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("C-done") && contents.contains("Update available: cosh-ng")
+        },
+    );
+    let contents = session.screen().contents();
+    let command_output = contents
+        .rfind("C-done")
+        .expect("last queued command output");
+    let notice = contents
+        .rfind("Update available: cosh-ng")
+        .expect("deferred upgrade notice");
+    assert!(
+        command_output < notice,
+        "upgrade notice rendered before consecutive custom accept-line commands completed:\n{contents}"
+    );
+
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_renders_at_zsh_idle_prompt_after_a_regular_command() {
+    // zsh never installs the Bash `prompt_idle` Readline binding, so any
+    // zero-count user keystroke used to pin `shell_at_prompt=false` for the
+    // rest of the session: ordinary chars typed before Enter would arm an
+    // occupancy hold that no probe can release, and a probe completing after
+    // the first command would be silently dropped by the idle poll.
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let mut session = spawn_with_gated_upgrade_probe_for_shell("zsh", None);
+    session.wait_screen("startup banner before upgrade probe completes", |screen| {
+        screen.contents().contains("╭ · cosh-shell")
+    });
+
+    // Separate the leading keystrokes from the submit so the relay reports a
+    // zero-count PtyUserWrite ahead of the counted `\n`, which is exactly the
+    // zsh pattern described in the issue.
+    session.send(b"echo ");
+    session.send(b"first-zsh-done\n");
+    session.wait_screen("first zsh command completes", |screen| {
+        screen.contents().contains("first-zsh-done")
+    });
+
+    release_upgrade_probe(&session);
+    session.wait_screen(
+        "idle zsh prompt renders deferred upgrade notice",
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("Update available: cosh-ng")
+                && contents.contains("sudo anolisa --install-mode system update cosh-ng")
+        },
+    );
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_notice_waits_for_a_queued_typeahead_command() {
+    let mut session = spawn_with_gated_upgrade_probe();
+
+    session.send(b"printf 'A-%s\\n' started; sleep 2; printf 'A-%s\\n' done\n");
+    session.wait_screen("first command is still running", |screen| {
+        screen.contents().contains("A-started")
+    });
+
+    session.send(b"sleep 1; printf 'B-%s\\n' done\n");
+    release_upgrade_probe(&session);
+
+    session.wait_screen("notice follows the queued typeahead command", |screen| {
+        let contents = screen.contents();
+        contents.contains("B-done") && contents.contains("Update available: cosh-ng")
+    });
+    let contents = session.screen().contents();
+    let command_output = contents
+        .rfind("B-done")
+        .expect("queued typeahead command output");
+    let notice = contents
+        .rfind("Update available: cosh-ng")
+        .expect("deferred upgrade notice");
+    assert!(
+        command_output < notice,
+        "upgrade notice rendered before queued typeahead completed:\n{contents}"
+    );
+
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+/// Types `draft` while the probe runs, then submits it: the prompt after an ordinary
+/// command is a `CommandCompleted`/`CommandFailed` boundary rather than `ShellReady`.
+#[cfg(target_os = "linux")]
+fn assert_upgrade_notice_waits_for_the_prompt_after(draft: &str) {
+    let mut session = spawn_with_gated_upgrade_probe();
+
+    session.send(draft.as_bytes());
+    session.wait_screen("draft before upgrade probe completes", |screen| {
+        screen.contents().contains(draft)
+    });
+    release_upgrade_probe(&session);
+
+    session.send(b"\x01");
+    session.wait_screen("completed probe preserves active draft", |screen| {
+        let contents = screen.contents();
+        contents.contains(draft) && !contents.contains("Update available: cosh-ng")
+    });
+
+    session.send(b"\n");
+    session.wait_screen("next prompt renders deferred upgrade notice", |screen| {
+        let contents = screen.contents();
+        contents.contains("Update available: cosh-ng")
+            && contents.contains("sudo anolisa --install-mode system update cosh-ng")
+    });
+    session.finish_with_input(b"exit 0\n", 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_exit_kills_an_in_flight_upgrade_probe() {
+    let session = spawn_with_gated_upgrade_probe();
+    let pid_file = session.home().join(UPGRADE_PROBE_PID_FILE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let probe = loop {
+        let pid = fs::read_to_string(&pid_file).ok();
+        if let Some(pid) = pid.and_then(|pid| pid.trim().parse::<u32>().ok()) {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "upgrade probe did not start");
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    // The probe is still blocked on the release marker, so only shell shutdown can stop it.
+    session.finish();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let process = std::path::PathBuf::from(format!("/proc/{probe}"));
+    while process.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "upgrade probe {probe} was not reaped after shell exit"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_rpm_cache_check_does_not_hold_the_first_prompt_after_rpm_exits() {
+    assert_rpm_cache_check_releases_first_prompt("true");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_rpm_cache_check_does_not_hold_the_first_prompt_after_rpm_times_out() {
+    assert_rpm_cache_check_releases_first_prompt("exec sleep 30");
+}
+
+/// Seeds an RPM-method cache so startup revalidates it with a fake `rpm` whose first call
+/// leaves a descendant in its own session holding the pipes, then runs `first_call_tail`.
+#[cfg(target_os = "linux")]
+fn assert_rpm_cache_check_releases_first_prompt(first_call_tail: &str) {
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell"))
+        .expect("canonical cosh-shell executable");
+    let cache = serde_json::json!({
+        "version": 1,
+        "checked_at": 0,
+        "executable": executable,
+        "method": "rpm",
+        "notice": {
+            "package": "cosh-ng",
+            "current": "1.0.0-1",
+            "latest": "99.0.0-1",
+            "command": "sudo dnf update cosh-ng"
+        }
+    })
+    .to_string();
+    let rpm = format!(
+        "#!/bin/sh\nif mkdir \"$HOME/rpm-first-probe\" 2>/dev/null; then\n  \
+         setsid sh -c 'echo $$ > \"$0\"; exec sleep 30' \"$HOME/escaped.pid\" &\n  \
+         while [ ! -s \"$HOME/escaped.pid\" ]; do sleep 0.01; done\n  {first_call_tail}\nfi\n\
+         printf 'cosh-ng\\n1.0.0-1\\n'\n"
+    );
+    let started = Instant::now();
+    let session = TerminalSession::spawn_for_shell_with_startup_env(
+        "bash",
+        "enhanced",
+        100,
+        &[("bin/rpm", &rpm), ("upgrade-cache.json", &cache)],
+        &[
+            ("PATH", "$HOME/bin:/usr/bin:/bin"),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK_CACHE", "$HOME/upgrade-cache.json"),
+        ],
+    );
+    let elapsed = started.elapsed();
+    let pid = fs::read_to_string(session.home().join("escaped.pid")).unwrap_or_default();
+    if let Ok(pid) = pid.trim().parse::<i32>() {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    session.finish();
+
+    assert!(
+        !pid.is_empty(),
+        "fake rpm was not consulted for the RPM cache"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "first prompt waited {elapsed:?}"
+    );
 }
 
 #[test]
