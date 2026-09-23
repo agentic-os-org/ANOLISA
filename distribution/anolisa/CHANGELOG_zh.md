@@ -9,6 +9,21 @@
 
 ## [未发布]
 
+## [0.3.16] - 2026-09-23
+
+### 新增
+
+- 为运行 macOS 11 或更高版本的 Intel Mac 新增 CLI 预构建压缩包和
+  `@anolisa/cli-darwin-x64` npm 包。官网安装脚本仍仅支持 ARM Mac，
+  Intel Mac 安装入口将单独开放
+  ([#3448](https://github.com/agentic-os-org/ANOLISA/pull/3448))。
+
+### 变更
+
+- 组件目录将 Intel macOS 识别为 `cosh-ng` 的受支持目标，
+  使 ANOLISA 能够在兼容版本可用时解析对应发布包
+  ([#3448](https://github.com/agentic-os-org/ANOLISA/pull/3448))。
+
 ## [0.3.15] - 2026-09-22
 
 ### 修复

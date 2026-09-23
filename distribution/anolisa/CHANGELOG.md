@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-09-23
+
+### Added
+
+- Add prebuilt CLI archives and the `@anolisa/cli-darwin-x64` npm package for
+  Intel Macs running macOS 11 or later. The website installer remains ARM-only
+  until Intel Mac installation is enabled separately
+  ([#3448](https://github.com/agentic-os-org/ANOLISA/pull/3448)).
+
+### Changed
+
+- Recognize Intel macOS as a supported target for `cosh-ng` in the component
+  catalog, allowing ANOLISA to resolve compatible releases when available
+  ([#3448](https://github.com/agentic-os-org/ANOLISA/pull/3448)).
+
 ## [0.3.15] - 2026-09-22
 
 ### Fixed
