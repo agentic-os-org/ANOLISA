@@ -7,6 +7,7 @@ use crate::activity::runtime::{RuntimeActivityRow, ToolInvocationRecord};
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin, PendingAgentRequest};
 use crate::agent::turn_extension::PendingTurnExtension;
 use crate::diagnostics::health::HealthScanReport;
+use crate::diagnostics::upgrade::StartupUpgradeState;
 use crate::hooks::state::HookRuntimeState;
 use crate::insight::correlation::InsightCorrelationState;
 use crate::insight::model::{InsightBinding, InsightCandidate};
@@ -150,6 +151,7 @@ pub(crate) struct InlineState {
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) startup_auth: StartupAuthState,
+    pub(crate) startup_upgrade: StartupUpgradeState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }

@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use super::{
-    append_startup_auth_hint, bootstrap_path_probe_plan, extract_bootstrap_path,
-    merge_bootstrap_paths, merge_path_additions_at_anchors, merge_path_lists,
-    plan_startup_for_render, record_visible_personal_impressions,
-    render_pending_recommendation_notice, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
+    append_startup_auth_hint, append_startup_upgrade_hint, bootstrap_path_probe_plan,
+    extract_bootstrap_path, merge_bootstrap_paths, merge_path_additions_at_anchors,
+    merge_path_lists, plan_startup_for_render, record_visible_personal_impressions,
+    render_pending_recommendation_notice, render_pending_upgrade_notice, startup_suggestion_mode,
+    visible_personal_candidates, write_startup_suggestion_card, BootstrapPathProbeIo, RawShellKind,
+    StartupSuggestionMode,
 };
 #[cfg(target_os = "linux")]
 use super::{
@@ -830,6 +831,51 @@ fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
     let mut quiet = Vec::new();
     append_startup_auth_hint(&mut disabled, &mut quiet);
     assert!(quiet.is_empty());
+}
+
+#[test]
+fn startup_upgrade_hint_renders_once_for_a_cached_notice() {
+    let mut state = InlineState::default();
+    state.startup_upgrade.resolved = Some(Some(crate::diagnostics::upgrade::UpgradeNotice {
+        package: "cosh-ng".to_string(),
+        current: "1.0.0".to_string(),
+        latest: "1.1.0".to_string(),
+        command: "anolisa update cosh-ng".to_string(),
+    }));
+    let mut body = Vec::new();
+
+    append_startup_upgrade_hint(&mut state, &mut body);
+    assert_eq!(body.len(), 2);
+    assert!(body[1].contains("1.0.0 → 1.1.0"), "{:?}", body[1]);
+    assert!(state.startup_upgrade.rendered);
+
+    append_startup_upgrade_hint(&mut state, &mut body);
+    assert_eq!(body.len(), 2);
+}
+
+#[test]
+fn late_upgrade_probe_renders_a_deferred_notice() {
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    state.startup_upgrade.pending = Some(receiver);
+    sender
+        .send(Some(crate::diagnostics::upgrade::UpgradeNotice {
+            package: "cosh-ng".to_string(),
+            current: "1.0.0".to_string(),
+            latest: "1.1.0".to_string(),
+            command: "anolisa update cosh-ng".to_string(),
+        }))
+        .unwrap();
+
+    let mut output = Vec::new();
+    render_pending_upgrade_notice(&mut state, &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("cosh-ng update available"), "{output}");
+    assert!(output.contains("anolisa update cosh-ng"), "{output}");
+    assert!(state.startup_upgrade.rendered);
 }
 
 #[test]

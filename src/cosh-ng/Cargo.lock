@@ -815,6 +815,7 @@ dependencies = [
  "qrcode",
  "ratatui",
  "regex",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
