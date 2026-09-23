@@ -315,14 +315,20 @@ impl Storage {
         if self.purge_interval > 0 {
             let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
             if count.is_multiple_of(self.purge_interval) {
-                if self.retention_days > 0 {
-                    if let Err(e) = self.purge_expired() {
-                        log::warn!("Auto-purge (age-based) failed: {e}");
+                let age_cleanup_ready = if self.retention_days > 0 {
+                    match self.purge_expired() {
+                        Ok(_) => true,
+                        Err(error) => {
+                            log::warn!("Auto-purge (age-based) failed: {error}");
+                            false
+                        }
                     }
-                }
-                if self.max_db_size_bytes > 0 {
-                    if let Err(e) = self.purge_oversized() {
-                        log::warn!("Auto-purge (size-based) failed: {e}");
+                } else {
+                    true
+                };
+                if age_cleanup_ready && self.max_db_size_bytes > 0 {
+                    if let Err(error) = self.purge_oversized() {
+                        log::warn!("Auto-purge (size-based) failed: {error}");
                     }
                 }
             }
@@ -374,9 +380,7 @@ impl Storage {
             // through the page cache, which counts against the service's
             // cgroup memory limit and can OOM-kill the process on large
             // databases (#2888). Freed pages are reused by future inserts.
-            if let Err(e) = self.audit_store.checkpoint() {
-                log::warn!("WAL checkpoint after age-based purge failed: {e}");
-            }
+            self.audit_store.checkpoint()?;
         }
 
         Ok(total_deleted)

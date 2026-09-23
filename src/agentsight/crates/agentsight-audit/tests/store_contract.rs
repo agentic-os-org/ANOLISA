@@ -373,6 +373,38 @@ fn maintenance_honors_disabled_and_enabled_retention() {
 }
 
 #[test]
+fn maintenance_stops_size_pruning_when_retention_checkpoint_is_busy() {
+    let path = security_db_path("maintenance-checkpoint-busy");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+    for index in 0..100 {
+        let event = fixture_file_action(&format!("/tmp/{}-{index}", "x".repeat(20_000)), 1);
+        store.insert_event(&event).expect("event should insert");
+    }
+    let retained = fixture_file_action("/tmp/current", 1_800_000_000_000_000_000);
+    store
+        .insert_event(&retained)
+        .expect("current event should insert");
+
+    let reader = rusqlite::Connection::open(&path).expect("reader should open");
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM security_events;")
+        .expect("reader should hold a snapshot");
+
+    let report = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 1,
+            max_db_size_mb: 1,
+        })
+        .expect("maintenance should stop safely");
+
+    assert_eq!(report.size.status, MaintenanceStatus::CheckpointBusy);
+    assert!(store.event(retained.event_id).unwrap().is_some());
+    drop(reader);
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
 fn maintenance_enforces_size_for_unreferenced_events() {
     let path = security_db_path("maintenance-size");
     let store = SecurityStore::open(&path).expect("fixture store should open");
