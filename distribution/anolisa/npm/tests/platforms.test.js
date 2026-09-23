@@ -17,6 +17,7 @@ import {
 const linuxX64 = targetForSelector('linux-x64');
 const linuxArm64 = targetForSelector('linux-arm64');
 const darwinArm64 = targetForSelector('darwin-arm64');
+const darwinX64 = targetForSelector('darwin-x64');
 
 const rootManifest = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -40,7 +41,9 @@ assert.equal(
   targetForSelector('aarch64-apple-darwin').pkg_suffix,
   'darwin-arm64',
 );
-assert.equal(targetForSelector('x64').pkg_suffix, 'linux-x64');
+assert.equal(targetForSelector('x86_64-apple-darwin').pkg_suffix, 'darwin-x64');
+assert.throws(() => targetForSelector('x64'), /ambiguous/);
+assert.throws(() => targetForSelector('x86_64'), /ambiguous/);
 assert.throws(() => targetForSelector('arm64'), /ambiguous/);
 assert.throws(() => targetForSelector('aarch64'), /ambiguous/);
 assert.throws(() => targetForSelector('unknown'), /Unknown target/);
@@ -49,9 +52,9 @@ assert.equal(
   platformPackageName('darwin', 'arm64'),
   '@anolisa/cli-darwin-arm64',
 );
-assert.throws(
-  () => platformPackageName('darwin', 'x64'),
-  /No prebuilt binary/,
+assert.equal(
+  platformPackageName('darwin', 'x64'),
+  '@anolisa/cli-darwin-x64',
 );
 
 assert.deepEqual(
@@ -60,9 +63,17 @@ assert.deepEqual(
 );
 assert.deepEqual(
   targetsForHost('darwin').map((target) => target.pkg_suffix),
-  ['darwin-arm64'],
+  ['darwin-arm64', 'darwin-x64'],
 );
 assert.throws(() => targetsForHost('win32'), /No npm build targets/);
+assert.deepEqual(
+  buildStrategyForTarget('darwin', 'x86_64-apple-darwin', darwinX64),
+  { tool: 'cargo', passTarget: false },
+);
+assert.deepEqual(
+  buildStrategyForTarget('darwin', 'aarch64-apple-darwin', darwinX64),
+  { tool: 'cargo', passTarget: true },
+);
 
 assert.deepEqual(
   buildStrategyForTarget(

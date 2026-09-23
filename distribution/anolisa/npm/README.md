@@ -29,6 +29,10 @@ anolisa adapter enable tokenless openclaw
 | Linux | x86_64 | `@anolisa/cli-linux-x64` |
 | Linux | aarch64 | `@anolisa/cli-linux-arm64` |
 | macOS | arm64 | `@anolisa/cli-darwin-arm64` |
+| macOS 11+ | x86_64 | `@anolisa/cli-darwin-x64` |
+
+Intel macOS requires a release that includes `@anolisa/cli-darwin-x64`.
+Older published versions are not retroactively extended by this source change.
 
 The correct platform-specific binary is automatically installed via `optionalDependencies`.
 

@@ -116,7 +116,10 @@ raw backend 每次解析都会重新拉取 distribution index，仓库不可达�
 
 ## 环境要求
 
-- Linux（x86_64 / aarch64）或 macOS（arm64，功能受限）
+- Linux（x86_64 / aarch64）或 macOS 11+（arm64 / x86_64，功能受限）
+
+Intel macOS 的预构建包和 npm 支持需要使用包含 `darwin-x64` 平台包的新版本。
+该版本发布且安装入口单独开放之前，官网安装脚本仍仅支持 ARM Mac。
 - 从源码构建需要 Rust ≥ 1.93
 
 ## 许可证

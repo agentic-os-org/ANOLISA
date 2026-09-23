@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an arm64 macOS release executable and its deployment target."""
+"""Validate a macOS release executable's architecture and deployment target."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 MH_MAGIC_64 = 0xFEEDFACF
-CPU_TYPE_ARM64 = 0x0100000C
+CPU_TYPES = {"aarch64": 0x0100000C, "x86_64": 0x01000007}
 MH_EXECUTE = 2
 LC_LOAD_DYLIB = 0xC
 LC_LOAD_WEAK_DYLIB = 0x80000018
@@ -54,7 +54,9 @@ def c_string(data: bytes, offset: int, end: int) -> str:
         raise MachOError("non-UTF-8 dylib name") from error
 
 
-def validate(data: bytes, expected_minimum: tuple[int, int, int]) -> None:
+def validate(
+    data: bytes, expected_minimum: tuple[int, int, int], arch: str = "aarch64"
+) -> None:
     """Validate architecture, deployment target, and dynamic library paths."""
     if len(data) < 32:
         raise MachOError("file is too small for a Mach-O 64-bit header")
@@ -70,8 +72,8 @@ def validate(data: bytes, expected_minimum: tuple[int, int, int]) -> None:
     ) = struct.unpack_from("<IiiIIIII", data)
     if magic != MH_MAGIC_64:
         raise MachOError("expected a little-endian Mach-O 64-bit executable")
-    if cpu_type != CPU_TYPE_ARM64:
-        raise MachOError(f"expected arm64 CPU type, got 0x{cpu_type:08x}")
+    if cpu_type != CPU_TYPES[arch]:
+        raise MachOError(f"expected {arch} CPU type, got 0x{cpu_type:08x}")
     if file_type != MH_EXECUTE:
         raise MachOError(f"expected MH_EXECUTE, got file type {file_type}")
     if 32 + commands_size > len(data):
@@ -132,14 +134,15 @@ def main() -> int:
     """Validate one executable without running it."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--min", dest="minimum", required=True)
+    parser.add_argument("--arch", choices=tuple(CPU_TYPES), default="aarch64")
     parser.add_argument("binary", type=Path)
     args = parser.parse_args()
     try:
-        validate(args.binary.read_bytes(), parse_version(args.minimum))
+        validate(args.binary.read_bytes(), parse_version(args.minimum), args.arch)
     except (OSError, MachOError) as error:
         print(f"ERROR: {args.binary}: {error}", file=sys.stderr)
         return 1
-    print(f"{args.binary}: arch=aarch64 min_macos={args.minimum}")
+    print(f"{args.binary}: arch={args.arch} min_macos={args.minimum}")
     return 0
 
 

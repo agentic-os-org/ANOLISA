@@ -39,6 +39,7 @@
   "optionalDependencies": {
     "@anolisa/cli-linux-x64": "0.3.15",
     "@anolisa/cli-linux-arm64": "0.3.15",
-    "@anolisa/cli-darwin-arm64": "0.3.15"
+    "@anolisa/cli-darwin-arm64": "0.3.15",
+    "@anolisa/cli-darwin-x64": "0.3.15"
   }
 }

@@ -1043,7 +1043,10 @@ targets = {targets}
                 .expect("component entry");
             assert!(component.supports_target("linux", "aarch64"));
             assert!(component.supports_target("macos", "aarch64"));
-            assert!(!component.supports_target("macos", "x86_64"));
+            assert_eq!(
+                component.supports_target("macos", "x86_64"),
+                name == "cosh-ng"
+            );
         }
     }
 

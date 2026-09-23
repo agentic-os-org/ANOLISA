@@ -19,7 +19,7 @@ BUILD_METADATA="${ANOLISA_BUILD_METADATA:-$BIN_DIR/anolisa-build.toml}"
 EPOCH="${SOURCE_DATE_EPOCH:-}"
 
 case "$TARGET_OS/$TARGET_ARCH" in
-    linux/x86_64 | linux/aarch64 | macos/aarch64) ;;
+    linux/x86_64 | linux/aarch64 | macos/aarch64 | macos/x86_64) ;;
     *) die "unsupported ANOLISA CLI target: $TARGET_OS/$TARGET_ARCH" ;;
 esac
 case "$EPOCH" in

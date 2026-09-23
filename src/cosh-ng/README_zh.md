@@ -73,6 +73,10 @@ Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
 
+发版构建矩阵也会生成 macOS x86_64（Intel）raw 包，与 arm64 一样要求 macOS 11.0
+或更新版本。包含此构建支持的版本发布后，Intel 产物可从 GitHub Releases 获取；
+上面的公共安装入口还需要发布 Intel ANOLISA CLI，并单独开放官网安装脚本。
+
 ## 30 秒开始使用
 
 ```bash

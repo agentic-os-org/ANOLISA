@@ -19,6 +19,7 @@ TARGET_PACKAGES = {
     ("linux", "x86_64"): ("linux-x64", "linux", "x64"),
     ("linux", "aarch64"): ("linux-arm64", "linux", "arm64"),
     ("macos", "aarch64"): ("darwin-arm64", "darwin", "arm64"),
+    ("macos", "x86_64"): ("darwin-x64", "darwin", "x64"),
 }
 
 

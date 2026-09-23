@@ -27,7 +27,8 @@
  *   ├── anolisa-cli-<version>.tgz                  (root package)
  *   ├── anolisa-cli-linux-x64-<version>.tgz        (platform package)
  *   ├── anolisa-cli-linux-arm64-<version>.tgz      (platform package)
- *   └── anolisa-cli-darwin-arm64-<version>.tgz     (platform package)
+ *   ├── anolisa-cli-darwin-arm64-<version>.tgz     (platform package)
+ *   └── anolisa-cli-darwin-x64-<version>.tgz       (platform package)
  */
 
 import { execSync } from 'node:child_process';

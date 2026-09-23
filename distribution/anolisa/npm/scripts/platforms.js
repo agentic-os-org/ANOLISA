@@ -24,6 +24,12 @@ export const TARGETS = Object.freeze([
     npm_cpu: 'arm64',
     pkg_suffix: 'darwin-arm64',
   },
+  {
+    rust_target: 'x86_64-apple-darwin',
+    npm_os: 'darwin',
+    npm_cpu: 'x64',
+    pkg_suffix: 'darwin-x64',
+  },
 ]);
 
 export const PLATFORM_MAP = Object.freeze(

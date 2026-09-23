@@ -62,6 +62,9 @@ case "$TARGET_OS/$TARGET_ARCH/$PROFILE" in
     macos/aarch64/darwin11-aarch64)
         RUST_TARGET=aarch64-apple-darwin
         ;;
+    macos/x86_64/darwin11-x86_64)
+        RUST_TARGET=x86_64-apple-darwin
+        ;;
     *)
         die "profile $PROFILE does not match target $TARGET_OS/$TARGET_ARCH"
         ;;
@@ -157,7 +160,8 @@ cargo metadata \
 BIN_DIR="$COMPONENT_ROOT/target/$RUST_TARGET/release"
 [ -x "$BIN_DIR/anolisa" ] || die "Cross build did not produce $BIN_DIR/anolisa"
 if [ "$TARGET_OS" = macos ]; then
-    python3 "$COMMON_DIR/verify-macho.py" --min 11.0 "$BIN_DIR/anolisa"
+    python3 "$COMMON_DIR/verify-macho.py" \
+        --arch "$TARGET_ARCH" --min 11.0 "$BIN_DIR/anolisa"
 else
     python3 "$COMMON_DIR/verify-glibc.py" \
         --arch "$TARGET_ARCH" --max 2.17 "$BIN_DIR/anolisa"

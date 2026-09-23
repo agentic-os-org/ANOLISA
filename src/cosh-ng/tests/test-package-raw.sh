@@ -90,7 +90,7 @@ if os_name == "linux":
     struct.pack_into("<I", header, 20, 1)
     content = bytes(header)
 else:
-    cpu = {"aarch64": 0x0100000C}[arch]
+    cpu = {"aarch64": 0x0100000C, "x86_64": 0x01000007}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
 for name in ("cosh-cli", "cosh-core", "cosh-gateway", "cosh-shell"):
     (pathlib.Path(destination) / name).write_bytes(content)
@@ -121,9 +121,11 @@ PY
 LINUX_X64="$TMP/bin-linux-x86_64"
 LINUX_ARM64="$TMP/bin-linux-aarch64"
 MACOS_ARM64="$TMP/bin-macos-aarch64"
+MACOS_X64="$TMP/bin-macos-x86_64"
 make_binaries linux x86_64 "$LINUX_X64"
 make_binaries linux aarch64 "$LINUX_ARM64"
 make_binaries macos aarch64 "$MACOS_ARM64"
+make_binaries macos x86_64 "$MACOS_X64"
 
 run_pack() {
     local os="$1"
@@ -153,8 +155,21 @@ run_pack darwin arm64 "$MACOS_ARM64" "$TMP/out-macos-arm64"
 MACOS_ARTIFACT="cosh-ng-$VERSION-macos-aarch64.tar.gz"
 test -f "$TMP/out-macos-arm64/$MACOS_ARTIFACT"
 
-if run_pack macos x64 "$LINUX_X64" "$TMP/unsupported-macos-x64" 2>/dev/null; then
-    echo "ERROR: macOS x86_64 raw packaging unexpectedly succeeded" >&2
+run_pack macos x64 "$MACOS_X64" "$TMP/out-macos-x64"
+run_pack darwin x86_64 "$MACOS_X64" "$TMP/out-macos-x64-repeat"
+MACOS_X64_ARTIFACT="cosh-ng-$VERSION-macos-x86_64.tar.gz"
+cmp "$TMP/out-macos-x64/$MACOS_X64_ARTIFACT" \
+    "$TMP/out-macos-x64-repeat/$MACOS_X64_ARTIFACT"
+if run_pack macos x64 "$MACOS_ARM64" "$TMP/wrong-macos-arch" 2>/dev/null; then
+    echo "ERROR: arm64 binaries unexpectedly packaged as macOS x86_64" >&2
+    exit 1
+fi
+if run_pack macos arm64 "$MACOS_X64" "$TMP/wrong-macos-arm64" 2>/dev/null; then
+    echo "ERROR: x86_64 binaries unexpectedly packaged as macOS arm64" >&2
+    exit 1
+fi
+if run_pack macos x64 "$LINUX_X64" "$TMP/wrong-macos-format" 2>/dev/null; then
+    echo "ERROR: ELF binaries unexpectedly packaged as macOS x86_64" >&2
     exit 1
 fi
 python3 "$ROOT/packaging/raw/verify-binaries.py" \
@@ -448,6 +463,7 @@ with macos_path.open("rb") as stream:
 
 assert linux["component"]["platform"]["os"] == ["linux"]
 assert macos["component"]["platform"]["os"] == ["macos"]
+assert macos["component"]["platform"]["arch"] == ["aarch64", "x86_64"]
 assert linux["component"]["contract"]["min_anolisa_version"] == "0.2.17"
 assert macos["component"]["contract"]["min_anolisa_version"] == "0.2.17"
 assert linux["component"]["conflicts"] == ["cosh"]
@@ -514,6 +530,16 @@ tar -xzf "$TMP/out-macos-arm64/$MACOS_ARTIFACT" -C "$MACOS_EXTRACTED"
 cmp "$MACOS_CONTRACT" "$MACOS_EXTRACTED/.anolisa/component.toml"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
+
+MACOS_X64_EXTRACTED="$TMP/extracted-macos-x64"
+mkdir "$MACOS_X64_EXTRACTED"
+tar -xzf "$TMP/out-macos-x64/$MACOS_X64_ARTIFACT" -C "$MACOS_X64_EXTRACTED"
+cmp "$MACOS_CONTRACT" "$MACOS_X64_EXTRACTED/.anolisa/component.toml"
+cmp "$MACOS_X64/cosh-cli" "$MACOS_X64_EXTRACTED/bin/cosh-cli"
+for binary in cosh-core cosh-gateway cosh-shell; do
+    cmp "$MACOS_X64/$binary" "$MACOS_X64_EXTRACTED/libexec/anolisa/cosh-ng/$binary"
+done
+test ! -e "$MACOS_X64_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/skills/manage-task-checkpoints"
 test -z "$(grep -F 'libssl' "$ROOT/.anolisa/component.toml" || true)"
 grep -Fq 'source = "bin/cosh"' "$ROOT/.anolisa/component.toml"

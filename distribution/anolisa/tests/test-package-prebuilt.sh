@@ -62,8 +62,11 @@ test -f "$TEMPORARY/out-linux-arm64/anolisa-$VERSION-linux-aarch64.tar.gz"
 run_pack macos aarch64 "$TEMPORARY/out-macos-arm64"
 test -f "$TEMPORARY/out-macos-arm64/anolisa-$VERSION-macos-aarch64.tar.gz"
 
-if run_pack macos x86_64 "$TEMPORARY/out-unsupported" 2>/dev/null; then
-    printf 'ERROR: unsupported macOS x86_64 package succeeded\n' >&2
+run_pack macos x86_64 "$TEMPORARY/out-macos-x64"
+test -f "$TEMPORARY/out-macos-x64/anolisa-$VERSION-macos-x86_64.tar.gz"
+
+if run_pack windows x86_64 "$TEMPORARY/out-unsupported" 2>/dev/null; then
+    printf 'ERROR: unsupported Windows package succeeded\n' >&2
     exit 1
 fi
 

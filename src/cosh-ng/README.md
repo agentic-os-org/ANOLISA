@@ -78,6 +78,12 @@ package supports macOS arm64, where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
 
+The release build matrix also produces a macOS x86_64 (Intel) raw archive,
+with the same macOS 11.0 minimum as arm64. Intel artifacts are available from
+GitHub Releases once a version containing this build support is published;
+the public installer above also requires an Intel ANOLISA CLI release and
+separate enablement of the website installer.
+
 ## Start in 30 seconds
 
 ```bash
