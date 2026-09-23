@@ -241,6 +241,8 @@ run_case() {
 }
 
 run_case cli-only ""
+assert_contains "${TEST_ROOT}/cli-only/artifact.sha256.urls" \
+  "/artifacts/macos/aarch64/anolisa-cli-${TEST_CLI_VERSION}-aarch64-apple-darwin.tar.gz" cli-only
 run_case help "" --help
 grep -Fq -- "--component NAME" "${TEST_ROOT}/help/stdout"
 grep -Fq -- "--backend BACKEND" "${TEST_ROOT}/help/stdout"
@@ -268,7 +270,7 @@ ANOLISA_TEST_ARCH=x86_64 run_case intel-pinned \
   "--install-mode user install cosh-ng --backend raw" \
   --cosh-ng --backend raw --install-mode user
 assert_contains "${TEST_ROOT}/intel-pinned/artifact.sha256.urls" \
-  "anolisa-cli-${TEST_CLI_VERSION}-x86_64-apple-darwin.tar.gz" intel-pinned
+  "/artifacts/macos/x86_64/anolisa-cli-${TEST_CLI_VERSION}-x86_64-apple-darwin.tar.gz" intel-pinned
 ANOLISA_TEST_ARCH=x86_64 ANOLISA_TEST_REQUEST_VERSION=stable \
   run_case intel-stable "--install-mode user install cosh-ng --backend raw" \
   --cosh-ng --backend raw --install-mode user
@@ -277,6 +279,8 @@ assert_contains "${TEST_ROOT}/intel-stable/artifact.sha256.urls" \
 test ! -e "${TEST_ROOT}/intel-stable/sudo.log"
 ANOLISA_TEST_OS=Linux ANOLISA_TEST_ARCH=x86_64 \
   run_case linux-x64 "install cosh-ng --backend raw" --cosh-ng
+assert_contains "${TEST_ROOT}/linux-x64/artifact.sha256.urls" \
+  "/artifacts/linux/x86_64/anolisa-cli-${TEST_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" linux-x64
 
 for failure in missing-platform checksum download; do
   name="intel-$failure"

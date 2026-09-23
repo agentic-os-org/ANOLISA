@@ -518,7 +518,7 @@ main() {
     artifact="anolisa-cli-${VERSION}-${TARGET}.tar.gz"
     release_dir="$VERSION"
     label="$VERSION"
-    local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${release_dir}/artifacts/${OS}/${ARCH_SHORT}"
+    local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${release_dir}/artifacts/${MANIFEST_OS}/${ARCH_SHORT}"
     tar_url="${base_url}/${artifact}"
     sha_url="${tar_url}.sha256.txt"
   fi
