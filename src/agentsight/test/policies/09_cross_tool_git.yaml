@@ -1,0 +1,7 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule no-git:
+    block exec "git" if AGENT
+    because "git is disabled for this agent"

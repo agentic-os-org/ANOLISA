@@ -1,0 +1,40 @@
+version: 1
+default_domain: review
+
+rules:
+  no-git-branch:
+    ifc: |
+      source COMMAND = exec "**"
+      rule no-git-branch:
+        kill exec "git" "branch" if COMMAND
+        because "do not create git branches"
+
+  no-network:
+    ifc: |
+      source COMMAND = exec "**"
+      rule no-network:
+        kill connect endpoint "*" if COMMAND
+        because "network is disabled by default"
+
+  readonly:
+    ifc: |
+      source COMMAND = exec "**"
+      rule readonly:
+        kill write file "/**" if COMMAND
+        because "review domains are read-only"
+
+domains:
+  session:
+    bind:
+      - rule: no-git-branch
+        mode: locked
+      - rule: no-network
+        mode: default
+
+  review:
+    parent: session
+    disable:
+      - no-network
+    bind:
+      - rule: readonly
+        mode: locked

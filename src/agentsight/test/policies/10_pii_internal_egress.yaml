@@ -1,0 +1,7 @@
+version: 1
+policy: |
+  source PII = file "/data/customers/**"
+
+  rule pii-egress:
+    block connect endpoint "*" if PII unless target "127."
+    because "PII can only reach internal endpoints"

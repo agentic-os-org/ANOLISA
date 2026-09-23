@@ -1,0 +1,16 @@
+version: 1
+rules:
+  parent-lock:
+    ifc: |
+      rule parent-lock:
+        kill exec "git"
+        because "locked"
+domains:
+  session:
+    bind:
+      - rule: parent-lock
+        mode: locked
+  child:
+    parent: session
+    disable:
+      - parent-lock

@@ -1,0 +1,28 @@
+version: 1
+
+rules:
+  protect-policy:
+    ifc: |
+      source COMMAND = exec "**"
+      rule protect-policy:
+        kill write file "**/actplane.yaml" if COMMAND
+        because "active policy is protected"
+
+  read-only-helper:
+    ifc: |
+      source COMMAND = exec "**"
+      rule read-only-helper:
+        kill write file "/repo/**" if COMMAND
+        because "helper domain is read-only"
+
+domains:
+  session:
+    bind:
+      - rule: protect-policy
+        mode: locked
+
+  helper:
+    parent: session
+    bind:
+      - rule: read-only-helper
+        mode: locked

@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule write-needs-linter:
+    notify write file "src/**" if AGENT unless after exec "**/lint" since write "src/**"
+    notify write file "tests/**" if AGENT unless after exec "**/lint" since write "tests/**"
+    because "changed files should be linted"
