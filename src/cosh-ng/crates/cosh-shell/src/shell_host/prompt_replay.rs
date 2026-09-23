@@ -3,11 +3,8 @@ use std::time::{Duration, Instant};
 
 use crate::raw_input::UserPtyInputGeneration;
 
-/// PTY silence at a painted, idle prompt after which unmatched submissions
-/// are written off as consumed by a foreground program. Readline echoes
-/// queued typeahead within milliseconds of painting a prompt, so once the
-/// prompt is up a fresh idle gap this long means no shell response is still
-/// pending.
+/// PTY silence at a painted, idle prompt after which unmatched counted
+/// submissions are written off as consumed by a foreground program.
 const IDLE_RECONCILE_WINDOW: Duration = Duration::from_millis(200);
 
 /// Prompt replay dedup state tied to the user PTY input generation.
@@ -51,6 +48,15 @@ pub(super) struct PromptReplayTracker {
     /// When the most recent relay write event was drained; gates idle
     /// reconciliation so a just-written submission is never written off.
     last_write_seen: Option<Instant>,
+    /// Input written while marker evidence said the shell was away from PS1
+    /// may contain a custom accept-line binding invisible to byte counting.
+    unclassified_away_prompt_input: bool,
+    /// Holds prompt occupancy until an in-band Readline probe, queued after
+    /// all earlier user bytes, proves that unclassified input was consumed.
+    prompt_occupancy_held: bool,
+    /// Input generation for the private Readline probe currently queued after
+    /// all user bytes observed at the latest prompt boundary.
+    idle_probe_generation: Option<u64>,
     idle_reconcile_window: Duration,
     pending_prompt: Option<Vec<u8>>,
     armed_at: u64,
@@ -64,6 +70,9 @@ impl PromptReplayTracker {
             outstanding_submits: 0,
             pending_intercepts: 0,
             last_write_seen: None,
+            unclassified_away_prompt_input: false,
+            prompt_occupancy_held: false,
+            idle_probe_generation: None,
             idle_reconcile_window: IDLE_RECONCILE_WINDOW,
             pending_prompt: None,
             armed_at: 0,
@@ -73,22 +82,83 @@ impl PromptReplayTracker {
     /// Records a relay-reported PTY write. The event travels through the
     /// channel ahead of the PTY echo it triggers, so an armed replay from an
     /// older generation can also be expired here.
-    pub(super) fn observe_user_write(&mut self, generation: u64, line_submits: usize) {
+    pub(super) fn observe_user_write_at_prompt(
+        &mut self,
+        generation: u64,
+        line_submits: usize,
+        at_main_prompt: bool,
+    ) {
         self.last_written = generation;
         self.outstanding_submits = self.outstanding_submits.saturating_add(line_submits);
         self.last_write_seen = Some(Instant::now());
+        self.idle_probe_generation = None;
+        if !at_main_prompt && line_submits == 0 {
+            self.unclassified_away_prompt_input = true;
+        }
         if self.pending_prompt.is_some() && generation != self.armed_at {
             self.pending_prompt = None;
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_user_write(&mut self, generation: u64, line_submits: usize) {
+        self.observe_user_write_at_prompt(generation, line_submits, true);
     }
 
     /// Marks a shell prompt boundary (precmd/shell-ready): the shell
     /// consumed exactly one submitted line and finished responding to it.
     /// Boundaries without a matching submission (e.g. a Ctrl-C prompt
     /// repaint) are ignored by the saturating decrement.
-    pub(super) fn observe_prompt_boundary(&mut self) {
+    ///
+    /// Unclassified input stays fail-closed across any number of boundaries:
+    /// bytes alone cannot reveal how many custom accept-line commands they
+    /// contain. Only the in-band Readline idle probe can release it.
+    pub(super) fn observe_prompt_boundary(&mut self) -> bool {
         self.outstanding_submits = self.outstanding_submits.saturating_sub(1);
         self.pending_intercepts = self.pending_intercepts.saturating_sub(1);
+
+        if std::mem::take(&mut self.unclassified_away_prompt_input) {
+            self.prompt_occupancy_held = true;
+        }
+        self.prompt_occupancy_held
+    }
+
+    /// Queues one private Readline probe behind all user bytes observed so far.
+    /// The probe is armed only for held unclassified input and is invalidated
+    /// by every later user write.
+    pub(super) fn arm_idle_probe(&mut self) -> bool {
+        if !self.prompt_occupancy_held
+            || self.idle_probe_generation.is_some()
+            || self.input_generation.current() != self.last_written
+        {
+            return false;
+        }
+        self.idle_probe_generation = Some(self.last_written);
+        true
+    }
+
+    /// Releases held occupancy only when Readline consumes the exact probe
+    /// generation queued after the preceding user input.
+    pub(super) fn observe_idle_probe(&mut self) -> bool {
+        let Some(generation) = self.idle_probe_generation.take() else {
+            return false;
+        };
+        if generation != self.input_generation.current() || !self.prompt_occupancy_held {
+            return false;
+        }
+        self.unclassified_away_prompt_input = false;
+        self.prompt_occupancy_held = false;
+        true
+    }
+
+    /// Returns whether a submitted line still awaits its own prompt boundary.
+    pub(super) fn has_unconsumed_submit(&self) -> bool {
+        self.outstanding_submits > self.pending_intercepts
+    }
+
+    /// Returns the newest PTY write generation drained by the relay.
+    pub(super) fn last_written_generation(&self) -> u64 {
+        self.last_written
     }
 
     /// Marks a DEBUG-trap intercept: the just-submitted line was killed and
@@ -106,29 +176,27 @@ impl PromptReplayTracker {
     /// Requires causal evidence that readline is back in control before the
     /// silence window counts: no marker-tracked command running, every relay
     /// write drained, and prompt bytes painted after the shell's post-hook
-    /// `prompt_ready` marker (`prompt_painted`). The precmd marker fires before
-    /// the user's own PROMPT_COMMAND body and the PS1 paint, so
-    /// boundary-plus-silence alone (e.g. a slow PROMPT_COMMAND) proves nothing
-    /// about queued typeahead.
-    /// Once the prompt is up, readline echoes queued submissions within
-    /// milliseconds, so a genuinely pending one cannot survive the window;
-    /// without this write-off one `read`/REPL interaction would disable
-    /// replay dedup for the rest of the session. Even a premature write-off
-    /// is bounded by the strip fail-open to a duplicate prompt paint.
+    /// `prompt_ready` marker (`prompt_painted`). Unclassified custom bindings
+    /// are excluded: only the in-band idle probe can settle their occupancy.
+    ///
+    /// Without this write-off one `read`/REPL interaction would disable replay
+    /// dedup for the rest of the session. A premature submit-only write-off is
+    /// bounded by the strip fail-open to a duplicate prompt paint.
     pub(super) fn reconcile_idle_at_prompt(
         &mut self,
         command_running: bool,
         prompt_painted: bool,
         last_pty_output: Option<Instant>,
-    ) {
+    ) -> bool {
+        let had_unconsumed_submit = self.has_unconsumed_submit();
         if (self.outstanding_submits == 0 && self.pending_intercepts == 0)
             || command_running
             || !prompt_painted
         {
-            return;
+            return false;
         }
         if self.input_generation.current() != self.last_written {
-            return;
+            return false;
         }
         let now = Instant::now();
         let settled = |at: Option<Instant>| {
@@ -138,6 +206,7 @@ impl PromptReplayTracker {
             self.outstanding_submits = 0;
             self.pending_intercepts = 0;
         }
+        had_unconsumed_submit && !self.has_unconsumed_submit()
     }
 
     pub(super) fn idle_reconcile_remaining(
@@ -172,15 +241,16 @@ impl PromptReplayTracker {
     /// accept-line response. Submissions the DEBUG trap intercepted are
     /// exempt: their only response is the repaint this arm exists to strip.
     ///
-    /// Known limit: editor-execute functions and custom `.inputrc` submission
-    /// bindings without CR/LF/Ctrl-O are invisible to the submission counter,
-    /// so a boundary or intercept they produce can let this arm over a queued
-    /// Enter. The strip fail-open bounds that mistake to a duplicate prompt
-    /// paint: the Enter's response never opens with the prompt bytes, so it is
-    /// passed through verbatim.
+    /// Custom submission bindings are guarded separately by marker-proven
+    /// prompt occupancy, so they cannot arm replay until an in-band Readline
+    /// probe queued behind all earlier input is consumed.
     pub(super) fn arm_for_replay(&mut self, prompt: &[u8]) {
         let current = self.input_generation.current();
-        if current != self.last_written || self.outstanding_submits > self.pending_intercepts {
+        if current != self.last_written
+            || self.outstanding_submits > self.pending_intercepts
+            || self.prompt_occupancy_held
+            || self.unclassified_away_prompt_input
+        {
             return;
         }
         self.arm(prompt, current);

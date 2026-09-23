@@ -138,6 +138,12 @@ expected = "active"
 探测通过时走真实 login 身份路径；Bash 3.2（包括 macOS 系统 Bash）、探测失败，或父环境导出了
 POSIX 启动无法导入的函数名时都会自动回退。zsh 不受影响。
 
+## 登录升级提示
+
+登录时，`cosh-shell` 会在后台检查托管安装的 `cosh-ng` 是否有可用更新，并在发现更新时显示提示。该检查默认开启。将 `COSH_SHELL_UPGRADE_CHECK` 设为 `off`、`0`、`false` 或 `no`（不区分大小写），可在下一次会话禁用检查。设置 `COSH_SHELL_UPGRADE_CHECK_CACHE` 可覆盖缓存文件路径；默认路径为 `~/.copilot-shell/cosh/upgrade-check.json`。
+
+如果 `cosh-ng` 由 `anolisa` 以 system 作用域、默认 raw 后端安装，只有 root 会话会显示升级提示。普通用户无法执行 system 作用域的更新检查（需要写入 `/var/cache/anolisa`），因此不会看到提示。如需手动检查，请运行 `sudo anolisa --install-mode system update cosh-ng --dry-run`。RPM 后端安装不受影响。
+
 ## 审计设置
 
 系统文件包含 `[audit]` 表时，以系统设置为准；否则使用用户设置。项目审计表会被忽略。
@@ -185,6 +191,8 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
 | `COSH_SHELL_LOGIN_IDENTITY` | 下一次 Enhanced 登录 shell 是否启用真实 login 身份，`on`/`off`（默认 on） |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
+| `COSH_SHELL_UPGRADE_CHECK` | 登录升级提示检查；默认开启，设为 `off`、`0`、`false` 或 `no` 可禁用 |
+| `COSH_SHELL_UPGRADE_CHECK_CACHE` | 覆盖登录升级提示缓存路径（默认 `~/.copilot-shell/cosh/upgrade-check.json`） |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |
 | `COSH_AUDIT_DIR` | 审计存储根目录 |

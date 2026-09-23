@@ -12,9 +12,10 @@ use super::{
     bootstrap_process_path_from_shell, extract_bootstrap_path, merge_bootstrap_paths,
     merge_path_additions_at_anchors, merge_path_lists, plan_startup_for_render,
     record_visible_personal_impressions, render_pending_recommendation_notice,
-    run_bootstrap_path_probe, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind,
-    StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
+    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
+    BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
+    BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -1049,6 +1050,70 @@ fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
     let mut quiet = Vec::new();
     append_startup_auth_hint(&mut disabled, &mut quiet);
     assert!(quiet.is_empty());
+}
+
+#[test]
+fn cached_upgrade_notice_is_excluded_from_banner_and_rendered_as_a_panel() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.startup_upgrade.resolved = Some(Some(crate::upgrade::check::UpgradeNotice {
+        package: "cosh-ng".to_string(),
+        current: "1.0.0".to_string(),
+        latest: "1.1.0".to_string(),
+        command: "anolisa update cosh-ng".to_string(),
+    }));
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    event.cwd = Some("/tmp".to_string());
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+
+    let mut banner = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut banner).unwrap();
+    let banner = String::from_utf8(banner).unwrap();
+    assert!(state.rendered_startup_banner);
+    assert!(!banner.contains("1.0.0 → 1.1.0"), "{banner}");
+    assert!(!banner.contains("anolisa update cosh-ng"), "{banner}");
+    assert!(!state.startup_upgrade.rendered);
+
+    let mut panel = Vec::new();
+    render_pending_upgrade_notice(&mut state, &mut panel).unwrap();
+    let panel = String::from_utf8(panel).unwrap();
+    assert!(panel.starts_with("\r\u{1b}[2K"), "{panel}");
+    assert!(panel.contains("cosh-ng update available"), "{panel}");
+    assert!(panel.contains("1.0.0 → 1.1.0"), "{panel}");
+    assert!(state.startup_upgrade.rendered);
+}
+
+#[test]
+fn late_upgrade_probe_renders_a_deferred_notice() {
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    state.startup_upgrade.pending = Some(receiver);
+
+    let mut output = Vec::new();
+    render_pending_upgrade_notice(&mut state, &mut output).unwrap();
+    assert!(output.is_empty());
+    assert!(!state.startup_upgrade.rendered);
+
+    sender
+        .send(Some(crate::upgrade::check::UpgradeNotice {
+            package: "cosh-ng".to_string(),
+            current: "1.0.0".to_string(),
+            latest: "1.1.0".to_string(),
+            command: "anolisa update cosh-ng".to_string(),
+        }))
+        .unwrap();
+    render_pending_upgrade_notice(&mut state, &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.starts_with("\r\u{1b}[2K"), "{output}");
+    assert!(output.contains("cosh-ng update available"), "{output}");
+    assert!(output.contains("anolisa update cosh-ng"), "{output}");
+    assert!(state.startup_upgrade.rendered);
 }
 
 #[test]

@@ -2125,11 +2125,13 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
             RawInputEvent::PtyUserWrite {
                 generation: 1,
                 line_submits: 0,
+                at_main_prompt: false,
             },
             RawInputEvent::ShellInputActivity { empty: true },
             RawInputEvent::PtyUserWrite {
                 generation: 2,
                 line_submits: 0,
+                at_main_prompt: false,
             },
         ]
     );
@@ -2190,6 +2192,7 @@ fn zsh_native_slash_tab_is_handed_to_shell_immediately() {
             RawInputEvent::PtyUserWrite {
                 generation,
                 line_submits,
+                ..
             } => Some((*generation, *line_submits)),
             _ => None,
         })
@@ -2417,11 +2420,13 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
             RawInputEvent::PtyUserWrite {
                 generation: 1,
                 line_submits: 0,
+                at_main_prompt: false,
             },
             RawInputEvent::ShellInputActivity { empty: true },
             RawInputEvent::PtyUserWrite {
                 generation: 2,
                 line_submits: 0,
+                at_main_prompt: false,
             },
         ]
     );

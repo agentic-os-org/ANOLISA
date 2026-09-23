@@ -1186,13 +1186,14 @@ _cosh_precmd_marker() {
   if [[ "${_COSH_USER_HISTORY_ENABLED:-0}" == 1 ]]; then
     set -o history
   fi
-  # The relay inserts this private sequence at a recognized main-prompt
-  # accept boundary. The widget inspects and clears Readline's unexpanded
-  # buffer so guarded slash controls never reach Bash parsing.
+  # The relay inserts these private sequences at recognized prompt boundaries.
+  # Guard widgets inspect Readline's buffer; the idle probe reports only after
+  # Readline consumes every earlier byte already queued on the PTY.
   for _cosh_keymap in emacs-standard emacs-meta vi-insert vi-command; do
     bind -m "$_cosh_keymap" -x '"\e[99~":_cosh_guard_slash_submission' 2>/dev/null || true
     bind -m "$_cosh_keymap" -x '"\e[100~":_cosh_guard_private_slash_submission' 2>/dev/null || true
     bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
+    bind -m "$_cosh_keymap" -x '"\e[102~":_cosh_emit_marker prompt_idle "" 0 false > /dev/tty' 2>/dev/null || true
   done
   unset _cosh_keymap
   IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true

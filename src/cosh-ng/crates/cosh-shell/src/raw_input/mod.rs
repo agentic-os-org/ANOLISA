@@ -44,12 +44,13 @@ pub(crate) enum RawInputEvent {
     ShellInputActivity {
         empty: bool,
     },
-    /// User bytes the relay wrote to the PTY: the write generation plus how
-    /// many recognized line submissions the write carried. Anchors prompt
-    /// replay state so real user input expires stale replays.
+    /// User bytes the relay wrote to the PTY: the write generation, recognized
+    /// line submissions, and whether a marker-proven prompt owned the input.
+    /// Anchors prompt replay state so real user input expires stale replays.
     PtyUserWrite {
         generation: u64,
         line_submits: usize,
+        at_main_prompt: bool,
     },
     CtrlC,
     Esc,

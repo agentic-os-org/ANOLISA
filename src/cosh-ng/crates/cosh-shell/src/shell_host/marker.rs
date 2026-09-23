@@ -147,6 +147,15 @@ mod tests {
     }
 
     #[test]
+    fn bash_marker_installs_the_readline_idle_probe_binding() {
+        let script = bash_marker_script();
+
+        assert!(script.contains(
+            r#"bind -m "$_cosh_keymap" -x '"\e[102~":_cosh_emit_marker prompt_idle "" 0 false > /dev/tty'"#
+        ));
+    }
+
+    #[test]
     fn non_interactive_pager_prefix_only_covers_documented_pager_variables() {
         assert_eq!(
             NON_INTERACTIVE_PAGER_PREFIX,

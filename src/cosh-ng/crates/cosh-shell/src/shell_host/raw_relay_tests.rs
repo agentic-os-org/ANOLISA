@@ -119,6 +119,28 @@ fn feed_enhanced_prompt_ready(parser: &mut OscParser) {
 }
 
 #[test]
+fn compact_bash_prompt_enables_authenticated_idle_probe_markers() {
+    let mut parser = parser_for_test("readline-idle-probe");
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"p\",\"t\":\"test-marker-token\",\"s\":0}\x07")
+        .expect("feed compact prompt");
+    assert!(parser.supports_prompt_idle_probe());
+    assert!(!parser.take_prompt_idle_probe());
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"prompt_idle\",\"t\":\"wrong-token\"}\x07")
+        .expect("feed untrusted idle marker");
+    assert!(!parser.take_prompt_idle_probe());
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"prompt_idle\",\"t\":\"test-marker-token\"}\x07")
+        .expect("feed trusted idle marker");
+    assert!(parser.take_prompt_idle_probe());
+    assert!(!parser.take_prompt_idle_probe());
+}
+
+#[test]
 fn prompt_snapshot_publishes_only_after_pty_is_drained() {
     for (name, drained, expected) in [
         ("not-drained", false, b"".as_slice()),
@@ -311,13 +333,11 @@ fn relay_write_event_expires_armed_prompt_replay() {
 }
 
 #[test]
-fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
-    // Production wiring: a PTY write with zero detected line submits
-    // (submit detection cannot see custom `accept-line` bindings)
-    // must still emit the shell_pty_input barrier event that the
-    // dispatcher consumes to invalidate the prompt-cwd report.
-    // Consecutive writes collapse into one event; a fresh
-    // command-less prompt report re-arms the barrier.
+fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
+    // Production wiring must invalidate both cwd evidence and prompt occupancy
+    // even when submit detection cannot see a custom `accept-line` binding.
+    // Cwd evidence is restored only by `ShellReady`, while every precmd restores
+    // prompt occupancy and independently re-arms that barrier.
     let mut parser = parser_for_test("pty-write-cwd-barrier");
     let (generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -325,12 +345,12 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     let mut echoed = 0usize;
     let prompt_presentation = PromptPresentation::new(false);
 
-    let barrier_count = |parser: &OscParser| {
+    let barrier_count = |parser: &OscParser, component| {
         parser
             .events
             .iter()
             .filter(|event| {
-                event.component.as_deref() == Some("shell_pty_input")
+                event.component.as_deref() == Some(component)
                     && event.message.as_deref() == Some("write")
             })
             .count()
@@ -341,6 +361,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
             .send(crate::raw_input::RawInputEvent::PtyUserWrite {
                 generation: generation.bump(),
                 line_submits: 0,
+                at_main_prompt: true,
             })
             .expect("queue pty write");
     }
@@ -355,9 +376,9 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     )
     .expect("drain pty writes");
     assert_eq!(
-        barrier_count(&parser),
+        barrier_count(&parser, "shell_pty_input"),
         1,
-        "consecutive writes must collapse into one barrier event"
+        "consecutive writes must collapse into one cwd barrier event"
     );
 
     // A fresh command-less prompt report re-arms the barrier, so the
@@ -367,6 +388,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         .send(crate::raw_input::RawInputEvent::PtyUserWrite {
             generation: generation.bump(),
             line_submits: 0,
+            at_main_prompt: true,
         })
         .expect("queue post-prompt write");
     drain_raw_input_events(
@@ -380,9 +402,44 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     )
     .expect("drain post-prompt write");
     assert_eq!(
-        barrier_count(&parser),
+        barrier_count(&parser, "shell_pty_input"),
         2,
-        "a fresh prompt report must re-arm the barrier"
+        "a command-less prompt report must re-arm the cwd barrier"
+    );
+
+    parser
+        .feed(
+            b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":\"true\",\"cwd\":\"/tmp\"}\x07",
+        )
+        .expect("feed preexec");
+    feed_shell_ready(&mut parser);
+    sender
+        .send(crate::raw_input::RawInputEvent::PtyUserWrite {
+            generation: generation.bump(),
+            line_submits: 0,
+            at_main_prompt: true,
+        })
+        .expect("queue post-command write");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("drain post-command write");
+
+    assert_eq!(
+        barrier_count(&parser, "shell_pty_input"),
+        2,
+        "command completion must not restore invalidated cwd evidence"
+    );
+    assert_eq!(
+        barrier_count(&parser, "shell_prompt_input"),
+        3,
+        "command completion must re-arm the prompt occupancy barrier"
     );
 }
 
@@ -395,6 +452,7 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         .send(RawInputEvent::PtyUserWrite {
             generation: generation.bump(),
             line_submits: 0,
+            at_main_prompt: true,
         })
         .unwrap();
     sender
@@ -732,6 +790,70 @@ fn typeahead_submission_blocks_arm_until_its_own_prompt_boundary() {
     prompt_replay.observe_prompt_boundary();
     prompt_replay.arm_for_replay(b"prompt> ");
     assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn uncounted_away_prompt_input_waits_for_the_in_band_idle_probe() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+    prompt_replay.set_idle_reconcile_window(Duration::ZERO);
+
+    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_at_prompt(generation.bump(), 0, false);
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+
+    // Prompt paint and arbitrary silence cannot prove that Readline exhausted
+    // custom accept-line keys buffered ahead of the next command.
+    assert!(!prompt_replay.reconcile_idle_at_prompt(false, true, None));
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(!prompt_replay.is_armed());
+
+    assert!(prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn consecutive_uncounted_submissions_hold_through_every_command_boundary() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+
+    prompt_replay.observe_user_write(generation.bump(), 1);
+    // One coalesced PTY write may contain any number of custom accept-line
+    // keys, so it deliberately records no guessed submission count.
+    prompt_replay.observe_user_write_at_prompt(generation.bump(), 0, false);
+
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+    // The foreground command and both queued commands may each produce a
+    // boundary, but none is proof that Readline exhausted queued input.
+    for _ in 0..2 {
+        assert!(prompt_replay.observe_prompt_boundary());
+        assert!(!prompt_replay.arm_idle_probe());
+        prompt_replay.arm_for_replay(b"prompt> ");
+        assert!(!prompt_replay.is_armed());
+    }
+
+    assert!(prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn user_write_invalidates_an_earlier_idle_probe_generation() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+
+    prompt_replay.observe_user_write_at_prompt(generation.bump(), 0, false);
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+
+    prompt_replay.observe_user_write_at_prompt(generation.bump(), 0, false);
+    assert!(!prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(!prompt_replay.is_armed());
+
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+    assert!(prompt_replay.observe_idle_probe());
 }
 
 #[test]
