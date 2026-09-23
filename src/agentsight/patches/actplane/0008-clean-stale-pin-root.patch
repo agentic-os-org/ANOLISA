@@ -1,0 +1,166 @@
+--- a/bpf/src/lib.rs	2026-09-23 10:00:00.000000000 +0800
++++ b/bpf/src/lib.rs	2026-09-23 10:00:00.000000000 +0800
+@@ -606,2 +606,2 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
+-        return Err(err(format!(
+-            "ActPlane pinned metadata mismatch at {}: expected {marker}; remove the pin root before changing ActPlane revision, profile, or schema",
++        return Err(stale_layout_err(format!(
++            "ActPlane pinned metadata mismatch at {}: expected {marker}",
+@@ -636,0 +637,30 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
++/// Remove a stale pin root — incomplete (e.g. an install aborted mid-way)
++/// or left by an incompatible ActPlane revision — so the reinstall does not
++/// fail with `BPF_OBJ_PIN` EEXIST. A missing root (fresh install) is a no-op.
++fn remove_stale_pin_root(paths: &PinnedEnginePaths) -> io::Result<()> {
++    if !paths.root.try_exists()? {
++        return Ok(());
++    }
++    // Defense in depth against a mis-set ACTPLANE_BPF_PIN_ROOT: never remove
++    // a populated directory that does not look like a pin root; an empty
++    // directory is always safe to clear.
++    let pin_layout = paths.maps_dir().try_exists()? || paths.links_dir().try_exists()?;
++    let empty = paths.root.read_dir()?.next().is_none();
++    if !pin_layout && !empty {
++        return Err(err(format!(
++            "refusing to remove {}: not an ActPlane pin root layout",
++            paths.root.display()
++        )));
++    }
++    log::warn!(
++        "ActPlane: removing stale pin root at {} before reinstall",
++        paths.root.display()
++    );
++    std::fs::remove_dir_all(&paths.root).map_err(|e| {
++        err(format!(
++            "remove stale ActPlane pin root at {}: {e}",
++            paths.root.display()
++        ))
++    })
++}
++
+@@ -638,2 +668,2 @@ fn pinned_profile_mismatch(paths: &PinnedEnginePaths, link: &str) -> io::Error {
+-    err(format!(
+-        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}; remove the pin root before changing profiles",
++    stale_layout_err(format!(
++        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}",
+@@ -1511,0 +1542,8 @@ fn err(msg: impl Into<String>) -> io::Error {
++/// Error kind marking a stale pinned-engine layout (marker/profile/schema
++/// mismatch with the current build): callers may delete the pin root and
++/// reinstall. Genuine I/O failures keep their original kind and must not be
++/// reinterpreted as staleness.
++fn stale_layout_err(msg: impl Into<String>) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, msg.into())
++}
++
+@@ -1889 +1927,8 @@ impl PinnedEngine {
+-        if pinned_engine_present(&paths, reserve)? {
++        let present = match pinned_engine_present(&paths, reserve) {
++            Ok(present) => present,
++            // Stale layout from an incompatible ActPlane revision: fall
++            // through and rebuild instead of failing the process start.
++            Err(e) if e.kind() == io::ErrorKind::InvalidData => false,
++            Err(e) => return Err(e),
++        };
++        if present {
+@@ -1894,0 +1940 @@ impl PinnedEngine {
++        remove_stale_pin_root(&paths)?;
+@@ -3657,0 +3704,97 @@ mod tests {
++    /// Upgrade residue (an older or aborted install) leaves maps pinned under
++    /// the root; the self-heal must remove the whole root so the reinstall
++    /// does not hit `BPF_OBJ_PIN` EEXIST (#3445).
++    #[test]
++    fn remove_stale_pin_root_deletes_existing_root() {
++        let root = std::env::temp_dir().join(format!("actplane-pin-stale-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        let paths = PinnedEnginePaths::new(&root);
++        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
++        std::fs::write(paths.map("ts_proc_domains"), b"").expect("stale map pin");
++
++        remove_stale_pin_root(&paths).expect("remove stale root");
++        assert!(!paths.root.exists(), "stale root must be gone");
++
++        let _ = std::fs::remove_dir_all(&root);
++    }
++
++    /// Fresh installs have no root at all; the self-heal must stay a no-op
++    /// rather than fail or create the directory.
++    #[test]
++    fn remove_stale_pin_root_noop_when_absent() {
++        let root =
++            std::env::temp_dir().join(format!("actplane-pin-stale-absent-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        let paths = PinnedEnginePaths::new(&root);
++
++        remove_stale_pin_root(&paths).expect("absent root is a no-op");
++        assert!(!paths.root.exists(), "no-op must not create the root");
++    }
++
++    /// A populated directory that is not a pin root layout (no `maps/` or
++    /// `links/` child) must be refused: a mis-set `ACTPLANE_BPF_PIN_ROOT`
++    /// points the self-heal at an unrelated directory, and deleting it would
++    /// destroy data instead of converging the engine.
++    #[test]
++    fn remove_stale_pin_root_refuses_non_pin_layout() {
++        let root =
++            std::env::temp_dir().join(format!("actplane-pin-stale-foreign-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        std::fs::create_dir_all(&root).expect("foreign dir");
++        std::fs::write(root.join("payload.txt"), b"").expect("foreign payload");
++        let paths = PinnedEnginePaths::new(&root);
++
++        let err = remove_stale_pin_root(&paths).expect_err("foreign dir must be refused");
++        assert!(
++            err.to_string().contains("refusing to remove"),
++            "unexpected error: {err}"
++        );
++        assert!(root.join("payload.txt").exists(), "foreign payload must survive");
++
++        // An empty directory is harmless to clear.
++        std::fs::remove_file(root.join("payload.txt")).expect("clear payload");
++        remove_stale_pin_root(&paths).expect("empty dir is safe to clear");
++        assert!(!root.exists(), "empty dir must be gone");
++
++        let _ = std::fs::remove_dir_all(&root);
++    }
++
++    /// A marker/profile mismatch must be distinguishable from genuine I/O
++    /// failures: the self-heal rebuilds only on `InvalidData`. Reverting the
++    /// error kind makes this fail even though the message stays similar.
++    #[test]
++    fn pinned_engine_present_mismatch_is_marked_stale_layout() {
++        let root = std::env::temp_dir().join(format!("actplane-pin-kind-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        let paths = PinnedEnginePaths::new(&root);
++        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
++        for name in [
++            "rb",
++            "cap_req",
++            "cap_pending_submitter",
++            "cap_task",
++            "cap_state",
++            "cap_policy",
++            "ts_counts",
++            "ts_proc",
++            "ts_proc_domains",
++            "ts_root",
++            "te_protected_pids",
++            "te_inode_guard",
++        ] {
++            std::fs::write(paths.map(name), b"").expect("map pin");
++        }
++        // Any name that is not the current marker forces the mismatch branch.
++        std::fs::write(paths.map("agentsight_profile_obsolete_v0"), b"").expect("old marker");
++
++        let err = pinned_engine_present(&paths, HookReserve::default())
++            .expect_err("mismatched marker must be rejected");
++        assert_eq!(
++            err.kind(),
++            std::io::ErrorKind::InvalidData,
++            "mismatch must be marked as a stale layout, got: {err:?}"
++        );
++
++        let _ = std::fs::remove_dir_all(&root);
++    }
++
+--- a/bpf/Cargo.toml	2026-09-23 10:00:00.000000000 +0800
++++ b/bpf/Cargo.toml	2026-09-23 10:00:00.000000000 +0800
+@@ -18,0 +19 @@ libbpf-sys = "1.7"
++log = "0.4"

@@ -650,6 +650,17 @@ fn remove_stale_pin_root(paths: &PinnedEnginePaths) -> io::Result<()> {
     if !paths.root.try_exists()? {
         return Ok(());
     }
+    // Defense in depth against a mis-set ACTPLANE_BPF_PIN_ROOT: never remove
+    // a populated directory that does not look like a pin root; an empty
+    // directory is always safe to clear.
+    let pin_layout = paths.maps_dir().try_exists()? || paths.links_dir().try_exists()?;
+    let empty = paths.root.read_dir()?.next().is_none();
+    if !pin_layout && !empty {
+        return Err(err(format!(
+            "refusing to remove {}: not an ActPlane pin root layout",
+            paths.root.display()
+        )));
+    }
     log::warn!(
         "ActPlane: removing stale pin root at {} before reinstall",
         paths.root.display()
@@ -4853,6 +4864,37 @@ os.execv({hit:?}, [{hit:?}])
 
         remove_stale_pin_root(&paths).expect("absent root is a no-op");
         assert!(!paths.root.exists(), "no-op must not create the root");
+    }
+
+    /// A populated directory that is not a pin root layout (no `maps/` or
+    /// `links/` child) must be refused: a mis-set `ACTPLANE_BPF_PIN_ROOT`
+    /// points the self-heal at an unrelated directory, and deleting it would
+    /// destroy data instead of converging the engine.
+    #[test]
+    fn remove_stale_pin_root_refuses_non_pin_layout() {
+        let root =
+            std::env::temp_dir().join(format!("actplane-pin-stale-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("foreign dir");
+        std::fs::write(root.join("payload.txt"), b"").expect("foreign payload");
+        let paths = PinnedEnginePaths::new(&root);
+
+        let err = remove_stale_pin_root(&paths).expect_err("foreign dir must be refused");
+        assert!(
+            err.to_string().contains("refusing to remove"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            root.join("payload.txt").exists(),
+            "foreign payload must survive"
+        );
+
+        // An empty directory is harmless to clear.
+        std::fs::remove_file(root.join("payload.txt")).expect("clear payload");
+        remove_stale_pin_root(&paths).expect("empty dir is safe to clear");
+        assert!(!root.exists(), "empty dir must be gone");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A marker/profile mismatch must be distinguishable from genuine I/O

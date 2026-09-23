@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Let `agentsight-enforcer` recover by itself when an upgrade leaves an
+  enforcement layout the new binary cannot reuse: the stale layout is now
+  detected and replaced automatically, so file-delete guard and enforcement
+  health no longer stay down until someone removes the old layout by hand.
+  (#3445)
+
 ## 0.13.0
 
 ### Features

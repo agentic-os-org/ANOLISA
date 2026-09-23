@@ -10,7 +10,8 @@ ACTPLANE_POST_0002_BPF_LIB_BLOB="6ddf254640e41c227a8e6d794cef247f2705bd26"
 ACTPLANE_POST_0003_BPF_LIB_BLOB="9aa60178ba61a6ad0723b1fe01e823ee94ee742d"
 ACTPLANE_POST_0004_BPF_LIB_BLOB="e1bca6268e0cca0a2d4aa59cc807592f65671a01"
 ACTPLANE_POST_0005_BPF_LIB_BLOB="efe99bacf1f50ec388e35542aa0210b74c9ac970"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="1f7208a5d81ce822ac6ddc25b4c126d1ac96c891"
+ACTPLANE_POST_0007_BPF_LIB_BLOB="1f7208a5d81ce822ac6ddc25b4c126d1ac96c891"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="d76db22d5517abf3c5b43d5d30fe11d641d4c805"
 ACTPLANE_STAGED_PREBUILT_BPF_BLOB="db8b3a82101013238e6d8f6c0e70df563da62b9a"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
@@ -24,13 +25,15 @@ PATCH_0004_FILE="$PATCH_DIR/0004-add-config-blob-size-guard.patch"
 PATCH_0005_FILE="$PATCH_DIR/0005-add-agent-file-guard-profile.patch"
 PATCH_0006_FILE="$PATCH_DIR/0006-add-inode-guard-map.patch"
 PATCH_0007_FILE="$PATCH_DIR/0007-dedicated-drain-trigger.patch"
+PATCH_0008_FILE="$PATCH_DIR/0008-clean-stale-pin-root.patch"
 PATCH_FILES="$PATCH_0001_FILE
 $PATCH_0002_FILE
 $PATCH_0003_FILE
 $PATCH_0004_FILE
 $PATCH_0005_FILE
 $PATCH_0006_FILE
-$PATCH_0007_FILE"
+$PATCH_0007_FILE
+$PATCH_0008_FILE"
 CARGO=${CARGO:-cargo}
 
 DECLARED_REVISION_COUNT=$(grep -F -c "rev = \"$ACTPLANE_REVISION\"" "$AGENTSIGHT_ROOT/Cargo.toml" || true)
@@ -127,27 +130,32 @@ if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0001_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE"; do
+    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0002_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE"; do
+    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0003_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE"; do
+    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0004_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE"; do
+    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0005_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE"; do
+    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE"; do
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0007_BPF_LIB_BLOB" ]; then
+    for patch_file in "$PATCH_0008_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
