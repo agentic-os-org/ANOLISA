@@ -46,8 +46,13 @@ use crate::slash::session::poll_background_compaction;
 use super::controller::pending_card_capture;
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
 use super::startup::{
-    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+    render_pending_recommendation_notice, render_pending_upgrade_notice_at_idle_prompt,
+    render_pending_upgrade_notice_at_prompt_boundary, render_startup_banner,
+    render_startup_health_banner,
 };
+use shell_prompt::update_shell_prompt_state;
+
+mod shell_prompt;
 
 pub(crate) enum RuntimeAction {
     AdvanceEventCursor(ShellEventCursor),
@@ -140,33 +145,7 @@ fn render_inline_guidance_from_batch<W: Write>(
                 | ShellEventKind::CommandFailed
         )
     });
-    // The shell's latest prompt-time cwd report: a `ShellReady` event
-    // is a precmd marker with no command in flight and carries the
-    // shell's `$PWD`, so it is positive evidence both that the marker
-    // channel works and of where the shell sits. Any later PTY input
-    // write invalidates the report — submit-detection in the byte
-    // stream is a documented heuristic (a custom `accept-line`
-    // binding is indistinguishable from editing keys), and the
-    // submitted line may have been a `cd` whose markers were lost
-    // entirely — so the report is only current while no user input
-    // follows it. Scanned newest first: the most recent decisive
-    // event wins, and an event-free dispatch never erases the last
-    // known state.
-    for event in action_events.iter().rev() {
-        if event.kind == ShellEventKind::UserInputIntercepted
-            && event.component.as_deref() == Some("shell_pty_input")
-            && event.message.as_deref() == Some("write")
-        {
-            state.shell_prompt_cwd = None;
-            break;
-        }
-        if event.kind == ShellEventKind::ShellReady {
-            if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
-                state.shell_prompt_cwd = Some(cwd.to_string());
-                break;
-            }
-        }
-    }
+    update_shell_prompt_state(action_events, state);
     if state.shell_exited {
         if let Some(event) = events
             .iter()
@@ -257,10 +236,11 @@ fn render_inline_guidance_from_batch<W: Write>(
     }
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
-    render_startup_health_banner(state, output)?;
-    render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
     update_soft_newline_tip_state(action_events, state);
+    render_startup_health_banner(state, output)?;
+    render_pending_upgrade_notice_at_prompt_boundary(action_events, state, output)?;
+    render_pending_recommendation_notice(state, output)?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events
@@ -448,6 +428,9 @@ fn poll_inline_runtime_without_shell_events<W: Write>(
     }
 
     render_startup_health_banner(state, output)?;
+    if state.shell_at_prompt {
+        render_pending_upgrade_notice_at_idle_prompt(state, output)?;
+    }
     render_pending_recommendation_notice(state, output)?;
     let personal_idle =
         state.agent_run.active.is_none() && !state.personalization.shell_input_active;

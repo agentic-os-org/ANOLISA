@@ -29,3 +29,16 @@ macro_rules! startup_auth_hint_ids {
         );
     };
 }
+
+// Registered as a trailing segment so all existing MessageId
+// discriminants remain stable.
+macro_rules! startup_upgrade_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            StartupUpgradeHintLine,
+            StartupUpgradeNoticeTitle,
+        );
+    };
+}

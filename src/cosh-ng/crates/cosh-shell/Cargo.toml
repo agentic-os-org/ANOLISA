@@ -17,6 +17,7 @@ path = "src/main.rs"
 chrono = { workspace = true, features = ["clock", "serde"] }
 nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
 ratatui = "0.28"
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
