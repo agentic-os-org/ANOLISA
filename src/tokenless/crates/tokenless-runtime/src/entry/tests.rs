@@ -964,6 +964,78 @@ fn pre_tool_anchor_preserves_quoted_arguments_and_handles_subshells() {
     );
 }
 
+/// Contract v1 pin for the wrapper form published in
+/// `docs/design/rtk-hook-placement.md`. Host risk classifiers unwrap this
+/// exact shape, so changing the key set, the key order, the quoting rule, or
+/// the payload is a contract break and must bump the documented version.
+#[test]
+fn pre_tool_rtk_wrapper_matches_published_contract_v1() {
+    let launcher = Path::new("/opt/tokenless bin/tokenless");
+    // A literal directory with a space: the contract promises `shell_quote`
+    // semantics for every value, and these two values need quoting while
+    // `call/1` stays bare.
+    let data_dir = Path::new("/var/lib/tokenless state");
+    let attribution = Attribution {
+        agent_id: "cosh".into(),
+        session_id: Some("session 1".into()),
+        tool_use_id: Some("call/1".into()),
+    };
+    // Fixed key order after `env`, then the launcher and the `rtk`
+    // subcommand the payload keeps, then RTK's own form of the segment.
+    let prefix = "env TOKENLESS_AGENT_ID=cosh TOKENLESS_SESSION_ID='session 1' \
+                  TOKENLESS_TOOL_USE_ID=call/1 \
+                  TOKENLESS_DATA_DIR='/var/lib/tokenless state'";
+    let invocation = "'/opt/tokenless bin/tokenless' rtk";
+    assert_eq!(
+        anchor_rtk_prefix(
+            "git status",
+            "rtk git status",
+            launcher,
+            &attribution,
+            data_dir
+        ),
+        format!("{prefix} {invocation} git status")
+    );
+    // Outcome receipts insert exactly two optional keys, after the four above
+    // and before the launcher, one pair per rewritten segment.
+    assert_eq!(
+        anchor_rtk_prefix_with_outcomes(
+            "git status && git log",
+            "rtk git status && rtk git log",
+            launcher,
+            &attribution,
+            data_dir,
+            |count, render| {
+                assert_eq!(count, 2);
+                Some(render("run 7"))
+            },
+        ),
+        format!(
+            "{prefix} TOKENLESS_RTK_RUN_ID='run 7' TOKENLESS_RTK_ORDINAL=0 {invocation} git status \
+             && {prefix} TOKENLESS_RTK_RUN_ID='run 7' TOKENLESS_RTK_ORDINAL=1 {invocation} git log"
+        )
+    );
+    // End to end, PreTool still hands that wrapper back as replaced arguments.
+    // Attribution without a session or tool-use id earns no receipt, so the
+    // produced form is exact.
+    let response = pre_tool_with_rewriter(
+        &bash_request("git status"),
+        &Attribution::new("cosh"),
+        Some(launcher),
+        Some(data_dir),
+        |_| rtk::RewriteOutcome::Allow("rtk git status".into()),
+    )
+    .unwrap();
+    assert_eq!(response.action, PreToolAction::ReplaceArguments);
+    assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+    assert_eq!(
+        response.arguments["command"].as_str().unwrap(),
+        "env TOKENLESS_AGENT_ID=cosh TOKENLESS_SESSION_ID= TOKENLESS_TOOL_USE_ID= \
+         TOKENLESS_DATA_DIR='/var/lib/tokenless state' \
+         '/opt/tokenless bin/tokenless' rtk git status"
+    );
+}
+
 #[test]
 fn rtk_receipts_cover_all_wrappers_or_keep_conservative_ownership() {
     let attribution = Attribution::new("test");
