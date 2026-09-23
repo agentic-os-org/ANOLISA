@@ -263,7 +263,7 @@ mod tests {
     fn yaml_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
         value
             .as_mapping()?
-            .get(&serde_yaml::Value::String(key.to_string()))
+            .get(serde_yaml::Value::String(key.to_string()))
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
             declassify SECRET by exec "**/redact"
         "#);
         assert_eq!(c.reasons.len(), 2);
-        assert!(c.bytes.len() > 0);
+        assert!(!c.bytes.is_empty());
     }
 
     #[test]
@@ -590,7 +590,7 @@ rule secret:
         for ent in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         {
             let path = ent.expect("policy dir entry").path();
-            if !path.extension().is_some_and(|ext| ext == "yaml") {
+            if path.extension().is_none_or(|ext| ext != "yaml") {
                 continue;
             }
             let src = std::fs::read_to_string(&path)
@@ -652,7 +652,7 @@ rule secret:
     fn rule_effect_is_metadata_and_kernel_config() {
         let c = ok("rule r:\n  kill exec \"git\"\n  because \"x\"\n");
         assert_eq!(c.meta[0].effect, ast::Effect::Kill);
-        assert!(c.bytes.len() > 0);
+        assert!(!c.bytes.is_empty());
     }
 
     #[test]
