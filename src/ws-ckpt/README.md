@@ -2,11 +2,11 @@
 
 [中文版](README_zh.md)
 
-Btrfs-based workspace snapshot system for AI Agents, providing sub-second checkpoint creation and rollback. ws-checkpoint is a runtime component of [ANOLISA](../../README.md), designed to give agents instant undo/redo capability at the filesystem level.
+Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime component of [ANOLISA](../../README.md) that provides filesystem-level checkpoint and rollback; latency depends on the filesystem, workload, and host environment.
 
 ## Features
 
-- **Sub-millisecond snapshots** — leverages btrfs COW for near-instant checkpoint and rollback
+- **Copy-on-write snapshots** — uses btrfs COW for efficient checkpoint and rollback; latency depends on the filesystem and workload
 - **Daemon architecture** — privileged operations run in a daemon; CLI clients need no root
 - **Unix Socket IPC** — bincode binary protocol for high-performance communication
 - **systemd integration** — RPM one-click deploy, auto-start on boot
@@ -100,6 +100,12 @@ ws-ckpt list --workspace ~/my-workspace
 
 # JSON output
 ws-ckpt list --workspace ~/my-workspace --format json
+
+# Read one explicit page (oldest first); output includes next_cursor
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --format json
+
+# Continue that explicit page
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --cursor '<next_cursor>' --format json
 
 # Diff between two snapshots
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2

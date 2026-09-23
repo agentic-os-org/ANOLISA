@@ -11,11 +11,11 @@ use tokio::net::UnixStream;
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
     ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    RecoveryPreview, Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT,
-    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
-    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
-    DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH, GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE,
-    OVERVIEW_JSON_SCHEMA,
+    RecoveryPreview, Request, Response, SnapshotListItem, WorkspacePolicyJson,
+    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
+    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
+    GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, MAX_LIST_PAGE_ITEMS, OVERVIEW_JSON_SCHEMA,
 };
 
 use std::cell::RefCell;
@@ -23,6 +23,7 @@ use std::cell::RefCell;
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
 const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
 const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
+const DEFAULT_LIST_PAGE_LIMIT: u32 = 1000;
 
 // JSON output buffer: handlers stage their payload here so main() can wrap
 // it with `elapsed_secs` and emit a single JSON object on stdout.
@@ -198,7 +199,7 @@ enum Commands {
         force: bool,
     },
 
-    /// List all snapshots for a workspace (or all workspaces if omitted)
+    /// List snapshots for a workspace (or all workspaces if omitted)
     List {
         /// Workspace path or ID (optional; omit to list all workspaces)
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
@@ -209,8 +210,16 @@ enum Commands {
         orphans: bool,
 
         /// Output format: table or json (default: table)
-        #[arg(long, default_value = "table")]
+        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
         format: String,
+
+        /// Maximum snapshots to return in one page
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_LIST_PAGE_ITEMS as i64))]
+        limit: Option<u32>,
+
+        /// Opaque continuation token returned by a previous page
+        #[arg(long)]
+        cursor: Option<String>,
     },
 
     /// Show diff between two snapshots, or between a snapshot and the current workspace
@@ -235,7 +244,7 @@ enum Commands {
         workspace: Option<String>,
 
         /// Output format: table or json (default: table)
-        #[arg(long, default_value = "table")]
+        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
         format: String,
     },
 
@@ -502,18 +511,39 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             format,
             orphans,
+            limit,
+            cursor,
         } => {
             let workspace = workspace.as_deref().map(resolve_workspace_arg);
-            let request = if orphans {
-                Request::ListOrphans { workspace }
-            } else {
-                Request::List {
+            let explicit_page = limit.is_some() || cursor.is_some();
+            let page_limit = limit.unwrap_or(DEFAULT_LIST_PAGE_LIMIT);
+            if explicit_page {
+                let request = Request::ListPage {
+                    orphans_only: orphans,
                     workspace,
-                    format: Some(format.clone()),
+                    limit: page_limit,
+                    cursor,
+                };
+                let response = send_request_to_daemon(&request).await?;
+                handle_list_page_response(response, &format, true)?;
+            } else {
+                let mut all = Vec::new();
+                let mut next_cursor = None;
+                loop {
+                    let request = Request::ListPage {
+                        orphans_only: orphans,
+                        workspace: workspace.clone(),
+                        limit: page_limit,
+                        cursor: next_cursor.take(),
+                    };
+                    let response = send_request_to_daemon(&request).await?;
+                    next_cursor = accept_list_page(&mut all, response)?;
+                    if next_cursor.is_none() {
+                        break;
+                    }
                 }
-            };
-            let response = send_request_to_daemon(&request).await?;
-            handle_list_response(response, &format)?;
+                render_snapshot_list(all, None, &format, false)?;
+            }
         }
         Commands::Diff {
             workspace,
@@ -1076,93 +1106,171 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
     Ok(())
 }
 
-/// Handle ListOk response, formatting as table or json.
-fn handle_list_response(response: Response, format: &str) -> Result<()> {
+fn accept_list_page(all: &mut Vec<SnapshotListItem>, response: Response) -> Result<Option<String>> {
     match response {
-        Response::ListOk { snapshots } => {
-            if format == "json" {
-                emit_json(serde_json::to_value(&snapshots)?);
-            } else {
-                // Table format
-                if snapshots.is_empty() {
-                    println!("No snapshots found.");
+        Response::ListPageOk {
+            snapshots,
+            next_cursor,
+        } => {
+            all.extend(snapshots);
+            Ok(next_cursor)
+        }
+        Response::Error { code, message } => anyhow::bail!("list failed [{code:?}]: {message}"),
+        _ => anyhow::bail!("unexpected response type while listing snapshots"),
+    }
+}
+
+fn snapshot_item_json(item: &SnapshotListItem) -> Result<serde_json::Value> {
+    match item {
+        SnapshotListItem::Full(entry) => Ok(serde_json::to_value(entry)?),
+        SnapshotListItem::Summary(summary) => Ok(serde_json::json!({
+            "id": summary.id,
+            "workspace": summary.workspace,
+            "meta": {
+                "created_at": summary.created_at,
+                "pinned": summary.pinned,
+                "missing": summary.missing,
+            },
+            "detail": "summary",
+            "omitted_fields": summary.omitted_fields,
+        })),
+    }
+}
+
+fn list_item_workspace(item: &SnapshotListItem) -> &str {
+    match item {
+        SnapshotListItem::Full(entry) => &entry.workspace,
+        SnapshotListItem::Summary(summary) => &summary.workspace,
+    }
+}
+
+fn render_snapshot_list(
+    snapshots: Vec<SnapshotListItem>,
+    next_cursor: Option<String>,
+    format: &str,
+    explicit_page: bool,
+) -> Result<()> {
+    if format == "json" {
+        let values = snapshots
+            .iter()
+            .map(snapshot_item_json)
+            .collect::<Result<Vec<_>>>()?;
+        if explicit_page {
+            emit_json(serde_json::json!({
+                "snapshots": values,
+                "next_cursor": next_cursor,
+            }));
+        } else {
+            emit_json(serde_json::Value::Array(values));
+        }
+        return Ok(());
+    }
+
+    if snapshots.is_empty() {
+        println!("No snapshots found.");
+        if let Some(cursor) = next_cursor {
+            println!("Next cursor: {cursor}");
+        }
+        return Ok(());
+    }
+
+    let hdr_ws = "WORKSPACE";
+    let hdr_snap = "SNAPSHOT";
+    let offset_secs = chrono::Local::now().offset().local_minus_utc();
+    let sign = if offset_secs >= 0 { '+' } else { '-' };
+    let h = offset_secs.abs() / 3600;
+    let m = (offset_secs.abs() % 3600) / 60;
+    let local_offset = if m == 0 {
+        format!("{sign}{h}")
+    } else {
+        format!("{sign}{h}:{m:02}")
+    };
+    let hdr_date_owned = format!("CREATED (UTC{local_offset})");
+    let hdr_date = hdr_date_owned.as_str();
+    let hdr_msg = "MESSAGE";
+    let id_len = |item: &SnapshotListItem| match item {
+        SnapshotListItem::Full(entry) => {
+            entry.id.len() + usize::from(entry.meta.missing) * " [MISSING]".len()
+        }
+        SnapshotListItem::Summary(summary) => {
+            summary.id.len()
+                + usize::from(summary.missing) * " [MISSING]".len()
+                + " [SUMMARY]".len()
+        }
+    };
+    let w_ws = snapshots
+        .iter()
+        .map(|item| list_item_workspace(item).len())
+        .max()
+        .unwrap_or(0)
+        .max(hdr_ws.len());
+    let w_snap = snapshots
+        .iter()
+        .map(id_len)
+        .max()
+        .unwrap_or(0)
+        .max(hdr_snap.len());
+    let w_date = 19_usize.max(hdr_date.len());
+    println!(
+        "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
+        hdr_ws, hdr_snap, hdr_date, hdr_msg,
+    );
+    println!(
+        "{}",
+        "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
+    );
+    for item in &snapshots {
+        let (workspace, id, created_at, pinned, message) = match item {
+            SnapshotListItem::Full(entry) => (
+                entry.workspace.as_str(),
+                if entry.meta.missing {
+                    format!("{} [MISSING]", entry.id)
                 } else {
-                    // Dynamically compute column widths
-                    let hdr_ws = "WORKSPACE";
-                    let hdr_snap = "SNAPSHOT";
-                    let offset_secs = chrono::Local::now().offset().local_minus_utc();
-                    let sign = if offset_secs >= 0 { '+' } else { '-' };
-                    let h = offset_secs.abs() / 3600;
-                    let m = (offset_secs.abs() % 3600) / 60;
-                    let local_offset = if m == 0 {
-                        format!("{sign}{h}")
-                    } else {
-                        format!("{sign}{h}:{m:02}")
-                    };
-                    let hdr_date = format!("CREATED (UTC{local_offset})");
-                    let hdr_date = hdr_date.as_str();
-                    let hdr_msg = "MESSAGE";
-
-                    let w_ws = snapshots
-                        .iter()
-                        .map(|e| e.workspace.len())
-                        .max()
-                        .unwrap_or(0)
-                        .max(hdr_ws.len());
-                    let w_snap = snapshots
-                        .iter()
-                        .map(|e| {
-                            if e.meta.missing {
-                                e.id.len() + " [MISSING]".len()
-                            } else {
-                                e.id.len()
-                            }
-                        })
-                        .max()
-                        .unwrap_or(0)
-                        .max(hdr_snap.len());
-                    let w_date = 19_usize.max(hdr_date.len()); // "YYYY-MM-DD HH:MM:SS"
-
-                    println!(
-                        "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
-                        hdr_ws, hdr_snap, hdr_date, hdr_msg,
-                    );
-                    println!(
-                        "{}",
-                        "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
-                    );
-                    for entry in &snapshots {
-                        let id_display = if entry.meta.missing {
-                            format!("{} [MISSING]", entry.id)
-                        } else {
-                            entry.id.clone()
-                        };
-                        println!(
-                            "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
-                            entry.workspace,
-                            id_display,
-                            entry
-                                .meta
-                                .created_at
-                                .with_timezone(&chrono::Local)
-                                .format("%Y-%m-%d %H:%M:%S"),
-                            entry.meta.pinned,
-                            entry.meta.message.as_deref().unwrap_or("-"),
-                        );
-                    }
-                    println!("\nTotal: {} snapshot(s)", snapshots.len());
-                }
-            }
-        }
-        Response::Error { code, message } => {
-            eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
-            process::exit(1);
-        }
-        _ => {
-            eprintln!("\x1b[33mUnexpected response type\x1b[0m");
-        }
+                    entry.id.clone()
+                },
+                entry.meta.created_at,
+                entry.meta.pinned,
+                entry.meta.message.as_deref().unwrap_or("-").to_string(),
+            ),
+            SnapshotListItem::Summary(summary) => (
+                summary.workspace.as_str(),
+                format!(
+                    "{}{} [SUMMARY]",
+                    summary.id,
+                    if summary.missing { " [MISSING]" } else { "" }
+                ),
+                summary.created_at,
+                summary.pinned,
+                format!("details omitted: {}", summary.omitted_fields.join(", ")),
+            ),
+        };
+        println!(
+            "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
+            workspace,
+            id,
+            created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S"),
+            pinned,
+            message,
+        );
+    }
+    println!("\nTotal: {} snapshot(s)", snapshots.len());
+    if let Some(cursor) = next_cursor {
+        println!("More snapshots are available. Next cursor: {cursor}");
     }
     Ok(())
+}
+
+fn handle_list_page_response(response: Response, format: &str, explicit_page: bool) -> Result<()> {
+    match response {
+        Response::ListPageOk {
+            snapshots,
+            next_cursor,
+        } => render_snapshot_list(snapshots, next_cursor, format, explicit_page),
+        Response::Error { code, message } => anyhow::bail!("list failed [{code:?}]: {message}"),
+        _ => anyhow::bail!("unexpected response type while listing snapshots"),
+    }
 }
 
 /// Handle DiffOk response, formatting diff entries.
@@ -3066,7 +3174,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command, Commands::List { workspace: Some(ws), orphans: true, format } if ws == "/ws" && format == "json")
+            matches!(cli.command, Commands::List { workspace: Some(ws), orphans: true, format, .. } if ws == "/ws" && format == "json")
         );
         let cli = Cli::try_parse_from(["ws-ckpt", "list", "--orphans"]).unwrap();
         assert!(matches!(
@@ -3077,6 +3185,189 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_list_pagination() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "list",
+            "--limit",
+            "10",
+            "--cursor",
+            "opaque-cursor",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::List {
+                format,
+                limit: Some(10),
+                cursor: Some(cursor),
+                ..
+            } if format == "json" && cursor == "opaque-cursor"
+        ));
+        assert!(Cli::try_parse_from(["ws-ckpt", "list", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["ws-ckpt", "list", "--offset", "20"]).is_err());
+        let cli = Cli::try_parse_from(["ws-ckpt", "list", "--cursor", "next"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::List {
+                limit: None,
+                cursor: Some(cursor),
+                ..
+            } if cursor == "next"
+        ));
+    }
+
+    #[test]
+    fn aggregate_list_combines_pages_into_one_json_array() {
+        let _ = take_json_output();
+        let first = SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+            id: "s1".into(),
+            workspace: "/ws".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            missing: false,
+            omitted_fields: vec!["message".into()],
+        });
+        let second = SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+            id: "s2".into(),
+            workspace: "/ws".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            missing: false,
+            omitted_fields: vec!["metadata".into()],
+        });
+        let mut all = Vec::new();
+        assert_eq!(
+            accept_list_page(
+                &mut all,
+                Response::ListPageOk {
+                    snapshots: vec![first],
+                    next_cursor: Some("next".into()),
+                },
+            )
+            .unwrap()
+            .as_deref(),
+            Some("next")
+        );
+        assert_eq!(
+            accept_list_page(
+                &mut all,
+                Response::ListPageOk {
+                    snapshots: vec![second],
+                    next_cursor: None,
+                },
+            )
+            .unwrap(),
+            None
+        );
+        render_snapshot_list(all, None, "json", false).unwrap();
+        let output = take_json_output().expect("single JSON output");
+        assert_eq!(output.as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn aggregate_list_failure_does_not_emit_partial_json() {
+        let _ = take_json_output();
+        let summary = SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+            id: "s1".into(),
+            workspace: "/ws".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            missing: false,
+            omitted_fields: vec!["message".into()],
+        });
+        let mut all = Vec::new();
+        let cursor = accept_list_page(
+            &mut all,
+            Response::ListPageOk {
+                snapshots: vec![summary],
+                next_cursor: Some("next".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(cursor.as_deref(), Some("next"));
+        let error = accept_list_page(
+            &mut all,
+            Response::Error {
+                code: ErrorCode::InternalError,
+                message: "later page failed".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("later page failed"));
+        assert!(take_json_output().is_none());
+    }
+
+    #[test]
+    fn summary_json_preserves_metadata_paths_and_detail_marker() {
+        let _ = take_json_output();
+        let created_at = chrono::Utc::now();
+        render_snapshot_list(
+            vec![
+                SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                    id: "s-full".into(),
+                    workspace: "/ws".into(),
+                    meta: ws_ckpt_common::SnapshotMeta {
+                        created_at,
+                        pinned: true,
+                        missing: false,
+                        message: None,
+                        metadata: None,
+                        parent_id: None,
+                        child_ids: vec![],
+                    },
+                }),
+                SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+                    id: "s-large".into(),
+                    workspace: "/ws".into(),
+                    created_at,
+                    pinned: true,
+                    missing: false,
+                    omitted_fields: vec![
+                        "message".into(),
+                        "metadata".into(),
+                        "parent_id".into(),
+                        "child_ids".into(),
+                    ],
+                }),
+            ],
+            None,
+            "json",
+            false,
+        )
+        .unwrap();
+        let output = take_json_output().unwrap();
+        assert_eq!(output[1]["detail"], "summary");
+        for field in ["created_at", "pinned", "missing"] {
+            assert_eq!(output[0]["meta"][field], output[1]["meta"][field]);
+            assert!(output[1].get(field).is_none());
+        }
+        assert_eq!(
+            output[1]["meta"]["created_at"],
+            serde_json::to_value(created_at).unwrap()
+        );
+        assert_eq!(output[1]["meta"]["pinned"], true);
+        assert_eq!(output[1]["meta"]["missing"], false);
+        for field in ["message", "metadata", "parent_id", "child_ids"] {
+            assert!(output[1]["meta"].get(field).is_none());
+            assert!(output[1]["omitted_fields"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(field)));
+        }
+    }
+
+    #[test]
+    fn parse_list_rejects_invalid_format() {
+        let error = Cli::try_parse_from(["ws-ckpt", "list", "--format", "jso"])
+            .err()
+            .expect("invalid list format must be rejected");
+        assert!(error.to_string().contains("invalid value 'jso'"));
     }
 
     #[test]
@@ -3147,6 +3438,14 @@ mod tests {
             }
             _ => panic!("expected Status"),
         }
+    }
+
+    #[test]
+    fn parse_status_rejects_invalid_format() {
+        let error = Cli::try_parse_from(["ws-ckpt", "status", "--format", "jso"])
+            .err()
+            .expect("invalid status format must be rejected");
+        assert!(error.to_string().contains("invalid value 'jso'"));
     }
 
     #[test]

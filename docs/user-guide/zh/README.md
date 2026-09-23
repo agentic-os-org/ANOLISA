@@ -92,7 +92,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [Blaze Sandbox Runtime](runtime/blaze.md) | blaze | Managed sandbox 的可选 VM 网络与周期存储制品同步 |
-| [工作区快照](runtime/ws-ckpt.md) | ws-ckpt | 秒级快照创建/回滚，基于 btrfs COW |
+| [工作区快照](runtime/ws-ckpt.md) | ws-ckpt | 基于 btrfs COW 的工作区检查点/回滚 |
 | [技能文件系统](runtime/skillfs.md) | skillfs | FUSE 虚拟视图、渐进披露 |
 | [SkillFS Kubernetes Sidecar](runtime/skillfs-kubernetes-sidecar.md) | skillfs | 在 Kubernetes 中以 FUSE Sidecar 运行 SkillFS |
 

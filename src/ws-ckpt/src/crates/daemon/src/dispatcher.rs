@@ -6,7 +6,7 @@ use ws_ckpt_common::{
     PolicyFieldOp, Request, Response, StatusReport, WorkspaceInfo, WorkspacePolicy,
     ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
+    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, MAX_LIST_PAGE_ITEMS,
 };
 
 /// Kernel-derived connection identity available to guarded requests.
@@ -140,6 +140,27 @@ pub(crate) async fn dispatch_with_context(
             Some(ws) => crate::snapshot_mgr::list_snapshots(state, &ws, true).await,
             None => crate::snapshot_mgr::list_all_snapshots(state, true).await,
         },
+        Request::ListPage {
+            orphans_only,
+            workspace,
+            limit,
+            cursor,
+        } => {
+            if limit == 0 || limit > MAX_LIST_PAGE_ITEMS {
+                return Response::Error {
+                    code: ErrorCode::InvalidPath,
+                    message: format!("list page limit must be between 1 and {MAX_LIST_PAGE_ITEMS}"),
+                };
+            }
+            crate::snapshot_mgr::list_snapshot_page(
+                state,
+                workspace.as_deref(),
+                limit as usize,
+                cursor.as_deref(),
+                orphans_only,
+            )
+            .await
+        }
         Request::Diff {
             workspace,
             from,

@@ -8,20 +8,25 @@ description: >
 ---
 # ws-ckpt 工作区快照管理
 
-基于 btrfs COW 快照,为任意工作区提供微秒级 checkpoint/rollback。
+基于 btrfs COW 快照，为任意工作区提供 checkpoint/rollback；实际耗时取决于文件系统、工作负载和机器环境。
 
 ## 工作区路径（关键 — 必须遵守）
 
 ⚠️ **绝对禁止猜测或推断工作区路径。**
 
-ws-ckpt 的所有命令都需要 `-w <workspace>` 指定工作区路径。执行任何命令前，必须按以下顺序确定 `-w` 参数：
+工作区级操作（checkpoint、rollback、diff、cleanup，以及按工作区执行的 delete/list/status）需要
+`-w <workspace>`。执行这些操作前，必须按以下顺序确定路径：
 
 1. 用户在**当前消息中明确给出**了路径 → 直接使用
 2. 否则 → **必须向用户询问**："请提供工作区路径（传给 `-w` 的目录）"，拿到回复后再执行
 
-不得从环境变量、默认路径、或任何隐含上下文中猜测。
+不得从环境变量、默认路径、或任何隐含上下文中猜测。确定后，本次会话内复用同一个路径。
 
-确定后，本次会话内复用同一个 workspace 路径，不要重复询问。
+以下全局查询/操作允许省略 `-w`，不要为此追问路径：
+
+- `list`：列出所有已注册工作区的快照；
+- `status`：查看 daemon 全局状态；
+- 快照 ID 全局唯一时的 `delete`。若 ID 有歧义，再要求用户提供 `-w`。
 
 cwd 占用的拦截由 daemon 层统一处理,skill 不再做前置守卫。
 
@@ -106,7 +111,7 @@ ws-ckpt delete -s old-snap --force
 ### list — 列出快照
 
 ```bash
-ws-ckpt list [-w <workspace>] [--format table|json]
+ws-ckpt list [-w <workspace>] [--format table|json] [--limit N] [--cursor TOKEN]
 ```
 
 - 省略 `-w` 列出所有工作区的快照
@@ -116,6 +121,13 @@ ws-ckpt list
 ws-ckpt list -w <path-to-workspace>
 ws-ckpt list --format json
 ```
+
+默认命令会自动读取全部游标页，JSON 仍输出单个数组。仅当用户明确要求分页时使用
+`--limit N`；响应中的 `next_cursor` 可通过 `--cursor '<token>'` 继续读取。游标是不透明
+且绑定查询范围的，不要解析或修改。若记录包含 `detail: "summary"` / `omitted_fields`，
+必须明确告知用户该记录因超大 `message`/`metadata` 只返回摘要，但快照 ID 仍可用于
+rollback、diff、delete 等操作。摘要保留的 `created_at`、`pinned`、`missing` 仍在
+`meta` 下；被省略字段缺席，不应当作原本为空。
 
 ### status — 查看状态
 

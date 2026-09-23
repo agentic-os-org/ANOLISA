@@ -1,6 +1,6 @@
 # 工作区快照（ws-ckpt）
 
-ws-ckpt 为 AI Agent 提供毫秒级工作区快照和回滚能力。它利用文件系统 COW（Copy-on-Write）技术创建即时快照，支持安全实验和快速恢复。
+ws-ckpt 利用文件系统 COW（Copy-on-Write）快照为 AI Agent 提供工作区检查点和回滚能力，支持安全实验和恢复；实际耗时取决于文件系统、工作负载和运行环境。
 
 ---
 
@@ -8,8 +8,8 @@ ws-ckpt 为 AI Agent 提供毫秒级工作区快照和回滚能力。它利用�
 
 AI Agent 修改代码、配置或数据文件时，误操作代价高昂。ws-ckpt 允许 Agent（和用户）：
 
-- 在风险操作前创建即时快照
-- 毫秒内回滚到任意历史检查点
+- 在风险操作前创建 COW 快照
+- 按需回滚到历史检查点
 - 比较检查点之间的差异
 - 通过插件集成自动创建检查点
 
@@ -74,7 +74,7 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | 创建新检查点 |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
-| `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json]` | 列出所有检查点 |
+| `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | 列出检查点；默认自动翻页 |
 | `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | 显示检查点间差异 |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
@@ -86,6 +86,38 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt unregister -w <workspace> [--force]` | 仅在子卷丢失时解除注册；不恢复数据 |
 | `ws-ckpt reload` | 重载 daemon 配置 |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | 启动 daemon 进程 |
+
+### 查询大量快照
+
+`list` 内部使用按字节限制的游标分页。不指定 `--limit` 和 `--cursor` 时，CLI 会自动
+跟随所有游标，并保持原有输出契约：JSON 输出单个数组，表格输出完整列表。若后续页面
+失败，JSON 不会输出不完整数组，并以非零状态退出。
+
+指定 `--limit` 或 `--cursor` 时只读取一页：
+
+```bash
+ws-ckpt list -w /home/user/projects/my-project --limit 1000 --format json
+ws-ckpt list -w /home/user/projects/my-project --limit 1000 --cursor '<next_cursor>' --format json
+ws-ckpt status -w /home/user/projects/my-project --format json
+```
+
+`--orphans` 同样使用分页，只返回恢复的 orphan 快照。续翻时必须保持该过滤条件不变。
+
+显式分页的 JSON 是包含 `snapshots` 和 `next_cursor` 的对象。分页按
+`(created_at, workspace_id, snapshot_id)` 升序排列。游标是不透明且带版本的，并绑定
+原始工作区范围和第一页的上界（首次索引扫描观察到的最大键，而非当前时间）。上界之后
+的新快照不会混入，位于上界内的并发插入以及
+删除仍可能影响后续页。如需无变更的时点列表，应在遍历期间暂停 checkpoint 和 cleanup。
+
+Daemon 从内存中的快照索引读取每一页，不扫描快照文件内容。每页仍重新扫描查询范围：
+N 条快照、P 页需要 O(N * P) 次索引访问，另加候选维护和渲染。只有入选候选键会被复制，
+但重复扫描仍然存在；不承诺固定延迟。页面目标约为 1 MiB，且不会超过
+16 MiB IPC 帧上限。如果单条记录的可选 `message` 或 `metadata` 会导致超限，该记录会以
+`detail: "summary"` 和 `omitted_fields` 返回。保留的 `created_at`、`pinned`、`missing`
+仍位于 `meta` 下，与完整记录一致；省略字段缺席，不返回 null。快照仍可通过 ID 操作。
+查询数量或健康状态
+应使用 `status`。`cleanup --keep N` 可以缩减历史，但会删除旧的未固定快照。分页需要
+新版 daemon；旧的非分页请求保持兼容。
 
 ### 示例
 

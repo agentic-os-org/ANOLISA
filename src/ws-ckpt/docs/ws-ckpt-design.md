@@ -1,6 +1,6 @@
 # ws-ckpt 设计文档
 
-> ws-ckpt 是一个基于 btrfs CoW 快照的工作区状态管理系统，面向 AI Agent 工作流提供微秒级 checkpoint / rollback 能力。
+> ws-ckpt 是一个基于 btrfs CoW 快照的工作区状态管理系统，面向 AI Agent 工作流提供 checkpoint / rollback 能力；实际耗时取决于文件系统、工作负载和运行环境。
 
 ---
 
@@ -11,7 +11,7 @@ AI Agent 在自主修改文件、调用工具时，每一步都可能"改坏"用
 - Git 需要显式 commit、需要干净的工作树、需要用户参与；
 - Agent 需要的是**在每次 LLM 回合或工具调用前后，悄无声息地按下"保存点"**，错了能立刻 rollback，不影响主流程。
 
-ws-ckpt 借助 btrfs 的 CoW 特性，把"保存当前工作区"变成**毫秒级、零额外空间**的元数据操作：
+ws-ckpt 借助 btrfs 的 CoW 特性，把“保存当前工作区”实现为高效的元数据操作；具体延迟和空间开销取决于文件系统、工作负载和后续写入：
 
 - Agent 不用 ws-ckpt 也能干活，但用了之后每次"改坏"都有兜底；
 - 把 root 权限的特权操作（mount、losetup、btrfs subvolume）收敛到守护进程，CLI / Plugin 只走 Unix Socket，不需要 sudo；
@@ -761,7 +761,7 @@ LLM Agent runtime
 
 - Plugin 不依赖 daemon 协议版本，CLI 兼容性是唯一约束面
 - Plugin 不需要 bincode / Unix Socket 客户端；写 Python / TypeScript 都很轻
-- 代价是每次 checkpoint 多一次 fork + exec，但 ws-ckpt 自身是毫秒级操作，subprocess overhead 在可接受范围内
+- 代价是每次 checkpoint 多一次 fork + exec；端到端开销取决于宿主机、文件系统和工作负载，应在目标环境中测量
 
 详细的 Plugin 设计见 [ws-ckpt-plugin-design.md](./ws-ckpt-plugin-design.md)。
 

@@ -35,6 +35,8 @@ pub fn ops_name_from_request(req: &Request) -> Option<&'static str> {
         Request::Rollback { .. } => Some("roll"),
         Request::Diff { .. } => Some("diff"),
         Request::List { .. } | Request::ListOrphans { .. } => Some("list"),
+        // Each page is a daemon request, not the outcome of a complete CLI list.
+        Request::ListPage { .. } => Some("list_page"),
         Request::Config
         | Request::ReloadConfig
         | Request::ReloadGlobalConfig
@@ -147,6 +149,16 @@ mod tests {
             format: None,
         };
         assert_eq!(ops_name_from_request(&list), Some("list"));
+
+        for cursor in [None, Some("continuation".into())] {
+            let page = Request::ListPage {
+                orphans_only: false,
+                workspace: Some("w".into()),
+                limit: 1000,
+                cursor,
+            };
+            assert_eq!(ops_name_from_request(&page), Some("list_page"));
+        }
 
         assert_eq!(ops_name_from_request(&Request::Config), Some("config"));
         assert_eq!(

@@ -62,7 +62,7 @@ Plugin 在每个 Agent 回合结束时（`agent_end` / `on_session_end`）自动
 
 ### 开销
 
-端到端 ~20-50 ms（btrfs snapshot ~1ms + subprocess ~10-30ms + IPC ~1-5ms），纯元数据操作，增量磁盘空间为 0（CoW）。与 LLM 推理时间重叠，用户无感知。
+端到端开销包含子进程启动、CLI/daemon IPC 和文件系统快照操作，取决于宿主机、文件系统及工作负载。需要性能保证时，应在目标环境中记录测试条件和延迟分布。COW 快照的后续磁盘增量取决于写入内容。
 
 ### 快照清理
 

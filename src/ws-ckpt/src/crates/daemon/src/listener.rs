@@ -9,10 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::state::DaemonState;
-use ws_ckpt_common::{decode_payload, encode_frame, ErrorCode, Request, Response};
-
-/// Maximum frame size: 16 MB
-const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
+use ws_ckpt_common::{
+    decode_payload, encode_frame, ErrorCode, Request, Response, WsCkptError, MAX_FRAME_SIZE,
+};
 
 pub async fn run_listener(
     state: Arc<DaemonState>,
@@ -130,18 +129,342 @@ async fn handle_connection(
 
     // Dispatch
     let context = crate::dispatcher::DispatchContext::new(peer_cred.map(|cred| cred.uid()));
-    let response = crate::dispatcher::dispatch_with_context(&state, request, context).await;
+    let mut response = crate::dispatcher::dispatch_with_context(&state, request, context).await;
+
+    let frame = match encode_frame(&response) {
+        Err(err @ WsCkptError::FrameTooLarge { .. }) => {
+            let advice = if matches!(response, Response::ListOk { .. }) {
+                "; use list --limit <N> and the returned cursor; use status for snapshot counts"
+            } else {
+                ""
+            };
+            response = Response::Error {
+                code: ErrorCode::InternalError,
+                message: format!("{err}{advice}"),
+            };
+            encode_frame(&response)?
+        }
+        result => result.context("Failed to encode response")?,
+    };
 
     if let Some(name) = ops_name {
         crate::ops_log::log_operation(name, &agent_name, &response);
     }
 
     // Encode and write response
-    let frame = encode_frame(&response).context("Failed to encode response")?;
     stream
         .write_all(&frame)
         .await
         .context("Failed to write response")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ws_ckpt_common::{DaemonConfig, SnapshotIndex, SnapshotMeta};
+
+    async fn exchange(state: &Arc<DaemonState>, request: Request) -> Response {
+        // Exercise the real connection handler without a daemon or background task.
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let client_io = async {
+            client
+                .write_all(&encode_frame(&request).unwrap())
+                .await
+                .unwrap();
+            let len = client.read_u32_le().await.unwrap();
+            assert!(len <= MAX_FRAME_SIZE);
+            let mut payload = vec![0; len as usize];
+            client.read_exact(&mut payload).await.unwrap();
+            decode_payload(&payload).unwrap()
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, response) =
+                tokio::join!(handle_connection(server, state.clone()), client_io);
+            server.unwrap();
+            response
+        })
+        .await
+        .expect("IPC round trip timed out")
+    }
+
+    #[tokio::test]
+    async fn list_above_frame_limit_remains_manageable() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            temp.path().join("data"),
+            temp.path().join("test.img"),
+        ));
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig::default(),
+            backend,
+            temp.path().join("state"),
+        ));
+        let created_at = chrono::Utc::now();
+        for (ws_id, count) in [("ws-a", 100_000), ("ws-b", 2)] {
+            let subvol = state.backend.data_root().join(ws_id);
+            std::fs::create_dir_all(&subvol).unwrap();
+            let path = temp.path().join(ws_id);
+            std::os::unix::fs::symlink(subvol, &path).unwrap();
+            let mut index = SnapshotIndex::new(path.clone());
+            for i in (0..count).rev() {
+                index.snapshots.insert(
+                    format!("s-{i:06}"),
+                    SnapshotMeta {
+                        message: Some("x".repeat(128)),
+                        metadata: None,
+                        pinned: false,
+                        created_at,
+                        missing: false,
+                        parent_id: None,
+                        child_ids: vec![],
+                    },
+                );
+            }
+            state.register_workspace(ws_id.into(), path, index).unwrap();
+        }
+
+        for workspace in [Some("ws-a".to_string()), None] {
+            let response = exchange(
+                &state,
+                Request::List {
+                    workspace: workspace.clone(),
+                    format: None,
+                },
+            )
+            .await;
+            assert!(matches!(response, Response::Error { message, .. }
+                if message.contains("frame too large") && message.contains("--limit")));
+
+            let first = exchange(
+                &state,
+                Request::ListPage {
+                    orphans_only: false,
+                    workspace: workspace.clone(),
+                    limit: 2,
+                    cursor: None,
+                },
+            )
+            .await;
+            let Response::ListPageOk {
+                snapshots,
+                next_cursor,
+            } = first
+            else {
+                panic!("expected first page")
+            };
+            let mut ids = snapshots
+                .into_iter()
+                .map(|entry| match entry {
+                    ws_ckpt_common::SnapshotListItem::Full(entry) => entry.id,
+                    ws_ckpt_common::SnapshotListItem::Summary(summary) => summary.id,
+                })
+                .collect::<Vec<_>>();
+            let second = exchange(
+                &state,
+                Request::ListPage {
+                    orphans_only: false,
+                    workspace: workspace.clone(),
+                    limit: 2,
+                    cursor: next_cursor,
+                },
+            )
+            .await;
+            let Response::ListPageOk { snapshots, .. } = second else {
+                panic!("expected second page")
+            };
+            ids.extend(snapshots.into_iter().map(|entry| match entry {
+                ws_ckpt_common::SnapshotListItem::Full(entry) => entry.id,
+                ws_ckpt_common::SnapshotListItem::Summary(summary) => summary.id,
+            }));
+            assert_eq!(ids, ["s-000000", "s-000001", "s-000002", "s-000003"]);
+
+            let response = exchange(
+                &state,
+                Request::ListPage {
+                    orphans_only: false,
+                    workspace: workspace.clone(),
+                    limit: 2,
+                    cursor: Some("not-a-cursor".into()),
+                },
+            )
+            .await;
+            assert!(matches!(response, Response::Error { message, .. }
+                if message.contains("cursor")));
+            let response = exchange(
+                &state,
+                Request::ListPage {
+                    orphans_only: false,
+                    workspace,
+                    limit: 0,
+                    cursor: None,
+                },
+            )
+            .await;
+            assert!(
+                matches!(response, Response::Error { message, .. } if message.contains("between 1"))
+            );
+        }
+
+        let first = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("ws-b".into()),
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .await;
+        let Response::ListPageOk {
+            next_cursor: Some(ws_b_cursor),
+            ..
+        } = first
+        else {
+            panic!("expected ws-b continuation cursor")
+        };
+        let scope_error = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("ws-a".into()),
+                limit: 1,
+                cursor: Some(ws_b_cursor.clone()),
+            },
+        )
+        .await;
+        assert!(matches!(scope_error, Response::Error { message, .. }
+            if message.contains("does not match")));
+
+        {
+            let arc = state.get_by_wsid("ws-b").unwrap();
+            let mut guard = arc.write().await;
+            guard.index.snapshots.remove("s-000001");
+            guard.index.snapshots.insert(
+                "s-000000a".into(),
+                SnapshotMeta {
+                    message: Some("inserted within first-page bound".into()),
+                    metadata: None,
+                    pinned: false,
+                    created_at,
+                    missing: false,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            );
+            guard.index.snapshots.insert(
+                "s-newer".into(),
+                SnapshotMeta {
+                    message: Some("newer than first-page bound".into()),
+                    metadata: None,
+                    pinned: false,
+                    created_at: created_at + chrono::Duration::seconds(1),
+                    missing: false,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            );
+        }
+        let second = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("ws-b".into()),
+                limit: 10,
+                cursor: Some(ws_b_cursor),
+            },
+        )
+        .await;
+        let Response::ListPageOk {
+            snapshots,
+            next_cursor,
+        } = second
+        else {
+            panic!("expected ws-b continuation page")
+        };
+        assert!(next_cursor.is_none());
+        assert!(matches!(snapshots.as_slice(),
+            [ws_ckpt_common::SnapshotListItem::Full(entry)] if entry.id == "s-000000a"));
+
+        let response = exchange(
+            &state,
+            Request::Status {
+                workspace: Some("ws-a".into()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, Response::StatusOk { report } if report.workspaces[0].snapshot_count == 100_000)
+        );
+        let response = exchange(
+            &state,
+            Request::List {
+                workspace: Some("ws-b".into()),
+                format: None,
+            },
+        )
+        .await;
+        assert!(matches!(response, Response::ListOk { snapshots } if snapshots.len() == 3));
+        let response = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("unknown".into()),
+                limit: 2,
+                cursor: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::WorkspaceNotFound,
+                ..
+            }
+        ));
+
+        let arc = state.get_by_wsid("ws-a").unwrap();
+        arc.write()
+            .await
+            .index
+            .snapshots
+            .get_mut("s-000000")
+            .unwrap()
+            .message = Some("x".repeat(MAX_FRAME_SIZE as usize));
+        let response = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("ws-a".into()),
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .await;
+        let Response::ListPageOk { snapshots, .. } = response else {
+            panic!("expected summary page")
+        };
+        assert_eq!(snapshots.len(), 1);
+        let ws_ckpt_common::SnapshotListItem::Summary(summary) = &snapshots[0] else {
+            panic!("expected oversized entry summary, got {:?}", snapshots[0])
+        };
+        assert_eq!(summary.id, "s-000000");
+        assert_eq!(
+            summary.omitted_fields,
+            ["message", "metadata", "parent_id", "child_ids"]
+        );
+        std::fs::remove_file(temp.path().join("ws-a")).unwrap();
+        let response = exchange(
+            &state,
+            Request::ListPage {
+                orphans_only: false,
+                workspace: Some("ws-a".into()),
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .await;
+        assert!(matches!(response, Response::Error { message, .. } if message.contains("recover")));
+    }
 }

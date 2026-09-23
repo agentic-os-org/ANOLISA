@@ -12,8 +12,8 @@ use ws_ckpt_common::{
     decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry,
     EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
     GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, RecoveryPreview, Request,
-    Response, SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceGenerationTokenV2, WorkspaceInfo,
-    WorkspacePolicy,
+    Response, SnapshotEntry, SnapshotListItem, SnapshotMeta, StatusReport,
+    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -24,6 +24,22 @@ fn temp_socket_path() -> PathBuf {
     let path = dir.path().join("test.sock");
     std::mem::forget(dir);
     path
+}
+
+fn sample_snapshot() -> SnapshotEntry {
+    SnapshotEntry {
+        id: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+        workspace: "/home/user/ws".to_string(),
+        meta: SnapshotMeta {
+            message: Some("initial".to_string()),
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: None,
+            child_ids: vec![],
+        },
+    }
 }
 
 /// Server side: read one request frame, process it, send a response frame
@@ -62,19 +78,11 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
         },
         Request::Delete { snapshot, .. } => Response::DeleteOk { target: snapshot },
         Request::List { .. } | Request::ListOrphans { .. } => Response::ListOk {
-            snapshots: vec![SnapshotEntry {
-                id: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
-                workspace: "/home/user/ws".to_string(),
-                meta: SnapshotMeta {
-                    message: Some("initial".to_string()),
-                    metadata: None,
-                    pinned: false,
-                    created_at: chrono::Utc::now(),
-                    missing: false,
-                    parent_id: None,
-                    child_ids: vec![],
-                },
-            }],
+            snapshots: vec![sample_snapshot()],
+        },
+        Request::ListPage { .. } => Response::ListPageOk {
+            snapshots: vec![SnapshotListItem::Full(sample_snapshot())],
+            next_cursor: Some("opaque-cursor".into()),
         },
         Request::Diff { .. } => Response::DiffOk {
             changes: vec![DiffEntry {
@@ -566,6 +574,44 @@ async fn full_list_request_response_over_socket() {
         _ => panic!("expected ListOk, got {:?}", response),
     }
 
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn full_list_page_request_response_over_socket() {
+    let socket_path = temp_socket_path();
+    let listener = UnixListener::bind(&socket_path).expect("bind");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        mock_server_handle(stream).await;
+    });
+
+    tokio::task::yield_now().await;
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    let request = Request::ListPage {
+        orphans_only: false,
+        workspace: Some("/tmp/ws".to_string()),
+        limit: 100,
+        cursor: Some("opaque-input".to_string()),
+    };
+    client
+        .write_all(&encode_frame(&request).unwrap())
+        .await
+        .unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+    client.read_exact(&mut payload).await.unwrap();
+
+    let response: Response = decode_payload(&payload).unwrap();
+    assert!(matches!(
+        response,
+        Response::ListPageOk { snapshots, next_cursor }
+            if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)]
+                if entry.id == "abcdef1234567890abcdef1234567890abcdef12")
+                && next_cursor.as_deref() == Some("opaque-cursor")
+    ));
     server.await.unwrap();
 }
 

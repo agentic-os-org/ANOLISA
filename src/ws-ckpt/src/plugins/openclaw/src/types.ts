@@ -19,6 +19,10 @@ export interface SnapshotInfo {
   metadata?: Record<string, unknown>;
   /** ISO 8601 creation timestamp. */
   createdAt: string;
+  /** Detail level returned by ws-ckpt. Summary entries omit large optional fields. */
+  detail?: "full" | "summary";
+  /** Fields omitted when detail is "summary". */
+  omittedFields?: string[];
 }
 
 /** Result of a checkpoint operation. */

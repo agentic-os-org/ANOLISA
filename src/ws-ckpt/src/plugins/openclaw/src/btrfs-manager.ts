@@ -288,18 +288,21 @@ export class BtrfsManager {
       const output = await this.executor.list(this.workspacePath, "json");
 
       if (output.exitCode !== 0) {
-        console.error(
-          `[ws-ckpt] Failed to list checkpoints: ${mapErrorToLLMMessage(output.stderr)}`,
+        throw new Error(
+          `Failed to list checkpoints: ${mapErrorToLLMMessage(output.stderr)}`,
         );
-        return this.store.getAll();
       }
 
       const parsed = this.parseSnapshotList(output.stdout);
       this.store.setAll(parsed);
       return this.store.getAll();
     } catch (error) {
-      console.error(`[ws-ckpt] List error:`, error);
-      return this.store.getAll();
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[ws-ckpt] List error: ${message}`);
+      if (message.startsWith("Failed to list checkpoints:")) {
+        throw error;
+      }
+      throw new Error(`Failed to list checkpoints: ${message}`);
     }
   }
 
@@ -491,6 +494,10 @@ export class BtrfsManager {
               ?? item.created_at ?? item.createdAt
               ?? new Date().toISOString(),
             ),
+            detail: item.detail === "summary" ? "summary" : "full",
+            omittedFields: Array.isArray(item.omitted_fields)
+              ? item.omitted_fields.map(String)
+              : undefined,
           };
         });
       }

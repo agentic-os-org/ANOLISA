@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-基于 btrfs 文件系统的 AI 工作区快照管理系统，支持秒级创建检查点和回滚，专为 AI Agent 场景设计。
+基于 btrfs 文件系统的 AI 工作区快照管理系统，为 AI Agent 提供检查点和回滚能力；实际耗时取决于文件系统、工作负载和运行环境。
 
 ## 特性
 
-- **毫秒级快照创建和回滚** — 利用 btrfs COW 特性，微秒级完成快照操作
+- **写时复制快照** — 利用 btrfs COW 高效创建和回滚快照；实际耗时取决于文件系统与工作负载
 - **守护进程架构** — 特权操作封装在 daemon 中，上层调用无需 root 权限
 - **Unix Socket IPC** — Bincode 二进制协议，高效通信
 - **systemd 服务化** — RPM 一键部署，开机自启
@@ -98,6 +98,12 @@ ws-ckpt list --workspace ~/my-workspace
 
 # 以 JSON 格式输出
 ws-ckpt list --workspace ~/my-workspace --format json
+
+# 读取单页（按创建时间升序），输出包含 next_cursor
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --format json
+
+# 使用不透明游标继续读取
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --cursor '<next_cursor>' --format json
 
 # 查看两个快照间的差异
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2

@@ -1,9 +1,15 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::info;
-use ws_ckpt_common::{ErrorCode, ResolveError, Response, SnapshotEntry, SnapshotMeta};
+use ws_ckpt_common::{
+    encoded_size, ErrorCode, ResolveError, Response, SnapshotEntry, SnapshotListItem, SnapshotMeta,
+    SnapshotSummary, MAX_FRAME_SIZE,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -562,6 +568,290 @@ pub async fn list_all_snapshots(
     })
 }
 
+const LIST_CURSOR_VERSION: u8 = 1;
+const MAX_CURSOR_LEN: usize = 16 * 1024;
+const TARGET_LIST_PAGE_SIZE: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct ListKey {
+    created_at: DateTime<Utc>,
+    workspace_id: String,
+    snapshot_id: String,
+}
+
+impl ListKey {
+    fn sort_key(&self) -> (DateTime<Utc>, &str, &str) {
+        (self.created_at, &self.workspace_id, &self.snapshot_id)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ListCursor {
+    version: u8,
+    scope: Option<String>,
+    orphans_only: bool,
+    after: ListKey,
+    upper: ListKey,
+}
+
+fn encode_list_cursor(
+    scope: Option<String>,
+    after: ListKey,
+    upper: ListKey,
+    orphans_only: bool,
+) -> String {
+    hex::encode(
+        serde_json::to_vec(&ListCursor {
+            version: LIST_CURSOR_VERSION,
+            scope,
+            orphans_only,
+            after,
+            upper,
+        })
+        .expect("list cursor fields are serializable"),
+    )
+}
+
+fn decode_list_cursor(
+    raw: &str,
+    scope: &Option<String>,
+    orphans_only: bool,
+) -> Result<ListCursor, String> {
+    if raw.len() > MAX_CURSOR_LEN {
+        return Err("list cursor is too long".to_string());
+    }
+    let bytes = hex::decode(raw).map_err(|_| "list cursor is not valid".to_string())?;
+    let cursor: ListCursor =
+        serde_json::from_slice(&bytes).map_err(|_| "list cursor is not valid".to_string())?;
+    if cursor.version != LIST_CURSOR_VERSION {
+        return Err("list cursor version is not supported".to_string());
+    }
+    if &cursor.scope != scope || cursor.orphans_only != orphans_only {
+        return Err("list cursor does not match the requested workspace scope".to_string());
+    }
+    if cursor.after > cursor.upper {
+        return Err("list cursor bounds are invalid".to_string());
+    }
+    Ok(cursor)
+}
+
+fn list_meta_matches_key(meta: &SnapshotMeta, key: &ListKey) -> bool {
+    meta.created_at == key.created_at
+}
+
+fn page_error(message: impl Into<String>) -> Response {
+    Response::Error {
+        code: ErrorCode::InternalError,
+        message: message.into(),
+    }
+}
+
+/// Read one cursor page without cloning the complete global snapshot index.
+pub async fn list_snapshot_page(
+    state: &Arc<DaemonState>,
+    workspace: Option<&str>,
+    limit: usize,
+    raw_cursor: Option<&str>,
+    orphans_only: bool,
+) -> anyhow::Result<Response> {
+    let arcs = if let Some(workspace) = workspace {
+        let Some(arc) = state.resolve_workspace(workspace).await else {
+            return Ok(workspace_not_found(workspace));
+        };
+        if let Some(resp) = state.detached_registration_error(&arc).await {
+            return Ok(resp);
+        }
+        vec![arc]
+    } else {
+        state.all_workspaces()
+    };
+
+    let scope = if workspace.is_some() {
+        let ws = arcs[0].read().await;
+        Some(ws.ws_id.clone())
+    } else {
+        None
+    };
+    let decoded = match raw_cursor {
+        Some(raw) => match decode_list_cursor(raw, &scope, orphans_only) {
+            Ok(cursor) => Some(cursor),
+            Err(message) => return Ok(page_error(message)),
+        },
+        None => None,
+    };
+    let after = decoded.as_ref().map(|cursor| &cursor.after);
+    let cursor_upper = decoded.as_ref().map(|cursor| &cursor.upper);
+    // Keep at most limit + 1 identity keys. Compare borrowed fields before
+    // allocating candidate keys; the index is still scanned once per page.
+    let candidate_cap = limit.saturating_add(1);
+    let mut candidates: BTreeMap<ListKey, Arc<RwLock<WorkspaceState>>> = BTreeMap::new();
+    let mut observed_upper: Option<ListKey> = None;
+    for arc in arcs {
+        let ws = arc.read().await;
+        let mut workspace_upper = None;
+        for (id, meta) in &ws.index.snapshots {
+            if orphans_only && !ws.index.recovered_orphans.contains(id) {
+                continue;
+            }
+            let key = (meta.created_at, ws.ws_id.as_str(), id.as_str());
+            // Existing timestamps may lie ahead of the wall clock after a clock
+            // correction. Capture the maximum observed key, not Utc::now().
+            if cursor_upper.is_none() && workspace_upper.is_none_or(|current| key > current) {
+                workspace_upper = Some(key);
+            }
+            if cursor_upper.is_some_and(|upper| key > upper.sort_key())
+                || after.is_some_and(|after| key <= after.sort_key())
+            {
+                continue;
+            }
+            if candidates.len() == candidate_cap
+                && candidates
+                    .last_key_value()
+                    .is_some_and(|(last, _)| key >= last.sort_key())
+            {
+                continue;
+            }
+            candidates.insert(
+                ListKey {
+                    created_at: meta.created_at,
+                    workspace_id: ws.ws_id.clone(),
+                    snapshot_id: id.clone(),
+                },
+                Arc::clone(&arc),
+            );
+            if candidates.len() > candidate_cap {
+                candidates.pop_last();
+            }
+        }
+        if let Some(key) = workspace_upper {
+            if observed_upper
+                .as_ref()
+                .is_none_or(|current| key > current.sort_key())
+            {
+                observed_upper = Some(ListKey {
+                    created_at: key.0,
+                    workspace_id: key.1.to_string(),
+                    snapshot_id: key.2.to_string(),
+                });
+            }
+        }
+    }
+
+    let Some(upper) = cursor_upper.cloned().or(observed_upper) else {
+        return Ok(Response::ListPageOk {
+            snapshots: vec![],
+            next_cursor: None,
+        });
+    };
+
+    build_list_page(scope, upper, limit, candidates, orphans_only).await
+}
+
+async fn build_list_page(
+    scope: Option<String>,
+    upper: ListKey,
+    limit: usize,
+    candidates: BTreeMap<ListKey, Arc<RwLock<WorkspaceState>>>,
+    orphans_only: bool,
+) -> anyhow::Result<Response> {
+    let candidate_count = candidates.len();
+    let mut snapshots = Vec::new();
+    let mut serialized_items_size = 0_u64;
+    let mut last_examined = None;
+    let mut stopped_for_budget = false;
+    for (index, (key, arc)) in candidates.into_iter().enumerate() {
+        if index >= limit {
+            break;
+        }
+        let ws = arc.read().await;
+        let meta = ws
+            .index
+            .snapshots
+            .get(&key.snapshot_id)
+            .filter(|meta| list_meta_matches_key(meta, &key));
+        let Some(meta) = meta else {
+            // A deleted/recreated candidate must not replace the cursor that
+            // was budgeted with an accepted item. Empty pages still advance.
+            if snapshots.is_empty() {
+                last_examined = Some(key);
+            }
+            continue;
+        };
+        let workspace = ws.index.workspace_path.to_string_lossy().to_string();
+        let entry = SnapshotListItem::Full(SnapshotEntry {
+            id: key.snapshot_id.clone(),
+            workspace: workspace.clone(),
+            meta: meta.clone(),
+        });
+        let continuation =
+            encode_list_cursor(scope.clone(), key.clone(), upper.clone(), orphans_only);
+        let base_size = encoded_size(&Response::ListPageOk {
+            snapshots: vec![],
+            next_cursor: Some(continuation),
+        })?;
+        let entry_size = encoded_size(&entry)?;
+        let full_size = base_size
+            .checked_add(serialized_items_size)
+            .and_then(|size| size.checked_add(entry_size))
+            .context("list page size overflow")?;
+
+        if !snapshots.is_empty() && full_size > TARGET_LIST_PAGE_SIZE {
+            stopped_for_budget = true;
+            break;
+        }
+        let selected = if full_size > u64::from(MAX_FRAME_SIZE) {
+            let summary = SnapshotListItem::Summary(SnapshotSummary {
+                id: key.snapshot_id.clone(),
+                workspace,
+                created_at: meta.created_at,
+                pinned: meta.pinned,
+                missing: meta.missing,
+                omitted_fields: vec![
+                    "message".to_string(),
+                    "metadata".to_string(),
+                    "parent_id".to_string(),
+                    "child_ids".to_string(),
+                ],
+            });
+            let summary_item_size = encoded_size(&summary)?;
+            let summary_size = base_size
+                .checked_add(serialized_items_size)
+                .and_then(|size| size.checked_add(summary_item_size))
+                .context("list summary page size overflow")?;
+            if summary_size > u64::from(MAX_FRAME_SIZE) {
+                return Ok(page_error(
+                    "snapshot identity and continuation cursor exceed the IPC frame limit",
+                ));
+            }
+            summary
+        } else {
+            entry
+        };
+        serialized_items_size = serialized_items_size
+            .checked_add(encoded_size(&selected)?)
+            .context("list page item size overflow")?;
+        snapshots.push(selected);
+        last_examined = Some(key);
+    }
+
+    let has_more = stopped_for_budget || candidate_count > limit;
+    let next_cursor = if has_more {
+        last_examined.map(|after| encode_list_cursor(scope, after, upper, orphans_only))
+    } else {
+        None
+    };
+    let response = Response::ListPageOk {
+        snapshots,
+        next_cursor,
+    };
+    if encoded_size(&response)? > u64::from(MAX_FRAME_SIZE) {
+        return Ok(page_error(
+            "snapshot page and continuation cursor exceed the IPC frame limit",
+        ));
+    }
+    Ok(response)
+}
+
 /// Compute diff between two snapshots.
 pub async fn diff_snapshots(
     state: &Arc<DaemonState>,
@@ -729,6 +1019,219 @@ mod tests {
         GuardedCheckpointOutcomeV2, Response, SnapshotIndex, SnapshotMeta,
         WorkspaceGenerationTokenV2,
     };
+
+    #[test]
+    fn list_candidate_rejects_reused_snapshot_id_with_new_key() {
+        let created_at = Utc::now();
+        let key = ListKey {
+            created_at,
+            workspace_id: "ws".into(),
+            snapshot_id: "snapshot".into(),
+        };
+        let replacement = SnapshotMeta {
+            message: Some("replacement".into()),
+            metadata: None,
+            created_at: created_at + Duration::seconds(1),
+            parent_id: None,
+            child_ids: Vec::new(),
+            pinned: false,
+            missing: false,
+        };
+
+        assert!(!list_meta_matches_key(&replacement, &key));
+    }
+
+    #[tokio::test]
+    async fn list_page_orphan_filter_is_bound_to_cursor() {
+        for workspace in [Some("ws-test"), None] {
+            let fx = GuardFixture::new("ws-test");
+            let arc = fx.state.get_by_wsid("ws-test").unwrap();
+            {
+                let mut ws = arc.write().await;
+                let created_at = Utc::now();
+                for id in ["a", "b", "c"] {
+                    ws.index
+                        .snapshots
+                        .insert(id.into(), make_snapshot_meta_at(false, created_at));
+                }
+                ws.index.recovered_orphans.extend(["a".into(), "c".into()]);
+            }
+            let first = list_snapshot_page(&fx.state, workspace, 1, None, true)
+                .await
+                .unwrap();
+            let Response::ListPageOk {
+                snapshots,
+                next_cursor: Some(cursor),
+            } = first
+            else {
+                panic!("expected orphan page and cursor");
+            };
+            assert!(
+                matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "a")
+            );
+            let mismatch = list_snapshot_page(&fx.state, workspace, 1, Some(&cursor), false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(mismatch, Response::Error { message, .. } if message.contains("scope"))
+            );
+            let second = list_snapshot_page(&fx.state, workspace, 10, Some(&cursor), true)
+                .await
+                .unwrap();
+            assert!(
+                matches!(second, Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "c"))
+            );
+            let all = list_snapshot_page(&fx.state, workspace, 10, None, false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(all, Response::ListPageOk { snapshots, next_cursor: None } if snapshots.len() == 3)
+            );
+            let legacy = crate::dispatcher::dispatch(
+                &fx.state,
+                ws_ckpt_common::Request::ListOrphans {
+                    workspace: workspace.map(str::to_string),
+                },
+            )
+            .await;
+            assert!(matches!(legacy, Response::ListOk { snapshots }
+                if snapshots.len() == 2 && snapshots.iter().all(|entry| entry.id != "b")));
+        }
+    }
+
+    #[tokio::test]
+    async fn list_page_includes_preexisting_future_timestamps() {
+        for workspace in [Some("ws-test"), None] {
+            let fx = GuardFixture::new("ws-test");
+            let arc = fx.state.get_by_wsid("ws-test").unwrap();
+            let future = Utc::now() + Duration::days(365);
+            {
+                let mut ws = arc.write().await;
+                for (id, seconds) in [("a", 0), ("b", 1)] {
+                    ws.index.snapshots.insert(
+                        id.into(),
+                        make_snapshot_meta_at(false, future + Duration::seconds(seconds)),
+                    );
+                }
+            }
+            let first = list_snapshot_page(&fx.state, workspace, 1, None, false)
+                .await
+                .unwrap();
+            let Response::ListPageOk {
+                snapshots,
+                next_cursor: Some(cursor),
+            } = first
+            else {
+                panic!(
+                    "expected a page and cursor for preexisting future-dated snapshots: {first:?}"
+                );
+            };
+            assert!(
+                matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "a")
+            );
+            let scope = workspace.map(str::to_string);
+            assert_eq!(
+                decode_list_cursor(&cursor, &scope, false)
+                    .unwrap()
+                    .upper
+                    .snapshot_id,
+                "b"
+            );
+            arc.write().await.index.snapshots.insert(
+                "c".into(),
+                make_snapshot_meta_at(false, future + Duration::seconds(2)),
+            );
+            let second = list_snapshot_page(&fx.state, workspace, 10, Some(&cursor), false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(second, Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "b"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_page_cursor_budget_survives_deleted_or_reused_candidates() {
+        for replaced in [false, true] {
+            let fx = GuardFixture::new("ws-test");
+            let arc = fx.state.get_by_wsid("ws-test").unwrap();
+            let created_at = Utc::now();
+            let key = |id: String| ListKey {
+                created_at,
+                workspace_id: "ws-test".into(),
+                snapshot_id: id,
+            };
+            let first = key("a".into());
+            let skipped = key(format!("b{}", "x".repeat(100)));
+            let upper = key("c".into());
+            let scope = None;
+            let cursor = encode_list_cursor(scope.clone(), first.clone(), upper.clone(), false);
+            let mut entry = SnapshotEntry {
+                id: first.snapshot_id.clone(),
+                workspace: fx.ws_link.to_string_lossy().into_owned(),
+                meta: make_snapshot_meta_at(false, created_at),
+            };
+            entry.meta.message = Some(String::new());
+            let overhead = encoded_size(&Response::ListPageOk {
+                snapshots: vec![SnapshotListItem::Full(entry.clone())],
+                next_cursor: Some(cursor),
+            })
+            .unwrap();
+            entry.meta.message =
+                Some("x".repeat((u64::from(MAX_FRAME_SIZE) - overhead - 100) as usize));
+            {
+                let mut ws = arc.write().await;
+                ws.index
+                    .snapshots
+                    .insert(first.snapshot_id.clone(), entry.meta);
+                ws.index.snapshots.insert(
+                    upper.snapshot_id.clone(),
+                    make_snapshot_meta_at(false, created_at),
+                );
+                // Simulate deletion/recreation between candidate selection and page assembly.
+                if replaced {
+                    ws.index.snapshots.insert(
+                        skipped.snapshot_id.clone(),
+                        make_snapshot_meta_at(false, created_at + Duration::seconds(1)),
+                    );
+                }
+            }
+            let candidates = [first.clone(), skipped, upper.clone()]
+                .into_iter()
+                .map(|key| (key, arc.clone()))
+                .collect();
+            let response = build_list_page(scope.clone(), upper, 2, candidates, false)
+                .await
+                .unwrap();
+            assert!(
+                ws_ckpt_common::encode_frame(&response).is_ok(),
+                "final cursor must fit the actual response, even after skipped candidates"
+            );
+            let Response::ListPageOk {
+                snapshots,
+                next_cursor: Some(cursor),
+            } = response
+            else {
+                panic!("expected a usable page");
+            };
+            assert!(
+                matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "a")
+            );
+            assert_eq!(
+                decode_list_cursor(&cursor, &scope, false).unwrap().after,
+                first
+            );
+            let next = list_snapshot_page(&fx.state, None, 2, Some(&cursor), false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(next, Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "c"))
+            );
+        }
+    }
 
     fn test_backend() -> Arc<dyn StorageBackend> {
         Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
