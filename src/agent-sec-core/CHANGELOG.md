@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1
+
+**OpenClaw Hook Integration**
+
+- Updated OpenClaw plugin deployment and runtime compatibility for OpenClaw 2.0, including capability consent and SQLite-backed session evidence. (#3440)
+
 ## 0.13.0
 
 **V2 Policy & Daemon Runtime**
