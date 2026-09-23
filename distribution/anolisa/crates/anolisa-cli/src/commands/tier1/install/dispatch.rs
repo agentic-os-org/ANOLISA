@@ -602,6 +602,7 @@ pub(crate) fn plan_component(
     } = &request.target
         && matches!(route, PlannedRoute::Delegated { .. })
     {
+        require_configured_rpm_backend(&repo_config, index_base_override.as_deref(), &command)?;
         check_rpm_install(
             &provider,
             &[artifact.as_deref().unwrap_or(package)],
