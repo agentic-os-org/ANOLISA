@@ -29,7 +29,7 @@ url = "2.5"
 
 [package]
 name = "agent-sec-cli"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 description = "Agent Security Core CLI - Native Rust extensions"
 license = "Apache-2.0"

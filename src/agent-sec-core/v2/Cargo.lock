@@ -90,7 +90,7 @@ checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "asc-action-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-types",
  "asc-observability",
@@ -102,14 +102,14 @@ dependencies = [
 
 [[package]]
 name = "asc-action-types"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "asc-agentsight-client"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-policy-target-contracts",
  "asc-policy-types",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "asc-capability-code-scan"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "asc-cli"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-runtime",
  "asc-daemon",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-client"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-daemon-protocol",
  "asc-observability",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-core"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-handler"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-protocol"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-policy-types",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-service"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "thiserror",
  "tokio",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "asc-event-log"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-observability",
  "asc-security-events",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "asc-event-sink"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-event-log",
  "asc-observability",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "asc-foundation-types"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "asc-observability"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-security-events",
  "chrono",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "asc-pap"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-pap-repository-memory",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "asc-pap-repository-memory"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-pap",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "asc-pcp"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-agentsight-client",
  "asc-foundation-types",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "asc-persistence-sqlite"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-observability",
  "asc-security-events",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-adapter-agentsight"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-policy-types",
  "serde",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-engine"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-pap",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-repository"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-policy-types",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "asc-pap",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-target-contracts"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-policy-types",
  "serde_json",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-types"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-foundation-types",
  "serde",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "asc-security-events"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "chrono",
  "rustix",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "asc-security-summary"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "asc-security-events",
  "chrono",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "asc-sqlite-kernel"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "rusqlite",
  "rustix",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "asc-telemetry"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "nix",
  "serde",
