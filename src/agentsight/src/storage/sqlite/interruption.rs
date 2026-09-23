@@ -1,9 +1,12 @@
 //! SQLite storage for interruption_events table.
 
+mod maintenance;
+
+use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
 use rusqlite::{Connection, params};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use super::connection::create_connection;
 use crate::interruption::{InterruptionEvent, InterruptionType};
 
 /// Bucket key reported by the per-session breakdown for events whose
@@ -51,13 +54,16 @@ pub struct InterruptionTypeStat {
 
 pub struct InterruptionStore {
     conn: Mutex<Connection>,
+    db_path: PathBuf,
 }
 
 impl InterruptionStore {
+    /// Opens an interruption store and initializes its schema.
     pub fn new_with_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let conn = create_connection(path)?;
+        let conn = open_connection(path, ConnectionOptions::default())?;
         let store = InterruptionStore {
             conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
         };
         store.init_tables()?;
         Ok(store)
@@ -723,228 +729,6 @@ impl InterruptionStore {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM process_exits WHERE pid=?1", params![pid])?;
         Ok(())
-    }
-
-    /// Purge interruption events older than cutoff_ns.
-    pub fn purge_before(&self, cutoff_ns: i64) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let deleted = conn.execute(
-            "DELETE FROM interruption_events WHERE occurred_at_ns < ?1",
-            params![cutoff_ns],
-        )?;
-        Ok(deleted)
-    }
-
-    /// Purge old records and trim the DB file if it exceeds a size budget.
-    ///
-    /// * `retention_days` - delete rows whose `occurred_at_ns` is older than this
-    ///   many days.  A value of 0 disables age-based purging.
-    /// * `max_db_size_mb` - if the database (main file + WAL + SHM) is larger
-    ///   than this, delete the oldest rows until it fits.  A value of 0
-    ///   disables size-based purging.
-    ///
-    /// Returns the total number of rows deleted.
-    pub fn purge_old_and_oversized(
-        &self,
-        retention_days: u64,
-        max_db_size_mb: u64,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        let mut total_deleted = 0usize;
-
-        // 1. Age-based retention
-        if retention_days > 0 {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as i64)
-                .unwrap_or(0);
-            let retention_ns = retention_days as i64 * 24 * 3600 * 1_000_000_000;
-            let cutoff_ns = now_ns.saturating_sub(retention_ns);
-            total_deleted += self.purge_before(cutoff_ns)?;
-        }
-
-        // 2. Size-based trimming (checkpoints inside its own loop)
-        if max_db_size_mb > 0 {
-            total_deleted += self.trim_to_size_limit(max_db_size_mb)?;
-        }
-
-        // 3. Reclaim pages freed by age-based deletes. The size trim already
-        // checkpointed on its last iteration; one more pass is cheap on an
-        // already-compact file.
-        if total_deleted > 0 {
-            if let Err(e) = self.checkpoint() {
-                log::warn!("checkpoint after interruption purge failed: {e}");
-            }
-        }
-
-        Ok(total_deleted)
-    }
-
-    /// Delete oldest rows until the total on-disk size fits 90% of the limit.
-    ///
-    /// Trimming starts only once the database exceeds the configured limit;
-    /// the 90% mark is just the stop target, so a few inserts after a trim do
-    /// not immediately retrigger it.
-    fn trim_to_size_limit(&self, max_db_size_mb: u64) -> Result<usize, Box<dyn std::error::Error>> {
-        let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
-        if self.total_db_file_size() <= max_bytes {
-            return Ok(0);
-        }
-        let threshold = (max_bytes as f64 * 0.9) as u64;
-        let mut total_deleted = 0usize;
-        let mut stuck_rounds = 0u32;
-
-        for _ in 0..20 {
-            let size = self.effective_db_file_size()?;
-            if size <= threshold {
-                break;
-            }
-            let rows = self.row_count()?;
-            if rows == 0 {
-                break;
-            }
-
-            // Bigger bites when far over the limit; mirrors the sibling genai
-            // store's prune policy.
-            let overshoot = size as f64 / max_bytes as f64;
-            let pct = if overshoot > 5.0 {
-                0.50
-            } else if overshoot > 2.0 {
-                0.25
-            } else {
-                0.10
-            };
-            let batch = ((rows as f64 * pct) as usize).max(1);
-            let deleted = self.delete_oldest_batch(batch)?;
-            total_deleted += deleted;
-            if deleted == 0 {
-                break;
-            }
-
-            // A DELETE in WAL mode does not shrink the main file (it appends
-            // to the WAL instead), so size must be re-measured after a
-            // checkpoint or the loop cannot observe progress. A busy
-            // checkpoint (another connection holds a read snapshot) leaves
-            // the WAL intact — stop trimming: further deletes would keep
-            // appending WAL frames and never converge.
-            match self.checkpoint() {
-                Ok(true) => {
-                    log::warn!(
-                        "WAL checkpoint busy during interruption trim; \
-                         stopping (the WAL could not be truncated)"
-                    );
-                    break;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    log::warn!("checkpoint during interruption trim failed: {e}");
-                }
-            }
-
-            let new_size = self.effective_db_file_size()?;
-            if new_size < size {
-                stuck_rounds = 0;
-            } else {
-                stuck_rounds += 1;
-                if stuck_rounds >= 3 {
-                    log::warn!(
-                        "Interruption trim stalled at {new_size} bytes \
-                         (threshold {threshold}, rows {rows}, overshoot {overshoot:.1}x); \
-                         VACUUM is likely failing, e.g. disk full"
-                    );
-                    break;
-                }
-            }
-        }
-
-        Ok(total_deleted)
-    }
-
-    /// Delete the oldest N interruption events.
-    fn delete_oldest_batch(&self, limit: usize) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let deleted = conn.execute(
-            "DELETE FROM interruption_events WHERE id IN (
-                SELECT id FROM interruption_events ORDER BY occurred_at_ns ASC LIMIT ?1
-            )",
-            params![limit as i64],
-        )?;
-        Ok(deleted)
-    }
-
-    /// Return the filesystem path of this store.
-    fn db_path(&self) -> std::path::PathBuf {
-        // The connection was created from a path in `new_with_path`; we can
-        // recover it via `path()` on the underlying connection.
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.path()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("interruption_events.db"))
-    }
-
-    /// Total on-disk size: main file + WAL + SHM. Fresh writes land in the
-    /// WAL, so measuring the main file alone misses recent growth.
-    fn total_db_file_size(&self) -> u64 {
-        let path = self.db_path();
-        let mut total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        // Append via OsString so non-UTF-8 db paths still resolve the sidecars.
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.clone().into_os_string();
-            sidecar.push(suffix);
-            if let Ok(meta) = std::fs::metadata(&sidecar) {
-                total += meta.len();
-            }
-        }
-        total
-    }
-
-    /// Logical data size: physical size minus freelist pages. Trim convergence
-    /// is measured on this: deletes free pages into the freelist without
-    /// shrinking the physical file.
-    ///
-    /// # Errors
-    /// Returns an error when the connection mutex is poisoned.
-    fn effective_db_file_size(&self) -> Result<u64, Box<dyn std::error::Error>> {
-        let physical = self.total_db_file_size();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
-        let freelist: i64 = conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .unwrap_or(0);
-        let page_size: i64 = conn
-            .query_row("PRAGMA page_size", [], |r| r.get(0))
-            .unwrap_or(4096);
-        Ok(physical.saturating_sub((freelist.max(0) * page_size.max(0)) as u64))
-    }
-
-    fn row_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
-        let count = conn.query_row("SELECT COUNT(*) FROM interruption_events", [], |r| r.get(0))?;
-        Ok(count)
-    }
-
-    /// Flush and truncate the WAL.
-    ///
-    /// Never VACUUMs: rebuilding the file would push its pages through the
-    /// page cache, which counts against the service's cgroup memory limit and
-    /// can OOM-kill the process on large databases (#2888). Freed pages stay
-    /// on the freelist and are reused by future inserts, so the physical file
-    /// stops growing once the logical size fits.
-    ///
-    /// Returns `Ok(true)` when the checkpoint was blocked by another
-    /// connection's read snapshot (busy): the statement succeeds but the WAL
-    /// is NOT truncated.
-    fn checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
-        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
-        Ok(busy != 0)
     }
 }
 

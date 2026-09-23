@@ -130,23 +130,78 @@ fn nesting_beyond_the_parse_limit_is_not_parsed() {
             "</div>".repeat(depth)
         ))
     };
-    // html, body, and main already take three levels.
-    assert!(HtmlExtractor.render(&nested(509)).is_some());
-    assert!(HtmlExtractor.render(&nested(510)).is_none());
+    // html, body, main and the paragraph already take four levels.
+    assert!(HtmlExtractor.render(&nested(508)).is_some());
+    assert!(HtmlExtractor.render(&nested(509)).is_none());
     let started = std::time::Instant::now();
     assert!(HtmlExtractor.render(&nested(200_000)).is_none());
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    // Void elements, implicitly closed runs, raw text, and comments do not nest.
+    // Void elements, implicitly closed runs, raw text, comments and
+    // self-closing foreign elements do not nest.
     let flat = page(&format!(
-        "<main>{}{}<script>{}</script><!-- {} --><textarea>{}</textarea><p>{PARAGRAPH}</p></main>",
+        "<main>{}{}<script>{}</script><!-- {} --><textarea>{}</textarea>\
+         <svg>{}</svg><svg/><p>{PARAGRAPH}</p></main>",
         "<br><img src=x><hr>".repeat(300),
         "<p>a<li>b<td>c".repeat(300),
         "<div>".repeat(600),
         "<div>".repeat(600),
-        "<div>".repeat(600)
+        "<div>".repeat(600),
+        "<path d=\"M0 0\"/>".repeat(600)
     ));
-    assert_eq!(nesting_depth(&flat), 3);
     assert!(HtmlExtractor.render(&flat).is_some());
+    // Depth is measured on the parser's own tree, so every way markup can
+    // nest is caught: a slash the tokenizer ignores in HTML content, a
+    // breakout or an HTML integration point that leaves foreign content, a
+    // quoted `/>`, a script element inside `<svg>` (not raw text there),
+    // and template contents that continue from the template's depth.
+    let started = std::time::Instant::now();
+    for (label, deep) in [
+        ("slash in html content", "<div/>".repeat(600)),
+        ("breakout", format!("<svg>{}", "<div/>".repeat(600))),
+        (
+            "integration point",
+            format!("<svg><foreignObject>{}", "<section/>".repeat(600)),
+        ),
+        ("quoted slash", format!("<svg>{}", "<path d=\"a/>b\">".repeat(600))),
+        (
+            "script in svg",
+            format!("<svg><script>{}</script>", "<div>".repeat(600)),
+        ),
+        (
+            "template",
+            format!("{}<template>{}", "<div>".repeat(300), "<div>".repeat(300)),
+        ),
+        // The adoption agency clones `<i>`, moves `<div>` under the clone
+        // and inserts a `<b>` clone below it, all before the clones are
+        // attached: three levels per round that no cache could see.
+        ("adoption agency", "<b><i><div></b>".repeat(600)),
+    ] {
+        let html = page(&format!("<main>{deep}<p>{PARAGRAPH}</p></main>"));
+        assert!(HtmlExtractor.render(&html).is_none(), "{label}");
+    }
+    // Refusing a page is still work the caller waits for, so the shapes the
+    // limit exists for have to be refused quickly, not merely refused.
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // Unterminated raw-text start tags never reach the parser at all: the
+    // trailer scan reports each as a tag and carries on after it, before any
+    // depth check runs. The end-tag search that fails for one of them fails
+    // for every later one too, so it must not be repeated per tag: 20 000 of
+    // them cost 9 ms when the failure is remembered and 4.2 s when it is not
+    // (release build).
+    let unclosed = "<script>".repeat(20_000);
+    let started = std::time::Instant::now();
+    assert!(HtmlExtractor.render(&unclosed).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    // Width is not depth: foster parenting inserts every `<div>` before the
+    // table and `<tr>` closes it again, so the tree stays shallow while the
+    // body grows 20 000 children wide. That must parse in linear time.
+    let wide = page(&format!(
+        "<main><table>{}</table><p>{PARAGRAPH}</p></main>",
+        "<div><tr>".repeat(20_000)
+    ));
+    let started = std::time::Instant::now();
+    assert!(HtmlExtractor.render(&wide).is_some());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]
@@ -421,13 +476,49 @@ fn content_after_the_document_end_is_kept() {
     ))
     .replacen(
         "<head>",
-        "<!-- legacy </html> note --><head><script>var s = \"</html>\";</script>",
+        "<!-- legacy </html> note --><head><script>var s = \"</html>\";</script>\
+         <noscript></html></noscript>",
         1,
     );
     let view = HtmlExtractor.render(&html).unwrap();
     assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\nsecond {PARAGRAPH}"));
     assert!(view.output.ends_with("\n[End page]"));
     assert_eq!(view.removed[0], 3);
+    assert_eq!(view.removed[2], 1);
+    // A raw-text element the tokenizer does not read as raw text, whether
+    // self-closing in foreign content or never closed, does not hide the end
+    // tag, and neither does a comment that is never closed. Every raw-text
+    // name has to be here: the rule is one condition over all of them, and a
+    // per-element or per-namespace special case would silently drop the
+    // unterminated ones again.
+    for inner in [
+        "<svg><noscript/></svg>",
+        "<math><noscript/></math>",
+        "<svg><title/></svg>",
+        "<svg><style/></svg>",
+        "<svg><script/></svg>",
+        "<svg><textarea/></svg>",
+        "<svg><xmp/></svg>",
+        "<svg><plaintext/></svg>",
+        "<noscript>",
+        "<script>",
+        // The scanner reads the `/>` inside the quoted attribute value as a
+        // self-closing tag and so does not skip the script; the unterminated
+        // comment after it must not swallow the end tag either.
+        "<script src=\"a/>b\"><!-- note</script>",
+        "<noscript/><!-- note",
+        "<script/><!-- note",
+        "<textarea/><!-- note",
+        "<!-- note",
+    ] {
+        let html = page(&format!("<main><p>{PARAGRAPH}</p>{inner}</main>"));
+        let view = HtmlExtractor
+            .render(&format!("{html}\n200"))
+            .unwrap_or_else(|| panic!("{inner}"));
+        assert!(view.output.ends_with("[End page]\n200"), "{inner}");
+        assert!(view.output.contains(PARAGRAPH), "{inner}");
+        assert_eq!(view.outside_root, 0, "{inner}");
+    }
 }
 
 #[test]

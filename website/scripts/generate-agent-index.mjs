@@ -57,6 +57,12 @@ function parseOverview(agentsMarkdown) {
   return components;
 }
 
+function componentSourcePath(directoryName) {
+  const row = componentRows.find((component) => path.posix.basename(component.source_path) === directoryName);
+  if (!row) throw new Error(`Missing required component "${directoryName}" in AGENTS.md component table`);
+  return row.source_path;
+}
+
 async function componentVersion(sourcePath) {
   const packagePath = path.join(repoRoot, sourcePath, 'package.json');
   if (await exists(packagePath)) {
@@ -125,7 +131,8 @@ function platformObject(platform) {
 async function componentPlatform(installName, fallback) {
   const manifestPath = path.join(
     repoRoot,
-    'src/anolisa/manifests/components',
+    anolisaSourcePath,
+    'manifests/components',
     installName,
     'component.toml',
   );
@@ -205,6 +212,9 @@ if (!installCommand) throw new Error('Could not derive the canonical install com
 
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
 const componentRows = parseOverview(agentsMarkdown);
+const anolisaSourcePath = componentSourcePath('anolisa');
+const tokenlessSourcePath = componentSourcePath('tokenless');
+const copilotShellSourcePath = componentSourcePath('copilot-shell');
 const components = [];
 for (const row of componentRows) {
   const id = path.posix.basename(row.source_path);
@@ -297,7 +307,7 @@ const index = {
   })),
   components,
   platform_support: {
-    source: 'src/anolisa/manifests/components/*/component.toml with AGENTS.md fallback',
+    source: `${anolisaSourcePath}/manifests/components/*/component.toml with AGENTS.md fallback`,
     linux: components.filter((component) => component.platform_support.linux).map((component) => component.id),
     macos: components.filter((component) => component.platform_support.macos).map((component) => ({id: component.id, support: component.platform_support.macos})),
     windows: components.filter((component) => component.platform_support.windows).map((component) => component.id),
@@ -394,8 +404,8 @@ function enumCommands(source, enumName) {
   return commands;
 }
 
-const anolisaCommandsSource = await readFile(path.join(repoRoot, 'src/anolisa/crates/anolisa-cli/src/commands.rs'), 'utf8');
-const tokenlessCommandsSource = await readFile(path.join(repoRoot, 'src/tokenless/crates/tokenless-cli/src/main.rs'), 'utf8');
+const anolisaCommandsSource = await readFile(path.join(repoRoot, anolisaSourcePath, 'crates/anolisa-cli/src/commands.rs'), 'utf8');
+const tokenlessCommandsSource = await readFile(path.join(repoRoot, tokenlessSourcePath, 'crates/tokenless-cli/src/main.rs'), 'utf8');
 const cliReference = [
   '# ANOLISA CLI Reference',
   `# Generated from Clap definitions at ${sourceCommit}`,
@@ -417,19 +427,18 @@ const cliReference = [
   '',
   '## Copilot Shell',
   '',
-  'Entry points from src/copilot-shell/package.json: cosh, co, copilot',
+  `Entry points from ${copilotShellSourcePath}/package.json: cosh, co, copilot`,
   '',
 ].join('\n');
 await writeFile(path.join(agentsOutput, 'cli-reference.txt'), cliReference);
 
 const changelogSources = [
   'CHANGELOG.md',
-  ...(await walkFiles(path.join(repoRoot, 'src'), (file) => path.basename(file) === 'CHANGELOG.md'))
-    .filter((file) => path.relative(path.join(repoRoot, 'src'), file).split(path.sep).length === 2)
-    .map((file) => toPosix(path.relative(repoRoot, file))),
+  ...componentRows.map((row) => `${row.source_path}/CHANGELOG.md`).sort(),
 ];
 const changelogText = [];
 for (const source of changelogSources) {
+  if (source !== 'CHANGELOG.md' && !(await exists(path.join(repoRoot, source)))) continue;
   changelogText.push(`===== ${source} =====`, '', await readFile(path.join(repoRoot, source), 'utf8'), '');
 }
 await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n'));

@@ -2,6 +2,30 @@
 
 [English](CHANGELOG.md)
 
+## 0.5.0
+
+### Added
+
+- 统一 workspace 路径身份，init 时拒绝冲突的别名注册
+- init/unregister 被中断的 workspace 在 daemon 重启后自动恢复
+- 新增 cosh-ng 受管任务使用的 guarded rollback V2 协议与 evidence wire variants，cosh-ng 需要 ws-ckpt daemon 0.5.0 及以上
+
+### Changed
+
+- OpenClaw 工具白名单改由 OpenClaw config CLI 管理，要求 OpenClaw 2026.2.13 及以上 (#3221)
+- `/etc/ws-ckpt/config.toml` 以 RPM `%config(noreplace)` 打包：升级保留管理员修改、新默认值落为 `.rpmnew`；卸载时修改过的配置保留为 `.rpmsave`，重装后需手动恢复 (#3070)
+
+### Fixed
+
+- 修复空 workspace 不生成快照的问题
+- 修复 workspace 目录被外部替换后操作仍静默成功的问题，现在快速失败并提示 recover (#3059)
+- 修复 `recover --all` 部分失败时仍返回成功的问题 (#3069)
+- 修复 recover 失败时 `rpm -e` 连带清掉最后一份快照的问题 (#3069)
+- 修复磁盘空间紧张时 checkpoint 失败的问题，自动回收已删除子卷 (#3053)
+- 修复并发 init 同一 workspace 的竞态问题
+- 修复 raw 安装布局下的 adapter 发现问题
+- 修复 OpenClaw 插件安装时未校验 CLI 能力支持的问题 (#3116)
+
 ## 0.4.5
 
 ### Added

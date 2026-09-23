@@ -109,7 +109,16 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
 
+cleanup 中断后，重启会清除普通缺失快照记录，并将恢复孤儿设为 pinned，等待显式删除。
+用 `ws-ckpt list -w <workspace> --orphans --format json` 查询，再用
+`ws-ckpt delete -w <workspace> -s <complete-id> --force` 删除确认不再需要的快照。
+delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 unavailable 状态；
+删除缺失目标返回 `SnapshotNotFound`。请同步升级 CLI 和 daemon。详见[快照恢复](../../docs/user-guide/zh/runtime/ws-ckpt.md#cleanup-中断后的快照恢复)。
+
 ### 恢复中断的初始化
+
+恢复确认使用 daemon 解析的工作区和快照数量。若执行前恢复目标或快照集合发生变化，
+需要重新确认。使用此确认协议时，请同步更新 CLI 和 daemon。
 
 `ws-ckpt recover -w <workspace> --force` 也能恢复尚未注册的工作区：还原
 `.pre-init-bak`，并保留迁移中的子卷供检查。已注册工作区恢复成功时会归档遗留备份，

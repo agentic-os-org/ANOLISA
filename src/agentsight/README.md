@@ -406,17 +406,13 @@ sudo agentsight trace
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
 
-### Basic Options
+### SQLite Storage (`storage`)
 
-| Category | Option | Description |
-|----------|--------|-------------|
-| Storage | `db_path` | SQLite database file path |
-| Storage | `data_retention_days` | Data retention period |
-| Probes | `target_uid` | Filter events by UID |
-| Probes | `poll_timeout_ms` | Ring buffer poll timeout |
-| HTTP | `connection_cache_capacity` | LRU cache size for connection tracking |
-| SLS | `sls_endpoint` / `sls_project` / `sls_logstore` | Alibaba Cloud SLS export settings |
-| Tokenizer | `tokenizer_file` | Path or URL to HuggingFace tokenizer |
+`storage.base_path` selects the common database directory. Each store has independent
+`retention_days`, `max_db_size_mb`, and a write- or time-based check interval; `0` disables the
+corresponding rule. Defaults range from 100 MiB for interruptions to 500 MiB for primary events and
+trajectories. The Dashboard Settings page shows each effective policy and current physical/logical
+usage. See the [configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
 
 ### Feature Flags (`features`)
 

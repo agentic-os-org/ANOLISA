@@ -66,9 +66,25 @@ impl PreRuntimeCheckpointDriver for PreRuntimeCheckpointAdapter {
                     evidence: Self::evidence(&operation, evidence)?,
                 })
             }
-            Ok(_) => Ok(PreRuntimeCheckpointCreateResult::KnownNoEffect {
-                reason: bounded_text("Checkpoint provider skipped the requested baseline")?,
-            }),
+            Ok(evidence) => {
+                let message = match &evidence.outcome {
+                    GuardedCheckpointOutcomeV2::Skipped { reason }
+                        if reason == "Empty workspace, no snapshot created." =>
+                    {
+                        "This ws-ckpt daemon cannot create a checkpoint for an empty workspace. \
+                         Upgrade ws-ckpt or add a file, then submit a new Task; \
+                         alternatively submit with checkpoint=off."
+                    }
+                    _ => {
+                        "The checkpoint provider did not create the required snapshot. \
+                         Check ws-ckpt, then submit a new Task; \
+                         alternatively submit with checkpoint=off."
+                    }
+                };
+                Ok(PreRuntimeCheckpointCreateResult::KnownNoEffect {
+                    reason: bounded_text(message)?,
+                })
+            }
             Err(failure) if failure.effect == CkptRequestEffect::KnownNoEffect => {
                 Ok(PreRuntimeCheckpointCreateResult::KnownNoEffect {
                     reason: bounded_text(

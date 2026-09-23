@@ -78,7 +78,11 @@ fn response_pending_exit_and_dead_pid_preserve_crash_evidence() {
                     )
                     .expect("pending LLM call");
                 let dir = super::tests::unique_tmp_dir("response-pending");
-                let store = GenAISqliteStore::new_with_path(&dir.join("genai.db")).unwrap();
+                let store = GenAISqliteStore::new_with_path(
+                    &dir.join("genai.db"),
+                    crate::config::InsertStoragePolicy::default(),
+                )
+                .unwrap();
                 let interruptions =
                     InterruptionStore::new_with_path(&dir.join("interruptions.db")).unwrap();
                 store.insert_pending(&pending).unwrap();
@@ -146,7 +150,11 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
                 .unwrap();
             pending.pending_origin = PendingOrigin::IdleDrain;
             let dir = super::tests::unique_tmp_dir("response-pending");
-            let store = GenAISqliteStore::new_with_path(&dir.join("genai.db")).unwrap();
+            let store = GenAISqliteStore::new_with_path(
+                &dir.join("genai.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .unwrap();
             store.insert_pending(&pending).unwrap();
             let db = rusqlite::Connection::open(dir.join("genai.db")).unwrap();
             let snapshot_id: i64 = db

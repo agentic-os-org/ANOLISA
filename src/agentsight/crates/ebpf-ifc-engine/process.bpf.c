@@ -3970,7 +3970,7 @@ int trace_splice_exit(struct trace_event_raw_sys_exit *ctx)
 	return handle_fd_copy_exit(ctx->ret);
 }
 
-SEC("tp/syscalls/sys_enter_getpid")
+SEC("tp/syscalls/sys_enter_membarrier")
 int cap_drain_tick(struct trace_event_raw_sys_enter *ctx)
 {
 	(void)ctx;

@@ -21,25 +21,33 @@ pub const DEFAULT_MAX_BODY_LEN: usize = 64 * 1024;
 /// Default maximum headers for HTTP parser
 pub const DEFAULT_MAX_HEADERS: usize = 64;
 
-/// Default database filename (shared for all data types)
-pub const DEFAULT_DB_NAME: &str = "agentsight.db";
+/// Primary event database filename.
+pub const PRIMARY_DB_NAME: &str = "agentsight.db";
+/// GenAI event and evaluation database filename.
+pub const GENAI_DB_NAME: &str = "genai_events.db";
+/// Interruption database filename.
+pub const INTERRUPTION_DB_NAME: &str = "interruption_events.db";
+/// Collected trajectory database filename.
+pub const TRAJECTORY_DB_NAME: &str = "trajectories.db";
+/// Optimization result database filename.
+pub const OPTIMIZATION_DB_NAME: &str = "optimization.db";
+/// Private security audit database filename.
+pub const SECURITY_AUDIT_DB_NAME: &str = "security.db";
+/// Private enforcement database filename.
+pub const ENFORCEMENT_DB_NAME: &str = "enforcement.db";
 
-/// Default audit table name
+/// Default audit table name.
 pub const DEFAULT_AUDIT_TABLE: &str = "audit_events";
-
-/// Default token table name
+/// Default token table name.
 pub const DEFAULT_TOKEN_TABLE: &str = "token_records";
-
-/// Default HTTP table name
+/// Default HTTP table name.
 pub const DEFAULT_HTTP_TABLE: &str = "http_records";
 
-/// Default data retention period in days (0 = no limit)
+/// Default data retention period in days.
 pub const DEFAULT_RETENTION_DAYS: u64 = 30;
-
-/// Default purge check interval (every N inserts)
-pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
-
-/// Default max database file size in MB (0 = no size-based limit)
+/// Default primary-store maintenance interval in inserts.
+pub const DEFAULT_PURGE_INTERVAL: u64 = 1_000;
+/// Default primary database size limit in MiB.
 pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
 
 /// Default bounded channel capacity for probe → event loop events.
@@ -156,7 +164,7 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 /// At startup the on-disk config's `schema_version` is compared against this
 /// value. If the on-disk version is missing or older, the config file is
 /// backed up (`.bak`) and overwritten with the embedded default.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 // ==================== TCP Target Configuration ====================
 
@@ -266,6 +274,225 @@ impl Default for ServerAuthConfig {
     }
 }
 
+/// Retention and capacity policy checked after a configured number of writes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InsertStoragePolicy {
+    /// Maximum age in days; zero disables age-based cleanup.
+    pub retention_days: u64,
+    /// Maximum logical database size in MiB; zero disables size cleanup.
+    pub max_db_size_mb: u64,
+    /// Number of writes between checks; zero disables automatic checks.
+    pub check_interval_inserts: u64,
+}
+
+impl InsertStoragePolicy {
+    fn primary_default() -> Self {
+        Self {
+            retention_days: DEFAULT_RETENTION_DAYS,
+            max_db_size_mb: DEFAULT_MAX_DB_SIZE_MB,
+            check_interval_inserts: DEFAULT_PURGE_INTERVAL,
+        }
+    }
+
+    fn genai_default() -> Self {
+        Self {
+            retention_days: 30,
+            max_db_size_mb: 200,
+            check_interval_inserts: 1,
+        }
+    }
+}
+
+/// Retention and capacity policy checked on a timer.
+#[derive(Debug, Clone, Copy)]
+pub struct PeriodicStoragePolicy {
+    /// Maximum age in days; zero disables age-based cleanup.
+    pub retention_days: u64,
+    /// Maximum logical database size in MiB; zero disables size cleanup.
+    pub max_db_size_mb: u64,
+    /// Seconds between checks; zero disables automatic checks.
+    pub check_interval_secs: u64,
+}
+
+impl PeriodicStoragePolicy {
+    const fn new(retention_days: u64, max_db_size_mb: u64, check_interval_secs: u64) -> Self {
+        Self {
+            retention_days,
+            max_db_size_mb,
+            check_interval_secs,
+        }
+    }
+}
+
+impl Default for PeriodicStoragePolicy {
+    fn default() -> Self {
+        Self::new(30, 200, 300)
+    }
+}
+
+/// Effective SQLite storage configuration.
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    /// Directory containing AgentSight-owned databases.
+    pub base_path: PathBuf,
+    /// Policy for `agentsight.db`.
+    pub primary: InsertStoragePolicy,
+    /// Policy for `genai_events.db`.
+    pub genai: InsertStoragePolicy,
+    /// Policy for `interruption_events.db`.
+    pub interruptions: PeriodicStoragePolicy,
+    /// Policy for `trajectories.db`.
+    pub trajectories: PeriodicStoragePolicy,
+    /// Policy for `optimization.db`.
+    pub optimization: PeriodicStoragePolicy,
+    /// Policy for the private security audit database.
+    pub security_audit: PeriodicStoragePolicy,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            base_path: default_base_path(),
+            primary: InsertStoragePolicy::primary_default(),
+            genai: InsertStoragePolicy::genai_default(),
+            interruptions: PeriodicStoragePolicy::new(30, 100, 60),
+            trajectories: PeriodicStoragePolicy::new(30, 500, 300),
+            optimization: PeriodicStoragePolicy::new(30, 200, 300),
+            security_audit: PeriodicStoragePolicy::new(30, 200, 3_600),
+        }
+    }
+}
+
+impl StorageConfig {
+    /// Returns the fixed path of the primary event database.
+    pub fn primary_path(&self) -> PathBuf {
+        self.base_path.join(PRIMARY_DB_NAME)
+    }
+
+    /// Returns the fixed path of the GenAI event database.
+    pub fn genai_path(&self) -> PathBuf {
+        self.base_path.join(GENAI_DB_NAME)
+    }
+
+    /// Returns the fixed path of the interruption database.
+    pub fn interruption_path(&self) -> PathBuf {
+        self.base_path.join(INTERRUPTION_DB_NAME)
+    }
+
+    /// Returns the fixed path of the trajectory database.
+    pub fn trajectory_path(&self) -> PathBuf {
+        self.base_path.join(TRAJECTORY_DB_NAME)
+    }
+
+    /// Returns the fixed path of the optimization database.
+    pub fn optimization_path(&self) -> PathBuf {
+        self.base_path.join(OPTIMIZATION_DB_NAME)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.base_path.as_os_str().is_empty() {
+            return Err("storage.base_path must not be empty".to_string());
+        }
+        let validate = |name: &str, retention_days: u64, max_db_size_mb: u64| {
+            retention_days
+                .checked_mul(24 * 60 * 60 * 1_000_000_000)
+                .ok_or_else(|| format!("storage.{name}.retention_days is too large"))?;
+            max_db_size_mb
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| format!("storage.{name}.max_db_size_mb is too large"))?;
+            Ok::<(), String>(())
+        };
+        validate(
+            "primary",
+            self.primary.retention_days,
+            self.primary.max_db_size_mb,
+        )?;
+        validate(
+            "genai",
+            self.genai.retention_days,
+            self.genai.max_db_size_mb,
+        )?;
+        for (name, policy) in [
+            ("interruptions", self.interruptions),
+            ("trajectories", self.trajectories),
+            ("optimization", self.optimization),
+            ("security_audit", self.security_audit),
+        ] {
+            validate(name, policy.retention_days, policy.max_db_size_mb)?;
+        }
+        Ok(())
+    }
+
+    fn apply_json(&mut self, json: JsonStorageConfig) {
+        if let Some(base_path) = json.base_path {
+            self.base_path = base_path;
+        }
+        apply_insert_policy(&mut self.primary, json.primary);
+        apply_insert_policy(&mut self.genai, json.genai);
+        apply_periodic_policy(&mut self.interruptions, json.interruptions);
+        apply_periodic_policy(&mut self.trajectories, json.trajectories);
+        apply_periodic_policy(&mut self.optimization, json.optimization);
+        apply_periodic_policy(&mut self.security_audit, json.security_audit);
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct JsonStorageConfig {
+    base_path: Option<PathBuf>,
+    primary: Option<JsonInsertStoragePolicy>,
+    genai: Option<JsonInsertStoragePolicy>,
+    interruptions: Option<JsonPeriodicStoragePolicy>,
+    trajectories: Option<JsonPeriodicStoragePolicy>,
+    optimization: Option<JsonPeriodicStoragePolicy>,
+    security_audit: Option<JsonPeriodicStoragePolicy>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct JsonInsertStoragePolicy {
+    retention_days: Option<u64>,
+    max_db_size_mb: Option<u64>,
+    check_interval_inserts: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct JsonPeriodicStoragePolicy {
+    retention_days: Option<u64>,
+    max_db_size_mb: Option<u64>,
+    check_interval_secs: Option<u64>,
+}
+
+fn apply_insert_policy(policy: &mut InsertStoragePolicy, json: Option<JsonInsertStoragePolicy>) {
+    let Some(json) = json else { return };
+    if let Some(value) = json.retention_days {
+        policy.retention_days = value;
+    }
+    if let Some(value) = json.max_db_size_mb {
+        policy.max_db_size_mb = value;
+    }
+    if let Some(value) = json.check_interval_inserts {
+        policy.check_interval_inserts = value;
+    }
+}
+
+fn apply_periodic_policy(
+    policy: &mut PeriodicStoragePolicy,
+    json: Option<JsonPeriodicStoragePolicy>,
+) {
+    let Some(json) = json else { return };
+    if let Some(value) = json.retention_days {
+        policy.retention_days = value;
+    }
+    if let Some(value) = json.max_db_size_mb {
+        policy.max_db_size_mb = value;
+    }
+    if let Some(value) = json.check_interval_secs {
+        policy.check_interval_secs = value;
+    }
+}
+
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
 struct JsonFullConfig {
@@ -297,6 +524,8 @@ struct JsonFullConfig {
     runtime_limits: Option<JsonRuntimeLimits>,
     #[serde(default)]
     server: Option<JsonServer>,
+    #[serde(default)]
+    storage: Option<JsonStorageConfig>,
     #[serde(default)]
     schema_version: Option<u32>,
 }
@@ -378,10 +607,6 @@ pub struct JsonBatchConfig {
 #[serde(default)]
 pub struct JsonInterruptionFeature {
     pub enabled: Option<bool>,
-    #[serde(default)]
-    pub retention_days: Option<u64>,
-    #[serde(default)]
-    pub max_db_size_mb: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -533,8 +758,8 @@ pub fn parse_json_rules(
 ///
 /// - If the file does not exist, creates it with the embedded default.
 /// - If the file exists but `schema_version` is missing or older than
-///   `CURRENT_SCHEMA_VERSION`, backs up the old file (`.bak`) and overwrites
-///   with the embedded default.
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file and replaces it with the
+///   embedded default.
 /// - If the file exists and `schema_version` matches, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
@@ -568,32 +793,6 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Shallow-merge: start from the embedded default, overlay all top-level
-    // keys the user has set (except schema_version itself), then bump version.
-    // This preserves user customizations (cmdline rules, https rules,
-    // codex_offsets, feature overrides) while adding any NEW sections from the
-    // default that the old config was missing. Fixes #1496 — the previous
-    // implementation did a destructive overwrite that silently lost user data.
-    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
-        .expect("embedded DEFAULT_AGENTS_JSON must be valid");
-    let user: serde_json::Value =
-        serde_json::from_str(&content).expect("JSON validity already confirmed above");
-
-    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
-        for (key, value) in user_obj {
-            if key == "schema_version" {
-                continue;
-            }
-            base_obj.insert(key.clone(), value.clone());
-        }
-        base_obj.insert(
-            "schema_version".to_string(),
-            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
-        );
-    }
-
-    let merged = serde_json::to_string_pretty(&base).expect("merged config must serialize");
-
     let backup = {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -603,10 +802,10 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     };
     std::fs::copy(path, &backup)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
-    std::fs::write(path, &merged)
-        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
+    std::fs::write(path, DEFAULT_AGENTS_JSON)
+        .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
     log::info!(
-        "Config schema_version {:?} < {}, merged user config with defaults at {path:?} (backup at {backup:?})",
+        "Config schema_version {:?} < {}, replaced it with defaults at {path:?} (backup at {backup:?})",
         on_disk_version,
         CURRENT_SCHEMA_VERSION
     );
@@ -698,10 +897,6 @@ pub struct FeatureFlags {
     pub sqlite_batch: Option<BatchConfig>,
     /// Interruption / DeadLoop detection.
     pub interruption_detection_enabled: bool,
-    /// Interruption DB retention in days.
-    pub interruption_retention_days: u64,
-    /// Interruption DB max size in MB.
-    pub interruption_max_db_size_mb: u64,
     /// Audit event storage.
     pub audit_enabled: bool,
     /// Token consumption breakdown storage.
@@ -734,8 +929,6 @@ impl Default for FeatureFlags {
             resource_sampling_enabled: false,
             sqlite_batch: None,
             interruption_detection_enabled: false,
-            interruption_retention_days: 30,
-            interruption_max_db_size_mb: 100,
             audit_enabled: false,
             token_consumption_enabled: false,
             sls_logtail_enabled: false,
@@ -815,24 +1008,14 @@ impl Default for RuntimeLimits {
 #[derive(Debug, Clone)]
 pub struct AgentsightConfig {
     // --- Storage Configuration ---
-    /// Base directory for database files
-    pub storage_base_path: PathBuf,
-    /// Database filename (shared for all data types)
-    pub db_name: String,
+    /// SQLite paths and lifecycle policies.
+    pub storage: StorageConfig,
     /// Audit table name
     pub audit_table: String,
     /// Token table name
     pub token_table: String,
     /// HTTP table name
     pub http_table: String,
-
-    // --- Retention Configuration ---
-    /// Data retention period in days (0 = no limit, records older than this are purged)
-    pub retention_days: u64,
-    /// Purge check interval (run purge every N inserts, 0 = never auto-purge)
-    pub purge_interval: u64,
-    /// Max database file size in MB (0 = no size-based limit)
-    pub max_db_size_mb: u64,
 
     // --- Trace Control ---
     /// Controls whether SLS-uploaded `LLMCall` records carry conversation
@@ -960,14 +1143,10 @@ impl Default for AgentsightConfig {
     fn default() -> Self {
         Self {
             // Storage defaults
-            storage_base_path: default_base_path(),
-            db_name: DEFAULT_DB_NAME.to_string(),
+            storage: StorageConfig::default(),
             audit_table: DEFAULT_AUDIT_TABLE.to_string(),
             token_table: DEFAULT_TOKEN_TABLE.to_string(),
             http_table: DEFAULT_HTTP_TABLE.to_string(),
-            retention_days: DEFAULT_RETENTION_DAYS,
-            purge_interval: DEFAULT_PURGE_INTERVAL,
-            max_db_size_mb: DEFAULT_MAX_DB_SIZE_MB,
 
             // Trace control defaults
             // Default = false (privacy-safe): SLS uploads carry only token /
@@ -1050,15 +1229,14 @@ impl AgentsightConfig {
 
     /// Create a new configuration with custom storage base path
     pub fn with_storage_path(base_path: PathBuf) -> Self {
-        Self {
-            storage_base_path: base_path,
-            ..Default::default()
-        }
+        let mut config = Self::default();
+        config.storage.base_path = base_path;
+        config
     }
 
-    /// Get the full path to the database
+    /// Get the full path to the primary database
     pub fn db_path(&self) -> PathBuf {
-        self.storage_base_path.join(&self.db_name)
+        self.storage.primary_path()
     }
 
     /// Get the audit table name
@@ -1079,7 +1257,7 @@ impl AgentsightConfig {
 
     /// Set storage base path
     pub fn set_storage_path(mut self, path: PathBuf) -> Self {
-        self.storage_base_path = path;
+        self.storage.base_path = path;
         self
     }
 
@@ -1198,6 +1376,13 @@ impl AgentsightConfig {
             self.cgroup_ids = ids;
         }
 
+        if let Some(storage) = parsed.storage.take() {
+            let mut resolved = self.storage.clone();
+            resolved.apply_json(storage);
+            resolved.validate()?;
+            self.storage = resolved;
+        }
+
         // Parse feature toggles
         if let Some(features) = parsed.features.take() {
             self.features = FeatureFlags {
@@ -1239,16 +1424,6 @@ impl AgentsightConfig {
                     .as_ref()
                     .and_then(|f| f.enabled)
                     .unwrap_or(false),
-                interruption_retention_days: features
-                    .interruption_detection
-                    .as_ref()
-                    .and_then(|f| f.retention_days)
-                    .unwrap_or(30),
-                interruption_max_db_size_mb: features
-                    .interruption_detection
-                    .as_ref()
-                    .and_then(|f| f.max_db_size_mb)
-                    .unwrap_or(100),
                 audit_enabled: features.audit.unwrap_or(false),
                 token_consumption_enabled: features.token_consumption.unwrap_or(false),
                 sls_logtail_enabled: features.sls_logtail.unwrap_or(false),
@@ -1498,7 +1673,7 @@ mod tests {
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
         assert_eq!(DEFAULT_MAX_BODY_LEN, 64 * 1024);
         assert_eq!(DEFAULT_MAX_HEADERS, 64);
-        assert_eq!(DEFAULT_DB_NAME, "agentsight.db");
+        assert_eq!(PRIMARY_DB_NAME, "agentsight.db");
         assert_eq!(DEFAULT_AUDIT_TABLE, "audit_events");
         assert_eq!(DEFAULT_TOKEN_TABLE, "token_records");
         assert_eq!(DEFAULT_HTTP_TABLE, "http_records");
@@ -1521,7 +1696,10 @@ mod tests {
     #[test]
     fn test_config_new_defaults() {
         let config = AgentsightConfig::new();
-        assert_eq!(config.db_name, "agentsight.db");
+        assert_eq!(
+            config.storage.primary_path(),
+            default_base_path().join(PRIMARY_DB_NAME)
+        );
         assert_eq!(config.connection_capacity, 24);
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
@@ -1532,9 +1710,11 @@ mod tests {
         assert!(config.target_uid.is_none());
         assert!(!config.enable_filewatch);
         assert!(!config.cgroup_filter_enabled);
-        assert_eq!(config.retention_days, 30);
-        assert_eq!(config.purge_interval, 1000);
-        assert_eq!(config.max_db_size_mb, 500);
+        assert_eq!(config.storage.primary.retention_days, 30);
+        assert_eq!(config.storage.primary.check_interval_inserts, 1000);
+        assert_eq!(config.storage.primary.max_db_size_mb, 500);
+        assert_eq!(config.storage.genai.max_db_size_mb, 200);
+        assert_eq!(config.storage.interruptions.check_interval_secs, 60);
     }
 
     /// `traceEnabled` is **off** by default (privacy-safe). Conversation
@@ -1569,10 +1749,58 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_config_loads_per_store_policies() {
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(
+                r#"{
+                    "storage": {
+                        "base_path": "/tmp/agentsight-storage",
+                        "primary": {"retention_days": 7, "check_interval_inserts": 25},
+                        "genai": {"max_db_size_mb": 321},
+                        "interruptions": {"check_interval_secs": 15}
+                    }
+                }"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            config.storage.base_path,
+            PathBuf::from("/tmp/agentsight-storage")
+        );
+        assert_eq!(config.storage.primary.retention_days, 7);
+        assert_eq!(config.storage.primary.max_db_size_mb, 500);
+        assert_eq!(config.storage.primary.check_interval_inserts, 25);
+        assert_eq!(config.storage.genai.retention_days, 30);
+        assert_eq!(config.storage.genai.max_db_size_mb, 321);
+        assert_eq!(config.storage.interruptions.check_interval_secs, 15);
+    }
+
+    #[test]
+    fn test_storage_config_rejects_invalid_values() {
+        let mut config = AgentsightConfig::new();
+        assert!(
+            config
+                .load_from_json(r#"{"storage":{"base_path":""}}"#)
+                .is_err()
+        );
+
+        let mut config = AgentsightConfig::new();
+        let json = format!(
+            r#"{{"storage":{{"primary":{{"retention_days":{}}}}}}}"#,
+            u64::MAX
+        );
+        assert!(config.load_from_json(&json).is_err());
+    }
+
+    #[test]
     fn test_config_with_storage_path() {
         let config = AgentsightConfig::with_storage_path(PathBuf::from("/tmp/test"));
-        assert_eq!(config.storage_base_path, PathBuf::from("/tmp/test"));
-        assert_eq!(config.db_name, "agentsight.db");
+        assert_eq!(config.storage.base_path, PathBuf::from("/tmp/test"));
+        assert_eq!(
+            config.storage.primary_path(),
+            PathBuf::from("/tmp/test/agentsight.db")
+        );
     }
 
     #[test]
@@ -1597,7 +1825,7 @@ mod tests {
             .set_enable_filewatch(true)
             .set_connection_capacity(48);
         assert!(config.verbose);
-        assert_eq!(config.storage_base_path, PathBuf::from("/custom"));
+        assert_eq!(config.storage.base_path, PathBuf::from("/custom"));
         assert_eq!(config.target_uid, Some(1000));
         assert!(config.enable_filewatch);
         assert_eq!(config.connection_capacity, 48);
@@ -2294,70 +2522,36 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
-        // Regression for #1496: when migrating a valid v1 config to v2, user
-        // customizations (cmdline rules, etc.) must survive — not be overwritten
-        // with the embedded default. Discriminating: reverting to the old
-        // overwrite logic would lose "MyCustomAgent" and fail this test.
+    fn ensure_default_agents_config_replaces_outdated_config() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let user_config = r#"{
-            "schema_version": 1,
+            "schema_version": 2,
             "cmdline": {
                 "allow": [
                     {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
-                ],
-                "deny": [{"rule": ["*noisy*"]}]
-            },
-            "https": [{"rule": ["custom.api.example.com"]}]
+                ]
+            }
         }"#;
         std::fs::write(&path, user_config).unwrap();
         ensure_default_agents_config(&path).unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        // User's custom agent rule must survive migration
-        assert!(
-            result.contains("MyCustomAgent"),
-            "user cmdline rule lost during migration: {result}"
-        );
-        assert!(
-            result.contains("custom.api.example.com"),
-            "user https rule lost during migration: {result}"
-        );
-        assert!(
-            result.contains("*noisy*"),
-            "user deny rule lost during migration: {result}"
-        );
-        // schema_version must be bumped to current
-        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(
-            migrated["schema_version"].as_u64().unwrap() as u32,
-            CURRENT_SCHEMA_VERSION
-        );
+        assert_eq!(result, DEFAULT_AGENTS_JSON);
+        assert!(!result.contains("MyCustomAgent"));
     }
 
     #[test]
-    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
-        // A v1 config that only has cmdline should gain features/runtime_limits
-        // from the default after migration — verifies additive merge.
+    fn ensure_default_agents_config_replacement_contains_storage_section() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
-        let minimal_v1 = r#"{
-            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
-        }"#;
-        std::fs::write(&path, minimal_v1).unwrap();
+        std::fs::write(&path, r#"{"schema_version": 2}"#).unwrap();
         ensure_default_agents_config(&path).unwrap();
-        let result = std::fs::read_to_string(&path).unwrap();
-        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
-        // New sections from default must be present
-        assert!(
-            migrated.get("features").is_some(),
-            "features section not added from default"
+        let result: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(result.get("storage").is_some());
+        assert_eq!(
+            result["schema_version"].as_u64(),
+            Some(CURRENT_SCHEMA_VERSION as u64)
         );
-        assert!(
-            migrated.get("runtime_limits").is_some(),
-            "runtime_limits section not added from default"
-        );
-        // User's original rule must still be there
-        assert!(result.contains("Test"), "user rule lost");
     }
 }

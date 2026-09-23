@@ -8,6 +8,7 @@ members = [
     "crates/agentsight-enforcer",
     "crates/agentsight-opt",
     "crates/agentsight-opt-store",
+    "crates/agentsight-sqlite-lifecycle",
     "crates/agentsight-trajectory-collector",
     "crates/enforcement-protocol",
     "crates/ebpf-ifc-engine",
@@ -66,6 +67,7 @@ agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }
 agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
+agentsight-sqlite-lifecycle = { path = "crates/agentsight-sqlite-lifecycle" }
 agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }
 anyhow = { workspace = true }
 chrono = { workspace = true }

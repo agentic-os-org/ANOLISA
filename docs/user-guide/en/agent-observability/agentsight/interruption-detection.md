@@ -188,17 +188,22 @@ Agents are restartable.
 ## Retention and size
 
 ```json
-"features": {
-  "interruption_detection": {
-    "enabled": true,
-    "retention_days": 30,
-    "max_db_size_mb": 100
+{
+  "features": {
+    "interruption_detection": { "enabled": true }
+  },
+  "storage": {
+    "interruptions": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    }
   }
 }
 ```
 
-Events live in `/var/log/sysak/.agentsight/interruption_events.db`. Older events are purged after
-`retention_days`, and the database is trimmed when it exceeds `max_db_size_mb`.
+Events live in `/var/log/sysak/.agentsight/interruption_events.db`. Storage retention, capacity, and
+maintenance frequency are configured under `storage.interruptions`.
 
 ## API access
 

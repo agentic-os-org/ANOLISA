@@ -181,11 +181,13 @@ impl Fixture {
             backend.clone(),
             temp.path().join("state"),
         ));
-        state.register_workspace(
-            WS_ID.to_string(),
-            workspace_path.clone(),
-            SnapshotIndex::new(workspace_path.clone()),
-        );
+        state
+            .register_workspace(
+                WS_ID.to_string(),
+                workspace_path.clone(),
+                SnapshotIndex::new(workspace_path.clone()),
+            )
+            .unwrap();
         Self {
             _temp: temp,
             state,
@@ -308,11 +310,14 @@ async fn identity_uses_exact_absolute_registration_without_bootstrap() {
 
     let invalid_path = fixture._temp.path().join("invalid-workspace-id");
     std::fs::create_dir(&invalid_path).expect("invalid-id workspace directory");
-    fixture.state.register_workspace(
-        "legacy-invalid".to_string(),
-        invalid_path.clone(),
-        SnapshotIndex::new(invalid_path.clone()),
-    );
+    fixture
+        .state
+        .register_workspace(
+            "legacy-invalid".to_string(),
+            invalid_path.clone(),
+            SnapshotIndex::new(invalid_path.clone()),
+        )
+        .unwrap();
     assert_rejected(
         workspace_identity(
             &fixture.state,
@@ -680,7 +685,9 @@ async fn evidence_survives_a_legacy_save_and_fresh_state_load() {
         fixture.backend.clone(),
         fixture._temp.path().join("restarted-state"),
     ));
-    restarted.register_workspace(WS_ID.to_string(), fixture.workspace_path.clone(), loaded);
+    restarted
+        .register_workspace(WS_ID.to_string(), fixture.workspace_path.clone(), loaded)
+        .unwrap();
     assert!(matches!(
         checkpoint_evidence(
             &restarted,
@@ -1037,7 +1044,9 @@ async fn uncertain_guarded_rollback_is_durable_and_never_replayed() {
         fixture.backend.clone(),
         fixture._temp.path().join("rollback-restarted-state"),
     ));
-    restarted.register_workspace(WS_ID.to_string(), fixture.workspace_path.clone(), loaded);
+    restarted
+        .register_workspace(WS_ID.to_string(), fixture.workspace_path.clone(), loaded)
+        .unwrap();
     assert!(matches!(
         rollback(
             &restarted,

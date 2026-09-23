@@ -11,7 +11,7 @@ fi
 
 run_shell() {
     echo "==> Running copilot-shell tests"
-    cd "$ROOT_DIR/src/copilot-shell" || exit 1
+    cd "$ROOT_DIR/deprecated/copilot-shell" || exit 1
     npm test
 }
 

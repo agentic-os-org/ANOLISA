@@ -226,6 +226,7 @@ dependencies = [
  "agentsight-enforcer",
  "agentsight-opt",
  "agentsight-opt-store",
+ "agentsight-sqlite-lifecycle",
  "agentsight-trajectory-collector",
  "anyhow",
  "async-stream",
@@ -304,6 +305,7 @@ name = "agentsight-audit"
 version = "0.1.0"
 dependencies = [
  "agentsight-enforcement-protocol",
+ "agentsight-sqlite-lifecycle",
  "libc",
  "log 0.4.33",
  "rusqlite",
@@ -360,8 +362,17 @@ dependencies = [
 name = "agentsight-opt-store"
 version = "0.1.0"
 dependencies = [
+ "agentsight-sqlite-lifecycle",
  "rusqlite",
  "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "agentsight-sqlite-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
  "thiserror 1.0.69",
 ]
 
@@ -370,6 +381,7 @@ name = "agentsight-trajectory-collector"
 version = "0.1.0"
 dependencies = [
  "agentsight-atif",
+ "agentsight-sqlite-lifecycle",
  "anyhow",
  "dirs",
  "log 0.4.33",

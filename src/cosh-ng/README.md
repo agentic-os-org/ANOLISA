@@ -59,7 +59,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-On macOS arm64, use user scope instead:
+On macOS 11+ (arm64 / x86_64), use user scope instead:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -74,9 +74,15 @@ sudo yum install cosh-ng
 
 The published Linux raw contract is not currently portable across all routed
 distributions, so it is not the recommended Linux installation path. The raw
-package supports macOS arm64, where Linux-only package and service operations
+package supports macOS 11+ (arm64 / x86_64), where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
+
+The release build matrix also produces a macOS x86_64 (Intel) raw archive,
+with the same macOS 11.0 minimum as arm64. Intel artifacts are available from
+GitHub Releases once a version containing this build support is published;
+the public installer above also requires an Intel ANOLISA CLI release and
+separate enablement of the website installer.
 
 ## Start in 30 seconds
 
@@ -274,6 +280,12 @@ explicitly reports unavailable or known-no-effect; an error or uncertain result
 does not authorize the effect. `On` fails closed unless exact checkpoint
 evidence exists, while `Off` creates neither the baseline nor per-effect
 barriers.
+
+Empty workspaces are valid checkpoint state in current ws-ckpt. If an older
+daemon skips the initial snapshot, `On` stops the Task before Runtime launch.
+Upgrade ws-ckpt or add a file and submit a new Task, or explicitly select `Off`
+when checkpoint protection is not needed. The failed Task is terminal;
+`retry` does not rebuild a failed baseline.
 
 Managed Core uses the closed `workspace-write-v1` profile. It exposes only
 `ask_user_question` and `write_file`; every write is a Runtime-native permission

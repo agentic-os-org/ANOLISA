@@ -429,9 +429,16 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     dangling_escape = true;
                 }
             }
-            '*' | '?' | '[' | '~' | '!' | '=' | '^' => {
+            '*' | '?' | '[' | '~' | '!' | '^' => {
                 // ponytail: leave expansion to the shell until its context is modeled.
                 requires_shell_expansion = true;
+                token.push(ch);
+            }
+            '=' => {
+                // zsh equals-expansion (`=cmd` → command path) fires only
+                // at word start; an assignment's `=` or option syntax
+                // like `--format=%h` never expands in bash or zsh.
+                requires_shell_expansion |= token.is_empty();
                 token.push(ch);
             }
             _ => token.push(ch),

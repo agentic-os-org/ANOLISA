@@ -142,7 +142,9 @@ pub enum GenAISemanticEvent {
 | TokenConsumptionStores | token_consumption | Token consumption breakdown |
 | GenAISqliteStore | genai_events | GenAI semantic events |
 
-**Source**: `src/storage/unified.rs`, `src/storage/sqlite/`
+Connection setup, DB/WAL/SHM measurement, checkpoint outcomes, retention cutoffs, and adaptive size-policy control live in the leaf crate `crates/agentsight-sqlite-lifecycle/`. Store modules retain schema ownership and provide their own oldest-row deletion rules, so the lifecycle crate never depends on pipeline or business models.
+
+**Source**: `src/storage/unified.rs`, `src/storage/sqlite/`, `crates/agentsight-sqlite-lifecycle/`
 
 ## Data Flow Diagram
 

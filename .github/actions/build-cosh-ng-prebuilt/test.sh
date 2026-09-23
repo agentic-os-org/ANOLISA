@@ -6,6 +6,7 @@ ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_DIR="$(cd "$ACTION_DIR/../prebuilt-rust-common" && pwd)"
 REPO_ROOT="$(git -C "$ACTION_DIR" rev-parse --show-toplevel)"
 COMPONENT_ROOT="$REPO_ROOT/src/cosh-ng"
+python3 "$COMMON_DIR/test_macho.py"
 TEMPORARY="$(mktemp -d)"
 trap 'rm -rf -- "$TEMPORARY"' EXIT
 
@@ -90,7 +91,29 @@ fi
     exit 1
 }
 
-for platform in linux macos; do
+# An invalid tag stops each valid target before worktree creation or compilation.
+for target in linux/x86_64/gnu2.28-x86_64 linux/aarch64/gnu2.28-aarch64 \
+    macos/aarch64/darwin11-aarch64 macos/x86_64/darwin11-x86_64; do
+    IFS=/ read -r os arch profile <<< "$target"
+    if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
+        --output-dir "$TEMPORARY/unused" --version "$VERSION" \
+        --target-os "$os" --target-arch "$arch" --profile "$profile" \
+        --tag invalid >"$TEMPORARY/target.log" 2>&1; then
+        printf 'ERROR: invalid tag accepted for %s\n' "$target" >&2
+        exit 1
+    fi
+    grep -Fq 'release tag invalid does not match requested version' "$TEMPORARY/target.log"
+done
+if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
+    --output-dir "$TEMPORARY/unused" --version "$VERSION" \
+    --target-os macos --target-arch x86_64 --profile darwin11-aarch64 \
+    --tag invalid >"$TEMPORARY/target.log" 2>&1; then
+    printf 'ERROR: mismatched macOS profile accepted\n' >&2
+    exit 1
+fi
+grep -Fq 'does not match target macos/x86_64' "$TEMPORARY/target.log"
+
+for platform in linux macos macos-x86_64; do
     printf 'SBOM fixture for %s\n' "$platform" >"$TEMPORARY/$platform.tar.gz"
     (
         cd "$TEMPORARY"
@@ -117,8 +140,18 @@ python3 "$COMMON_DIR/generate-sbom.py" \
     --project-dir "$COMPONENT_ROOT" \
     --source-date-epoch 0 >/dev/null
 
+python3 "$COMMON_DIR/generate-sbom.py" \
+    --artifact "$TEMPORARY/macos-x86_64.tar.gz" \
+    --component cosh-ng \
+    --version "$VERSION" \
+    --os macos \
+    --arch x86_64 \
+    --target x86_64-apple-darwin \
+    --project-dir "$COMPONENT_ROOT" \
+    --source-date-epoch 0 >/dev/null
+
 python3 - "$TEMPORARY/linux.tar.gz.cdx.json" \
-    "$TEMPORARY/macos.tar.gz.cdx.json" <<'PY'
+    "$TEMPORARY/macos.tar.gz.cdx.json" "$TEMPORARY/macos-x86_64.tar.gz.cdx.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -133,13 +166,14 @@ def names(path: str) -> set[str]:
 
 linux = names(sys.argv[1])
 macos = names(sys.argv[2])
-for platform, packages in (("linux", linux), ("macos", macos)):
+macos_x86 = names(sys.argv[3])
+for platform, packages in (("linux", linux), ("macos", macos), ("macos-x86_64", macos_x86)):
     windows = sorted(name for name in packages if name.startswith("windows"))
     if windows:
         raise SystemExit(f"{platform} SBOM contains Windows-only packages: {windows}")
 if "core-foundation" in linux:
     raise SystemExit("Linux SBOM contains a macOS-only package")
-if "core-foundation" not in macos:
+if "core-foundation" not in macos or "core-foundation" not in macos_x86:
     raise SystemExit("macOS SBOM is missing a target dependency")
 PY
 

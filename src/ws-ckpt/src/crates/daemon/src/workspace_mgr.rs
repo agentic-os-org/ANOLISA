@@ -5,12 +5,10 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use ws_ckpt_common::{
-    load_workspace_policy_with_failsafe, ErrorCode, ResolveError, Response, SnapshotIndex,
-};
+use ws_ckpt_common::{load_workspace_policy_with_failsafe, ErrorCode, Response, SnapshotIndex};
 
 use crate::index_store;
-use crate::state::DaemonState;
+use crate::state::{normalize_registration_path, DaemonState};
 
 // ── helpers ──
 
@@ -34,32 +32,59 @@ fn strip_trailing_slashes(s: &str) -> &str {
     }
 }
 
-/// Re-adopt an existing managed subvolume into the daemon state and return
-/// `InitOk { ws_id }`. Used when a workspace is discovered out-of-band
-/// (e.g. after daemon restart with on-disk subvol intact) — either through
-/// a user-facing symlink (Step 0) or through canonical resolution into
-/// mount_path (Step 2b).
-///
-/// Loads the index from disk if present; falls back to rebuilding it from
-/// the snapshots directory; persists the rebuilt index. Save_manifest
-/// failure is warned but not fatal — the in-memory registration succeeded
-/// and subsequent writes will retry persistence.
+/// Re-adopt storage only through a verified user-facing registration anchor.
 async fn adopt_existing_subvol(
     state: &Arc<DaemonState>,
     ws_id: &str,
-    registered_path: std::path::PathBuf,
-) -> Response {
-    // Same-ws_id lifecycle lock as init/recover. ws_id here came from the
-    // existing on-disk subvol name, not SHA256(path), but it shares the
-    // index_dir(ws_id) namespace either way.
+    requested_path: std::path::PathBuf,
+) -> anyhow::Result<Response> {
     let _wsid_guard = state.lock_wsid(ws_id).await;
+    let data_root = tokio::fs::canonicalize(state.backend.data_root()).await?;
+    let live_path = tokio::fs::canonicalize(data_root.join(ws_id)).await?;
+    if live_path.parent() != Some(data_root.as_path()) {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "workspace storage must be a direct child of the data root",
+        ));
+    }
     let snap_dir = state.index_dir(ws_id);
     let btrfs_snap_dir = state.backend.snapshots_root().join(ws_id);
-    let mut index = if let Ok(idx) = index_store::load(&snap_dir).await {
-        idx
-    } else {
-        SnapshotIndex::new(registered_path.clone())
+    let existing_index = match index_store::load(&snap_dir).await {
+        Ok(index) => Some(index),
+        Err(_) if !snap_dir.join(ws_ckpt_common::INDEX_FILE).try_exists()? => None,
+        Err(error) => return Err(error).context("cannot verify workspace ownership from index"),
     };
+    let registered_path = normalize_registration_path(
+        existing_index
+            .as_ref()
+            .map_or(requested_path.as_path(), |index| {
+                index.workspace_path.as_path()
+            }),
+    )?;
+    if registered_path.starts_with(&data_root) || registered_path == std::path::Path::new("/") {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "re-adoption requires a user registration path outside managed storage",
+        ));
+    }
+    if tokio::fs::canonicalize(&registered_path)
+        .await
+        .ok()
+        .as_ref()
+        != Some(&live_path)
+    {
+        return Ok(error_resp(ErrorCode::InvalidPath, "recorded workspace owner is detached; restore its registration link before re-adoption"));
+    }
+    // A missing index is recoverable only with both a user link to this exact
+    // live root and the snapshot bucket created by initialization.
+    if !tokio::fs::metadata(&btrfs_snap_dir).await?.is_dir() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "workspace snapshot bucket is not a directory",
+        ));
+    }
+    let mut index = existing_index.unwrap_or_else(|| SnapshotIndex::new(registered_path.clone()));
+    index.workspace_path = registered_path.clone();
     if index.snapshots.is_empty() {
         if let Ok(mut rebuilt) =
             index_store::rebuild_from_fs(&btrfs_snap_dir, registered_path.clone()).await
@@ -90,32 +115,32 @@ async fn adopt_existing_subvol(
         index,
         policy,
         failsafe,
-    );
+    )?;
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after subvol re-adoption: {:#}", e);
     }
-    Response::InitOk {
+    Ok(Response::InitOk {
         ws_id: ws_id.to_string(),
-    }
+    })
 }
 
 // Resolve the parent only: an interrupted init may have removed the final
 // directory or left a dangling workspace symlink.
-async fn orphan_workspace_path(workspace: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
+pub(crate) async fn orphan_workspace_path(
+    workspace: &str,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
     let path = std::path::Path::new(strip_trailing_slashes(workspace));
-    let Some(name) = path.file_name() else {
-        return Ok(None);
+    let original = match normalize_registration_path(path) {
+        Ok(path) => path,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
     };
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
-    let parent = match tokio::fs::canonicalize(parent).await {
-        Ok(parent) => parent,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let original = parent.join(name);
     let original_str = original
         .to_str()
         .context("workspace path is not valid UTF-8")?;
@@ -170,8 +195,16 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // Init is globally serialized; use stable path identities if
     // concurrent initialization of unrelated workspaces becomes necessary.
     let init_guard = state.init_lock.lock().await;
+    if let Some(existing) = state.resolve_workspace(workspace).await {
+        if let Some(error) = state.detached_registration_error(&existing).await {
+            return Ok(error);
+        }
+        return Ok(Response::InitOk {
+            ws_id: existing.read().await.ws_id.clone(),
+        });
+    }
     if let Some(original) = orphan_workspace_path(workspace).await? {
-        if original.starts_with(state.backend.data_root()) || original == std::path::Path::new("/")
+        if state.registration_path_is_internal(&original)? || original == std::path::Path::new("/")
         {
             return Ok(error_resp(
                 ErrorCode::InvalidPath,
@@ -195,51 +228,6 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
             crate::backends::btrfs_common::recover_orphan_backup(original_str, &subvol).await?;
         }
     }
-    // 0. Early check: detect workspace already managed via symlink to our data_root.
-    //    This must run before canonicalize(), which would resolve the symlink
-    //    and cause the "inside mount_path" guard to reject it.
-    let ws_path = std::path::PathBuf::from(workspace);
-    if let Ok(meta) = tokio::fs::symlink_metadata(&ws_path).await {
-        if meta.file_type().is_symlink() {
-            if let Ok(target) = tokio::fs::read_link(&ws_path).await {
-                let data_root = state.backend.data_root();
-                if target.starts_with(data_root) {
-                    if tokio::fs::metadata(&target).await.is_ok() {
-                        // Valid symlink pointing to our managed subvolume
-                        let ws_id = target
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-
-                        if state.get_by_wsid(&ws_id).is_some() {
-                            // Already registered — idempotent success
-                            info!(
-                                "workspace already initialized: {} -> {:?} (ws_id={})",
-                                workspace, target, ws_id
-                            );
-                            return Ok(Response::InitOk { ws_id });
-                        }
-
-                        // Subvolume exists but daemon lost track (e.g. restart).
-                        // Re-register (recovery mode).
-                        info!(
-                            "recovering unregistered workspace: {} -> {:?} (ws_id={})",
-                            workspace, target, ws_id
-                        );
-                        return Ok(adopt_existing_subvol(state, &ws_id, ws_path.clone()).await);
-                    } else {
-                        // Broken symlink — target subvolume gone; remove and re-init
-                        warn!(
-                            "workspace symlink target missing: {:?}; re-initializing",
-                            target
-                        );
-                        let _ = tokio::fs::remove_file(&ws_path).await;
-                    }
-                }
-            }
-        }
-    }
-
     // 1. Canonicalize (resolves symlinks to real path)
     let abs_path = match tokio::fs::canonicalize(workspace).await {
         Ok(p) => p,
@@ -307,90 +295,61 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
             format!("not a directory: {}", abs_path.display()),
         ));
     }
-    if let Some(existing) = state.get_by_path(&abs_path) {
-        let ws = existing.read().await;
-        let expected_target = state.backend.data_root().join(&ws.ws_id);
-        let read_link_res = tokio::fs::read_link(&abs_path).await;
-        let symlink_ok = matches!(&read_link_res, Ok(t) if *t == expected_target);
-        if symlink_ok {
-            info!(
-                "workspace already initialized via path: {} (ws_id={})",
-                abs_path.display(),
-                ws.ws_id
-            );
-            return Ok(Response::InitOk {
-                ws_id: ws.ws_id.clone(),
-            });
-        }
-        let hint = if read_link_res.is_err() {
-            "\n  note: path is currently a regular directory — \
-             move or rename it before running recover to avoid data loss"
-        } else {
-            ""
+    // BtrfsBase can use an auto-detected mount unrelated to config.mount_path.
+    // Recognize only direct managed children; reject all other paths in storage.
+    let canonical_data_root = tokio::fs::canonicalize(state.backend.data_root())
+        .await
+        .ok();
+    if let Some(rest) = canonical_data_root
+        .as_ref()
+        .and_then(|root| abs_path.strip_prefix(root).ok())
+    {
+        let mut comps = rest.components();
+        let single = match (comps.next(), comps.next()) {
+            (Some(first), None) => Some(first.as_os_str().to_string_lossy().to_string()),
+            _ => None,
         };
-        warn!(
-            "workspace {} registered as {} but symlink missing or incorrect; \
-             run 'ws-ckpt recover -w {}' to repair",
-            abs_path.display(),
-            ws.ws_id,
-            abs_path.display()
-        );
+        if let Some(ws_id) = single {
+            if let Some(existing) = state.get_by_wsid(&ws_id) {
+                let ws = existing.read().await;
+                warn!(
+                    "init target {} resolves to managed subvolume {:?}; \
+                     treating as already initialized",
+                    workspace, abs_path
+                );
+                return Ok(Response::InitOk {
+                    ws_id: ws.ws_id.clone(),
+                });
+            }
+            // Orphan subvol — re-adopt if its snapshot bucket exists
+            // (created at init, proving it was a real workspace).
+            if tokio::fs::metadata(state.backend.snapshots_root().join(&ws_id))
+                .await
+                .is_ok()
+            {
+                warn!(
+                    "init target {} resolves to orphan subvolume {:?}; \
+                     re-adopting (ws_id={})",
+                    workspace, abs_path, ws_id
+                );
+                return adopt_existing_subvol(
+                    state,
+                    &ws_id,
+                    normalize_registration_path(std::path::Path::new(workspace))?,
+                )
+                .await;
+            }
+        }
         return Ok(error_resp(
-            ErrorCode::InternalError,
+            ErrorCode::InvalidPath,
             format!(
-                "workspace registered (ws_id={}) but symlink missing or broken; \
-                 run 'ws-ckpt recover -w {}' to restore, then re-init{}",
-                ws.ws_id,
-                abs_path.display(),
-                hint,
+                "path is inside backend data root ({}): {}",
+                state.backend.data_root().display(),
+                abs_path.display()
             ),
         ));
     }
     if abs_path.starts_with(&state.mount_path) {
-        // The user-facing path canonicalises into our mount root. Two
-        // sub-cases need different handling:
-        //   (a) `abs_path == data_root/<ws_id>` for some `ws_id` we
-        //       manage. The user is effectively reaching one of our
-        //       subvolumes through a bind mount or symlink chain — treat
-        //       this as idempotent (already registered) or auto-adopt
-        //       (orphan subvol after restart).
-        //   (b) Anything else under mount_path (e.g. `.snapshots/...`, a
-        //       nested directory inside a subvol, or an unknown name at
-        //       the root). This is real self-referential nesting and
-        //       must stay an error.
-        if let Ok(rest) = abs_path.strip_prefix(state.backend.data_root()) {
-            let mut comps = rest.components();
-            let single = match (comps.next(), comps.next()) {
-                (Some(first), None) => Some(first.as_os_str().to_string_lossy().to_string()),
-                _ => None,
-            };
-            if let Some(ws_id) = single {
-                if let Some(existing) = state.get_by_wsid(&ws_id) {
-                    let ws = existing.read().await;
-                    warn!(
-                        "init target {} resolves to managed subvolume {:?}; \
-                         treating as already initialized",
-                        workspace, abs_path
-                    );
-                    return Ok(Response::InitOk {
-                        ws_id: ws.ws_id.clone(),
-                    });
-                }
-                // Orphan subvol — re-adopt if its snapshot bucket exists
-                // (created at init, proving it was a real workspace).
-                if tokio::fs::metadata(state.backend.snapshots_root().join(&ws_id))
-                    .await
-                    .is_ok()
-                {
-                    warn!(
-                        "init target {} resolves to orphan subvolume {:?}; \
-                         re-adopting (ws_id={})",
-                        workspace, abs_path, ws_id
-                    );
-                    return Ok(adopt_existing_subvol(state, &ws_id, abs_path.clone()).await);
-                }
-            }
-        }
         return Ok(error_resp(
             ErrorCode::InvalidPath,
             format!(
@@ -436,26 +395,30 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         ));
     }
 
-    // 3. Generate ws-id
+    // 3. Generate and reserve a ws-id before migrating any user data. The
+    // lifecycle lock closes the gap between checking every ownership source and
+    // publishing the new registration.
     let data_root = state.backend.data_root();
     let base_id = generate_ws_id_base(&abs_path.to_string_lossy());
     let mut ws_id = base_id.clone();
     let mut suffix = 2u32;
-    while data_root.join(&ws_id).try_exists()?
-        || state.backend.snapshots_root().join(&ws_id).try_exists()?
-        || state
-            .index_dir(&ws_id)
-            .with_file_name(format!("{}.unregistered", ws_id))
-            .try_exists()?
-    {
+    let _wsid_guard = loop {
+        let guard = state.lock_wsid(&ws_id).await;
+        let index_dir = state.index_dir(&ws_id);
+        let occupied = state.get_by_wsid(&ws_id).is_some()
+            || data_root.join(&ws_id).try_exists()?
+            || state.backend.snapshots_root().join(&ws_id).try_exists()?
+            || index_dir.try_exists()?
+            || index_dir
+                .with_file_name(format!("{}.unregistered", ws_id))
+                .try_exists()?;
+        if !occupied {
+            break guard;
+        }
+        drop(guard);
         ws_id = format!("{}-{}", base_id, suffix);
         suffix += 1;
-    }
-
-    // Serialize against a concurrent `recover` of the same path: ws_id is
-    // SHA256(path), so a recover already in flight would race with our
-    // index_store::save / register / save_manifest below.
-    let _wsid_guard = state.lock_wsid(&ws_id).await;
+    };
 
     let abs_path_str = abs_path.to_string_lossy().to_string();
 
@@ -500,7 +463,13 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     let (policy, failsafe) = load_workspace_policy_with_failsafe(&snap_dir, &ws_id, "init");
 
     // 13. Register to state
-    state.register_workspace_with_policy(ws_id.clone(), abs_path.clone(), index, policy, failsafe);
+    state.register_workspace_with_policy(
+        ws_id.clone(),
+        abs_path.clone(),
+        index,
+        policy,
+        failsafe,
+    )?;
 
     // 13a. Save manifest
     if let Err(e) = state.save_manifest().await {
@@ -578,22 +547,14 @@ pub async fn delete_snapshot(
     // 2. Write lock after the mutation mutex.
     let mut ws = ws_lock.write().await;
 
-    // 2a. Resolve snapshot by prefix within this workspace
-    let resolved_id = match ws.index.resolve_by_prefix(snapshot_id) {
-        Ok((id, _)) => id.clone(),
-        Err(ResolveError::NotFound) => {
-            return Ok(error_resp(
-                ErrorCode::SnapshotNotFound,
-                format!("snapshot not found: {}", snapshot_id),
-            ));
-        }
-        Err(ResolveError::Ambiguous(n)) => {
-            return Ok(error_resp(
-                ErrorCode::SnapshotNotFound,
-                format!("ambiguous snapshot prefix '{}': {} matches", snapshot_id, n),
-            ));
-        }
-    };
+    // Never reinterpret a previously valid ID as a prefix after its removal.
+    if !ws.index.snapshots.contains_key(snapshot_id) {
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot not found: {snapshot_id}"),
+        ));
+    }
+    let resolved_id = snapshot_id.to_string();
 
     // 3. Check pinned
     if let Some(meta) = ws.index.snapshots.get(&resolved_id) {
@@ -605,13 +566,27 @@ pub async fn delete_snapshot(
         }
     }
 
-    // 4. Delete subvolume (skip if snapshot is marked missing — subvolume already gone)
-    let is_missing = ws
-        .index
-        .snapshots
-        .get(&resolved_id)
-        .map(|m| m.missing)
-        .unwrap_or(false);
+    // Check disk as well: cleanup may have stopped before persisting a marker.
+    let is_missing = !tokio::fs::try_exists(
+        state
+            .backend
+            .snapshots_root()
+            .join(&ws.ws_id)
+            .join(&resolved_id),
+    )
+    .await
+    .with_context(|| format!("inspect snapshot {resolved_id}"))?;
+    if is_missing && ws.index.governed_evidence.contains_key(&resolved_id) {
+        if let Some(meta) = ws.index.snapshots.get_mut(&resolved_id) {
+            meta.missing = true;
+        }
+        index_store::save(&state.index_dir(&ws.ws_id), &ws.index).await?;
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot subvolume is missing: {resolved_id}; guarded evidence retained"),
+        ));
+    }
+
     if !is_missing {
         state
             .backend
@@ -623,6 +598,7 @@ pub async fn delete_snapshot(
     ws.index.unlink_node(&resolved_id);
     ws.index.snapshots.remove(&resolved_id);
     ws.index.governed_evidence.remove(&resolved_id);
+    ws.index.recovered_orphans.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
     tokio::fs::create_dir_all(&snap_dir)
         .await
@@ -635,6 +611,13 @@ pub async fn delete_snapshot(
     // 5b. Save manifest
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after delete_snapshot: {:#}", e);
+    }
+
+    if is_missing {
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot subvolume is missing: {resolved_id}; record removed"),
+        ));
     }
 
     // 6. Return
@@ -669,6 +652,25 @@ pub async fn recover_workspace(
     state: &Arc<DaemonState>,
     workspace: &str,
 ) -> anyhow::Result<Response> {
+    recover_workspace_inner(state, workspace, None).await
+}
+
+pub async fn recover_workspace_confirmed(
+    state: &Arc<DaemonState>,
+    preview: &ws_ckpt_common::RecoveryPreview,
+) -> anyhow::Result<Response> {
+    let workspace = preview
+        .ws_id
+        .as_deref()
+        .unwrap_or(&preview.registration_path);
+    recover_workspace_inner(state, workspace, Some(preview)).await
+}
+
+async fn recover_workspace_inner(
+    state: &Arc<DaemonState>,
+    workspace: &str,
+    expected: Option<&ws_ckpt_common::RecoveryPreview>,
+) -> anyhow::Result<Response> {
     let _init_guard = state.init_lock.lock().await;
     // 1. resolve workspace (by ID, path, or relative)
     let mut resolved = state.resolve_workspace(workspace).await;
@@ -681,13 +683,19 @@ pub async fn recover_workspace(
                 let original_str = original
                     .to_str()
                     .context("workspace path is not valid UTF-8")?;
-                if original.starts_with(state.backend.data_root())
+                if state.registration_path_is_internal(&original)?
                     || original == std::path::Path::new("/")
                 {
                     return Ok(error_resp(
                         ErrorCode::InvalidPath,
                         "cannot restore an orphan inside managed storage",
                     ));
+                }
+                if let Some(expected) = expected {
+                    let current = crate::recover_preview::orphan_preview(state, &original).await?;
+                    if &current != expected {
+                        return Ok(recovery_preview_changed());
+                    }
                 }
                 let retained = orphan_storage_paths(state, original_str).await?;
                 crate::backends::btrfs_common::restore_orphan_backup(original_str).await?;
@@ -718,7 +726,15 @@ pub async fn recover_workspace(
             format!("workspace not found: {}", workspace),
         ));
     };
-    let original_path = ws_lock.read().await.path.to_string_lossy().to_string();
+    let ws = ws_lock.read().await;
+    if let Some(expected) = expected {
+        let current = crate::recover_preview::registered_preview(state, &ws).await?;
+        if &current != expected {
+            return Ok(recovery_preview_changed());
+        }
+    }
+    let original_path = ws.path.to_string_lossy().to_string();
+    drop(ws);
 
     // Intentionally no cwd guard: recover is a terminal "tear out" operation
     // gated by CLI ConfirmationRequired. The CLI prompt is the contract.
@@ -765,6 +781,13 @@ pub async fn recover_workspace(
             workspace: original_path,
         },
     })
+}
+
+fn recovery_preview_changed() -> Response {
+    error_resp(
+        ErrorCode::ConfirmationRequired,
+        "workspace or snapshots changed since recovery preview; preview and confirm again",
+    )
 }
 
 // Keep historical data outside the reserved orphan name so recover -> init
@@ -1152,11 +1175,13 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let ws_link = tmpdir.path().join("myws");
         tokio::fs::symlink(&subvol, &ws_link).await.unwrap();
-        state.register_workspace(
-            "ws-exist".to_string(),
-            ws_link.clone(),
-            SnapshotIndex::new(ws_link.clone()),
-        );
+        state
+            .register_workspace(
+                "ws-exist".to_string(),
+                ws_link.clone(),
+                SnapshotIndex::new(ws_link.clone()),
+            )
+            .unwrap();
         let resp = init(&state, &ws_link.to_string_lossy()).await.unwrap();
         let _ = tokio::fs::remove_dir_all(&subvol).await;
         match resp {
@@ -1166,7 +1191,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_init_waits_through_storage_migration() {
+    async fn init_skips_ws_id_reserved_only_by_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let backend = Arc::new(RecorderStubBackend {
+            data_root_path: temp.path().join("mount/data"),
+            snapshots_root_path: temp.path().join("mount/snapshots"),
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: temp.path().join("configured-mount"),
+                ..test_config()
+            },
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let base_id = generate_ws_id_base(workspace.to_str().unwrap());
+        let detached_owner = temp.path().join("detached-owner");
+        state
+            .register_workspace(
+                base_id.clone(),
+                detached_owner.clone(),
+                SnapshotIndex::new(detached_owner.clone()),
+            )
+            .unwrap();
+
+        let response = init(&state, workspace.to_str().unwrap()).await.unwrap();
+
+        assert!(matches!(response, Response::InitOk { ws_id } if ws_id == format!("{base_id}-2")));
+        let existing = state.get_by_wsid(&base_id).unwrap();
+        assert_eq!(existing.read().await.path, detached_owner);
+        assert_eq!(
+            backend.init_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn init_skips_ws_id_reserved_only_by_active_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let backend = Arc::new(RecorderStubBackend {
+            data_root_path: temp.path().join("mount/data"),
+            snapshots_root_path: temp.path().join("mount/snapshots"),
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: temp.path().join("configured-mount"),
+                ..test_config()
+            },
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let base_id = generate_ws_id_base(workspace.to_str().unwrap());
+        let existing_index_dir = state.index_dir(&base_id);
+        std::fs::create_dir_all(&existing_index_dir).unwrap();
+        let existing_index = existing_index_dir.join(ws_ckpt_common::INDEX_FILE);
+        std::fs::write(&existing_index, b"keep existing index").unwrap();
+
+        let response = init(&state, workspace.to_str().unwrap()).await.unwrap();
+
+        assert!(matches!(response, Response::InitOk { ws_id } if ws_id == format!("{base_id}-2")));
+        assert_eq!(
+            std::fs::read(&existing_index).unwrap(),
+            b"keep existing index"
+        );
+        assert!(state.get_by_wsid(&base_id).is_none());
+        assert_eq!(
+            backend.init_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_checkpoint_waits_through_storage_migration() {
         use std::time::Duration;
 
         // Exercise both ordinary allocation and a pre-existing ID collision.
@@ -1193,7 +1295,7 @@ mod tests {
                 base_id.clone()
             };
             let config = DaemonConfig {
-                mount_path: temp.path().join("mount"),
+                mount_path: temp.path().join("configured-mount"),
                 ..test_config()
             };
             let state = Arc::new(DaemonState::new(
@@ -1203,7 +1305,15 @@ mod tests {
             ));
             let workspace_str = workspace.to_str().unwrap();
             let alias_str = alias.to_str().unwrap();
-            let leader = init(&state, workspace_str);
+            let checkpoint_request = |path: &str, id: &str| ws_ckpt_common::Request::Checkpoint {
+                workspace: path.to_string(),
+                id: id.to_string(),
+                message: None,
+                metadata: None,
+                pin: false,
+            };
+            let leader =
+                crate::dispatcher::dispatch(&state, checkpoint_request(workspace_str, "leader"));
             tokio::pin!(leader);
 
             // Hold the first init after creating storage, before renaming.
@@ -1212,7 +1322,8 @@ mod tests {
                 permit = backend.init_progress.acquire() => permit.unwrap().forget(),
                 _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("init never reached storage"),
             }
-            let follower = init(&state, workspace_str);
+            let follower =
+                crate::dispatcher::dispatch(&state, checkpoint_request(workspace_str, "follower"));
             tokio::pin!(follower);
             assert!(
                 tokio::time::timeout(Duration::from_millis(50), &mut follower)
@@ -1233,8 +1344,12 @@ mod tests {
             assert!(!workspace.exists());
             // Both the original spelling and an alias must wait through the
             // missing-path window rather than reporting InvalidPath.
-            let during_gap = init(&state, workspace_str);
-            let via_alias = init(&state, alias_str);
+            let during_gap = crate::dispatcher::dispatch(
+                &state,
+                checkpoint_request(workspace_str, "during-gap"),
+            );
+            let via_alias =
+                crate::dispatcher::dispatch(&state, checkpoint_request(alias_str, "via-alias"));
             tokio::pin!(during_gap, via_alias);
             assert!(
                 tokio::time::timeout(Duration::from_millis(50), &mut during_gap)
@@ -1252,13 +1367,29 @@ mod tests {
             })
             .await
             .expect("concurrent init did not finish");
-            for response in [responses.0, responses.1, responses.2, responses.3] {
-                let response = response.unwrap();
+            for (response, expected_snapshot) in
+                [responses.0, responses.1, responses.2, responses.3]
+                    .into_iter()
+                    .zip(["leader", "follower", "during-gap", "via-alias"])
+            {
                 assert!(
-                    matches!(&response, Response::InitOk { ws_id } if ws_id == &expected_id),
+                    matches!(&response, Response::CheckpointOk { snapshot_id } if snapshot_id == expected_snapshot),
                     "{response:?}"
                 );
+                assert_eq!(
+                    std::fs::read(
+                        backend
+                            .snapshots_root()
+                            .join(&expected_id)
+                            .join(expected_snapshot)
+                            .join("payload")
+                    )
+                    .unwrap(),
+                    b"keep me"
+                );
             }
+            let registered = state.get_by_wsid(&expected_id).unwrap();
+            assert_eq!(registered.read().await.index.snapshots.len(), 4);
             assert_eq!(
                 backend.init_calls.load(std::sync::atomic::Ordering::SeqCst),
                 1
@@ -1289,11 +1420,13 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_string_lossy().to_string();
         let canon = tokio::fs::canonicalize(&path).await.unwrap();
-        state.register_workspace(
-            "ws-gone".to_string(),
-            canon.clone(),
-            SnapshotIndex::new(canon),
-        );
+        state
+            .register_workspace(
+                "ws-gone".to_string(),
+                canon.clone(),
+                SnapshotIndex::new(canon),
+            )
+            .unwrap();
         let resp = init(&state, &path).await.unwrap();
         match resp {
             Response::Error { code, message } => {
@@ -1386,16 +1519,213 @@ mod tests {
             mount_path.join("test.img"),
         ));
         let state = Arc::new(DaemonState::new(cfg, backend, test_state_dir()));
-        state.register_workspace(
-            ws_id.to_string(),
-            PathBuf::from("/some/user/facing/path"),
-            SnapshotIndex::new(PathBuf::from("/some/user/facing/path")),
-        );
+        let user_dir = tempfile::tempdir().unwrap();
+        let user_path = user_dir.path().join("repo");
+        std::os::unix::fs::symlink(&subvol_path, &user_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                user_path.clone(),
+                SnapshotIndex::new(user_path),
+            )
+            .unwrap();
 
         let resp = init(&state, &subvol_path.to_string_lossy()).await.unwrap();
         match resp {
             Response::InitOk { ws_id: returned } => assert_eq!(returned, ws_id),
             other => panic!("expected idempotent InitOk, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_btrfs_base_checks_data_root_outside_configured_mount() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
+            temp.path().join("detected-mount"),
+            crate::backends::btrfs_base::BtrfsBaseScenario::InPlace,
+        ));
+        let config = DaemonConfig {
+            mount_path: temp.path().join("configured-mount"),
+            ..test_config()
+        };
+        let state = Arc::new(DaemonState::new(
+            config,
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let subvol = backend.data_root().join("ws-existing");
+        tokio::fs::create_dir_all(subvol.join("nested"))
+            .await
+            .unwrap();
+        let workspace = temp.path().join("workspace");
+        let alias = temp.path().join("alias");
+        tokio::fs::symlink(&subvol, &workspace).await.unwrap();
+        tokio::fs::symlink(&workspace, &alias).await.unwrap();
+        state
+            .register_workspace(
+                "ws-existing".into(),
+                workspace.clone(),
+                SnapshotIndex::new(workspace.clone()),
+            )
+            .unwrap();
+        for path in [&subvol, &alias] {
+            let response = init(&state, path.to_str().unwrap()).await.unwrap();
+            assert!(matches!(response, Response::InitOk { ws_id } if ws_id == "ws-existing"));
+            let resolved = state
+                .resolve_workspace(path.to_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resolved.read().await.ws_id, "ws-existing");
+        }
+        let snapshots = backend.snapshots_root().to_path_buf();
+        tokio::fs::create_dir_all(&snapshots).await.unwrap();
+        for path in [
+            backend.data_root().to_path_buf(),
+            subvol.join("nested"),
+            snapshots,
+        ] {
+            assert!(state
+                .resolve_workspace(path.to_str().unwrap())
+                .await
+                .is_none());
+            let response = init(&state, path.to_str().unwrap()).await.unwrap();
+            assert!(
+                matches!(
+                    response,
+                    Response::Error {
+                        code: ErrorCode::InvalidPath,
+                        ..
+                    }
+                ),
+                "{response:?}"
+            );
+        }
+        // An exact registered spelling retargeted to another workspace must
+        // still fail its own detach guard, never checkpoint the other one.
+        let other = backend.data_root().join("ws-other");
+        tokio::fs::create_dir(&other).await.unwrap();
+        let other_link = temp.path().join("other-link");
+        tokio::fs::symlink(&other, &other_link).await.unwrap();
+        state
+            .register_workspace(
+                "ws-other".into(),
+                other_link.clone(),
+                SnapshotIndex::new(other_link),
+            )
+            .unwrap();
+        tokio::fs::remove_file(&workspace).await.unwrap();
+        tokio::fs::symlink(&other, &workspace).await.unwrap();
+        let resolved = state
+            .resolve_workspace(workspace.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resolved.read().await.ws_id, "ws-existing");
+        assert!(state.detached_registration_error(&resolved).await.is_some());
+        tokio::fs::remove_file(&workspace).await.unwrap();
+        tokio::fs::symlink(&subvol, &workspace).await.unwrap();
+        // Internal storage alone cannot supply a user-facing recovery anchor.
+        let orphan = backend.data_root().join("ws-orphan");
+        tokio::fs::create_dir_all(&orphan).await.unwrap();
+        tokio::fs::create_dir_all(backend.snapshots_root().join("ws-orphan"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            init(&state, orphan.to_str().unwrap()).await.unwrap(),
+            Response::Error {
+                code: ErrorCode::InvalidPath,
+                ..
+            }
+        ));
+        let orphan_link = temp.path().join("orphan-link");
+        tokio::fs::symlink(&orphan, &orphan_link).await.unwrap();
+        assert!(
+            matches!(init(&state, orphan_link.to_str().unwrap()).await.unwrap(), Response::InitOk { ws_id } if ws_id == "ws-orphan")
+        );
+        assert_eq!(
+            state.get_by_wsid("ws-orphan").unwrap().read().await.path,
+            orphan_link
+        );
+        assert_eq!(tokio::fs::read_link(&workspace).await.unwrap(), subvol);
+    }
+
+    #[tokio::test]
+    async fn adoption_preserves_owner_and_rejects_nested_storage() {
+        for base in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend: Arc<dyn StorageBackend> = if base {
+                Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
+                    temp.path().join("detected"),
+                    crate::backends::btrfs_base::BtrfsBaseScenario::InPlace,
+                ))
+            } else {
+                Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+                    temp.path().join("storage"),
+                    temp.path().join("image"),
+                ))
+            };
+            let state = Arc::new(DaemonState::new(
+                test_config(),
+                backend.clone(),
+                temp.path().join("state"),
+            ));
+            let live = backend.data_root().join("ws-owned");
+            std::fs::create_dir_all(live.join("child")).unwrap();
+            std::fs::create_dir_all(backend.snapshots_root().join("ws-owned")).unwrap();
+            let owner = temp.path().join("repo");
+            let alias = temp.path().join("alias");
+            let nested = temp.path().join("nested");
+            std::os::unix::fs::symlink(&live, &owner).unwrap();
+            std::os::unix::fs::symlink(&owner, &alias).unwrap();
+            std::os::unix::fs::symlink(live.join("child"), &nested).unwrap();
+            index_store::save(
+                &state.index_dir("ws-owned"),
+                &SnapshotIndex::new(owner.clone()),
+            )
+            .await
+            .unwrap();
+            let response = init(&state, nested.to_str().unwrap()).await.unwrap();
+            assert!(
+                matches!(
+                    response,
+                    Response::Error {
+                        code: ErrorCode::InvalidPath,
+                        ..
+                    }
+                ),
+                "{response:?}"
+            );
+            assert!(state.all_workspaces().is_empty());
+            let response = init(&state, alias.to_str().unwrap()).await.unwrap();
+            assert!(matches!(response, Response::InitOk { .. }), "{response:?}");
+            let ws = state.get_by_wsid("ws-owned").unwrap();
+            assert_eq!(ws.read().await.path, owner);
+            assert_eq!(ws.read().await.index.workspace_path, owner);
+            // Re-adoption from a direct internal path is safe only when its
+            // persisted index proves a live, external registration anchor.
+            state.unregister_workspace("ws-owned").await;
+            assert!(matches!(
+                init(&state, live.to_str().unwrap()).await.unwrap(),
+                Response::InitOk { .. }
+            ));
+            assert_eq!(
+                state.get_by_wsid("ws-owned").unwrap().read().await.path,
+                owner
+            );
+            state.unregister_workspace("ws-owned").await;
+            std::fs::remove_file(&owner).unwrap();
+            std::fs::create_dir(&owner).unwrap();
+            let response = init(&state, live.to_str().unwrap()).await.unwrap();
+            assert!(
+                matches!(
+                    response,
+                    Response::Error {
+                        code: ErrorCode::InvalidPath,
+                        ..
+                    }
+                ),
+                "{response:?}"
+            );
+            assert!(state.all_workspaces().is_empty());
         }
     }
 
@@ -1446,7 +1776,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let backend: Arc<dyn StorageBackend> =
             Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
-                temp.path().to_path_buf(),
+                temp.path().join("data"),
                 temp.path().join("test.img"),
             ));
         let state = Arc::new(DaemonState::new(
@@ -1454,7 +1784,7 @@ mod tests {
             backend,
             temp.path().join("state"),
         ));
-        let subvol = temp.path().join(ws_id);
+        let subvol = state.backend.data_root().join(ws_id);
         std::fs::create_dir_all(&subvol).unwrap();
         let ws_link = temp.path().join("ws-link");
         std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
@@ -1471,8 +1801,31 @@ mod tests {
                 child_ids: vec![],
             },
         );
-        state.register_workspace(ws_id.to_string(), ws_link.clone(), index);
+        state
+            .register_workspace(ws_id.to_string(), ws_link.clone(), index)
+            .unwrap();
         (state, ws_link, temp)
+    }
+
+    #[tokio::test]
+    async fn delete_absent_subvolume_prunes_record_and_remains_not_found() {
+        let (state, _, _temp) = live_topology("ws-del-absent");
+        for _ in 0..2 {
+            let response = delete_snapshot(&state, "ws-del-absent", "snap-1", false)
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::SnapshotNotFound,
+                    ..
+                }
+            ));
+            let index = index_store::load(&state.index_dir("ws-del-absent"))
+                .await
+                .unwrap();
+            assert!(index.snapshots.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1688,11 +2041,13 @@ mod tests {
         let subvol = mount.join(ws_id);
         tokio::fs::create_dir_all(&subvol).await.unwrap();
         tokio::fs::symlink(&subvol, &original).await.unwrap();
-        state.register_workspace(
-            ws_id.to_string(),
-            original.clone(),
-            SnapshotIndex::new(original.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                original.clone(),
+                SnapshotIndex::new(original.clone()),
+            )
+            .unwrap();
         let index = state.index_dir(ws_id);
         tokio::fs::create_dir_all(&index).await.unwrap();
         tokio::fs::write(index.join("index.json"), b"metadata")
@@ -1787,11 +2142,13 @@ mod tests {
             state_dir.clone(),
         ));
         let ws_id = "ws-retry";
-        state.register_workspace(
-            ws_id.to_string(),
-            original.clone(),
-            SnapshotIndex::new(original.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                original.clone(),
+                SnapshotIndex::new(original.clone()),
+            )
+            .unwrap();
         let registered = state.get_by_wsid(ws_id).unwrap();
         registered.write().await.policy_failsafe = true;
         tokio::fs::symlink(mount.join(ws_id), &original)
@@ -1879,11 +2236,13 @@ mod tests {
                 backend.clone(),
                 tmp.path().join("state"),
             ));
-            state.register_workspace(
-                ws_id.clone(),
-                original.clone(),
-                SnapshotIndex::new(original.clone()),
-            );
+            state
+                .register_workspace(
+                    ws_id.clone(),
+                    original.clone(),
+                    SnapshotIndex::new(original.clone()),
+                )
+                .unwrap();
             let input = if use_alias {
                 alias.join("workspace")
             } else {
@@ -1940,11 +2299,13 @@ mod tests {
             tmp.path().join("state"),
         ));
         let ws_id = "ws-no-index";
-        state.register_workspace(
-            ws_id.into(),
-            original.clone(),
-            SnapshotIndex::new(original.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.into(),
+                original.clone(),
+                SnapshotIndex::new(original.clone()),
+            )
+            .unwrap();
         let backup = crate::backends::btrfs_common::backup_path_for(original.to_str().unwrap());
         // A dangling backup link still occupies a retained filesystem entry.
         tokio::fs::symlink(tmp.path().join("missing"), &backup)
@@ -2018,11 +2379,13 @@ mod tests {
         let ws_tmp = tempfile::tempdir().unwrap();
         let canon = tokio::fs::canonicalize(ws_tmp.path()).await.unwrap();
         let ws_id = "ws-recov-orch";
-        state.register_workspace(
-            ws_id.to_string(),
-            canon.clone(),
-            SnapshotIndex::new(canon.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                canon.clone(),
+                SnapshotIndex::new(canon.clone()),
+            )
+            .unwrap();
         // Simulate prior PATCH: write a real policy.toml inside index_dir.
         let dir = state.index_dir(ws_id);
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -2044,6 +2407,77 @@ mod tests {
             "ws must be unregistered"
         );
         assert!(!dir.exists(), "recover must wipe stale per-ws index dir");
+    }
+
+    #[tokio::test]
+    async fn confirmed_recovery_rechecks_deletion_scope_and_pins_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecorderStubBackend {
+            data_root_path: temp.path().join("data"),
+            snapshots_root_path: temp.path().join("snapshots"),
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let owner = temp.path().join("repo");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir_all(backend.data_root().join("ws-A")).unwrap();
+        std::os::unix::fs::symlink(backend.data_root().join("ws-A"), &owner).unwrap();
+        std::os::unix::fs::symlink(&owner, &alias).unwrap();
+        state
+            .register_workspace(
+                "ws-A".into(),
+                owner.clone(),
+                SnapshotIndex::new(owner.clone()),
+            )
+            .unwrap();
+        let Response::RecoverPreviewOk { preview } =
+            crate::recover_preview::preview(&state, alias.to_str().unwrap())
+                .await
+                .unwrap()
+        else {
+            panic!("preview")
+        };
+        assert_eq!(preview.ws_id.as_deref(), Some("ws-A"));
+        assert_eq!(preview.registration_path, owner.to_str().unwrap());
+        // Recover deletes unindexed physical snapshots too: the confirmation
+        // must expire if that deletion scope grows while the user is deciding.
+        let physical = backend.snapshots_root().join("ws-A/unindexed");
+        std::fs::create_dir_all(&physical).unwrap();
+        assert!(matches!(
+            recover_workspace_confirmed(&state, &preview).await.unwrap(),
+            Response::Error {
+                code: ErrorCode::ConfirmationRequired,
+                ..
+            }
+        ));
+        assert_eq!(backend.recover_call_count(), 0);
+        let Response::RecoverPreviewOk { preview } =
+            crate::recover_preview::preview(&state, alias.to_str().unwrap())
+                .await
+                .unwrap()
+        else {
+            panic!("preview")
+        };
+        assert_eq!(preview.snapshot_count, 1);
+        // The user-facing alias can change; execution still names the confirmed ID.
+        std::fs::create_dir_all(backend.data_root().join("ws-B")).unwrap();
+        let other = temp.path().join("other");
+        std::os::unix::fs::symlink(backend.data_root().join("ws-B"), &other).unwrap();
+        state
+            .register_workspace("ws-B".into(), other.clone(), SnapshotIndex::new(other))
+            .unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(backend.data_root().join("ws-B"), &alias).unwrap();
+        assert!(
+            matches!(recover_workspace_confirmed(&state, &preview).await.unwrap(), Response::RecoverOk { workspace } if workspace == owner.to_str().unwrap())
+        );
+        assert_eq!(backend.recover_call_count(), 1);
+        assert!(state.get_by_wsid("ws-A").is_none());
+        assert!(state.get_by_wsid("ws-B").is_some());
     }
 
     #[tokio::test]
@@ -2069,11 +2503,13 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(canon.to_string_lossy().as_bytes());
         let ws_id = format!("ws-{}", &format!("{:x}", hasher.finalize())[..6]);
-        state.register_workspace(
-            ws_id.clone(),
-            canon.clone(),
-            SnapshotIndex::new(canon.clone()),
-        );
+        state
+            .register_workspace(
+                ws_id.clone(),
+                canon.clone(),
+                SnapshotIndex::new(canon.clone()),
+            )
+            .unwrap();
 
         // Outside the recover, hold the per-ws_id lifecycle lock — simulates
         // a concurrent init / adopt that's mid-flight on the same ws_id.
@@ -2206,8 +2642,15 @@ mod tests {
                 snapshot_count: 0,
             })
         }
-        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
-            unimplemented!()
+        async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            let snapshot = self.snapshots_root().join(ws_id).join(snapshot_id);
+            tokio::fs::create_dir(&snapshot).await?;
+            tokio::fs::copy(
+                self.data_root().join(ws_id).join("payload"),
+                snapshot.join("payload"),
+            )
+            .await?;
+            Ok(())
         }
         async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
             unimplemented!()

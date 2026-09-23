@@ -16,6 +16,8 @@ AgentSight 采集到的一切都以 SQLite 数据库形式留在本机。Dashboa
 | `interruption_events.db` | 检测到的中断，含类型、严重级别与证据 |
 | `optimization.db` | Dashboard 优化分析的结果 |
 | `trajectories.db` | ATIF v1.7 轨迹，仅在开启 `features.trajectory_collection` 时存在 |
+| `.agentsight-private/security.db` | 安全事件、案例、证据与处置状态 |
+| `.agentsight-private/enforcement.db` | 拦截策略、违规记录与状态流转 |
 | `.agentsight-private/reuse.db` | 轨迹复用标签、人工决定、LLM verdict 与标签审计事件 |
 | `.agentsight-private/causal.db` | 持久化的因果归因 case |
 | `.dashboard_token` | Dashboard 访问令牌（64 位十六进制，仅 root 可读） |
@@ -26,20 +28,26 @@ AgentSight 采集到的一切都以 SQLite 数据库形式留在本机。Dashboa
 tracer 自身始终写入默认目录。
 
 > `serve --db <path>` 会让所有兄弟库都从 `--db` 所在目录解析——GenAI 事件、中断库、轨迹库以及
-> health checker 都跟着它走。私有的复用与因果库从其 `.agentsight-private/` 子目录解析。因此归档副本是
-> 隔离展示的，不会混入当前主机的数据。请把兄弟 `.db` 文件以及存在时的 `.agentsight-private/` 目录放在
-> 你传入的那个文件的同一目录下。裸相对路径 `--db name.db` 使用当前目录。
+> health checker 都跟着它走。私有的安全、拦截、复用与因果库从其 `.agentsight-private/` 子目录解析。
+> 因此归档副本是隔离展示的，不会混入当前主机的数据。请把兄弟 `.db` 文件以及存在时的
+> `.agentsight-private/` 目录放在你传入的那个文件的同一目录下。裸相对路径 `--db name.db` 使用当前目录。
 
 > 这些文件包含完整的提示词与模型回答，请按敏感数据对待：保持安装时的目录权限，往外拷贝时务必谨慎。
 
 ## 保留与容量上限
 
-| 存储 | 上限 | 修改方式 |
+| 存储 | 默认策略 | 配置项 |
 |---|---|---|
-| `genai_events.db` | 默认 200 MB；达到上限的 90% 开始清理最旧的 LLM 调用与进程资源采样 | 在服务环境里设置 `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` |
-| `interruption_events.db` | 30 天 + 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
+| `agentsight.db` | 30 天、500 MiB、每 1,000 次写入检查 | `storage.primary` |
+| `genai_events.db` | 30 天、200 MiB、每次写入检查；包含评估结果 | `storage.genai` |
+| `interruption_events.db` | 30 天、100 MiB、每 60 秒检查 | `storage.interruptions` |
+| `trajectories.db` | 30 天、500 MiB、每 300 秒检查 | `storage.trajectories` |
+| `optimization.db` | 30 天、200 MiB、每 300 秒检查 | `storage.optimization` |
+| `.agentsight-private/security.db` | 30 天、200 MiB、每小时检查，并保护活动案例图 | `storage.security_audit` |
+| `.agentsight-private/enforcement.db` | 保留最新 100,000 条 violation | 固定行数上限 |
 
-上限按逻辑容量计（物理文件大小减去空闲页），清理按最旧优先收敛到阈值内。清理后
+保留时间、容量或检查间隔设为 `0` 时关闭对应规则。上限按逻辑容量计（物理文件大小减去空闲页），清理按最旧
+且允许淘汰的记录优先，直到逻辑容量收敛到阈值内。清理后
 物理文件不会自动缩小：释放的页进入空闲页表并被后续写入复用，文件大小稳定在
 历史峰值。如需向文件系统归还磁盘空间，在低峰期手动执行
 `sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`（VACUUM 会重建整个文件，
@@ -48,16 +56,18 @@ tracer 自身始终写入默认目录。
 > 容器部署请注意：这些保留语义只在数据目录持久化时才有意义。不挂卷时容器每次重启都会清空全部数据，
 > 详见 [容器与 Sidecar](deployment.md#容器与-sidecar) 的持久化一节。
 
-给安装包服务调高 GenAI 上限：
+修改限制时，编辑 `/etc/agentsight/config.json` 的 `storage` 配置节，再 reload 服务。Settings 页面会展示
+每个数据库当前生效的策略、物理占用和逻辑占用。
+
+通过 API 查看当前占用：
 
 ```bash
-sudo systemctl edit agentsight.service
-# [Service]
-# Environment=AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500
-sudo systemctl restart agentsight.service
+TOKEN=$(sudo cat /var/log/sysak/.agentsight/.dashboard_token)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/status \
+  | python3 -m json.tool
 ```
 
-查看当前占用：
+也可以直接检查目录：
 
 ```bash
 sudo du -sh /var/log/sysak/.agentsight
@@ -105,6 +115,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |
+| 存储 | `GET /api/storage/status` | SQLite 生效策略与物理/逻辑占用，不返回文件路径 |
 | Skill 指标 | `GET /api/skill-metrics`、`/downloads`、`/loads`、`/usage-ratio`、`/distribution`、`/hotness` | Skill 采纳情况 |
 | 优化分析 | `POST /api/optimize/sessions/{id}/{dimension}`、`GET /api/optimize/results`、`GET` 与 `POST /api/optimize/config` | LLM 辅助分析 |
 | 质量与归因 | `POST /api/grader/evaluate`、`GET /api/grader/latest`、`POST /api/causal-attribution` | 会话质量评分、根因归因 |

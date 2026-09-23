@@ -18,7 +18,7 @@ package = "cosh-ng"
 
 [component.platform]
 os = ["macos"]
-arch = ["aarch64"]
+arch = ["aarch64", "x86_64"]
 
 [[component.dependencies]]
 name = "bash"

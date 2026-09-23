@@ -2,8 +2,16 @@ import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {exists, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
-const componentChangelogs = (await walkFiles(path.join(repoRoot, 'src'), (file) => path.basename(file) === 'CHANGELOG.md'))
-  .filter((file) => path.relative(path.join(repoRoot, 'src'), file).split(path.sep).length === 2);
+const componentChangelogs = [];
+for (const sourceRoot of ['src', 'distribution', 'deprecated']) {
+  const root = path.join(repoRoot, sourceRoot);
+  if (!(await exists(root))) continue;
+  componentChangelogs.push(
+    ...(await walkFiles(root, (file) => path.basename(file) === 'CHANGELOG.md'))
+      .filter((file) => path.relative(root, file).split(path.sep).length === 2),
+  );
+}
+componentChangelogs.sort();
 const sourceLocaleLink = /^\[(?:中文版|English)\]\(CHANGELOG(?:_zh)?\.md\)\r?\n(?:\r?\n)?/m;
 
 function displayName(source) {

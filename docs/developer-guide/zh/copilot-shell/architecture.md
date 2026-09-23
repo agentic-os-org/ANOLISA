@@ -6,7 +6,7 @@ Copilot Shell 是一个终端内的 AI 编程助手，采用 TypeScript 编写�
 ## 仓库结构
 
 ```
-src/copilot-shell/
+deprecated/copilot-shell/
 ├── packages/
 │   ├── cli/          # 命令行入口和 TUI 层
 │   ├── core/         # 核心引擎（模型、工具、会话管理）

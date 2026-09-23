@@ -1142,7 +1142,7 @@ async fn delete_recovery_batch(paths: &[PathBuf], fs_root: &Path) -> Vec<String>
         .collect()
 }
 
-async fn recovery_snapshot_paths(snapshot_dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) async fn recovery_snapshot_paths(snapshot_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = match tokio::fs::read_dir(snapshot_dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

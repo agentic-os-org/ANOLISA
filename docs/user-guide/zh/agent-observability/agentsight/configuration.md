@@ -17,7 +17,16 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "storage": {
+    "base_path": "/var/log/sysak/.agentsight",
+    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_inserts": 1000 },
+    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_inserts": 1 },
+    "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
+    "trajectories": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 300 },
+    "optimization": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 }
+  },
   "runtime": {
     "sls_logtail_path": ""
   },
@@ -34,7 +43,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
     "session_mapping": { "enabled": true, "max_entries": 10000 },
     "sqlite_storage": { "enabled": true, "batch": { "max_size": 100, "flush_ms": 100 } },
     "resource_sampling": false,
-    "interruption_detection": { "enabled": true, "retention_days": 30, "max_db_size_mb": 100 },
+    "interruption_detection": { "enabled": true },
     "audit": true,
     "token_consumption": false,
     "sls_logtail": false,
@@ -70,6 +79,23 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 }
 ```
 
+## SQLite 存储策略
+
+`storage.base_path` 是 AgentSight 自有数据库共用的目录。每个数据库分别配置保留天数、逻辑容量上限和维护
+间隔。`retention_days`、`max_db_size_mb` 或检查间隔为 `0` 时，表示关闭对应规则。
+
+| 存储 | 保留时间 | 容量上限 | 检查间隔 |
+|---|---:|---:|---:|
+| `storage.primary`（`agentsight.db`） | 30 天 | 500 MiB | 1,000 次写入 |
+| `storage.genai`（`genai_events.db`，含评估结果） | 30 天 | 200 MiB | 每次写入 |
+| `storage.interruptions` | 30 天 | 100 MiB | 60 秒 |
+| `storage.trajectories` | 30 天 | 500 MiB | 300 秒 |
+| `storage.optimization` | 30 天 | 200 MiB | 300 秒 |
+| `storage.security_audit` | 30 天 | 200 MiB | 3,600 秒 |
+
+`schema_version` 变化时，配置格式整体替换。自定义配置请从随包发布的 `agentsight.json` 开始修改，旧版本
+配置不会自动合并到 schema v3。
+
 ## 功能开关
 
 `features` 下的每一项都可以独立关闭。关闭后对应模块根本不会被实例化，因此既不占内存也不产生 I/O。
@@ -98,9 +124,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 | `features.session_mapping.max_entries` | `10000` | response ID → session ID 映射上限 |
 | `features.sqlite_storage.batch.max_size` | `100` | 每批写入行数 |
 | `features.sqlite_storage.batch.flush_ms` | `100` | 批量写入的最大延迟（毫秒） |
-| `features.interruption_detection.retention_days` | `30` | 中断事件保留天数 |
-| `features.interruption_detection.max_db_size_mb` | `100` | `interruption_events.db` 容量上限 |
-| `features.trajectory_collection.scan_interval_secs` | `30` | 轨迹采集扫描间隔 |
+| `features.trajectory_collection.scan_interval_secs` | `30` | 轨迹文件发现间隔；存储清理由 `storage.trajectories.check_interval_secs` 控制 |
 
 ## 运行时上限
 
@@ -215,23 +239,17 @@ sudo agentsight discover                                   # 跑一次自己的 
 
 ## schema_version 与升级
 
-`schema_version`（当前为 `2`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
+`schema_version`（当前为 `3`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
 
-- 相同或更新 → 保留你的文件不动；
-- 缺失或更旧 → 先把你的文件复制为 `config.json.bak.<unix秒>`，再写入合并后的文件：以当前默认配置为底，
-  把你设置过的每个顶层键（`cmdline`、`https`、`features`、`codex_offsets` 等）覆盖上去，最后提升
-  `schema_version`。
+- 相同或更新 → 保留文件不动；
+- 缺失或更旧 → 先复制为 `config.json.bak.<unix秒>`，再替换为当前默认配置。
 
-合并是按顶层键的浅合并，因此你定制过的小节会被整体保留，同时默认配置中新增的小节会被补进来。这也意味着
-只改了一半的 `cmdline` 仍然是一半——上文「替换而非追加」的规则依旧成立。
-
-RPM 使用 `%config(noreplace)`，因此升级包不会覆盖磁盘上的文件，格式变更由上述检查处理。
+旧 schema 中的自定义项不会自动合并。请在新文件上重新应用需要的规则，然后 reload 服务。
 
 ## 环境变量
 
 | 变量 | 用途 |
 |---|---|
-| `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB` | GenAI 事件数据库容量上限（默认 200） |
 | `AGENTSIGHT_TOKENIZER_PATH` | 本地分词器模型所在目录 |
 | `AGENTSIGHT_ENFORCER_SOCKET` | enforcer socket 路径（默认 `/run/agentsight/enforcer.sock`） |
 | `AGENTSIGHT_CHROME_TRACE` | 输出 Chrome trace 文件用于流水线性能分析 |

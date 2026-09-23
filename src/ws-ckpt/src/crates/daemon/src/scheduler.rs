@@ -333,6 +333,7 @@ mod tests {
         usage: Result<(u64, u64), String>,
         zombies: Result<Vec<u64>, String>,
         data_root: std::path::PathBuf,
+        snapshots_root: std::path::PathBuf,
     }
 
     impl UsageProbeBackend {
@@ -341,6 +342,7 @@ mod tests {
                 usage,
                 zombies,
                 data_root: std::env::temp_dir(),
+                snapshots_root: std::env::temp_dir(),
             }
         }
     }
@@ -354,7 +356,7 @@ mod tests {
             &self.data_root
         }
         fn snapshots_root(&self) -> &std::path::Path {
-            &self.data_root
+            &self.snapshots_root
         }
         async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
             self.usage
@@ -373,14 +375,21 @@ mod tests {
         ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
             unimplemented!()
         }
-        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
-            unimplemented!()
+        async fn create_snapshot(&self, ws_id: &str, id: &str) -> anyhow::Result<()> {
+            let target = self.snapshots_root.join(ws_id).join(id);
+            std::fs::create_dir_all(&target)?;
+            std::fs::copy(
+                self.data_root.join(ws_id).join("canary"),
+                target.join("canary"),
+            )?;
+            Ok(())
         }
         async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<std::path::PathBuf> {
             unimplemented!()
         }
-        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
-            unimplemented!()
+        async fn delete_snapshot(&self, ws_id: &str, id: &str) -> anyhow::Result<()> {
+            std::fs::remove_dir_all(self.snapshots_root.join(ws_id).join(id))?;
+            Ok(())
         }
         async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
@@ -395,10 +404,18 @@ mod tests {
         }
         async fn cleanup_snapshots(
             &self,
-            _: &str,
-            _: &[String],
+            ws_id: &str,
+            ids: &[String],
         ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
-            unimplemented!()
+            let mut report = Vec::new();
+            for id in ids {
+                self.delete_snapshot(ws_id, id).await?;
+                report.push((
+                    id.clone(),
+                    ws_ckpt_common::backend::SnapshotDeleteOutcome::Removed,
+                ));
+            }
+            Ok(report)
         }
         async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
@@ -414,6 +431,167 @@ mod tests {
         ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
             unimplemented!()
         }
+    }
+
+    #[tokio::test]
+    async fn recovered_orphans_survive_retention_checkpoint_and_restart_until_explicit_delete() {
+        use super::auto_cleanup;
+        use crate::state::DaemonState;
+        use crate::{dispatcher::dispatch, index_store, snapshot_mgr, workspace_mgr};
+        use std::sync::Arc;
+        use ws_ckpt_common::{ErrorCode, Request, Response, SnapshotIndex};
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok((100, 1)), Ok(vec![]));
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let ws_id = "ws-orphans";
+        let live = backend.data_root.join(ws_id);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("canary"), "live").unwrap();
+        let path = temp.path().join("workspace");
+        std::os::unix::fs::symlink(&live, &path).unwrap();
+        let orphan = backend.snapshots_root.join(ws_id).join("snap-1");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("canary"), "orphan").unwrap();
+        let config = cfg(true, CleanupRetention::Count(1));
+        let mut state = Arc::new(DaemonState::new(
+            config.clone(),
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let index = SnapshotIndex::new(path.clone());
+        state
+            .register_workspace(ws_id.into(), path, index.clone())
+            .unwrap();
+        index_store::save(&state.index_dir(ws_id), &index)
+            .await
+            .unwrap();
+        state.save_manifest().await.unwrap();
+        for round in 0..2 {
+            let manifest = ws_ckpt_common::persist::load_state(&state.state_dir)
+                .unwrap()
+                .unwrap();
+            state = Arc::new(
+                DaemonState::rebuild_from_persisted(
+                    &manifest,
+                    config.clone(),
+                    backend.clone(),
+                    state.state_dir.clone(),
+                    "persisted",
+                )
+                .await
+                .unwrap(),
+            );
+            state.mark_bootstrapped();
+            assert!(matches!(
+                snapshot_mgr::checkpoint(
+                    &state,
+                    ws_id,
+                    &format!("snap-new-{round}"),
+                    None,
+                    None,
+                    false
+                )
+                .await
+                .unwrap(),
+                Response::CheckpointOk { .. }
+            ));
+            // A normal pinned checkpoint must not be classified as an orphan.
+            assert!(matches!(
+                snapshot_mgr::checkpoint(
+                    &state,
+                    ws_id,
+                    &format!("pinned-{round}"),
+                    None,
+                    None,
+                    true
+                )
+                .await
+                .unwrap(),
+                Response::CheckpointOk { .. }
+            ));
+            assert!(matches!(
+                snapshot_mgr::checkpoint(
+                    &state,
+                    ws_id,
+                    &format!("snap-newer-{round}"),
+                    None,
+                    None,
+                    false
+                )
+                .await
+                .unwrap(),
+                Response::CheckpointOk { .. }
+            ));
+            {
+                let arc = state.get_by_wsid(ws_id).unwrap();
+                let mut ws = arc.write().await;
+                // Count(0) and Age(0) disable retention. Make real candidates
+                // for Count(1) and Age(1s), including an older protected orphan.
+                for (id, age) in [
+                    ("snap-1".into(), 3),
+                    (format!("snap-new-{round}"), 2),
+                    (format!("snap-newer-{round}"), 1),
+                ] {
+                    ws.index.snapshots.get_mut(&id).unwrap().created_at =
+                        chrono::Utc::now() - chrono::Duration::days(age);
+                }
+            }
+            for retention in [
+                CleanupRetention::Count(1),
+                CleanupRetention::age("1s").unwrap(),
+            ] {
+                let arc = state.get_by_wsid(ws_id).unwrap();
+                arc.write().await.policy.auto_cleanup_keep = Some(retention);
+                auto_cleanup(&state).await;
+                let index = index_store::load(&state.index_dir(ws_id)).await.unwrap();
+                assert!(index.snapshots["snap-1"].pinned);
+                assert!(index.recovered_orphans.contains("snap-1"));
+                assert!(!index.snapshots.contains_key(&format!("snap-new-{round}")));
+                assert_eq!(
+                    std::fs::read_to_string(orphan.join("canary")).unwrap(),
+                    "orphan"
+                );
+            }
+            assert!(!state
+                .get_by_wsid(ws_id)
+                .unwrap()
+                .read()
+                .await
+                .index
+                .snapshots
+                .contains_key(&format!("snap-newer-{round}")));
+            for workspace in [None, Some(ws_id.into())] {
+                let response = dispatch(&state, Request::ListOrphans { workspace }).await;
+                let Response::ListOk { snapshots } = response else {
+                    panic!("{response:?}")
+                };
+                assert_eq!(snapshots.len(), 1);
+                assert_eq!(snapshots[0].id, "snap-1");
+                assert!(snapshots[0].meta.pinned);
+                assert_eq!(
+                    snapshots[0].workspace,
+                    temp.path().join("workspace").to_str().unwrap()
+                );
+            }
+        }
+        assert!(matches!(
+            workspace_mgr::delete_snapshot(&state, ws_id, "snap-1", false)
+                .await
+                .unwrap(),
+            Response::Error {
+                code: ErrorCode::ConfirmationRequired,
+                ..
+            }
+        ));
+        assert!(
+            matches!(workspace_mgr::delete_snapshot(&state, ws_id, "snap-1", true).await.unwrap(), Response::DeleteOk { target } if target == "snap-1")
+        );
+        let index = index_store::load(&state.index_dir(ws_id)).await.unwrap();
+        assert!(!index.snapshots.contains_key("snap-1"));
+        assert!(index.recovered_orphans.is_empty());
+        assert!(!orphan.exists());
     }
 
     /// Concatenate all line messages (one probe run yields 0..=1 lines).

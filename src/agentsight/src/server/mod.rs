@@ -14,19 +14,20 @@ pub mod optimize;
 mod preferences;
 mod reuse;
 mod secret;
+pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use agentsight_audit::AuditService;
 use include_dir::{Dir, include_dir};
 
-use crate::config::ServerAuthConfig;
+use crate::config::{ServerAuthConfig, StorageConfig};
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
@@ -125,7 +126,7 @@ impl AppState {
         }
 
         // Try to open; upgrade to write lock to memoize
-        match TrajectoryStore::new_with_path(&db_path) {
+        match TrajectoryStore::open_read_only_existing(&db_path) {
             Ok(store) => {
                 let mut guard = self
                     .trajectory_store
@@ -324,6 +325,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::trajectory_filters)
                 .service(handlers::list_trajectory_steps)
                 .service(handlers::get_trajectory_detail)
+                // Storage lifecycle status
+                .service(storage_status::get_storage_status)
                 // API self-documentation
                 .service(web::resource("/docs").route(web::get().to(api_docs)))
                 .default_service(web::route().to(api_not_found)),
@@ -619,6 +622,7 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
         "Steps by derived category, with surrounding context",
     ),
     ("GET", "/api/trajectories/{session_id}", "Trajectory detail"),
+    ("GET", "/api/storage/status", "SQLite storage status"),
 ];
 
 /// GET /api/docs — machine-readable route inventory for integrators, so
@@ -710,7 +714,7 @@ pub async fn run_server(
     port: u16,
     storage_path: PathBuf,
     auth_config: ServerAuthConfig,
-    audit_retention_days: u64,
+    storage_config: StorageConfig,
     reuse_llm_judge_enabled: bool,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
@@ -723,7 +727,7 @@ pub async fn run_server(
     let audit_service = Arc::new(AuditService::new(security_store.audit_store()));
 
     let evaluation_store = Arc::new(
-        EvaluationStore::new_with_path(&storage_path)
+        EvaluationStore::new_with_policy(&storage_path, storage_config.genai)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
 
@@ -800,7 +804,10 @@ pub async fn run_server(
     // Open the same database `--db` selected so the checker reads pending calls and
     // writes agent_crash events into one consistent dataset.
     let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
-        match crate::storage::sqlite::GenAISqliteStore::new_with_path(&storage_path) {
+        match crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &storage_path,
+            storage_config.genai,
+        ) {
             Ok(store) => {
                 log::info!("GenAI SQLite store initialized for HealthChecker at {storage_path:?}");
                 Some(Arc::new(store))
@@ -849,7 +856,7 @@ pub async fn run_server(
             log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
             None
         } else {
-            match TrajectoryStore::new_with_path(&db_path) {
+            match TrajectoryStore::open_read_only_existing(&db_path) {
                 Ok(store) => {
                     log::info!("Trajectory store initialized at {db_path:?}");
                     Some(Arc::new(store))
@@ -863,6 +870,8 @@ pub async fn run_server(
     };
 
     let optimize_state = optimize::OptimizeState::init(storage_base);
+    let optimization_maintenance =
+        start_optimization_maintenance(Arc::clone(&optimize_state), storage_config.optimization);
 
     let data = web::Data::new(AppState {
         storage_path,
@@ -881,8 +890,11 @@ pub async fn run_server(
         causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
-    let audit_retention =
-        start_audit_retention(Arc::clone(&data.audit_service), audit_retention_days);
+    let audit_retention = start_audit_retention(
+        Arc::clone(&data.audit_service),
+        storage_config.security_audit,
+    );
+    let storage_status_config = web::Data::new(storage_config);
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!("AgentSight API server listening on http://{host}:{port}");
@@ -906,6 +918,7 @@ pub async fn run_server(
             .wrap(cors)
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
+            .app_data(storage_status_config.clone())
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
             .configure(configure_routes)
@@ -915,6 +928,9 @@ pub async fn run_server(
         Ok(server) => server,
         Err(error) => {
             if let Some(worker) = audit_retention {
+                worker.abort();
+            }
+            if let Some(worker) = optimization_maintenance {
                 worker.abort();
             }
             containment::stop_reconciler(&containment, containment_reconciler);
@@ -937,35 +953,67 @@ pub async fn run_server(
     if let Some(worker) = audit_retention {
         worker.abort();
     }
+    if let Some(worker) = optimization_maintenance {
+        worker.abort();
+    }
     containment::stop_reconciler(&containment, containment_reconciler);
     stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
 }
 
-const AUDIT_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
 fn start_audit_retention(
     audit_service: Arc<AuditService>,
-    retention_days: u64,
+    policy: crate::config::PeriodicStoragePolicy,
 ) -> Option<actix_web::rt::task::JoinHandle<()>> {
-    (retention_days > 0).then(|| {
+    (policy.check_interval_secs > 0).then(|| {
         actix_web::rt::spawn(async move {
             loop {
-                let now_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let retention_ns = retention_days.saturating_mul(24 * 60 * 60 * 1_000_000_000);
-                let cutoff_ns = now_ns.saturating_sub(retention_ns);
-                match audit_service.purge_before(cutoff_ns) {
-                    Ok(deleted) if deleted > 0 => {
-                        log::info!("purged {deleted} expired system-audit records");
+                match audit_service
+                    .store()
+                    .maintain(agentsight_audit::AuditMaintenancePolicy {
+                        retention_days: policy.retention_days,
+                        max_db_size_mb: policy.max_db_size_mb,
+                    }) {
+                    Ok(report)
+                        if report.expired_rows > 0 || report.size.deleted_rows > 0 =>
+                    {
+                        log::info!(
+                            "system-audit maintenance deleted {} expired rows and {} size-policy rows",
+                            report.expired_rows,
+                            report.size.deleted_rows
+                        );
                     }
                     Ok(_) => {}
-                    Err(error) => log::warn!("system-audit retention purge failed: {error}"),
+                    Err(error) => log::warn!("system-audit maintenance failed: {error}"),
                 }
-                actix_web::rt::time::sleep(AUDIT_RETENTION_INTERVAL).await;
+                actix_web::rt::time::sleep(Duration::from_secs(policy.check_interval_secs)).await;
+            }
+        })
+    })
+}
+
+fn start_optimization_maintenance(
+    optimize_state: Arc<optimize::OptimizeState>,
+    policy: crate::config::PeriodicStoragePolicy,
+) -> Option<actix_web::rt::task::JoinHandle<()>> {
+    (policy.check_interval_secs > 0).then(|| {
+        actix_web::rt::spawn(async move {
+            loop {
+                match optimize_state.maintain_storage(policy) {
+                    Ok(Some(report))
+                        if report.expired_results > 0 || report.size.deleted_rows > 0 =>
+                    {
+                        log::info!(
+                            "optimization maintenance deleted {} expired rows and {} size-policy rows",
+                            report.expired_results,
+                            report.size.deleted_rows
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("optimization maintenance failed: {error}"),
+                }
+                actix_web::rt::time::sleep(Duration::from_secs(policy.check_interval_secs)).await;
             }
         })
     })
@@ -1069,7 +1117,10 @@ mod tests {
         let state = test_app_state(0);
         // The default db path (/var/log/sysak/.agentsight/trajectories.db)
         // should not exist in CI, so lazy loading returns None.
-        if crate::storage::sqlite::sibling_db_path("trajectories.db").exists() {
+        if crate::config::default_base_path()
+            .join("trajectories.db")
+            .exists()
+        {
             return; // db exists, can't test the "missing" path
         }
 
@@ -1118,6 +1169,7 @@ mod tests {
             "/api/token-savings",
             "/api/agent-health",
             "/api/security/summary",
+            "/api/storage/status",
             "/api/reuse/triage",
             "/api/reuse/sessions",
             "/api/reuse/sessions/{session_id}/label",

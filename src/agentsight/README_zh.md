@@ -389,17 +389,12 @@ sudo agentsight trace
 
 AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。
 
-### 基础配置
+### SQLite 存储（`storage`）
 
-| 类别 | 选项 | 说明 |
-|------|------|------|
-| 存储 | `db_path` | SQLite 数据库文件路径 |
-| 存储 | `data_retention_days` | 数据保留天数 |
-| 探针 | `target_uid` | 按 UID 过滤事件 |
-| 探针 | `poll_timeout_ms` | Ring buffer 轮询超时 |
-| HTTP | `connection_cache_capacity` | 连接追踪的 LRU 缓存大小 |
-| SLS | `sls_endpoint` / `sls_project` / `sls_logstore` | 阿里云 SLS 导出配置 |
-| Tokenizer | `tokenizer_file` | HuggingFace tokenizer 文件路径或 URL |
+`storage.base_path` 指定数据库共用目录。每个数据库分别配置 `retention_days`、`max_db_size_mb`
+和按写入次数或时间触发的检查间隔，值为 `0` 时关闭对应规则。默认容量从中断库的 100 MiB 到主事件库、
+轨迹库的 500 MiB。Dashboard 设置页会展示各库的生效策略以及物理/逻辑占用。详见
+[配置指南](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#sqlite-存储策略)。
 
 ### 功能开关（`features`）
 

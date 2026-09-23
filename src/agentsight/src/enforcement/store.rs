@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use agentsight_enforcement_protocol::{
     Binding, BindingState, CredentialExfiltrationPolicy, CredentialPolicySnapshot, ViolationEvent,
 };
+use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
@@ -122,7 +123,7 @@ impl EnforcementStore {
         let connection = if path == Path::new(":memory:") {
             Connection::open_in_memory()?
         } else {
-            crate::storage::sqlite::create_connection(path)
+            open_connection(path, ConnectionOptions::default())
                 .map_err(|error| EnforcementStoreError::Open(error.to_string()))?
         };
         Self::from_connection(connection)

@@ -137,8 +137,13 @@ jobs:
             version: "2026.6.10"
             expected-version: "2026.6.10"
             expect-unsafe-install: "true"
+          - label: "2026.8.1"
+            version: "2026.8.1"
+            expected-version: "2026.8.1"
+            expect-unsafe-install: "false"
           - label: latest
             version: "latest"
+            node-version: "24.16.0"
             expected-version: ""
             expect-unsafe-install: ""
     defaults:
@@ -151,7 +156,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.openclaw.node-version || '22' }}
           cache: npm
           cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
 

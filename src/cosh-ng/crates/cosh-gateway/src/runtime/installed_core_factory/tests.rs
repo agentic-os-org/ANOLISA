@@ -387,3 +387,39 @@ fn factory_rejects_a_non_core_configured_entry() {
     )
     .is_err());
 }
+
+#[test]
+fn factory_launches_in_refreshed_workspace_without_restart() {
+    let root = TempDir::new().unwrap();
+    let script = root.path().join("writer.sh");
+    fs::write(
+        &script,
+        "printf '%s' \"$PWD\" > artifact; while read line; do :; done\n",
+    )
+    .unwrap();
+    let core = root.path().join("cosh-core");
+    fs::copy("/bin/sh", &core).unwrap();
+    let (mut factory, run) = admitted(&root, &core, &script);
+    let binding = factory.workspaces.clone();
+    let workspace = root.path().join("workspace");
+    for _ in 0..2 {
+        let old = root.path().join("workspace.rollback-tmp");
+        fs::rename(&workspace, &old).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::remove_dir_all(&old).unwrap();
+        binding.refresh_after_snapshot_switch().unwrap();
+        let port = factory.create(&run).unwrap();
+        let artifact = workspace.join("artifact");
+        for _ in 0..100 {
+            if artifact.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            workspace.display().to_string()
+        );
+        drop(port);
+    }
+}

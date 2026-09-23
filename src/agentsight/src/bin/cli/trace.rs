@@ -181,7 +181,8 @@ impl TraceCommand {
             log::warn!("Config {config_path:?} unavailable ({e}); using built-in defaults");
         }
 
-        let Some(db_path) = Self::resolve_trajectory_db_path() else {
+        let Some(db_path) = Self::resolve_trajectory_db_path(config.storage.trajectory_path())
+        else {
             eprintln!(
                 "Failed to open a writable trajectories.db in either the shared \
                  directory or $HOME; pass a writable HOME or grant write access."
@@ -202,6 +203,11 @@ impl TraceCommand {
                 .as_ref()
                 .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
             db_path: db_path.clone(),
+            maintenance: agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+                retention_days: config.storage.trajectories.retention_days,
+                max_db_size_mb: config.storage.trajectories.max_db_size_mb,
+            },
+            maintenance_interval_secs: config.storage.trajectories.check_interval_secs,
         };
 
         // `run_collector_loop` treats the flag as "keep running", so Ctrl+C
@@ -242,12 +248,12 @@ impl TraceCommand {
     /// Prefers the shared directory so `agentsight serve` finds the file without
     /// extra flags, then falls back to `$HOME/.local/share/agentsight` for
     /// unprivileged runs. Returns `None` when neither can be opened.
-    fn resolve_trajectory_db_path() -> Option<std::path::PathBuf> {
-        use agentsight::storage::sqlite::sibling_db_path;
-
+    fn resolve_trajectory_db_path(
+        configured_path: std::path::PathBuf,
+    ) -> Option<std::path::PathBuf> {
         // The `private` flag marks the home-directory fallback: it is the only
         // candidate whose parents may be traversable by other local users.
-        let mut candidates = vec![(sibling_db_path("trajectories.db"), false)];
+        let mut candidates = vec![(configured_path, false)];
         if let Some(home) = std::env::var_os("HOME") {
             candidates.push((
                 std::path::PathBuf::from(home)

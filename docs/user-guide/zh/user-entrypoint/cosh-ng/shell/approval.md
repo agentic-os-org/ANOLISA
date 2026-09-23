@@ -26,6 +26,13 @@ find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null
 仍需审批。命令仍须通过只读规则和风险检查；抑制 stderr 不会使修改类命令获得
 自动执行资格。执行结果保留 stdout 和退出状态，命令失败时也不例外。
 
+启用 tokenless RTK 重写后，被包裹的命令
+（`env TOKENLESS_* … /usr/bin/rtk <命令>`，或 RTK 自己输出绝对路径时的
+`/usr/bin/rtk <命令>`）保持相同的豁免资格：
+cosh 评估被包裹的只读命令，并执行包裹后的形态，
+因此 RTK 的输出压缩在免审批路径上仍然生效。
+`TOKENLESS_DATA_DIR` 与会话的 tokenless 状态目录不一致时，仍需审批。
+
 这些自动命令在请求时的工作目录中使用受控环境执行。`HOME`、`LANG`、
 `LC_ALL`、`LC_CTYPE` 和 `TZ` 来自 cosh 进程；交互 shell 后续通过 `export`
 做出的修改不会同步，`GIT_*` 变量也不会传入。因此，时区、locale 和 Git

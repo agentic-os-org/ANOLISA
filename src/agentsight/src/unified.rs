@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::aggregator::Aggregator;
 use crate::analyzer::Analyzer;
-use crate::config::AgentsightConfig;
+use crate::config::{AgentsightConfig, StorageConfig};
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::FfiEventSender;
@@ -41,7 +41,7 @@ use crate::interruption::{
 use crate::parser::Parser;
 use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
-use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
 
@@ -124,6 +124,8 @@ pub struct AgentSight {
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
     /// Cached feature flags so runtime paths can check them without the config.
     features: crate::config::FeatureFlags,
+    /// Effective SQLite lifecycle policies.
+    storage_config: StorageConfig,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -221,7 +223,7 @@ impl AgentSight {
 
         // Persistence check runs after the config file load so the warning
         // targets the storage directory actually in effect.
-        crate::container::warn_if_data_dir_not_persistent(&config.storage_base_path);
+        crate::container::warn_if_data_dir_not_persistent(&config.storage.base_path);
 
         let all_cmdline_rules = config.cmdline_rules.clone();
 
@@ -355,7 +357,7 @@ impl AgentSight {
         let storage = if config.features.sqlite_storage_enabled {
             Self::create_storage(&config)?
         } else {
-            Storage::noop()
+            Storage::noop()?
         };
 
         // Build GenAI exporters based on feature flags.
@@ -406,14 +408,11 @@ impl AgentSight {
         } else {
             // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
             if config.features.sqlite_storage_enabled {
-                let db_path = config
-                    .db_path()
-                    .parent()
-                    .map(|p| p.join("genai_events.db"))
-                    .unwrap_or_else(GenAISqliteStore::default_path);
+                let db_path = config.storage.genai_path();
                 match GenAISqliteStore::new_with_path_and_batch(
                     &db_path,
                     config.features.sqlite_batch,
+                    config.storage.genai,
                 ) {
                     Ok(store) => {
                         log::info!(
@@ -500,7 +499,7 @@ impl AgentSight {
         // Initialize interruption store only when interruption detection is enabled.
         let interruption_store: Option<Arc<InterruptionStore>> =
             if config.features.interruption_detection_enabled {
-                let db_path = sibling_db_path("interruption_events.db");
+                let db_path = config.storage.interruption_path();
                 match InterruptionStore::new_with_path(&db_path) {
                     Ok(store) => {
                         log::info!("Interruption events store initialized at {db_path:?}");
@@ -583,7 +582,12 @@ impl AgentSight {
                     .trajectory_scan_dirs
                     .as_ref()
                     .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
-                db_path: sibling_db_path("trajectories.db"),
+                db_path: config.storage.trajectory_path(),
+                maintenance: agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+                    retention_days: config.storage.trajectories.retention_days,
+                    max_db_size_mb: config.storage.trajectories.max_db_size_mb,
+                },
+                maintenance_interval_secs: config.storage.trajectories.check_interval_secs,
             };
             let stop = Arc::clone(&running);
             std::thread::Builder::new()
@@ -640,21 +644,22 @@ impl AgentSight {
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
             features: config.features.clone(),
+            storage_config: config.storage.clone(),
         })
     }
 
     /// Create storage backend from configuration
     fn create_storage(config: &AgentsightConfig) -> Result<Storage> {
         let sqlite_config = SqliteConfig {
-            base_path: config.storage_base_path.clone(),
-            db_name: config.db_name.clone(),
+            base_path: config.storage.base_path.clone(),
+            db_name: crate::config::PRIMARY_DB_NAME.to_string(),
             audit_table: config.audit_table.clone(),
             token_table: config.token_table.clone(),
             http_table: config.http_table.clone(),
             token_consumption_table: "token_consumption".to_string(),
-            retention_days: config.retention_days,
-            purge_interval: config.purge_interval,
-            max_db_size_mb: config.max_db_size_mb,
+            retention_days: config.storage.primary.retention_days,
+            purge_interval: config.storage.primary.check_interval_inserts,
+            max_db_size_mb: config.storage.primary.max_db_size_mb,
         };
         Storage::with_sqlite_config(&sqlite_config)
     }
@@ -2272,15 +2277,18 @@ impl AgentSight {
 
     /// Periodically purge old/oversized interruption DB entries.
     fn maybe_purge_interruption_store(&mut self) {
-        if self.last_interruption_purge.elapsed() < std::time::Duration::from_secs(60) {
+        let policy = self.storage_config.interruptions;
+        if policy.check_interval_secs == 0
+            || self.last_interruption_purge.elapsed()
+                < std::time::Duration::from_secs(policy.check_interval_secs)
+        {
             return;
         }
         self.last_interruption_purge = std::time::Instant::now();
         if let Some(ref istore) = self.interruption_store {
-            if let Err(e) = istore.purge_old_and_oversized(
-                self.features.interruption_retention_days,
-                self.features.interruption_max_db_size_mb,
-            ) {
+            if let Err(e) =
+                istore.purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+            {
                 log::warn!("Interruption store purge failed: {e}");
             }
         }
@@ -2740,7 +2748,11 @@ mod tests {
     fn resource_sampler_starts_when_enabled_with_sqlite() {
         let dir = unique_tmp_dir("resource-sampler");
         let store = Arc::new(
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("genai store"),
         );
         let targets = Arc::new(RwLock::new(HashMap::new()));
         let running = Arc::new(AtomicBool::new(true));
@@ -2777,7 +2789,11 @@ mod tests {
     ) -> (PathBuf, Arc<GenAISqliteStore>, Arc<InterruptionStore>) {
         let dir = unique_tmp_dir(tag);
         let genai_store = Arc::new(
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("genai store"),
         );
         let istore = Arc::new(
             InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
@@ -3123,7 +3139,13 @@ mod tests {
     fn test_complete_pending_skips_insert_when_row_already_interrupted() {
         let dir = unique_tmp_dir("cp-interrupted");
         let db_path = dir.join("genai_events.db");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &db_path,
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("create test store"),
+        );
 
         let info = make_test_pending_info("call-1");
         store.insert_pending(&info).expect("insert_pending");
@@ -3164,7 +3186,13 @@ mod tests {
     fn test_complete_pending_fallback_inserts_when_no_row_exists() {
         let dir = unique_tmp_dir("cp-fallback");
         let db_path = dir.join("genai_events.db");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &db_path,
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("create test store"),
+        );
 
         // No insert_pending — simulate DB restart scenario
         let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-2"));
@@ -3196,7 +3224,13 @@ mod tests {
     fn test_complete_deferred_genai_promotes_pending_and_exports_non_sqlite() {
         let dir = unique_tmp_dir("deferred-export");
         let db_path = dir.join("genai_events.db");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &db_path,
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("create test store"),
+        );
 
         // Insert a pending row
         let info = make_test_pending_info("call-3");
@@ -3287,7 +3321,13 @@ mod tests {
     fn test_exit_flush_completes_deferred_call_without_waiting_timeout() {
         let dir = unique_tmp_dir("exit-flush");
         let db_path = dir.join("genai_events.db");
-        let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &db_path,
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("create test store"),
+        );
 
         // Pending rows for both pids, as written at deferred-queue time.
         let mut exiting = make_test_pending_info("exit-flush-call");
@@ -3446,8 +3486,11 @@ mod tests {
     #[test]
     fn test_retro_session_fixup_repairs_timeout_escaped_call() {
         let dir = unique_tmp_dir("retro-fixup");
-        let store =
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .expect("genai store");
         let mut info = make_test_pending_info("retro-call-1");
         info.pid = 4242;
         // The 32-hex shape the id_resolver fallback produces.
@@ -3487,8 +3530,11 @@ mod tests {
         use crate::interruption::{InterruptionEvent, InterruptionType};
 
         let dir = unique_tmp_dir("retro-fixup-dual");
-        let store =
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .expect("genai store");
         let istore = InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
             .expect("interruption store");
 
@@ -3568,8 +3614,11 @@ mod tests {
     #[test]
     fn test_retro_session_fixup_waits_for_mapping() {
         let dir = unique_tmp_dir("retro-wait");
-        let store =
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .expect("genai store");
         let mut info = make_test_pending_info("retro-call-2");
         info.pid = 4242;
         info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
@@ -3613,8 +3662,11 @@ mod tests {
         };
 
         let dir = unique_tmp_dir("retro-expired");
-        let store =
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .expect("genai store");
         let mut info = make_test_pending_info("retro-call-3");
         info.pid = 4242;
         info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
@@ -3648,8 +3700,11 @@ mod tests {
     #[test]
     fn test_retro_session_fixup_skips_reused_pid() {
         let dir = unique_tmp_dir("retro-pid-reuse");
-        let store =
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .expect("genai store");
         let mut info = make_test_pending_info("retro-call-4");
         info.pid = 4242;
         info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());

@@ -241,7 +241,10 @@ mod tests {
             "agentsight-resource-sampler-{}.db",
             std::process::id()
         ));
-        let store = Arc::new(GenAISqliteStore::new_with_path(&path).expect("resource store"));
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+                .expect("resource store"),
+        );
         let targets = Arc::new(RwLock::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let handle = start_resource_sampler(store, targets, stop).expect("sampler thread");

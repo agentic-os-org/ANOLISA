@@ -8,13 +8,13 @@ OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`
 
 | Dependency     | Version   | Check                        |
 |----------------|-----------|------------------------------|
-| Node.js        | >= 20     | `node --version`             |
+| Node.js        | See OpenClaw 2.0 compatibility below | `node --version` |
 | npm            | >= 10     | `npm --version`              |
 | OpenClaw       | >= 2026.4.14 | `openclaw --version`       |
 | agent-sec-cli  | (latest)  | `agent-sec-cli --help`       |
 | jq             | >= 1.6    | `jq --version`               |
 
-Development and test builds use the `openclaw` dev dependency pinned in `package.json` so TypeScript can compile against the newest typed hook definitions. The OpenClaw runtime does not need to match that dev dependency. Runtime compatibility is capability-based: `2026.4.14` and `2026.4.23` are supported legacy baselines for core security hooks, while `model_call_started` and `model_call_ended` telemetry may degrade cleanly on those versions.
+Development and test builds use OpenClaw `2026.8.1` (OpenClaw 2.0), pinned in `package.json` so TypeScript checks the target release's hook definitions. The OpenClaw runtime does not need to match that dev dependency. Runtime compatibility is capability-based: `2026.4.14` and `2026.4.23` are supported legacy baselines for core security hooks, while `model_call_started` and `model_call_ended` telemetry may degrade cleanly on those versions.
 
 ## Compatibility Contract
 
@@ -24,7 +24,7 @@ The installable package declares the OpenClaw compatibility boundary in `package
 - `openclaw.compat.pluginApi: ">=2026.4.14"` declares the plugin SDK/runtime API floor used by OpenClaw install compatibility checks.
 - `peerDependencies.openclaw: ">=2026.4.14"` keeps npm peer metadata aligned with the OpenClaw installer contract.
 
-Package entrypoints follow the current OpenClaw plugin contract: `openclaw.extensions` points at the TypeScript source entry for checkout development, and `openclaw.runtimeExtensions` points at the built JavaScript entry used by installed packages. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
+Package entrypoints follow the current OpenClaw plugin contract: both `openclaw.extensions` and `openclaw.runtimeExtensions` point at the built JavaScript entry. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
 
 Deployment & upgrade guide: [OpenClaw Compatibility Deployment & Upgrade Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/openclaw-deploy.md) ([中文版](../../../docs/user-guide/zh/agent-security/agent-sec-core/openclaw-deploy.md)).
 
@@ -98,6 +98,19 @@ ls dist/
 
 ---
 
+## OpenClaw 2.0 compatibility
+
+OpenClaw `2026.8.1` requires Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
+`>=25.9.0`. Use a compatible Node version for dependency installation and E2E.
+Deployment accepts this plugin's declared capabilities through the host's
+`--accept-capabilities` flag; `--force` alone does not grant consent. Operator
+`security.installPolicy` blocks still apply. Conversation access remains enabled
+separately for content inspection hooks.
+
+Hook callbacks infer their types from `api.on`; they do not import the hook types
+removed from `plugin-runtime`. E2E policy assertions use `sessions.get`, so they
+work with both legacy JSONL and 2.0 SQLite transcripts.
+
 ## Deploy to OpenClaw
 
 ### Option A: Deploy from Source (Development)
@@ -161,9 +174,9 @@ The deployment script performs these steps:
 
 1. **Pre-checks** — Verifies `agent-sec-cli` and `jq` are in PATH; validates `openclaw.plugin.json`, `dist/`, and `dist/index.js` exist
 2. **OpenClaw version check** — Reads `openclaw --version` and requires OpenClaw `>=2026.4.14`
-3. **Installer capability check** — Reads `openclaw plugins install --help`, requires `--force`, and detects whether `--dangerously-force-unsafe-install` is available
+3. **Installer capability check** — Reads `openclaw plugins install --help`, requires `--force`, and detects capability-consent or legacy install flags
 4. **Inspect capability check** — Reads `openclaw plugins inspect --help`, requires `--json`, and detects whether `--runtime` is available
-5. **Plugin installation** — Runs `openclaw plugins install <path> --force`, adding `--dangerously-force-unsafe-install` only when the current installer advertises that compatibility flag
+5. **Plugin installation** — Runs `openclaw plugins install <path> --force`, adding `--accept-capabilities` when supported; older installers use `--dangerously-force-unsafe-install` only when advertised
 6. **Conversation access policy** — Sets `plugins.entries.agent-sec.hooks.allowConversationAccess=true` on OpenClaw `>=2026.4.24`; older supported hosts skip it and degrade conversation observability hooks
 7. **Runtime verification** — Uses `openclaw plugins inspect agent-sec --runtime --json` when supported, otherwise `openclaw plugins inspect agent-sec --json`, and fails unless the plugin status is `loaded`
 8. **User guidance** — Displays instructions to restart the OpenClaw gateway and optional policy commands (does NOT restart automatically)
@@ -253,7 +266,7 @@ does not require the shell to be activated because it detects `.venv/bin`
 directly. The same values can be provided with
 `AGENT_SEC_OPENCLAW_PILOT_AGENT_SEC_CLI` and
 `AGENT_SEC_OPENCLAW_PILOT_AGENT_SEC_DAEMON`. Use `--workdir <dir>` to keep
-logs and artifacts in a stable directory.
+logs and artifacts in a stable directory. An existing work directory must be owned by the current user and have mode `0700`, as required by the daemon.
 
 Optional pilot arguments:
 

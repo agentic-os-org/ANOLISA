@@ -151,7 +151,7 @@ pub async fn list_sessions(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => {
             match store.list_sessions(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
                 Ok(sessions) => HttpResponse::Ok().json(sessions),
@@ -181,7 +181,7 @@ pub async fn list_traces_by_session(
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => match store.list_traces_by_session(
             &session_id,
             start_ns,
@@ -227,7 +227,11 @@ pub async fn get_session_resources(
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
     let loaded = web::block(move || {
-        let store = GenAISqliteStore::new_with_path(&db_path).map_err(|error| error.to_string())?;
+        let store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .map_err(|error| error.to_string())?;
         store
             .get_session_resource_timeline(&session_id, start_ns, end_ns, max_points)
             .map_err(|error| error.to_string())
@@ -254,7 +258,7 @@ pub async fn get_trace_detail(
     let db_path = &data.storage_path;
     let trace_id = path.into_inner();
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => match store.get_trace_events(&trace_id) {
             Ok(events) => HttpResponse::Ok().json(events),
             Err(e) => HttpResponse::InternalServerError()
@@ -277,7 +281,7 @@ pub async fn get_conversation_events(
     let db_path = &data.storage_path;
     let conversation_id = path.into_inner();
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => match store.get_events_by_conversation(&conversation_id) {
             Ok(events) => HttpResponse::Ok().json(events),
             Err(e) => HttpResponse::InternalServerError()
@@ -496,7 +500,10 @@ pub async fn get_latency_metrics(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": "start_ns must not exceed end_ns"}));
     }
-    match GenAISqliteStore::new_with_path(&data.storage_path) {
+    match GenAISqliteStore::new_with_path(
+        &data.storage_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(store) => match store.get_latency_metrics(start_ns, end_ns, query.agent_name.as_deref())
         {
             Ok(summary) => HttpResponse::Ok().json(summary),
@@ -522,7 +529,7 @@ pub async fn list_agent_names(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => match store.list_agent_names(start_ns, end_ns) {
             Ok(names) => HttpResponse::Ok().json(names),
             Err(e) => HttpResponse::InternalServerError()
@@ -558,7 +565,7 @@ pub async fn get_timeseries(
     let buckets = query.buckets.unwrap_or(30);
     let agent_name = query.agent_name.as_deref();
 
-    match GenAISqliteStore::new_with_path(db_path) {
+    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
         Ok(store) => {
             let token_series =
                 match store.get_token_timeseries(start_ns, end_ns, agent_name, buckets) {
@@ -1419,7 +1426,9 @@ mod tests {
     }
 
     fn write_completed_conversation_event(path: &std::path::Path, conversation_id: &str) {
-        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         let mut call = LLMCall::new(
             format!("call-{conversation_id}"),
             1_700_000_000_000_000_000,
@@ -1483,7 +1492,9 @@ mod tests {
     }
 
     fn write_pending_conversation_event(path: &std::path::Path, conversation_id: &str) {
-        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         store
             .insert_pending(&PendingCallInfo {
                 call_id: format!("pending-{conversation_id}"),
@@ -2308,7 +2319,7 @@ mod tests {
     async fn genai_query_handlers_return_persisted_data() {
         let db_path = unique_handler_db("genai_queries");
         write_completed_conversation_event(&db_path, "conv-handler");
-        GenAISqliteStore::new_with_path(&db_path)
+        GenAISqliteStore::new_with_path(&db_path, crate::config::InsertStoragePolicy::default())
             .unwrap()
             .insert_resource_samples(&[crate::storage::sqlite::ResourceSample {
                 timestamp_ns: 1_700_000_000_000_000_250,
@@ -3134,7 +3145,10 @@ mod tests {
 pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
     let db_path = &data.storage_path;
 
-    let summaries = match GenAISqliteStore::new_with_path(db_path) {
+    let summaries = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(store) => match store.get_agent_token_summary() {
             Ok(v) => v,
             Err(e) => {
@@ -3339,13 +3353,16 @@ pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
     let storage_path = data.storage_path.clone();
     let app_state = data.clone();
     let loaded = web::block(move || {
-        let genai = GenAISqliteStore::new_with_path(&storage_path)
-            .map_err(|error| error.to_string())
-            .and_then(|store| {
-                store
-                    .list_agent_activity_summaries()
-                    .map_err(|error| error.to_string())
-            });
+        let genai = GenAISqliteStore::new_with_path(
+            &storage_path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|store| {
+            store
+                .list_agent_activity_summaries()
+                .map_err(|error| error.to_string())
+        });
         let trajectories = app_state.trajectory_store().map(|store| {
             store
                 .list_agent_activity_summaries()
@@ -3510,7 +3527,10 @@ pub async fn export_atif_trace(
     let db_path = &data.storage_path;
     let trace_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(db_path) {
+    let store = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -3549,7 +3569,10 @@ pub async fn export_atif_session(
     let db_path = &data.storage_path;
     let session_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(db_path) {
+    let store = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -3588,7 +3611,10 @@ pub async fn export_atif_conversation(
     let db_path = &data.storage_path;
     let conversation_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(db_path) {
+    let store = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -4404,7 +4430,10 @@ fn compute_skill_metrics_response(
         .start_ns
         .unwrap_or_else(|| end_ns - 7 * 86_400_000_000_000i64);
 
-    let store = match GenAISqliteStore::new_with_path(storage_path) {
+    let store = match GenAISqliteStore::new_with_path(
+        storage_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()

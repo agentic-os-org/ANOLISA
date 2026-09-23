@@ -1,0 +1,45 @@
+{
+  "name": "@anolisa/cli",
+  "version": "0.3.16",
+  "description": "ANOLISA CLI — Agentic OS component lifecycle manager",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "distribution/anolisa"
+  },
+  "homepage": "https://github.com/alibaba/anolisa",
+  "keywords": [
+    "anolisa",
+    "agentic-os",
+    "cli",
+    "agent",
+    "ai"
+  ],
+  "bin": {
+    "anolisa": "bin/anolisa"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "optionalDependencies": {
+    "@anolisa/cli-linux-x64": "0.3.16",
+    "@anolisa/cli-linux-arm64": "0.3.16",
+    "@anolisa/cli-darwin-arm64": "0.3.16",
+    "@anolisa/cli-darwin-x64": "0.3.16"
+  }
+}

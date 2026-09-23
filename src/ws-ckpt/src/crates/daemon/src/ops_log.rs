@@ -34,7 +34,7 @@ pub fn ops_name_from_request(req: &Request) -> Option<&'static str> {
         Request::Checkpoint { .. } | Request::GuardedCheckpointV2 { .. } => Some("ckpt"),
         Request::Rollback { .. } => Some("roll"),
         Request::Diff { .. } => Some("diff"),
-        Request::List { .. } => Some("list"),
+        Request::List { .. } | Request::ListOrphans { .. } => Some("list"),
         Request::Config
         | Request::ReloadConfig
         | Request::ReloadGlobalConfig

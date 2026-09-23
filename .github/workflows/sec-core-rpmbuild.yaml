@@ -44,7 +44,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.23.2'
 
       - name: Build RPM
         run: ./scripts/rpm-build.sh agent-sec-core
@@ -276,7 +276,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.23.2'
 
       - name: Build V2 RPM
         run: ./scripts/rpm-build.sh agent-sec-core-v2

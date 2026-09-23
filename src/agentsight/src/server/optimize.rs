@@ -45,6 +45,11 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// LLM ranking budget for semantic session search, in seconds. Separate
+    /// from the analysis path (which has no budget): a slow reasoning model
+    /// should raise this without affecting long-running optimization jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -121,6 +126,13 @@ impl OptLlmConfig {
             .unwrap_or_else(|| "gpt-4o".into())
     }
 
+    fn search_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.search_timeout_secs
+                .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        )
+    }
+
     /// Mask the API key for display: first 6 and last 4 chars.
     fn masked_api_key(&self) -> Option<String> {
         self.effective_api_key().map(|k| {
@@ -177,6 +189,24 @@ impl OptimizeState {
         })
     }
 
+    /// Applies the configured retention and capacity policy to optimization results.
+    pub(super) fn maintain_storage(
+        &self,
+        policy: crate::config::PeriodicStoragePolicy,
+    ) -> Result<Option<agentsight_opt_store::OptimizationMaintenanceReport>, String> {
+        self.store
+            .as_ref()
+            .map(|store| {
+                store
+                    .maintain(agentsight_opt_store::OptimizationMaintenancePolicy {
+                        retention_days: policy.retention_days,
+                        max_db_size_mb: policy.max_db_size_mb,
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+
     pub(crate) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
@@ -226,10 +256,17 @@ pub async fn semantic_search_sessions(
     let client = match state.build_client() {
         Ok(c) => c,
         Err(_) => {
+            // Search degrades to empty instead of failing, but an unconfigured
+            // LLM is the most common cause of an empty page — make it
+            // attributable rather than indistinguishable from "no matches".
+            log::warn!(
+                "semantic_search: LLM not configured (missing API key), returning empty results"
+            );
             return HttpResponse::Ok()
                 .json(semantic_search::SemanticSearchResponse { results: vec![] });
         }
     };
+    let timeout = state.snapshot().search_timeout();
     let request = body.into_inner();
 
     // Sessions labelled `useless` are out of retrieval scope by design — the
@@ -254,7 +291,7 @@ pub async fn semantic_search_sessions(
         },
         None => request,
     };
-    semantic_search::handle_semantic_search(&client, &request).await
+    semantic_search::handle_semantic_search(&client, &request, timeout).await
 }
 
 /// Load a session's captured events and build the ATIF trajectory that the
@@ -269,9 +306,12 @@ fn load_trajectory(
     trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
-    let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
-        HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-    })?;
+    let store =
+        GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default())
+            .map_err(|e| {
+                HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()}))
+            })?;
     let events = store.get_events_by_session(session_id).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
@@ -1009,6 +1049,7 @@ mod tests {
             api_key: Some("sk-1234567890abcd".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            search_timeout_secs: None,
         };
 
         assert_eq!(
@@ -1026,6 +1067,7 @@ mod tests {
             api_key: Some("short".into()),
             base_url: Some(String::new()),
             model: Some(String::new()),
+            search_timeout_secs: None,
         };
 
         assert_eq!(config.effective_api_key().as_deref(), Some("short"));
@@ -1042,6 +1084,7 @@ mod tests {
             api_key: Some("sk-super-secret-key".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            search_timeout_secs: None,
         };
         config.save(&path).unwrap();
 
@@ -1407,5 +1450,23 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_timeout_defaults_to_shared_default() {
+        assert_eq!(
+            OptLlmConfig::default().search_timeout(),
+            std::time::Duration::from_secs(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn search_timeout_secs_round_trips_and_stays_absent_when_unset() {
+        let config: OptLlmConfig =
+            serde_json::from_str(r#"{"search_timeout_secs": 30}"#).expect("deserialize");
+        assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
+        // Dashboard-managed files must not grow keys the user never set.
+        let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
+        assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
     }
 }

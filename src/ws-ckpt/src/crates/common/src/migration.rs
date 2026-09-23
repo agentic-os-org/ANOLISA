@@ -239,6 +239,7 @@ mod tests {
             head: None,
             governed_evidence: HashMap::new(),
             guarded_rollbacks: HashMap::new(),
+            recovered_orphans: Default::default(),
         }
     }
 

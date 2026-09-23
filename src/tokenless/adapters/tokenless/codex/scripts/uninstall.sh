@@ -65,15 +65,43 @@ codex_list() {  # codex_list <args...> -> prints the listing, status = CLI statu
     "$CODEX_BIN" "$@" 2>/dev/null
 }
 
+# `codex plugin list` is a table of every plugin the registered marketplaces
+# offer, in whatever state they are in, and it is headed by the marketplace
+# names:
+#
+#   Marketplace `anolisa-tokenless`
+#   /home/.../codex-marketplace/.agents/plugins/marketplace.json
+#
+#   PLUGIN                       STATUS              VERSION  SOURCE
+#   tokenless@anolisa-tokenless  installed, enabled  local    /home/.../tokenless
+#
+# So "tokenless shows up in the listing" is not evidence about the registration:
+# that header matches too, and it is printed even when the plugin was never
+# added. `plugin remove` only flips this plugin's STATUS to `not installed` —
+# codex-cli 0.154.0 keeps the row until the marketplace that ships it is removed,
+# which is the next thing this script does. Reading the surviving row as "still
+# registered" turned every successful uninstall into exit 1 and, through
+# TOKENLESS_DEREGISTER_ONLY, stopped the component uninstaller from dropping the
+# adapter resources and the receipt. Only a row for this plugin whose status is
+# not `not installed` counts as a surviving registration.
+codex_plugin_registered() {  # <listing> -> 0 while an active plugin row survives
+    local rows
+    rows="$(printf '%s\n' "$1" \
+        | grep -E "^[[:space:]]*tokenless(@[^[:space:]]*)?[[:space:]]" \
+        | grep -Eiv "^[[:space:]]*[^[:space:]]+[[:space:]]+not[[:space:]]+installed([[:space:]]|$)" \
+        || true)"
+    [[ -n "$rows" ]]
+}
+
 if [[ -n "$CODEX_BIN" ]]; then
     if plugin_listing="$(codex_list plugin list)"; then
-        if printf '%s\n' "$plugin_listing" | grep -q "tokenless"; then
+        if codex_plugin_registered "$plugin_listing"; then
             echo "[tokenless] Removing codex plugin 'tokenless@${MARKETPLACE_NAME}'..."
             "$CODEX_BIN" plugin remove "tokenless@${MARKETPLACE_NAME}" 2>&1 || true
             # The removal status is swallowed on purpose — "was not registered" and
             # "refused" both come back non-zero — so re-ask instead of trusting it.
             if after_listing="$(codex_list plugin list)"; then
-                if printf '%s\n' "$after_listing" | grep -q "tokenless"; then
+                if codex_plugin_registered "$after_listing"; then
                     echo "[tokenless] ERROR: codex still lists the tokenless plugin after 'plugin remove'." >&2
                     DEREGISTER_FAILED=1
                 fi

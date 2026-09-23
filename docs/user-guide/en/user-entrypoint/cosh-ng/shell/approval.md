@@ -28,6 +28,14 @@ still pass the read-only and risk checks; stderr suppression does not make
 a modifying command eligible. Stdout and the exit status remain available
 in the execution result, including when the command fails.
 
+When tokenless RTK rewriting is enabled, wrapped commands
+(`env TOKENLESS_* … /usr/bin/rtk <command>`, or `/usr/bin/rtk <command>`
+when RTK emits the absolute path itself) keep the same eligibility:
+cosh assesses the wrapped read-only command and executes the wrapped
+form, so RTK output compression stays active on the approval-free path.
+A `TOKENLESS_DATA_DIR` that differs from the session's tokenless state
+directory still requires approval.
+
 These automatic commands run in the requesting directory with a controlled
 environment. `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TZ` come from the cosh
 process; subsequent `export` changes in the interactive shell are not copied,

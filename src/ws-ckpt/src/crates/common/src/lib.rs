@@ -192,6 +192,19 @@ pub enum Request {
         /// Registered workspace path or ID.
         workspace: String,
     },
+    /// Resolve recovery's exact target and deletion scope before confirmation.
+    RecoverPreview {
+        workspace: String,
+    },
+    /// Recover only if the daemon's preview still describes the same target.
+    RecoverConfirmed {
+        preview: RecoveryPreview,
+    },
+    /// List snapshots recovered without their original metadata.
+    ListOrphans {
+        /// Omit to query all registered workspaces.
+        workspace: Option<String>,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -361,6 +374,23 @@ pub enum Response {
         /// Locations intentionally retained for manual recovery.
         retained_paths: Vec<String>,
     },
+    /// Recovery identity and snapshot scope to display before confirmation.
+    RecoverPreviewOk {
+        preview: RecoveryPreview,
+    },
+}
+
+/// Daemon-resolved recovery target; execution revalidates it under lifecycle locks.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPreview {
+    /// Registered workspace ID, or `None` for an interrupted, unregistered init.
+    pub ws_id: Option<String>,
+    /// User-visible restoration destination, never a managed storage alias.
+    pub registration_path: String,
+    /// Number of on-disk snapshot directories that recovery will delete.
+    pub snapshot_count: u32,
+    /// Fingerprint of the target and snapshot set; stale confirmation is refused.
+    pub confirmation_digest: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -644,6 +674,9 @@ pub struct SnapshotIndex {
     /// Durable guarded rollback receipts keyed by caller idempotency identifier.
     #[serde(default)]
     pub guarded_rollbacks: HashMap<String, GuardedRollbackEvidenceV2>,
+    /// Snapshot IDs adopted from disk without their original metadata.
+    #[serde(default)]
+    pub recovered_orphans: HashSet<String>,
 }
 
 impl SnapshotIndex {
@@ -654,6 +687,7 @@ impl SnapshotIndex {
             head: None,
             governed_evidence: HashMap::new(),
             guarded_rollbacks: HashMap::new(),
+            recovered_orphans: HashSet::new(),
         }
     }
 }
@@ -3298,7 +3332,32 @@ mod tests {
     }
 
     #[test]
+    fn orphan_query_preserves_legacy_list_wire_layout() {
+        let old = Request::List {
+            workspace: Some("/ws".into()),
+            format: Some("json".into()),
+        };
+        assert_eq!(
+            bincode::serialize(&old).unwrap(),
+            bincode::serialize(&(4_u32, Some("/ws"), Some("json"))).unwrap()
+        );
+        let request = Request::ListOrphans {
+            workspace: Some("/ws".into()),
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        assert_eq!(encoded, bincode::serialize(&(28_u32, Some("/ws"))).unwrap());
+        assert!(matches!(bincode::deserialize::<Request>(&encoded).unwrap(),
+            Request::ListOrphans { workspace: Some(ws) } if ws == "/ws"));
+    }
+
+    #[test]
     fn recovery_protocol_extensions_preserve_existing_wire_layout() {
+        let preview = RecoveryPreview {
+            ws_id: Some("ws-preview".into()),
+            registration_path: "/ws".into(),
+            snapshot_count: 7,
+            confirmation_digest: [9; 32],
+        };
         let requests = [
             Request::Recover {
                 workspace: "/ws".into(),
@@ -3306,8 +3365,14 @@ mod tests {
             Request::Unregister {
                 workspace: "/ws".into(),
             },
+            Request::RecoverPreview {
+                workspace: "/alias/ws".into(),
+            },
+            Request::RecoverConfirmed {
+                preview: preview.clone(),
+            },
         ];
-        for (request, tag) in requests.iter().zip([13_u32, 25]) {
+        for (request, tag) in requests.iter().zip([13_u32, 25, 26, 27]) {
             let encoded = bincode::serialize(request).unwrap();
             assert_eq!(&encoded[..4], &tag.to_le_bytes());
             let decoded: Request = bincode::deserialize(&encoded).unwrap();
@@ -3325,8 +3390,9 @@ mod tests {
                 workspace: "/ws".into(),
                 retained_paths: vec!["/backup".into()],
             },
+            Response::RecoverPreviewOk { preview },
         ];
-        for (response, tag) in responses.iter().zip([12_u32, 26, 27]) {
+        for (response, tag) in responses.iter().zip([12_u32, 26, 27, 28]) {
             let encoded = bincode::serialize(response).unwrap();
             assert_eq!(&encoded[..4], &tag.to_le_bytes());
             let decoded: Response = bincode::deserialize(&encoded).unwrap();
@@ -3569,6 +3635,7 @@ mod tests {
         assert_eq!(index.workspace_path, PathBuf::from("/workspace"));
         assert!(index.governed_evidence.is_empty());
         assert!(index.guarded_rollbacks.is_empty());
+        assert!(index.recovered_orphans.is_empty());
     }
 
     #[test]

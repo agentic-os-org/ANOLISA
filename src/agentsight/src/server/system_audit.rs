@@ -316,7 +316,8 @@ pub(super) fn store_error(error: SecurityStoreError) -> HttpResponse {
         SecurityStoreError::Serialization(_) | SecurityStoreError::InvalidData(_) => {
             invalid_stored_data()
         }
-        SecurityStoreError::Open(_)
+        SecurityStoreError::Lifecycle(_)
+        | SecurityStoreError::Open(_)
         | SecurityStoreError::Sqlite(_)
         | SecurityStoreError::InvalidFilter(_)
         | SecurityStoreError::MissingCase(_)

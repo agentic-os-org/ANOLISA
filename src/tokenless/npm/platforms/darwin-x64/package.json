@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/tokenless-darwin-x64",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "private": true,
   "description": "Token-Less native binaries for macOS x86_64",
   "license": "Apache-2.0",

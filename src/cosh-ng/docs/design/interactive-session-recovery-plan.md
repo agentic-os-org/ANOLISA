@@ -85,14 +85,14 @@ React/Ink UI-history model.
 
 Useful patterns:
 
-- [`chatRecordingService.ts`](../../../src/copilot-shell/packages/core/src/services/chatRecordingService.ts)
+- [`chatRecordingService.ts`](../../../../deprecated/copilot-shell/packages/core/src/services/chatRecordingService.ts)
   records version, cwd, timestamps, branch, message relationships, and exact
   model history.
-- [`sessionService.ts`](../../../src/copilot-shell/packages/core/src/services/sessionService.ts)
+- [`sessionService.ts`](../../../../deprecated/copilot-shell/packages/core/src/services/sessionService.ts)
   separates listing, loading, preview, existence, and removal operations.
-- [`SessionPicker.tsx`](../../../src/copilot-shell/packages/cli/src/ui/components/SessionPicker.tsx)
+- [`SessionPicker.tsx`](../../../../deprecated/copilot-shell/packages/cli/src/ui/components/SessionPicker.tsx)
   provides sorted selection, pagination, branch filtering, and previews.
-- [`useResumeCommand.ts`](../../../src/copilot-shell/packages/cli/src/ui/hooks/useResumeCommand.ts)
+- [`useResumeCommand.ts`](../../../../deprecated/copilot-shell/packages/cli/src/ui/hooks/useResumeCommand.ts)
   treats resume as an explicit state transition that resets active UI/core
   state.
 - CLI configuration uses the same service for `--continue` and `--resume`.

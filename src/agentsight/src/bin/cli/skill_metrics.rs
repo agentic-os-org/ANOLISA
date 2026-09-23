@@ -228,7 +228,10 @@ impl SkillMetricsCommand {
         };
 
         // Open store
-        let store = GenAISqliteStore::new_with_path(&db_path)?;
+        let store = GenAISqliteStore::new_with_path(
+            &db_path,
+            agentsight::config::InsertStoragePolicy::default(),
+        )?;
 
         // Compute time range
         let start_ns = hours_ago_ns(last) as i64;

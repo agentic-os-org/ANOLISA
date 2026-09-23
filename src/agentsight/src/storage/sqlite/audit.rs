@@ -2,14 +2,14 @@
 //!
 //! Handles table creation, record insertion, and querying for audit events.
 
+use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, ConnectionOptions, SizeSnapshot, checkpoint_truncate, measure_database,
+    open_connection,
+};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
-
-use super::connection::{
-    create_connection, default_base_path, wal_checkpoint, wal_checkpoint_busy,
-};
-use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 
 /// SQLite-based audit event store
 pub struct AuditStore {
@@ -25,7 +25,7 @@ impl AuditStore {
 
     /// Create a new AuditStore with custom table name
     pub fn with_table(path: &Path, table_name: &str) -> Result<Self> {
-        let conn = create_connection(path)?;
+        let conn = open_connection(path, ConnectionOptions::default())?;
         let table_name = table_name.to_string();
 
         // Create table and indexes with dynamic table name
@@ -57,7 +57,7 @@ impl AuditStore {
 
     /// Default database path: ~/.agentsight/audit.db
     pub fn default_path() -> PathBuf {
-        default_base_path().join("audit.db")
+        crate::config::default_base_path().join("audit.db")
     }
 
     /// Insert an audit record, returns the row ID
@@ -232,28 +232,25 @@ impl AuditStore {
 
     /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> Result<()> {
-        wal_checkpoint(&self.conn)
+        match checkpoint_truncate(&self.conn)? {
+            CheckpointOutcome::Completed => Ok(()),
+            CheckpointOutcome::Busy => anyhow::bail!("WAL checkpoint remained busy"),
+        }
     }
 
-    /// Truncating WAL checkpoint that reports whether it was blocked (busy).
-    ///
-    /// See [`wal_checkpoint_busy`]; size-based purge uses this to stop
-    /// deleting when the WAL cannot be truncated (#2888).
-    pub fn checkpoint_busy(&self) -> Result<bool> {
-        wal_checkpoint_busy(&self.conn)
+    /// Truncating WAL checkpoint used by size-based maintenance.
+    pub fn checkpoint_outcome(&self) -> Result<CheckpointOutcome> {
+        checkpoint_truncate(&self.conn).map_err(Into::into)
     }
 
-    /// Free-page bytes on the shared database file (freelist count x page size).
-    ///
-    /// Used by size-based purge convergence: deleted rows grow the freelist
-    /// instead of shrinking the file, so the logical data size is
-    /// `physical - freelist_bytes`.
-    pub fn freelist_bytes(&self) -> Result<u64> {
-        let freelist: i64 = self
+    /// Measures physical allocation and reusable freelist capacity.
+    pub fn size_snapshot(&self) -> Result<SizeSnapshot> {
+        let path = self
             .conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
-        Ok((freelist.max(0) * page_size.max(0)) as u64)
+            .path()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("audit store has no database path"))?;
+        measure_database(&path, &self.conn).map_err(Into::into)
     }
 
     /// Get summary statistics since a given timestamp

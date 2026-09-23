@@ -11,10 +11,11 @@ use tokio::net::UnixStream;
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
     ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
-    DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
-    GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, OVERVIEW_JSON_SCHEMA,
+    RecoveryPreview, Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
+    DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH, GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE,
+    OVERVIEW_JSON_SCHEMA,
 };
 
 use std::cell::RefCell;
@@ -188,7 +189,7 @@ enum Commands {
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
-        /// Snapshot ID or unique prefix
+        /// Complete snapshot ID (prefixes are not accepted)
         #[arg(long, short = 's', value_parser = snapshot_id_value_parser())]
         snapshot: String,
 
@@ -202,6 +203,10 @@ enum Commands {
         /// Workspace path or ID (optional; omit to list all workspaces)
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
+
+        /// Only snapshots recovered without their original metadata
+        #[arg(long)]
+        orphans: bool,
 
         /// Output format: table or json (default: table)
         #[arg(long, default_value = "table")]
@@ -493,10 +498,19 @@ async fn run(cli: Cli) -> Result<()> {
             let response = send_request_to_daemon(&request).await?;
             handle_response(response, &request).await?;
         }
-        Commands::List { workspace, format } => {
-            let request = Request::List {
-                workspace: workspace.as_deref().map(resolve_workspace_arg),
-                format: Some(format.clone()),
+        Commands::List {
+            workspace,
+            format,
+            orphans,
+        } => {
+            let workspace = workspace.as_deref().map(resolve_workspace_arg);
+            let request = if orphans {
+                Request::ListOrphans { workspace }
+            } else {
+                Request::List {
+                    workspace,
+                    format: Some(format.clone()),
+                }
             };
             let response = send_request_to_daemon(&request).await?;
             handle_list_response(response, &format)?;
@@ -1110,10 +1124,13 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                     let w_date = 19_usize.max(hdr_date.len()); // "YYYY-MM-DD HH:MM:SS"
 
                     println!(
-                        "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
+                        "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
                         hdr_ws, hdr_snap, hdr_date, hdr_msg,
                     );
-                    println!("{}", "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 3));
+                    println!(
+                        "{}",
+                        "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
+                    );
                     for entry in &snapshots {
                         let id_display = if entry.meta.missing {
                             format!("{} [MISSING]", entry.id)
@@ -1121,7 +1138,7 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                             entry.id.clone()
                         };
                         println!(
-                            "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
+                            "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
                             entry.workspace,
                             id_display,
                             entry
@@ -1129,6 +1146,7 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                                 .created_at
                                 .with_timezone(&chrono::Local)
                                 .format("%Y-%m-%d %H:%M:%S"),
+                            entry.meta.pinned,
                             entry.meta.message.as_deref().unwrap_or("-"),
                         );
                     }
@@ -2030,6 +2048,24 @@ async fn handle_unregister(workspace: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+// Every destructive recovery uses daemon-resolved metadata, including --force.
+async fn preview_recovery(workspace: String) -> Result<RecoveryPreview> {
+    let response = send_request_to_daemon(&Request::RecoverPreview { workspace })
+        .await
+        .context("Cannot preview recovery; ensure the daemon supports recovery preview")?;
+    recovery_preview_from_response(response)
+}
+
+fn recovery_preview_from_response(response: Response) -> Result<RecoveryPreview> {
+    match response {
+        Response::RecoverPreviewOk { preview } => Ok(preview),
+        Response::Error { code, message } => {
+            anyhow::bail!("Recovery preview failed [{code:?}]: {message}")
+        }
+        _ => anyhow::bail!("Daemon did not return a recovery preview; upgrade/restart the daemon before recovering"),
+    }
+}
+
 /// Handle recover command: single workspace or all workspaces.
 async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Result<()> {
     if workspace.is_none() && !all {
@@ -2058,10 +2094,17 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             return Ok(());
         }
 
+        let mut previews = Vec::with_capacity(workspaces.len());
+        for ws in &workspaces {
+            previews.push(preview_recovery(ws.ws_id.clone()).await?);
+        }
         if !force {
-            println!("Recovering {} workspace(s):", workspaces.len());
-            for ws in &workspaces {
-                println!("  {} ({} snapshots)", ws.path, ws.snapshot_count);
+            println!("Recovering {} workspace(s):", previews.len());
+            for preview in &previews {
+                println!(
+                    "  {} ({} snapshots)",
+                    preview.registration_path, preview.snapshot_count
+                );
             }
             println!(
                 "This will delete all snapshots and restore all workspaces to normal directories.\n\
@@ -2081,9 +2124,9 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         }
 
         let mut failed: usize = 0;
-        for ws in &workspaces {
-            let req = Request::Recover {
-                workspace: ws.path.clone(),
+        for preview in &previews {
+            let req = Request::RecoverConfirmed {
+                preview: preview.clone(),
             };
             let resp = send_request_to_daemon(&req).await?;
             match resp {
@@ -2097,12 +2140,15 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
                 Response::Error { code, message } => {
                     eprintln!(
                         "\x1b[31mError [{:?}] recovering {}: {}\x1b[0m",
-                        code, ws.path, message
+                        code, preview.registration_path, message
                     );
                     failed += 1;
                 }
                 _ => {
-                    eprintln!("\x1b[33mUnexpected response for {}\x1b[0m", ws.path);
+                    eprintln!(
+                        "\x1b[33mUnexpected response for {}\x1b[0m",
+                        preview.registration_path
+                    );
                     failed += 1;
                 }
             }
@@ -2125,35 +2171,13 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         // Single workspace mode
         let ws_arg = resolve_workspace_arg(workspace.as_deref().unwrap());
 
-        // Snapshot count comes from the GLOBAL status, not `Status -w`: the
-        // per-workspace form now refuses detached registrations (the very
-        // state recover exists to repair), which would abort this flow before
-        // the Recover request is ever sent. Global status lists detached
-        // workspaces too, so the confirm prompt keeps its metadata either way.
-        // Match both path and ws_id: the daemon resolves `recover -w` either
-        // way, and a count of 0 for the ID form would understate what the
-        // confirmation is about to delete.
-        let status_req = Request::Status { workspace: None };
-        let status_resp = send_request_to_daemon(&status_req).await?;
-        let snapshot_count = match &status_resp {
-            Response::StatusOk { report } => report
-                .workspaces
-                .iter()
-                .find(|w| {
-                    w.ws_id == ws_arg
-                        || w.path.trim_end_matches('/') == ws_arg.trim_end_matches('/')
-                })
-                .map(|w| w.snapshot_count)
-                .unwrap_or(0),
-            Response::Error { code, message } => {
-                eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
-                process::exit(1);
-            }
-            _ => 0,
-        };
+        let preview = preview_recovery(ws_arg).await?;
 
         if !force {
-            println!("Workspace: {} ({} snapshots)", ws_arg, snapshot_count);
+            println!(
+                "Workspace: {} ({} snapshots)",
+                preview.registration_path, preview.snapshot_count
+            );
             println!(
                 "This restores a registered workspace and deletes its snapshots. For interrupted, unregistered init, it restores the pre-init backup and retains migrated storage for inspection.\n\
                  WARNING: ws-ckpt does NOT check for processes with cwd inside the workspace before recover.\n\
@@ -2171,7 +2195,7 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             }
         }
 
-        let req = Request::Recover { workspace: ws_arg };
+        let req = Request::RecoverConfirmed { preview };
         let resp = send_request_to_daemon(&req).await?;
         match resp {
             Response::RecoverWithWarning { workspace, warning } => {
@@ -3019,12 +3043,40 @@ mod tests {
     fn parse_list() {
         let cli = Cli::try_parse_from(["ws-ckpt", "list", "--workspace", "/tmp/test"]).unwrap();
         match cli.command {
-            Commands::List { workspace, format } => {
+            Commands::List {
+                workspace, format, ..
+            } => {
                 assert_eq!(workspace.as_deref(), Some("/tmp/test"));
                 assert_eq!(format, "table"); // default
             }
             _ => panic!("expected List"),
         }
+    }
+
+    #[test]
+    fn parse_list_orphans_with_and_without_workspace() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "list",
+            "-w",
+            "/ws",
+            "--orphans",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::List { workspace: Some(ws), orphans: true, format } if ws == "/ws" && format == "json")
+        );
+        let cli = Cli::try_parse_from(["ws-ckpt", "list", "--orphans"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::List {
+                workspace: None,
+                orphans: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3143,7 +3195,9 @@ mod tests {
     fn list_without_workspace_parses_ok() {
         let cli = Cli::try_parse_from(["ws-ckpt", "list"]).unwrap();
         match cli.command {
-            Commands::List { workspace, format } => {
+            Commands::List {
+                workspace, format, ..
+            } => {
                 assert!(workspace.is_none());
                 assert_eq!(format, "table");
             }
@@ -3463,6 +3517,34 @@ mod tests {
         assert!(
             matches!(cli.command, Commands::Unregister { workspace, force: true } if workspace == "/tmp/ws")
         );
+    }
+
+    #[test]
+    fn recovery_confirmation_uses_daemon_identity_and_refuses_missing_preview() {
+        let preview = RecoveryPreview {
+            ws_id: Some("ws-actual".into()),
+            registration_path: "/real-parent/repo".into(),
+            snapshot_count: 19,
+            confirmation_digest: [7; 32],
+        };
+        let received = recovery_preview_from_response(Response::RecoverPreviewOk {
+            preview: preview.clone(),
+        })
+        .unwrap();
+        assert_eq!(received, preview);
+        assert!(recovery_preview_from_response(Response::RecoverOk {
+            workspace: "/alias-parent/repo".into(),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("upgrade/restart"));
+        assert!(recovery_preview_from_response(Response::Error {
+            code: ErrorCode::WorkspaceNotFound,
+            message: "registration disappeared".into(),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("registration disappeared"));
     }
 
     // ── Recover CLI parsing tests ──

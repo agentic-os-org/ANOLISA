@@ -34,8 +34,11 @@ pub fn load_conversation_input(
     conversation_id: &str,
     force: bool,
 ) -> Result<EvaluationInput, GraderError> {
-    let genai_store = GenAISqliteStore::new_with_path(storage_path)
-        .map_err(|error| GraderError::Storage(error.to_string()))?;
+    let genai_store = GenAISqliteStore::new_with_path(
+        storage_path,
+        crate::config::InsertStoragePolicy::default(),
+    )
+    .map_err(|error| GraderError::Storage(error.to_string()))?;
     let events = genai_store
         .get_events_by_conversation(conversation_id)
         .map_err(|error| GraderError::Storage(error.to_string()))?;
@@ -274,7 +277,9 @@ mod tests {
     }
 
     fn write_conversation_event(path: &Path, conversation_id: &str) {
-        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        let store =
+            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+                .unwrap();
         let mut call = LLMCall::new(
             "call-1".to_string(),
             1_700_000_000_000_000_000,

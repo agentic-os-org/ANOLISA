@@ -55,7 +55,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-在 macOS arm64 上改用 user 范围：
+在 macOS 11+ (arm64 / x86_64) 上改用 user 范围：
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -69,9 +69,13 @@ sudo yum install cosh-ng
 ```
 
 当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
-Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
+Linux 安装路径。raw 包支持 macOS 11+ (arm64 / x86_64)，但依赖 Linux 的软件包和服务操作
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
+
+发版构建矩阵也会生成 macOS x86_64（Intel）raw 包，与 arm64 一样要求 macOS 11.0
+或更新版本。包含此构建支持的版本发布后，Intel 产物可从 GitHub Releases 获取；
+上面的公共安装入口还需要发布 Intel ANOLISA CLI，并单独开放官网安装脚本。
 
 ## 30 秒开始使用
 
@@ -247,6 +251,10 @@ Checkpoint policy 同时作用于 Runtime 启动前和获批的 Runtime-native e
 只有 provider 明确报告 unavailable 或 known-no-effect 时，`Auto` 才记录持久 downgrade；
 error 或 uncertain result 不能授权 effect。`On` 只有在存在准确 checkpoint evidence 时才
 放行，否则 fail closed；`Off` 既不创建 baseline，也不建立逐 effect barrier。
+
+当前 ws-ckpt 支持为空 workspace 创建 checkpoint。若旧 daemon 跳过初始快照，`On`
+会在 Runtime 启动前终止 Task。升级 ws-ckpt 或添加文件后提交新 Task；若无需 checkpoint
+保护，也可显式选择 `Off`。失败的 Task 已进入终态，`retry` 不会重建失败的 baseline。
 
 托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
 `write_file`。每次写入都是 Runtime-native permission decision；只有 Gateway approval

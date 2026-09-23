@@ -39,7 +39,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend 
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`--cosh-ng` 仍可作为 `--component cosh-ng` 的简写。在 macOS arm64 上改用
+`--cosh-ng` 仍可作为 `--component cosh-ng` 的简写。在 macOS 11+ (arm64 / x86_64) 上改用
 `--backend raw --install-mode user`。
 
 ### 增加可观测性、安全或运行时控制

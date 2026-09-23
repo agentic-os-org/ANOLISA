@@ -342,14 +342,32 @@ fn checkpoint_possibly_applied_reconciles_without_recreating_or_starting_runtime
 }
 
 #[test]
-fn auto_skips_known_unavailable_but_on_fails_closed_before_runtime() {
-    for (policy, expected_state, should_start) in [
+fn auto_skips_known_no_effect_but_on_fails_closed_before_runtime() {
+    for (policy, expected_state, should_start, provider_skipped) in [
         (
             CheckpointPolicy::Auto,
             PreRuntimeBaselineState::Skipped,
             true,
+            false,
         ),
-        (CheckpointPolicy::On, PreRuntimeBaselineState::Failed, false),
+        (
+            CheckpointPolicy::On,
+            PreRuntimeBaselineState::Failed,
+            false,
+            false,
+        ),
+        (
+            CheckpointPolicy::Auto,
+            PreRuntimeBaselineState::Skipped,
+            true,
+            true,
+        ),
+        (
+            CheckpointPolicy::On,
+            PreRuntimeBaselineState::Failed,
+            false,
+            true,
+        ),
     ] {
         let root = TempDir::new().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -394,6 +412,22 @@ fn auto_skips_known_unavailable_but_on_fails_closed_before_runtime() {
             NeverStartFactory(Arc::clone(&starts)),
         )
         .unwrap();
+        let skip_reason = BoundedText::new(
+            "Empty workspace checkpoint was not created; add a file and submit a new Task",
+        )
+        .unwrap();
+        let creates = Arc::new(AtomicUsize::new(0));
+        if provider_skipped {
+            scheduler = scheduler.with_pre_runtime_checkpoint_driver(Box::new(CheckpointDriver {
+                prepares: Arc::new(AtomicUsize::new(0)),
+                creates: Arc::clone(&creates),
+                reconciles: Arc::new(AtomicUsize::new(0)),
+                create_result: PreRuntimeCheckpointCreateResult::KnownNoEffect {
+                    reason: skip_reason.clone(),
+                },
+                reconcile_result: PreRuntimeCheckpointReconcileResult::NotApplied,
+            }));
+        }
         let now = now_ms().unwrap().saturating_add(1);
         assert!(matches!(
             scheduler.tick(now).unwrap(),
@@ -430,7 +464,19 @@ fn auto_skips_known_unavailable_but_on_fails_closed_before_runtime() {
                 .events
                 .iter()
                 .any(|event| matches!(event.event, TaskEvent::TaskFailed { .. })));
+            if provider_skipped {
+                assert!(events.events.iter().any(|event| matches!(
+                    &event.event,
+                    TaskEvent::TaskFailed { error }
+                        if error.safe_message.as_str() == skip_reason.as_str()
+                            && !error.retryable
+                )));
+            }
         }
+        assert_eq!(
+            creates.load(Ordering::Relaxed),
+            usize::from(provider_skipped)
+        );
     }
 }
 

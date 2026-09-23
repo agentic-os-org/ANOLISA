@@ -448,9 +448,9 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         let config_path = dir.join("config.json");
         let content = if auth_enabled {
-            r#"{"schema_version":2,"server":{"auth":{"enabled":true}}}"#
+            r#"{"schema_version":3,"server":{"auth":{"enabled":true}}}"#
         } else {
-            r#"{"schema_version":2,"server":{"auth":{"enabled":false}}}"#
+            r#"{"schema_version":3,"server":{"auth":{"enabled":false}}}"#
         };
         std::fs::write(&config_path, content).unwrap();
         config_path.to_string_lossy().to_string()

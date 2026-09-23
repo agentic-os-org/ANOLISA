@@ -32,7 +32,7 @@ UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 # SKILL.md that is missing from the bundle lists ships but is never deployed.
 OS_SKILLS_ROOT="$REPO_ROOT/src/os-skills"
 BUNDLE_COMPONENT="$OS_SKILLS_ROOT/component.toml"
-BUNDLE_DISTRIBUTION="$REPO_ROOT/src/anolisa/manifests/components/os-skills/component.toml"
+BUNDLE_DISTRIBUTION="$REPO_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml"
 OS_SKILLS_INDEX_EN="$OS_SKILLS_ROOT/README.md"
 OS_SKILLS_INDEX_ZH="$OS_SKILLS_ROOT/README_zh.md"
 SKILL_NAME="install-tokenless"
@@ -193,14 +193,14 @@ check_bundle() {
 
 # The two manifests are not interchangeable. src/os-skills/component.toml is the
 # source-tree manifest the *next* os-skills artifact is built from, so a new skill
-# belongs there immediately. src/anolisa/manifests/components/os-skills/
+# belongs there immediately. distribution/anolisa/manifests/components/os-skills/
 # component.toml is the distribution contract for an artifact that is *already
 # published*: index.toml pins its version to a sha256 and a byte size. Declaring a
 # skill here that the pinned artifact does not contain makes `anolisa adapter
 # enable os-skills <framework>` fail while copying a source that does not exist,
 # so this one may only gain the skill together with a version bump and a new
 # index.toml entry.
-INDEX_TOML="$REPO_ROOT/src/anolisa/manifests/components/index.toml"
+INDEX_TOML="$REPO_ROOT/distribution/anolisa/manifests/components/index.toml"
 [ -f "$INDEX_TOML" ] || { echo "FAIL missing file: $INDEX_TOML" >&2; exit 1; }
 DIST_VERSION=$(awk -F'"' '/^version = /{ print $2; exit }' "$BUNDLE_DISTRIBUTION")
 [ -n "$DIST_VERSION" ] || fail "cannot read the os-skills distribution contract version"

@@ -11,7 +11,7 @@ The boundary is kept consistent in the following locations:
 - `openclaw.compat.pluginApi` in `openclaw-plugin/package.json`
 - `peerDependencies.openclaw` in `openclaw-plugin/package.json`
 
-The current e2e pipeline has validated the following OpenClaw host matrix:
+The following matrix records the earlier CI validation:
 
 | OpenClaw host | Result |
 |---------------|--------|
@@ -25,6 +25,17 @@ The current e2e pipeline has validated the following OpenClaw host matrix:
 | `latest` | Pass |
 
 Validation evidence: GitHub Actions `OpenClaw Plugin E2E` run `28774739252`.
+
+Local E2E validation also passed on `2026.8.1` and the legacy `2026.4.23` host
+with Node `22.22.3` and installed `agent-sec-cli 0.13.0`: installation, runtime
+loading, Gateway traffic, all four policy cases, and 14 direct hook probes.
+The suite uses a mock model and deterministic deny fixtures; on `2026.8.1`,
+the approval case verified blocking when no approval route was available.
+
+OpenClaw 2.0 is release `2026.8.1`. It requires Node `>=22.22.3 <23`,
+`>=24.15.0 <25`, or `>=25.9.0`. Its plugin install records live in host-managed
+SQLite state; use `plugins inspect` to verify installation rather than reading
+the retired `plugins.installs` config key.
 
 ## Prerequisites
 
@@ -93,8 +104,9 @@ OPENCLAW_STATE_DIR=~/.openclaw-dev ./scripts/deploy.sh "$(pwd)"
 
 - Reads `openclaw --version` and requires OpenClaw `>=2026.4.14`
 - Reads `openclaw plugins install --help` to confirm `--force` support
-- Passes `--dangerously-force-unsafe-install` when the current OpenClaw installer help exposes it
-- Omits that flag when the current OpenClaw installer help does not expose it
+- Passes `--accept-capabilities` when supported, accepting the declared capabilities of agent-sec (required by OpenClaw 2.0)
+- On older hosts without capability consent, passes `--dangerously-force-unsafe-install` only when advertised; on modern hosts that legacy flag is a no-op
+- Preserves operator `security.installPolicy` decisions; capability acceptance does not bypass a policy block
 - Writes `plugins.entries.agent-sec.hooks.allowConversationAccess=true` on OpenClaw `>=2026.4.24`
 - Skips `allowConversationAccess` on OpenClaw `2026.4.14` through `2026.4.23`
 - Validates the install record via `openclaw plugins inspect agent-sec --json`

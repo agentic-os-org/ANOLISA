@@ -41,8 +41,7 @@ normalize_arch() {
 
 validate_target() {
     case "$TARGET_OS-$TARGET_ARCH" in
-        linux-x86_64 | linux-aarch64 | macos-aarch64) ;;
-        macos-x86_64) die "cosh-ng raw packages do not support macOS x86_64" ;;
+        linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64) ;;
         *) die "unsupported cosh-ng raw target: $TARGET_OS-$TARGET_ARCH" ;;
     esac
 }

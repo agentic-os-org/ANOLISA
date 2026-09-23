@@ -64,6 +64,9 @@ case "$TARGET_OS/$TARGET_ARCH/$PROFILE" in
     macos/aarch64/darwin11-aarch64)
         RUST_TARGET=aarch64-apple-darwin
         ;;
+    macos/x86_64/darwin11-x86_64)
+        RUST_TARGET=x86_64-apple-darwin
+        ;;
     *)
         die "profile $PROFILE does not match target $TARGET_OS/$TARGET_ARCH"
         ;;
@@ -164,7 +167,8 @@ for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
         die "Cross build did not produce $TARGET_BIN_DIR/$binary"
     install -p -m 0755 "$TARGET_BIN_DIR/$binary" "$BIN_DIR/$binary"
     if [ "$TARGET_OS" = macos ]; then
-        python3 "$COMMON_DIR/verify-macho.py" --min 11.0 "$BIN_DIR/$binary"
+        python3 "$COMMON_DIR/verify-macho.py" \
+            --arch "$TARGET_ARCH" --min 11.0 "$BIN_DIR/$binary"
     else
         python3 "$COMMON_DIR/verify-glibc.py" \
             --arch "$TARGET_ARCH" --max 2.28 "$BIN_DIR/$binary"

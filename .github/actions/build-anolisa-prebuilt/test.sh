@@ -5,7 +5,7 @@ set -euo pipefail
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_DIR="$(cd "$ACTION_DIR/../prebuilt-rust-common" && pwd)"
 REPO_ROOT="$(git -C "$ACTION_DIR" rev-parse --show-toplevel)"
-COMPONENT_ROOT="$REPO_ROOT/src/anolisa"
+COMPONENT_ROOT="$REPO_ROOT/distribution/anolisa"
 TEMPORARY="$(mktemp -d)"
 trap 'rm -rf -- "$TEMPORARY"' EXIT
 
@@ -48,6 +48,7 @@ identity = {
     ("linux", "x64"): ("linux", "x86_64"),
     ("linux", "arm64"): ("linux", "aarch64"),
     ("darwin", "arm64"): ("macos", "aarch64"),
+    ("darwin", "x64"): ("macos", "x86_64"),
 }
 npm_targets = set()
 for package_file in (component_root / "npm/platforms").glob("*/package.json"):
@@ -71,7 +72,7 @@ VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/prebuilt/verify-release.py" \
         "$COMPONENT_ROOT" --os linux --arch x86_64
 )"
-for target in 'linux aarch64' 'macos aarch64'; do
+for target in 'linux aarch64' 'macos aarch64' 'macos x86_64'; do
     read -r os_name arch <<<"$target"
     test "$(
         python3 "$COMPONENT_ROOT/packaging/prebuilt/verify-release.py" \
@@ -79,14 +80,32 @@ for target in 'linux aarch64' 'macos aarch64'; do
     )" = "$VERSION"
 done
 
+# Reject a mismatched cross profile before any build-side effects.
+if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
+    --output-dir "$TEMPORARY/unused" --version "$VERSION" \
+    --target-os macos --target-arch x86_64 --profile darwin11-aarch64 \
+    --tag invalid >"$TEMPORARY/target.log" 2>&1; then
+    printf 'ERROR: mismatched Intel macOS profile accepted\n' >&2
+    exit 1
+fi
+grep -Fq 'does not match target macos/x86_64' "$TEMPORARY/target.log"
+if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
+    --output-dir "$TEMPORARY/unused" --version "$VERSION" \
+    --target-os macos --target-arch x86_64 --profile darwin11-x86_64 \
+    --tag invalid >"$TEMPORARY/target.log" 2>&1; then
+    printf 'ERROR: invalid tag accepted for Intel macOS\n' >&2
+    exit 1
+fi
+grep -Fq 'release tag invalid does not match requested version' "$TEMPORARY/target.log"
+
 SEMVER_REPO="$TEMPORARY/semver-repo"
-install -d -m 0755 "$SEMVER_REPO/src/anolisa/packaging/prebuilt"
-install -p -m 0644 "$COMPONENT_ROOT/Cargo.toml" "$SEMVER_REPO/src/anolisa/Cargo.toml"
-cp -a "$COMPONENT_ROOT/npm" "$SEMVER_REPO/src/anolisa/npm"
+install -d -m 0755 "$SEMVER_REPO/distribution/anolisa/packaging/prebuilt"
+install -p -m 0644 "$COMPONENT_ROOT/Cargo.toml" "$SEMVER_REPO/distribution/anolisa/Cargo.toml"
+cp -a "$COMPONENT_ROOT/npm" "$SEMVER_REPO/distribution/anolisa/npm"
 install -p -m 0755 "$COMPONENT_ROOT/packaging/prebuilt/verify-release.py" \
-    "$SEMVER_REPO/src/anolisa/packaging/prebuilt/verify-release.py"
+    "$SEMVER_REPO/distribution/anolisa/packaging/prebuilt/verify-release.py"
 git -C "$SEMVER_REPO" init -q
-git -C "$SEMVER_REPO" add -- src/anolisa
+git -C "$SEMVER_REPO" add -- distribution/anolisa
 git -C "$SEMVER_REPO" \
     -c user.name='ANOLISA CI' \
     -c user.email='ci@localhost' \

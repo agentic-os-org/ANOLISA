@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cosh_gateway_contracts::{
@@ -141,7 +142,9 @@ impl fmt::Debug for ResolvedWorkspace {
 #[derive(Clone)]
 pub struct TrustedWorkspaceResolver {
     targets: Vec<TargetRef>,
-    workspace: ResolvedWorkspace,
+    path: PathBuf,
+    reference: WorkspaceRef,
+    directory: Arc<RwLock<Option<PinnedDirectory>>>,
 }
 
 impl TrustedWorkspaceResolver {
@@ -187,10 +190,9 @@ impl TrustedWorkspaceResolver {
         };
         Ok(Self {
             targets,
-            workspace: ResolvedWorkspace {
-                directory,
-                reference,
-            },
+            path: directory.canonical_path().to_path_buf(),
+            reference,
+            directory: Arc::new(RwLock::new(Some(directory))),
         })
     }
 
@@ -201,7 +203,16 @@ impl TrustedWorkspaceResolver {
     /// Rejects target kind, authority, or identifier substitution.
     pub fn resolve(&self, target: &TargetRef) -> Result<ResolvedWorkspace, ContractError> {
         if self.targets.iter().any(|candidate| candidate == target) {
-            Ok(self.workspace.clone())
+            let directory = self
+                .directory
+                .read()
+                .map_err(|_| workspace_error())?
+                .clone()
+                .ok_or_else(workspace_error)?;
+            Ok(ResolvedWorkspace {
+                directory,
+                reference: self.reference.clone(),
+            })
         } else {
             Err(contract_error(
                 "runtime_target_invalid",
@@ -212,10 +223,41 @@ impl TrustedWorkspaceResolver {
         }
     }
 
+    /// Re-pins the admitted canonical path after a proven governed snapshot switch.
+    ///
+    /// Clones share the replacement. Existing launch handles retain their inode;
+    /// the daemon must serialize switching with new Runtime admission. The public
+    /// workspace reference stays stable for durable Tasks and checkpoint evidence.
+    ///
+    /// # Errors
+    ///
+    /// Leaves new Runtime admission disabled if the directory cannot be pinned or
+    /// resolves to another path. Call only after trusted rollback success.
+    pub fn refresh_after_snapshot_switch(&self) -> Result<(), ContractError> {
+        let mut current = self.directory.write().map_err(|_| workspace_error())?;
+        *current = None;
+        let directory = PinnedDirectory::pin(&self.path).map_err(|_| workspace_error())?;
+        if directory.canonical_path() != self.path {
+            return Err(workspace_error());
+        }
+        *current = Some(directory);
+        Ok(())
+    }
+
+    /// Disables new Runtime admission after a snapshot switch with uncertain effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a poisoned binding lock, which also blocks resolution.
+    pub fn invalidate_after_snapshot_switch(&self) -> Result<(), ContractError> {
+        *self.directory.write().map_err(|_| workspace_error())? = None;
+        Ok(())
+    }
+
     /// Returns the admitted digest-only workspace projection.
     #[must_use]
     pub fn workspace_ref(&self) -> &WorkspaceRef {
-        self.workspace.reference()
+        &self.reference
     }
 }
 
@@ -224,7 +266,7 @@ impl fmt::Debug for TrustedWorkspaceResolver {
         formatter
             .debug_struct("TrustedWorkspaceResolver")
             .field("targets", &self.targets)
-            .field("workspace", &self.workspace)
+            .field("workspace", &self.reference)
             .finish()
     }
 }
@@ -257,7 +299,7 @@ impl InstalledAcpRuntimePortFactory {
         if actors.installation_id() != &installation_id || adapters.is_empty() {
             return Err(profile_error());
         }
-        let workspace = workspaces.workspace.path().to_path_buf();
+        let workspace = workspaces.path.clone();
         let mut resolved_adapters = BTreeMap::new();
         for (profile, executable) in adapters {
             let resolved = AcpRuntimeProfileResolver::resolve(AcpRuntimeProfileRequest {
@@ -291,8 +333,14 @@ impl InstalledAcpRuntimePortFactory {
         if actors.installation_id() != &installation_id || adapters.is_empty() {
             return Err(profile_error());
         }
-        let workspace = workspaces.workspace.path();
-        let workspace_identity = workspaces.workspace.identity();
+        let workspace = &workspaces.path;
+        let workspace_identity = workspaces
+            .directory
+            .read()
+            .map_err(|_| workspace_error())?
+            .as_ref()
+            .ok_or_else(workspace_error)?
+            .identity();
         if adapters.iter().any(|(profile, resolved)| {
             resolved.profile() != *profile
                 || resolved.workspace() != workspace
@@ -344,9 +392,6 @@ impl AgentRuntimePortFactory for InstalledAcpRuntimePortFactory {
         if resolved.workspace() != workspace.path() {
             return Err(workspace_error());
         }
-        if resolved.pinned_workspace().identity() != workspace.identity() {
-            return Err(workspace_error());
-        }
 
         let identity = AcpAgentRuntimeIdentity {
             installation_id: self.installation_id.clone(),
@@ -367,7 +412,7 @@ impl AgentRuntimePortFactory for InstalledAcpRuntimePortFactory {
         };
         let config = AcpAgentRuntimeConfig {
             session: AcpSessionDriverConfig::new(
-                resolved.launch_spec(),
+                resolved.launch_spec_in(workspace.pinned_directory().clone()),
                 resolved.bind_client_config(AcpV1ClientConfig::new(
                     "cosh-gateway",
                     env!("CARGO_PKG_VERSION"),

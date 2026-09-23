@@ -4,10 +4,15 @@
 //! ATIF v1.7 document (never from the raw JSONL) so they always agree with
 //! `atif_json`; bookkeeping columns (`file_*`) drive incremental scanning.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agentsight_sqlite_lifecycle::{
+    checkpoint_truncate, enforce_size_policy, measure_database, open_connection,
+    retention_cutoff_ns, CheckpointOutcome, ConnectionMode, ConnectionOptions, MaintenanceReport,
+    MaintenanceStatus, SizeBasis, SizePolicy,
+};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -83,6 +88,26 @@ pub struct TrajectoryAgentActivitySummary {
     pub total_steps: i64,
     /// Prompt and completion tokens across all trajectories.
     pub total_tokens: i64,
+}
+
+/// Retention and capacity limits for collected trajectories.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrajectoryMaintenancePolicy {
+    /// Maximum trajectory age in days; zero disables age retention.
+    pub retention_days: u64,
+    /// Maximum logical database size in MiB; zero disables size maintenance.
+    pub max_db_size_mb: u64,
+}
+
+/// Result of one trajectory maintenance pass.
+#[derive(Debug, Clone, Copy)]
+pub struct TrajectoryMaintenanceReport {
+    /// Trajectory rows removed by age retention.
+    pub expired_trajectories: usize,
+    /// Stale bookkeeping rows removed.
+    pub removed_skipped_files: usize,
+    /// Result of capacity enforcement.
+    pub size: MaintenanceReport,
 }
 
 /// Filter for [`TrajectoryStore::scan_steps`].
@@ -162,6 +187,7 @@ pub struct StepScanOutcome {
 /// Thread-safe store over a dedicated `trajectories.db`.
 pub struct TrajectoryStore {
     conn: Mutex<Connection>,
+    db_path: PathBuf,
 }
 
 impl TrajectoryStore {
@@ -171,10 +197,8 @@ impl TrajectoryStore {
     /// Returns an error if the database cannot be opened or the schema
     /// cannot be created.
     pub fn new_with_path(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
+        let conn = open_connection(path, ConnectionOptions::default())
             .with_context(|| format!("open trajectories db {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.busy_timeout(std::time::Duration::from_millis(500))?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS collected_trajectories (
                 session_id TEXT PRIMARY KEY,
@@ -212,6 +236,26 @@ impl TrajectoryStore {
         migrate_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+        })
+    }
+
+    /// Opens an existing trajectory database without creating or modifying it.
+    ///
+    /// # Errors
+    /// Returns an error when the file is absent or SQLite cannot open it read-only.
+    pub fn open_read_only_existing(path: &Path) -> Result<Self> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
         })
     }
 
@@ -311,6 +355,10 @@ impl TrajectoryStore {
                 record.first_user_message,
                 record.last_user_message,
             ],
+        )?;
+        conn.execute(
+            "DELETE FROM skipped_files WHERE file_path = ?1",
+            params![record.file_path],
         )?;
         Ok(())
     }
@@ -593,6 +641,164 @@ impl TrajectoryStore {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Applies age retention, removes stale scan bookkeeping, and enforces capacity.
+    ///
+    /// # Errors
+    /// Returns an error on filesystem inspection, SQLite, or mutex failure.
+    pub fn maintain(
+        &self,
+        policy: TrajectoryMaintenancePolicy,
+    ) -> Result<TrajectoryMaintenanceReport> {
+        let cutoff_ns = if policy.retention_days == 0 {
+            None
+        } else {
+            Some(
+                i64::try_from(retention_cutoff_ns(
+                    u64::try_from(now_ns()).unwrap_or(0),
+                    policy.retention_days,
+                )?)
+                .unwrap_or(i64::MAX),
+            )
+        };
+        let removed_skipped_files = self.remove_stale_skipped_files(cutoff_ns)?;
+        let expired_trajectories = match cutoff_ns {
+            Some(cutoff) => self.delete_trajectories_before(cutoff)?,
+            None => 0,
+        };
+        if (expired_trajectories > 0 || removed_skipped_files > 0)
+            && self.checkpoint()? == CheckpointOutcome::Busy
+        {
+            let snapshot = self.size_snapshot()?;
+            return Ok(TrajectoryMaintenanceReport {
+                expired_trajectories,
+                removed_skipped_files,
+                size: MaintenanceReport {
+                    status: MaintenanceStatus::CheckpointBusy,
+                    rounds: 0,
+                    deleted_rows: 0,
+                    before: snapshot,
+                    after: snapshot,
+                },
+            });
+        }
+
+        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        let size = enforce_size_policy::<anyhow::Error>(
+            SizePolicy {
+                limit_bytes,
+                trigger_bytes: limit_bytes,
+                target_bytes: limit_bytes.saturating_mul(9) / 10,
+                trigger_basis: SizeBasis::Physical,
+                target_basis: SizeBasis::Logical,
+                max_rounds: 20,
+                max_stalled_rounds: 3,
+            },
+            || self.size_snapshot(),
+            |fraction| self.delete_oldest_fraction(fraction),
+            || self.checkpoint(),
+        )?;
+        Ok(TrajectoryMaintenanceReport {
+            expired_trajectories,
+            removed_skipped_files,
+            size,
+        })
+    }
+
+    fn delete_trajectories_before(&self, cutoff_ns: i64) -> Result<usize> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO skipped_files (file_path, file_size, file_mtime_ns)
+             SELECT file_path, file_size, file_mtime_ns FROM collected_trajectories
+             WHERE collected_at_ns < ?1",
+            params![cutoff_ns],
+        )?;
+        let deleted = transaction.execute(
+            "DELETE FROM collected_trajectories WHERE collected_at_ns < ?1",
+            params![cutoff_ns],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    fn delete_oldest_fraction(&self, fraction: f64) -> Result<usize> {
+        let mut conn = self.lock_conn()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM collected_trajectories", [], |row| {
+                row.get(0)
+            })?;
+        if count == 0 || fraction <= 0.0 {
+            return Ok(0);
+        }
+        let limit = ((count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1);
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO skipped_files (file_path, file_size, file_mtime_ns)
+             SELECT file_path, file_size, file_mtime_ns FROM collected_trajectories
+             WHERE session_id IN (
+                 SELECT session_id FROM collected_trajectories
+                 ORDER BY collected_at_ns ASC, session_id ASC LIMIT ?1
+             )",
+            params![limit],
+        )?;
+        let deleted = transaction.execute(
+            "DELETE FROM collected_trajectories WHERE session_id IN (
+                SELECT session_id FROM collected_trajectories
+                ORDER BY collected_at_ns ASC, session_id ASC LIMIT ?1
+            )",
+            params![limit],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    fn remove_stale_skipped_files(&self, cutoff_ns: Option<i64>) -> Result<usize> {
+        let stale_paths = {
+            let conn = self.lock_conn()?;
+            let mut statement = conn.prepare(
+                "SELECT skipped.file_path, skipped.file_mtime_ns,
+                        EXISTS(SELECT 1 FROM collected_trajectories AS trajectories
+                               WHERE trajectories.file_path = skipped.file_path)
+                 FROM skipped_files AS skipped",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .filter_map(|(path, modified_ns, has_trajectory)| {
+                    let expired = cutoff_ns.is_some_and(|cutoff| modified_ns < cutoff);
+                    (expired || has_trajectory || !Path::new(&path).exists()).then_some(path)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let conn = self.lock_conn()?;
+        let mut removed = 0usize;
+        for path in stale_paths {
+            removed += conn.execute(
+                "DELETE FROM skipped_files WHERE file_path = ?1",
+                params![path],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    fn size_snapshot(&self) -> Result<agentsight_sqlite_lifecycle::SizeSnapshot> {
+        let conn = self.lock_conn()?;
+        measure_database(&self.db_path, &conn).map_err(Into::into)
+    }
+
+    fn checkpoint(&self) -> Result<CheckpointOutcome> {
+        let conn = self.lock_conn()?;
+        checkpoint_truncate(&conn).map_err(Into::into)
     }
 
     /// Finds steps matching `filter`, each with its neighbouring steps.
@@ -1200,6 +1406,74 @@ mod tests {
             vec!["qoder".to_string(), "qoderwork".to_string()]
         );
         assert_eq!(f.agent_names, vec!["qoder".to_string()]);
+    }
+
+    #[test]
+    fn read_only_open_requires_an_existing_database() {
+        let path = tmp_db("read-only");
+        assert!(TrajectoryStore::open_read_only_existing(&path).is_err());
+
+        let writable = TrajectoryStore::new_with_path(&path).unwrap();
+        writable.upsert_trajectory(&sample_record()).unwrap();
+        drop(writable);
+
+        let read_only = TrajectoryStore::open_read_only_existing(&path).unwrap();
+        assert!(read_only.get("s-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn maintenance_removes_expired_trajectory() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("maintenance-age")).unwrap();
+        store.upsert_trajectory(&sample_record()).unwrap();
+        store
+            .lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE collected_trajectories SET collected_at_ns = 1 WHERE session_id = ?1",
+                params!["s-1"],
+            )
+            .unwrap();
+
+        let report = store
+            .maintain(TrajectoryMaintenancePolicy {
+                retention_days: 1,
+                max_db_size_mb: 0,
+            })
+            .unwrap();
+
+        assert_eq!(report.expired_trajectories, 1);
+        assert!(store.get("s-1").unwrap().is_none());
+
+        let cleanup = store
+            .maintain(TrajectoryMaintenancePolicy {
+                retention_days: 1,
+                max_db_size_mb: 0,
+            })
+            .unwrap();
+        assert_eq!(cleanup.removed_skipped_files, 1);
+    }
+
+    #[test]
+    fn maintenance_trims_oldest_trajectories_to_size_target() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("maintenance-size")).unwrap();
+        let payload = "x".repeat(20_000);
+        for index in 0..100 {
+            let mut record = sample_record();
+            record.session_id = format!("session-{index:03}");
+            record.file_path = format!("/tmp/session-{index:03}.jsonl");
+            record.atif_json = payload.clone();
+            store.upsert_trajectory(&record).unwrap();
+        }
+
+        let report = store
+            .maintain(TrajectoryMaintenancePolicy {
+                retention_days: 0,
+                max_db_size_mb: 1,
+            })
+            .unwrap();
+
+        assert!(report.size.deleted_rows > 0);
+        assert!(store.get("session-099").unwrap().is_some());
     }
 
     #[test]

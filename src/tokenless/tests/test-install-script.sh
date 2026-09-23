@@ -506,7 +506,27 @@ case "$1 $2" in
       echo "codex: error: cannot read the plugin list" >&2
       exit 1
     fi
-    [ -f "$state/plugin" ] && echo "tokenless@anolisa-tokenless   enabled"
+    # codex-cli 0.154.0 lists every plugin the registered marketplaces offer,
+    # in whatever state it is in, under a header that names the marketplace:
+    #
+    #   Marketplace `anolisa-tokenless`
+    #   PLUGIN                       STATUS              VERSION  SOURCE
+    #   tokenless@anolisa-tokenless  installed, enabled  local    <source>
+    #
+    # `plugin remove` only flips that STATUS to `not installed`; the row itself
+    # survives until the marketplace that ships the plugin is removed. Reading
+    # the listing correctly under both facts is what the adapter's deregistration
+    # check is judged on, so the stub reproduces them rather than printing a bare
+    # row that disappears with the plugin.
+    if [ -f "$state/marketplace" ]; then
+      echo "Marketplace \`anolisa-tokenless\`"
+      echo "PLUGIN                       STATUS              VERSION  SOURCE"
+      if [ -f "$state/plugin" ]; then
+        echo "tokenless@anolisa-tokenless  installed, enabled  local    $state/plugin"
+      else
+        echo "tokenless@anolisa-tokenless  not installed                $state/plugin"
+      fi
+    fi
     exit 0 ;;
   "plugin remove")
     if [ "${CODEX_STUB_REMOVE_FAILS:-0}" = "1" ]; then
@@ -3209,5 +3229,46 @@ assert_file "the adapter resources that registration points at are kept" \
   "$S56_ADAPTERS/claude-code/.claude-plugin/plugin.json"
 assert_file "and the adapter tree itself is kept" \
   "$S56_ADAPTERS/claude-code/scripts/uninstall.sh"
+
+# =============================================================================
+# Scenario 57 — a `not installed` row is a deregistration, not a registration
+# =============================================================================
+# codex-cli 0.154.0 keeps listing a plugin that a registered marketplace
+# offers after `plugin remove`, with its STATUS flipped to `not installed`; the
+# row only disappears together with the marketplace, which the adapter script
+# removes immediately afterwards. A deregistration check that just looks for
+# "tokenless" in `plugin list` read that row as a surviving registration — as it
+# read the `Marketplace` header above it, which is printed even when the plugin
+# was never added — so every successful uninstall exited 1, kept the marketplace
+# directory, and stopped the component uninstaller from dropping the adapter
+# resources and the receipt. Scenario 29's retry covers the same row through the
+# receipt-driven uninstaller; this one pins the adapter contract directly. A
+# registration that really did survive still has to fail (scenarios 29 and 33).
+S57_HOME="$TEST_DIR/codex-residual/home"
+S57_STATE="$S57_HOME/.codex-stub"
+S57_MARKET="$S57_HOME/.local/share/anolisa/codex-marketplace"
+mkdir -p "$S57_HOME/.local/bin" "$S57_STATE" "$S57_MARKET/tokenless"
+printf '#!/bin/sh\necho kept\n' > "$S57_HOME/.local/bin/tokenless"
+chmod +x "$S57_HOME/.local/bin/tokenless"
+printf '{"name":"tokenless"}\n' > "$S57_MARKET/tokenless/plugin.json"
+: > "$S57_STATE/plugin"
+: > "$S57_STATE/marketplace"
+RUN_OUTPUT="$(
+  env -i \
+    PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" \
+    HOME="$S57_HOME" \
+    SHELL=/bin/bash \
+    TOKENLESS_DEREGISTER_ONLY=1 \
+    bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "a deregistration codex confirms exits 0" "$RUN_STATUS" "0"
+assert_not_contains "does not report a registration that is already gone" "$RUN_OUTPUT" \
+  "still lists the tokenless plugin"
+assert_contains "reports the run as complete" "$RUN_OUTPUT" "Uninstall complete"
+assert_no_file "the plugin registration is gone" "$S57_STATE/plugin"
+assert_no_file "and so is the marketplace registration" "$S57_STATE/marketplace"
+assert_no_file "so the marketplace directory it pointed at is dropped" "$S57_MARKET"
+assert_file "deregistration-only mode still keeps the component binary" \
+  "$S57_HOME/.local/bin/tokenless"
 
 echo "install-script test passed"

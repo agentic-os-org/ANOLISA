@@ -219,10 +219,6 @@ detect_platform() {
     *)               err "unsupported architecture: $arch" ;;
   esac
 
-  if [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
-    err "macOS x86_64 is not supported; only Apple Silicon (arm64) is available"
-  fi
-
   case "$OS" in
     linux)  TARGET="${ARCH}-unknown-linux-gnu" ;;
     darwin) TARGET="${ARCH}-apple-darwin" ;;
@@ -522,7 +518,7 @@ main() {
     artifact="anolisa-cli-${VERSION}-${TARGET}.tar.gz"
     release_dir="$VERSION"
     label="$VERSION"
-    local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${release_dir}/artifacts/${OS}/${ARCH_SHORT}"
+    local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${release_dir}/artifacts/${MANIFEST_OS}/${ARCH_SHORT}"
     tar_url="${base_url}/${artifact}"
     sha_url="${tar_url}.sha256.txt"
   fi

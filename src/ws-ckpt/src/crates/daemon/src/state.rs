@@ -6,7 +6,7 @@ use anyhow::Context;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use ws_ckpt_common::backend::BackendType;
 use ws_ckpt_common::backend::StorageBackend;
@@ -15,18 +15,81 @@ use ws_ckpt_common::persist::{
 };
 use ws_ckpt_common::{
     load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, ErrorCode,
-    LoadPolicyOutcome, ResolveError, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy,
-    INDEXES_DIR, INDEX_FILE,
+    LoadPolicyOutcome, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy, INDEXES_DIR,
+    INDEX_FILE,
 };
 
 use crate::fs_watcher::WorkspaceWatcher;
 use crate::index_store;
 
+/// Resolve parent aliases without following the final workspace symlink.
+///
+/// Missing anchors and parent directories remain addressable after detachment.
+/// Existing ancestors are resolved before appending missing normal components;
+/// unresolved `..` and broken parent symlinks are rejected as ambiguous.
+pub(crate) fn normalize_registration_path(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("workspace registration path is empty");
+    }
+    match path.file_name() {
+        Some(name) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Ok(normalize_registration_parent(parent)
+                .with_context(|| format!("normalize workspace parent {parent:?}"))?
+                .join(name))
+        }
+        None => std::fs::canonicalize(path)
+            .with_context(|| format!("normalize workspace registration path {path:?}")),
+    }
+}
+
+fn normalize_registration_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) => {
+                // A broken symlink is not a missing directory: discarding it
+                // would invent an anchor unrelated to the filesystem target.
+                if error.kind() != std::io::ErrorKind::NotFound
+                    || !matches!(std::fs::symlink_metadata(ancestor), Err(ref err)
+                        if err.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Err(error);
+                }
+                let Some(name) = ancestor.file_name() else {
+                    // In particular, never cancel '..' across a missing node.
+                    return Err(error);
+                };
+                missing.push(name);
+                ancestor = ancestor
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceRegistry {
+    workspaces: HashMap<String, Arc<RwLock<WorkspaceState>>>,
+    path_to_wsid: HashMap<PathBuf, String>,
+}
+
 pub struct DaemonState {
-    /// ws_id -> workspace state (tokio RwLock because lock is held across .await)
-    workspaces: DashMap<String, Arc<RwLock<WorkspaceState>>>,
-    /// Reverse index: canonicalized abs path -> ws_id
-    path_to_wsid: DashMap<PathBuf, String>,
+    // Never hold this lock across an await or a workspace-state lock: lifecycle
+    // publication and both lookup directions must be one atomic operation.
+    registry: std::sync::RwLock<WorkspaceRegistry>,
     /// Daemon configuration (std RwLock for runtime-reloadable config)
     pub config: std::sync::RwLock<DaemonConfig>,
     /// Broadcast signal: dispatcher calls `notify_waiters()` after a successful
@@ -88,8 +151,7 @@ impl DaemonState {
         let socket_path = config.socket_path.clone();
         let selection_method = "auto-detect".to_string();
         Self {
-            workspaces: DashMap::new(),
-            path_to_wsid: DashMap::new(),
+            registry: std::sync::RwLock::new(WorkspaceRegistry::default()),
             config: std::sync::RwLock::new(config),
             config_notify: Notify::new(),
             mount_path,
@@ -169,6 +231,12 @@ impl DaemonState {
 
         for entry in &state_file.workspaces {
             let ws_id = &entry.ws_id;
+            let workspace_path = normalize_registration_path(&entry.workspace_path).with_context(|| {
+                format!(
+                    "restore workspace {ws_id:?} at {:?}: restore its parent directory before restarting",
+                    entry.workspace_path
+                )
+            })?;
             let index_dir = state.index_dir(ws_id);
             let index_path = index_dir.join(INDEX_FILE);
 
@@ -177,27 +245,40 @@ impl DaemonState {
                 index.clone()
             } else {
                 match tokio::fs::read_to_string(&index_path).await {
-                    Ok(content) => match serde_json::from_str::<SnapshotIndex>(&content) {
-                        Ok(idx) => idx,
-                        Err(e) => {
-                            warn!("Failed to parse index file {:?}: {}", index_path, e);
-                            SnapshotIndex::new(entry.workspace_path.clone())
-                        }
-                    },
+                    Ok(content) => serde_json::from_str::<SnapshotIndex>(&content)
+                        .with_context(|| format!("parse snapshot index {index_path:?}"))?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        SnapshotIndex::new(workspace_path.clone())
+                    }
                     Err(e) => {
-                        warn!("Failed to read index file {:?}: {}", index_path, e);
-                        SnapshotIndex::new(entry.workspace_path.clone())
+                        return Err(e)
+                            .with_context(|| format!("read snapshot index {index_path:?}"))
                     }
                 }
             };
 
             info!(
                 "Restoring workspace from persisted state: {} -> {:?}",
-                ws_id, entry.workspace_path
+                ws_id, workspace_path
             );
 
+            // Shared helper: Missing → inherit-global; Err → fail-safe
+            // (auto_cleanup=false + policy_failsafe=true). See [[ws-failsafe]].
+            let (policy, failsafe) = match recovered {
+                Some((_, policy)) => (policy, false),
+                None => load_workspace_policy_with_failsafe(&index_dir, ws_id, "rebuild"),
+            };
+            state
+                .register_workspace_with_policy(
+                    ws_id.clone(),
+                    workspace_path.clone(),
+                    index,
+                    policy,
+                    failsafe,
+                )
+                .with_context(|| format!("restore workspace registration {ws_id:?}"))?;
             // Start file watcher
-            match WorkspaceWatcher::start(&entry.workspace_path) {
+            match WorkspaceWatcher::start(&workspace_path) {
                 Ok(watcher) => {
                     state.register_watcher(ws_id.clone(), watcher);
                 }
@@ -208,60 +289,17 @@ impl DaemonState {
                     );
                 }
             }
-            // Shared helper: Missing → inherit-global; Err → fail-safe
-            // (auto_cleanup=false + policy_failsafe=true). See [[ws-failsafe]].
-            let (policy, failsafe) = match recovered {
-                Some((_, policy)) => (policy, false),
-                None => load_workspace_policy_with_failsafe(&index_dir, ws_id, "rebuild"),
-            };
-            state.register_workspace_with_policy(
-                ws_id.clone(),
-                entry.workspace_path.clone(),
-                index,
-                policy,
-                failsafe,
-            );
         }
 
-        // Reconcile: mark phantom snapshots whose subvolumes no longer exist
-        let snapshots_root = state.backend.snapshots_root().to_path_buf();
-        let ws_ids: Vec<String> = state.workspaces.iter().map(|e| e.key().clone()).collect();
-        for ws_id in &ws_ids {
-            if let Some(ws_arc) = state.get_by_wsid(ws_id) {
+        // Reconcile both sides of a crash between backend mutation and index save.
+        for ws_id in state.workspace_ids() {
+            if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
                 let mut ws = ws_arc.write().await;
-                let mut changed = false;
-                // Need to iterate with keys, so use a collected list
-                let snap_ids: Vec<String> = ws.index.snapshots.keys().cloned().collect();
-                for snap_id in &snap_ids {
-                    let snap_path = snapshots_root.join(ws_id).join(snap_id);
-                    if !snap_path.exists() {
-                        if let Some(snap) = ws.index.snapshots.get_mut(snap_id) {
-                            if !snap.missing {
-                                error!(
-                                    "Snapshot {} subvolume missing at {:?}, marking as unavailable",
-                                    snap_id, snap_path
-                                );
-                                snap.missing = true;
-                                changed = true;
-                            }
-                        }
-                    } else if let Some(snap) = ws.index.snapshots.get_mut(snap_id) {
-                        if snap.missing {
-                            info!(
-                                "Snapshot {} subvolume recovered at {:?}",
-                                snap_id, snap_path
-                            );
-                            snap.missing = false;
-                            changed = true;
-                        }
-                    }
-                }
-                if changed {
-                    // Save reconciled index
-                    let index_dir = state.index_dir(ws_id);
-                    if let Err(e) = index_store::save(&index_dir, &ws.index).await {
-                        warn!("Failed to save reconciled index for {}: {}", ws_id, e);
-                    }
+                let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
+                if index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await? {
+                    index_store::save(&state.index_dir(&ws_id), &ws.index)
+                        .await
+                        .with_context(|| format!("save reconciled index for {ws_id}"))?;
                 }
             }
         }
@@ -372,23 +410,28 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Collect registered workspace entries for state.json. No RwLock taken so
-    /// a write-locked ws is not silently dropped.
+    /// Snapshot registry identities without taking workspace-state locks.
     fn collect_workspace_entries(&self) -> Vec<WorkspaceEntry> {
-        self.path_to_wsid
+        let registry = self.registry.read().unwrap_or_else(|err| err.into_inner());
+        registry
+            .path_to_wsid
             .iter()
-            .filter_map(|entry| {
-                let ws_id = entry.value().clone();
-                if !self.workspaces.contains_key(&ws_id) {
-                    return None;
-                }
-                Some(WorkspaceEntry {
-                    ws_id,
-                    workspace_path: entry.key().clone(),
-                    registered_at: Utc::now(),
-                    origin_backend: self.backend.backend_type(),
-                })
+            .map(|(path, ws_id)| WorkspaceEntry {
+                ws_id: ws_id.clone(),
+                workspace_path: path.clone(),
+                registered_at: Utc::now(),
+                origin_backend: self.backend.backend_type(),
             })
+            .collect()
+    }
+
+    fn workspace_ids(&self) -> Vec<String> {
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
+            .keys()
+            .cloned()
             .collect()
     }
 
@@ -411,24 +454,36 @@ impl DaemonState {
     }
 
     pub fn get_by_wsid(&self, ws_id: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
-        self.workspaces
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
             .get(ws_id)
-            .map(|entry| Arc::clone(entry.value()))
+            .cloned()
     }
 
     pub fn get_by_path(&self, path: &Path) -> Option<Arc<RwLock<WorkspaceState>>> {
-        let ws_id = self.path_to_wsid.get(path)?.value().clone();
-        self.get_by_wsid(&ws_id)
+        {
+            let registry = self.registry.read().unwrap_or_else(|err| err.into_inner());
+            if let Some(ws_id) = registry.path_to_wsid.get(path) {
+                return registry.workspaces.get(ws_id).cloned();
+            }
+        }
+        let path = normalize_registration_path(path).ok()?;
+        let registry = self.registry.read().unwrap_or_else(|err| err.into_inner());
+        let ws_id = registry.path_to_wsid.get(&path)?;
+        registry.workspaces.get(ws_id).cloned()
     }
 
-    /// Returns the workspace ID registered for this exact path spelling.
-    ///
-    /// The map guard is dropped before returning so callers can acquire the
-    /// mutation mutex without retaining a DashMap shard lock across `.await`.
+    /// Returns the workspace ID for an exact normalized registration anchor.
+    /// Guarded identity discovery deliberately does not resolve caller aliases.
     pub(crate) fn wsid_for_exact_registration_path(&self, path: &Path) -> Option<String> {
-        self.path_to_wsid
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .path_to_wsid
             .get(path)
-            .map(|entry| entry.value().clone())
+            .cloned()
     }
 
     /// Confirms that the workspace ID still maps to this exact allocation.
@@ -437,9 +492,12 @@ impl DaemonState {
         ws_id: &str,
         workspace: &Arc<RwLock<WorkspaceState>>,
     ) -> bool {
-        self.workspaces
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
             .get(ws_id)
-            .is_some_and(|entry| Arc::ptr_eq(entry.value(), workspace))
+            .is_some_and(|entry| Arc::ptr_eq(entry, workspace))
     }
 
     /// Confirms that both registration indexes still name the same workspace.
@@ -449,11 +507,15 @@ impl DaemonState {
         ws_id: &str,
         workspace: &Arc<RwLock<WorkspaceState>>,
     ) -> bool {
-        let path_matches = self
+        let registry = self.registry.read().unwrap_or_else(|err| err.into_inner());
+        registry
             .path_to_wsid
             .get(path)
-            .is_some_and(|entry| entry.value() == ws_id);
-        path_matches && self.workspace_arc_is_current(ws_id, workspace)
+            .is_some_and(|id| id == ws_id)
+            && registry
+                .workspaces
+                .get(ws_id)
+                .is_some_and(|entry| Arc::ptr_eq(entry, workspace))
     }
 
     /// Resolve a workspace by identifier: tries workspace ID first, then filesystem path.
@@ -475,20 +537,27 @@ impl DaemonState {
         if let Some(arc) = self.get_by_wsid(workspace) {
             return Some(arc);
         }
-        // 2. Try as filesystem path (canonical)
+        // Exact registrations must win even if a managed link was retargeted;
+        // mutation callers must check its own detached-registration guard.
+        let path = Path::new(workspace);
+        if let Some(arc) = self.get_by_path(path) {
+            return Some(arc);
+        }
         if let Ok(abs_path) = tokio::fs::canonicalize(workspace).await {
             if let Some(arc) = self.get_by_path(&abs_path) {
                 return Some(arc);
             }
-        }
-        // 3. Fallback: try raw path without canonicalization.
-        //    With symlink-based workspaces, canonicalize() follows the symlink
-        //    and returns the btrfs subvolume path, which won't match the
-        //    registered workspace path. The raw path matches the original
-        //    user-facing path stored at registration time.
-        let raw_path = PathBuf::from(workspace);
-        if let Some(arc) = self.get_by_path(&raw_path) {
-            return Some(arc);
+            // Aliases follow the final managed symlink to data_root/ws_id.
+            // Nested directories and unregistered storage are not workspaces.
+            if let Ok(data_root) = tokio::fs::canonicalize(self.backend.data_root()).await {
+                if let Ok(rest) = abs_path.strip_prefix(data_root) {
+                    if rest.components().count() == 1 {
+                        if let Some(ws_id) = rest.to_str() {
+                            return self.get_by_wsid(ws_id);
+                        }
+                    }
+                }
+            }
         }
         None
     }
@@ -575,18 +644,50 @@ impl DaemonState {
         })
     }
 
-    pub fn register_workspace(&self, ws_id: String, path: PathBuf, index: SnapshotIndex) {
-        self.register_workspace_with_policy(ws_id, path, index, WorkspacePolicy::default(), false);
+    /// Distinguish user registration anchors from backend-owned storage paths.
+    pub(crate) fn registration_path_is_internal(&self, path: &Path) -> anyhow::Result<bool> {
+        let path = normalize_registration_path(path)?;
+        let root = self.backend.data_root();
+        let data_root = match std::fs::canonicalize(root) {
+            Ok(root) => root,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(std::fs::symlink_metadata(root), Err(ref err)
+                    if err.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                normalize_registration_path(root)?
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("resolve backend data root {root:?}"))
+            }
+        };
+        Ok(path.starts_with(data_root) || path == normalize_registration_path(root)?)
     }
 
-    pub fn register_workspace_with_policy(
+    /// Atomically register a unique workspace identity and normalized anchor.
+    pub fn register_workspace(
         &self,
         ws_id: String,
         path: PathBuf,
         index: SnapshotIndex,
+    ) -> anyhow::Result<()> {
+        self.register_workspace_with_policy(ws_id, path, index, WorkspacePolicy::default(), false)
+    }
+
+    /// Reject duplicate IDs or anchors without modifying either registry index.
+    pub fn register_workspace_with_policy(
+        &self,
+        ws_id: String,
+        path: PathBuf,
+        mut index: SnapshotIndex,
         policy: WorkspacePolicy,
         failsafe: bool,
-    ) {
+    ) -> anyhow::Result<()> {
+        let path = normalize_registration_path(&path)?;
+        if path == Path::new("/") || self.registration_path_is_internal(&path)? {
+            anyhow::bail!("workspace registration anchor {path:?} must be a user path outside backend storage");
+        }
+        index.workspace_path = path.clone();
         let state = Arc::new(RwLock::new(WorkspaceState {
             ws_id: ws_id.clone(),
             path: path.clone(),
@@ -595,14 +696,19 @@ impl DaemonState {
             policy_failsafe: failsafe,
             policy_io_mu: Arc::new(Mutex::new(())),
         }));
-        let replaced = self.workspaces.insert(ws_id.clone(), state).is_some();
-        if replaced {
-            self.path_to_wsid.retain(|registered_path, registered_id| {
-                registered_id != &ws_id || registered_path == &path
-            });
+        {
+            let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
+            if registry.workspaces.contains_key(&ws_id) {
+                anyhow::bail!("workspace ID {ws_id:?} is already registered");
+            }
+            if let Some(existing) = registry.path_to_wsid.get(&path) {
+                anyhow::bail!("workspace path {path:?} is already registered as {existing:?}");
+            }
+            registry.workspaces.insert(ws_id.clone(), state);
+            registry.path_to_wsid.insert(path, ws_id);
         }
-        self.path_to_wsid.insert(path, ws_id);
         self.config_notify.notify_waiters();
+        Ok(())
     }
 
     /// Reload every `policy.toml` from disk into the in-memory state.
@@ -631,7 +737,7 @@ impl DaemonState {
         const RELOAD_CONCURRENCY: usize = 32;
         let sem = Arc::new(Semaphore::new(RELOAD_CONCURRENCY));
 
-        let ws_ids: Vec<String> = self.workspaces.iter().map(|e| e.key().clone()).collect();
+        let ws_ids = self.workspace_ids();
         let mut set = tokio::task::JoinSet::new();
         for ws_id in ws_ids {
             let arc = match self.get_by_wsid(&ws_id) {
@@ -733,12 +839,12 @@ impl DaemonState {
                 w.stop();
             }
         }
-        if let Some((_, ws_state)) = self.workspaces.remove(ws_id) {
-            // Await any in-flight writer (e.g. a concurrent checkpoint) so
-            // path_to_wsid is never leaked. After workspaces.remove no new
-            // holders can appear; existing ones drop quickly.
-            let state = ws_state.read().await;
-            self.path_to_wsid.remove(&state.path);
+        {
+            let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
+            registry.workspaces.remove(ws_id);
+            registry
+                .path_to_wsid
+                .retain(|_, registered_id| registered_id != ws_id);
         }
         // Symmetric with register: re-park/re-evaluate the
         // scheduler when a ws goes away. No-op when no one is parked.
@@ -848,7 +954,7 @@ impl DaemonState {
             }
         };
 
-        let workspace_path = index.workspace_path.clone();
+        let workspace_path = normalize_registration_path(&index.workspace_path)?;
 
         // If loaded index has no snapshots, try rebuilding from filesystem
         let index = if index.snapshots.is_empty() {
@@ -874,6 +980,18 @@ impl DaemonState {
         };
 
         info!("Restored workspace {} -> {:?}", ws_id, workspace_path);
+        // Shared fail-safe helper; same `(policy, failsafe)` semantics as
+        // every other register entry. See [[ws-failsafe]].
+        let policy_dir = state.index_dir(&ws_id);
+        let (policy, failsafe) =
+            load_workspace_policy_with_failsafe(&policy_dir, &ws_id, "rebuild");
+        state.register_workspace_with_policy(
+            ws_id.clone(),
+            workspace_path.clone(),
+            index,
+            policy,
+            failsafe,
+        )?;
         // Start file watcher for write-lock detection
         match WorkspaceWatcher::start(&workspace_path) {
             Ok(watcher) => {
@@ -883,40 +1001,30 @@ impl DaemonState {
                 warn!("Failed to start watcher for {}: {}", ws_id, e);
             }
         }
-        // Shared fail-safe helper; same `(policy, failsafe)` semantics as
-        // every other register entry. See [[ws-failsafe]].
-        let policy_dir = state.index_dir(&ws_id);
-        let (policy, failsafe) =
-            load_workspace_policy_with_failsafe(&policy_dir, &ws_id, "rebuild");
-        state.register_workspace_with_policy(ws_id, workspace_path, index, policy, failsafe);
 
         Ok(())
     }
 
     pub fn all_workspaces(&self) -> Vec<Arc<RwLock<WorkspaceState>>> {
-        self.workspaces
-            .iter()
-            .map(|entry| Arc::clone(entry.value()))
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
+            .values()
+            .cloned()
             .collect()
     }
 
-    /// Cross-workspace snapshot lookup by ID (exact match or unique prefix).
+    /// Cross-workspace snapshot lookup by exact ID.
     /// Returns `(workspace_path, snapshot_id)` if exactly one match is found.
     pub async fn resolve_snapshot_globally(&self, snapshot_ref: &str) -> Option<(String, String)> {
         let mut found: Vec<(String, String)> = Vec::new();
 
-        for entry in self.workspaces.iter() {
-            let ws = entry.value().read().await;
-            match ws.index.resolve_by_prefix(snapshot_ref) {
-                Ok((id, _)) => {
-                    let ws_path = ws.path.to_string_lossy().to_string();
-                    found.push((ws_path, id.clone()));
-                }
-                Err(ResolveError::Ambiguous(_)) => {
-                    // Ambiguous within one workspace → treat as globally ambiguous
-                    return None;
-                }
-                Err(ResolveError::NotFound) => {}
+        for workspace in self.all_workspaces() {
+            let ws = workspace.read().await;
+            if ws.index.snapshots.contains_key(snapshot_ref) {
+                let ws_path = ws.path.to_string_lossy().to_string();
+                found.push((ws_path, snapshot_ref.to_string()));
             }
         }
 
@@ -1061,9 +1169,38 @@ mod tests {
             },
         )
         .unwrap();
-        state.register_workspace("ws-restart".to_string(), path, index);
+        state
+            .register_workspace("ws-restart".to_string(), path, index)
+            .unwrap();
         state.save_manifest().await.unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_invalid_indexes_instead_of_adopting_protected_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(temp.path()).await;
+        let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let path = state.index_dir("ws-restart").join(INDEX_FILE);
+        // Invalid JSON and an unreadable index must both stop reconciliation.
+        for contents in [b"{broken".as_slice(), b"\xff".as_slice()] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(DaemonState::rebuild_from_persisted(
+                &manifest,
+                test_config(),
+                state.backend.clone(),
+                state.state_dir.clone(),
+                "persisted",
+            )
+            .await
+            .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+            assert!(state
+                .backend
+                .snapshots_root()
+                .join("ws-restart/retained-snapshot")
+                .exists());
+        }
     }
 
     #[tokio::test]
@@ -1160,8 +1297,10 @@ mod tests {
     #[test]
     fn register_and_get_by_wsid() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
-        state.register_workspace("ws-abc".to_string(), PathBuf::from("/home/user/ws"), index);
+        let index = SnapshotIndex::new(PathBuf::from("/tmp/ws"));
+        state
+            .register_workspace("ws-abc".to_string(), PathBuf::from("/tmp/ws"), index)
+            .unwrap();
 
         let ws = state.get_by_wsid("ws-abc");
         assert!(ws.is_some());
@@ -1170,9 +1309,11 @@ mod tests {
     #[test]
     fn register_and_get_by_path() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/home/user/project");
+        let path = PathBuf::from("/tmp/project");
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-001".to_string(), path.clone(), index);
+        state
+            .register_workspace("ws-001".to_string(), path.clone(), index)
+            .unwrap();
 
         let ws = state.get_by_path(&path);
         assert!(ws.is_some());
@@ -1181,9 +1322,11 @@ mod tests {
     #[tokio::test]
     async fn register_and_verify_ws_id_content() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/home/user/ws2");
+        let path = PathBuf::from("/tmp/ws2");
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-xyz".to_string(), path.clone(), index);
+        state
+            .register_workspace("ws-xyz".to_string(), path.clone(), index)
+            .unwrap();
 
         let arc = state.get_by_wsid("ws-xyz").unwrap();
         let ws = arc.read().await;
@@ -1207,9 +1350,11 @@ mod tests {
     #[tokio::test]
     async fn resolve_workspace_by_wsid() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/home/user/ws");
+        let path = PathBuf::from("/tmp/ws");
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-abc123".to_string(), path, index);
+        state
+            .register_workspace("ws-abc123".to_string(), path, index)
+            .unwrap();
         assert!(state.resolve_workspace("ws-abc123").await.is_some());
     }
 
@@ -1219,7 +1364,9 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tokio::fs::canonicalize(tmpdir.path()).await.unwrap();
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-path-test".to_string(), path, index);
+        state
+            .register_workspace("ws-path-test".to_string(), path, index)
+            .unwrap();
         assert!(state
             .resolve_workspace(&tmpdir.path().to_string_lossy())
             .await
@@ -1236,9 +1383,11 @@ mod tests {
     #[test]
     fn path_to_wsid_bidirectional_mapping() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/home/user/myws");
+        let path = PathBuf::from("/tmp/myws");
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-map".to_string(), path.clone(), index);
+        state
+            .register_workspace("ws-map".to_string(), path.clone(), index)
+            .unwrap();
 
         // path -> ws -> verify ws_id
         let arc = state.get_by_path(&path).unwrap();
@@ -1247,29 +1396,35 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_register_replaces_reverse_path_mapping() {
+    fn duplicate_register_preserves_original_mapping() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path1 = PathBuf::from("/ws/first");
-        let path2 = PathBuf::from("/ws/second");
+        let path1 = PathBuf::from("/tmp/first");
+        let path2 = PathBuf::from("/tmp/second");
         let index1 = SnapshotIndex::new(path1.clone());
         let index2 = SnapshotIndex::new(path2.clone());
 
-        state.register_workspace("ws-dup".to_string(), path1.clone(), index1);
-        state.register_workspace("ws-dup".to_string(), path2.clone(), index2);
+        state
+            .register_workspace("ws-dup".to_string(), path1.clone(), index1)
+            .unwrap();
+        assert!(state
+            .register_workspace("ws-dup".to_string(), path2.clone(), index2)
+            .is_err());
 
         let arc = state.get_by_wsid("ws-dup").unwrap();
         let ws = arc.try_read().unwrap();
-        assert_eq!(ws.path, path2);
-        assert!(state.get_by_path(&path1).is_none());
-        assert!(state.get_by_path(&path2).is_some());
+        assert_eq!(ws.path, path1);
+        assert!(state.get_by_path(&path1).is_some());
+        assert!(state.get_by_path(&path2).is_none());
     }
 
     #[tokio::test]
     async fn unregister_workspace_removes_both_mappings() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/home/user/removable");
+        let path = PathBuf::from("/tmp/removable");
         let index = SnapshotIndex::new(path.clone());
-        state.register_workspace("ws-rm".to_string(), path.clone(), index);
+        state
+            .register_workspace("ws-rm".to_string(), path.clone(), index)
+            .unwrap();
 
         // Verify it exists
         assert!(state.get_by_wsid("ws-rm").is_some());
@@ -1286,23 +1441,27 @@ mod tests {
     #[test]
     fn all_workspaces_returns_all_registered() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        state.register_workspace(
-            "ws-a".to_string(),
-            PathBuf::from("/a"),
-            SnapshotIndex::new(PathBuf::from("/a")),
-        );
-        state.register_workspace(
-            "ws-b".to_string(),
-            PathBuf::from("/b"),
-            SnapshotIndex::new(PathBuf::from("/b")),
-        );
+        state
+            .register_workspace(
+                "ws-a".to_string(),
+                PathBuf::from("/a"),
+                SnapshotIndex::new(PathBuf::from("/a")),
+            )
+            .unwrap();
+        state
+            .register_workspace(
+                "ws-b".to_string(),
+                PathBuf::from("/b"),
+                SnapshotIndex::new(PathBuf::from("/b")),
+            )
+            .unwrap();
         assert_eq!(state.all_workspaces().len(), 2);
     }
 
     #[tokio::test]
     async fn resolve_snapshot_globally_exact_match() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
+        let mut index = SnapshotIndex::new(PathBuf::from("/tmp/ws"));
         index.snapshots.insert(
             "abcdef1234567890abcdef1234567890abcdef12".to_string(),
             SnapshotMeta {
@@ -1315,19 +1474,21 @@ mod tests {
                 child_ids: vec![],
             },
         );
-        state.register_workspace("ws-abc".to_string(), PathBuf::from("/home/user/ws"), index);
+        state
+            .register_workspace("ws-abc".to_string(), PathBuf::from("/tmp/ws"), index)
+            .unwrap();
 
         let result = state
             .resolve_snapshot_globally("abcdef1234567890abcdef1234567890abcdef12")
             .await;
         assert!(result.is_some());
         let (ws_path, snap_id) = result.unwrap();
-        assert_eq!(ws_path, "/home/user/ws");
+        assert_eq!(ws_path, "/tmp/ws");
         assert_eq!(snap_id, "abcdef1234567890abcdef1234567890abcdef12");
     }
 
     #[tokio::test]
-    async fn resolve_snapshot_globally_prefix_match() {
+    async fn resolve_snapshot_globally_rejects_prefix() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         let mut index = SnapshotIndex::new(PathBuf::from("/ws1"));
         index.snapshots.insert(
@@ -1342,22 +1503,24 @@ mod tests {
                 child_ids: vec![],
             },
         );
-        state.register_workspace("ws-1".to_string(), PathBuf::from("/ws1"), index);
+        state
+            .register_workspace("ws-1".to_string(), PathBuf::from("/ws1"), index)
+            .unwrap();
 
         let result = state.resolve_snapshot_globally("abcdef").await;
-        assert!(result.is_some());
-        let (_, snap_id) = result.unwrap();
-        assert_eq!(snap_id, "abcdef1234567890abcdef1234567890abcdef12");
+        assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn resolve_snapshot_globally_not_found() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        state.register_workspace(
-            "ws-1".to_string(),
-            PathBuf::from("/ws1"),
-            SnapshotIndex::new(PathBuf::from("/ws1")),
-        );
+        state
+            .register_workspace(
+                "ws-1".to_string(),
+                PathBuf::from("/ws1"),
+                SnapshotIndex::new(PathBuf::from("/ws1")),
+            )
+            .unwrap();
         let result = state.resolve_snapshot_globally("nonexistent").await;
         assert!(result.is_none());
     }
@@ -1376,19 +1539,19 @@ mod tests {
         };
 
         let mut idx1 = SnapshotIndex::new(PathBuf::from("/ws1"));
-        idx1.snapshots.insert(
-            "abcdef1111111111111111111111111111111111".to_string(),
-            meta.clone(),
-        );
-        state.register_workspace("ws-1".to_string(), PathBuf::from("/ws1"), idx1);
+        idx1.snapshots.insert("same-id".to_string(), meta.clone());
+        state
+            .register_workspace("ws-1".to_string(), PathBuf::from("/ws1"), idx1)
+            .unwrap();
 
         let mut idx2 = SnapshotIndex::new(PathBuf::from("/ws2"));
-        idx2.snapshots
-            .insert("abcdef2222222222222222222222222222222222".to_string(), meta);
-        state.register_workspace("ws-2".to_string(), PathBuf::from("/ws2"), idx2);
+        idx2.snapshots.insert("same-id".to_string(), meta);
+        state
+            .register_workspace("ws-2".to_string(), PathBuf::from("/ws2"), idx2)
+            .unwrap();
 
-        // Prefix "abcdef" matches in both workspaces
-        let result = state.resolve_snapshot_globally("abcdef").await;
+        // The exact ID exists in both workspaces
+        let result = state.resolve_snapshot_globally("same-id").await;
         assert!(result.is_none());
     }
 
@@ -1421,16 +1584,20 @@ mod tests {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         let path_a = PathBuf::from("/ws-locked");
         let path_b = PathBuf::from("/ws-free");
-        state.register_workspace(
-            "ws-a".to_string(),
-            path_a.clone(),
-            SnapshotIndex::new(path_a),
-        );
-        state.register_workspace(
-            "ws-b".to_string(),
-            path_b.clone(),
-            SnapshotIndex::new(path_b),
-        );
+        state
+            .register_workspace(
+                "ws-a".to_string(),
+                path_a.clone(),
+                SnapshotIndex::new(path_a),
+            )
+            .unwrap();
+        state
+            .register_workspace(
+                "ws-b".to_string(),
+                path_b.clone(),
+                SnapshotIndex::new(path_b),
+            )
+            .unwrap();
 
         let ws_a = state.get_by_wsid("ws-a").unwrap();
         let (acquired_tx, acquired_rx) = oneshot::channel();
@@ -1458,8 +1625,10 @@ mod tests {
     #[tokio::test]
     async fn register_workspace_default_policy_is_inherit_global() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path = PathBuf::from("/ws/inherit");
-        state.register_workspace("ws-i".to_string(), path.clone(), SnapshotIndex::new(path));
+        let path = PathBuf::from("/tmp/inherit");
+        state
+            .register_workspace("ws-i".to_string(), path.clone(), SnapshotIndex::new(path))
+            .unwrap();
         let arc = state.get_by_wsid("ws-i").unwrap();
         let ws = arc.read().await;
         assert!(ws.policy.is_empty(), "default register sets empty policy");
@@ -1473,43 +1642,49 @@ mod tests {
         assert!(!state.any_ws_has_effective_cleanup().await);
 
         // Inherit-only ws under a globally-off config → still false.
-        let path_a = PathBuf::from("/ws/a");
-        state.register_workspace_with_policy(
-            "ws-a".to_string(),
-            path_a.clone(),
-            SnapshotIndex::new(path_a),
-            WorkspacePolicy::default(),
-            false,
-        );
+        let path_a = PathBuf::from("/tmp/a");
+        state
+            .register_workspace_with_policy(
+                "ws-a".to_string(),
+                path_a.clone(),
+                SnapshotIndex::new(path_a),
+                WorkspacePolicy::default(),
+                false,
+            )
+            .unwrap();
         assert!(!state.any_ws_has_effective_cleanup().await);
 
         // Per-ws override re-enables on top of globally-off → true.
-        let path_b = PathBuf::from("/ws/b");
-        state.register_workspace_with_policy(
-            "ws-b".to_string(),
-            path_b.clone(),
-            SnapshotIndex::new(path_b),
-            WorkspacePolicy {
-                auto_cleanup: Some(true),
-                auto_cleanup_keep: None,
-            },
-            false,
-        );
+        let path_b = PathBuf::from("/tmp/b");
+        state
+            .register_workspace_with_policy(
+                "ws-b".to_string(),
+                path_b.clone(),
+                SnapshotIndex::new(path_b),
+                WorkspacePolicy {
+                    auto_cleanup: Some(true),
+                    auto_cleanup_keep: None,
+                },
+                false,
+            )
+            .unwrap();
         assert!(state.any_ws_has_effective_cleanup().await);
 
         // Per-ws auto_cleanup=Some(false) on top of globally-off → still
         // false (the ws-b override above is what keeps the aggregate true).
-        let path_c = PathBuf::from("/ws/c");
-        state.register_workspace_with_policy(
-            "ws-c".to_string(),
-            path_c.clone(),
-            SnapshotIndex::new(path_c),
-            WorkspacePolicy {
-                auto_cleanup: Some(false),
-                auto_cleanup_keep: None,
-            },
-            false,
-        );
+        let path_c = PathBuf::from("/tmp/c");
+        state
+            .register_workspace_with_policy(
+                "ws-c".to_string(),
+                path_c.clone(),
+                SnapshotIndex::new(path_c),
+                WorkspacePolicy {
+                    auto_cleanup: Some(false),
+                    auto_cleanup_keep: None,
+                },
+                false,
+            )
+            .unwrap();
         assert!(state.any_ws_has_effective_cleanup().await);
     }
 
@@ -1522,28 +1697,32 @@ mod tests {
         cfg.auto_cleanup_keep = ws_ckpt_common::CleanupRetention::Count(0);
         let state = DaemonState::new(cfg, test_backend(), test_state_dir());
 
-        let path_a = PathBuf::from("/ws/a");
-        state.register_workspace_with_policy(
-            "ws-a".to_string(),
-            path_a.clone(),
-            SnapshotIndex::new(path_a),
-            WorkspacePolicy::default(),
-            false,
-        );
+        let path_a = PathBuf::from("/tmp/a");
+        state
+            .register_workspace_with_policy(
+                "ws-a".to_string(),
+                path_a.clone(),
+                SnapshotIndex::new(path_a),
+                WorkspacePolicy::default(),
+                false,
+            )
+            .unwrap();
         assert!(!state.any_ws_has_effective_cleanup().await);
 
         // ws-b overrides keep with a real number → effective re-enabled.
-        let path_b = PathBuf::from("/ws/b");
-        state.register_workspace_with_policy(
-            "ws-b".to_string(),
-            path_b.clone(),
-            SnapshotIndex::new(path_b),
-            WorkspacePolicy {
-                auto_cleanup: None,
-                auto_cleanup_keep: Some(ws_ckpt_common::CleanupRetention::Count(5)),
-            },
-            false,
-        );
+        let path_b = PathBuf::from("/tmp/b");
+        state
+            .register_workspace_with_policy(
+                "ws-b".to_string(),
+                path_b.clone(),
+                SnapshotIndex::new(path_b),
+                WorkspacePolicy {
+                    auto_cleanup: None,
+                    auto_cleanup_keep: Some(ws_ckpt_common::CleanupRetention::Count(5)),
+                },
+                false,
+            )
+            .unwrap();
         assert!(state.any_ws_has_effective_cleanup().await);
     }
 
@@ -1555,14 +1734,16 @@ mod tests {
         let state = DaemonState::new(test_config(), test_backend(), state_dir.clone());
 
         let ws_id = "ws-reload";
-        let path = PathBuf::from("/ws/reload");
-        state.register_workspace_with_policy(
-            ws_id.to_string(),
-            path.clone(),
-            SnapshotIndex::new(path),
-            WorkspacePolicy::default(),
-            false,
-        );
+        let path = PathBuf::from("/tmp/reload");
+        state
+            .register_workspace_with_policy(
+                ws_id.to_string(),
+                path.clone(),
+                SnapshotIndex::new(path),
+                WorkspacePolicy::default(),
+                false,
+            )
+            .unwrap();
 
         // Operator hand-edits the policy file out-of-band (no IPC).
         let ws_index_dir = state.index_dir(ws_id);
@@ -1594,17 +1775,19 @@ mod tests {
         let state = DaemonState::new(test_config(), test_backend(), tmp.path().to_path_buf());
 
         let ws_id = "ws-failsafe-reload";
-        let path = PathBuf::from("/ws/failsafe-reload");
-        state.register_workspace_with_policy(
-            ws_id.to_string(),
-            path.clone(),
-            SnapshotIndex::new(path),
-            WorkspacePolicy {
-                auto_cleanup: Some(false),
-                auto_cleanup_keep: None,
-            },
-            true,
-        );
+        let path = PathBuf::from("/tmp/failsafe-reload");
+        state
+            .register_workspace_with_policy(
+                ws_id.to_string(),
+                path.clone(),
+                SnapshotIndex::new(path),
+                WorkspacePolicy {
+                    auto_cleanup: Some(false),
+                    auto_cleanup_keep: None,
+                },
+                true,
+            )
+            .unwrap();
 
         let real_policy = WorkspacePolicy {
             auto_cleanup: Some(true),
@@ -1669,50 +1852,295 @@ mod tests {
     }
 
     #[test]
-    fn reregister_same_wsid_new_path() {
+    fn duplicate_path_rejects_another_workspace_id() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        let path1 = PathBuf::from("/ws/old");
-        let path2 = PathBuf::from("/ws/new");
-        state.register_workspace(
-            "ws-move".to_string(),
-            path1.clone(),
-            SnapshotIndex::new(path1.clone()),
-        );
-        state.register_workspace(
-            "ws-move".to_string(),
-            path2.clone(),
-            SnapshotIndex::new(path2.clone()),
-        );
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let path = real.join("workspace");
+        state
+            .register_workspace(
+                "ws-a".into(),
+                path.clone(),
+                SnapshotIndex::new(path.clone()),
+            )
+            .unwrap();
+        let duplicate = alias.join("workspace");
+        assert!(state
+            .register_workspace(
+                "ws-b".into(),
+                duplicate.clone(),
+                SnapshotIndex::new(duplicate)
+            )
+            .is_err());
+        assert!(state.get_by_wsid("ws-b").is_none());
+        assert_eq!(state.collect_workspace_entries().len(), 1);
+        let original = state.get_by_wsid("ws-a").unwrap();
+        assert!(Arc::ptr_eq(&original, &state.get_by_path(&path).unwrap()));
+    }
 
-        // New path resolves to the workspace
-        let arc = state.get_by_path(&path2).unwrap();
-        let ws = arc.try_read().unwrap();
-        assert_eq!(ws.ws_id, "ws-move");
-        assert_eq!(ws.path, path2);
+    #[tokio::test]
+    async fn normalized_registration_survives_detachment_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::create_dir(real.join("tmp")).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let live = root.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let anchor = real.join("workspace");
+        std::os::unix::fs::symlink(&live, &anchor).unwrap();
+        let input = alias.join("tmp/../workspace");
+        let state_dir = root.path().join("state");
+        let state = DaemonState::new(test_config(), test_backend(), state_dir.clone());
+        state
+            .register_workspace(
+                "ws-normalized".into(),
+                input.clone(),
+                SnapshotIndex::new(input),
+            )
+            .unwrap();
+        let workspace = state.get_by_wsid("ws-normalized").unwrap();
+        assert_eq!(workspace.read().await.path, anchor);
+        assert_eq!(workspace.read().await.index.workspace_path, anchor);
+        state.save_manifest().await.unwrap();
+        let mut manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        // Also migrate persisted records written by the old raw-path registry.
+        manifest.workspaces[0].workspace_path = alias.join("workspace");
+        std::fs::remove_file(&anchor).unwrap();
+        for replacement_directory in [false, true] {
+            if replacement_directory {
+                std::fs::create_dir(&anchor).unwrap();
+            }
+            let rebuilt = DaemonState::rebuild_from_persisted(
+                &manifest,
+                test_config(),
+                test_backend(),
+                state_dir.clone(),
+                "persisted",
+            )
+            .await
+            .unwrap();
+            let by_path = rebuilt.get_by_path(&anchor).unwrap();
+            assert_eq!(by_path.read().await.ws_id, "ws-normalized");
+            assert_eq!(
+                rebuilt.collect_workspace_entries()[0].workspace_path,
+                anchor
+            );
+            assert!(rebuilt
+                .detached_registration_error(&by_path)
+                .await
+                .is_some());
+        }
     }
 
     #[test]
-    fn path_count_after_reregister() {
+    fn missing_parent_does_not_hide_an_existing_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let anchor = parent.join("workspace");
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        state.register_workspace(
-            "ws-cnt".to_string(),
-            PathBuf::from("/first"),
-            SnapshotIndex::new(PathBuf::from("/first")),
+        state
+            .register_workspace(
+                "ws-detached".into(),
+                anchor.clone(),
+                SnapshotIndex::new(anchor.clone()),
+            )
+            .unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        let workspace = state.get_by_path(&anchor).unwrap();
+        assert!(state.exact_registration_is_current(&anchor, "ws-detached", &workspace));
+        assert_eq!(
+            state.wsid_for_exact_registration_path(&anchor).as_deref(),
+            Some("ws-detached")
         );
-        state.register_workspace(
-            "ws-cnt".to_string(),
-            PathBuf::from("/second"),
-            SnapshotIndex::new(PathBuf::from("/second")),
-        );
+        assert!(state
+            .register_workspace("ws-new".into(), anchor.clone(), SnapshotIndex::new(anchor))
+            .is_err());
+    }
 
-        let entries = state.collect_workspace_entries();
-        let matching: Vec<_> = entries.iter().filter(|e| e.ws_id == "ws-cnt").collect();
-        // After re-register, all_workspaces should show exactly 1
-        assert_eq!(state.all_workspaces().len(), 1);
-        // collect_workspace_entries may have stale path entries
-        assert!(
-            !matching.is_empty(),
-            "workspace should appear in collected entries"
+    #[tokio::test]
+    async fn restart_retains_registration_when_parent_was_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let anchor = parent.join("workspace");
+        let state_dir = root.path().join("state");
+        let state = DaemonState::new(test_config(), test_backend(), state_dir.clone());
+        state
+            .register_workspace(
+                "ws-detached".into(),
+                anchor.clone(),
+                SnapshotIndex::new(anchor.clone()),
+            )
+            .unwrap();
+        state.save_manifest().await.unwrap();
+        let manifest = persist::load_state(&state_dir).unwrap().unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        let rebuilt = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            test_backend(),
+            state_dir,
+            "persisted",
+        )
+        .await
+        .unwrap();
+        let workspace = rebuilt.get_by_path(&anchor).unwrap();
+        assert_eq!(workspace.read().await.path, anchor);
+        assert!(rebuilt
+            .detached_registration_error(&workspace)
+            .await
+            .is_some());
+    }
+
+    #[test]
+    fn missing_parent_normalization_rejects_ambiguous_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert_eq!(
+            normalize_registration_path(&missing.join("child/workspace")).unwrap(),
+            missing.join("child/workspace")
         );
+        assert!(normalize_registration_path(&missing.join("../workspace")).is_err());
+        let broken = root.path().join("broken");
+        std::os::unix::fs::symlink(&missing, &broken).unwrap();
+        assert!(normalize_registration_path(&broken.join("workspace")).is_err());
+        assert!(normalize_registration_path(&broken.join("child/workspace")).is_err());
+    }
+
+    #[tokio::test]
+    async fn persisted_conflicting_registration_fails_without_choosing_an_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(root.path()).await;
+        let mut manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let mut conflict = manifest.workspaces[0].clone();
+        conflict.ws_id = "ws-conflict".into();
+        manifest.workspaces.push(conflict);
+        let result = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            state.backend.clone(),
+            state.state_dir.clone(),
+            "persisted",
+        )
+        .await;
+        assert!(
+            matches!(result, Err(error) if format!("{error:#}").contains("already registered"))
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_internal_registration_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(root.path()).await;
+        let mut manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        manifest.workspaces[0].workspace_path = state.backend.data_root().join("ws-restart");
+        let result = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            state.backend.clone(),
+            state.state_dir.clone(),
+            "persisted",
+        )
+        .await;
+        assert!(
+            matches!(result, Err(error) if format!("{error:#}").contains("outside backend storage"))
+        );
+    }
+
+    #[test]
+    fn registration_boundary_resolves_backend_root_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        std::fs::create_dir(&data_root).unwrap();
+        let alias = root.path().join("data-alias");
+        std::os::unix::fs::symlink(&data_root, &alias).unwrap();
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            alias.clone(),
+            root.path().join("test.img"),
+        ));
+        let state = DaemonState::new(test_config(), backend, root.path().join("state"));
+        for path in [
+            data_root.join("ws-a"),
+            alias.join("ws-a"),
+            data_root.clone(),
+            alias.clone(),
+            PathBuf::from("/"),
+        ] {
+            assert!(state
+                .register_workspace("ws-a".into(), path.clone(), SnapshotIndex::new(path))
+                .is_err());
+        }
+        let user = root.path().join("user");
+        std::os::unix::fs::symlink(data_root.join("ws-a"), &user).unwrap();
+        assert!(!state.registration_path_is_internal(&user).unwrap());
+        state
+            .register_workspace("ws-a".into(), user.clone(), SnapshotIndex::new(user))
+            .unwrap();
+    }
+
+    #[test]
+    fn normalization_preserves_symlink_parent_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(real.join("child"), &alias).unwrap();
+        assert_eq!(
+            normalize_registration_path(&alias.join("../workspace")).unwrap(),
+            real.join("workspace")
+        );
+        let anchor = real.join("workspace");
+        std::os::unix::fs::symlink(root.path().join("other"), &anchor).unwrap();
+        assert_eq!(normalize_registration_path(&anchor).unwrap(), anchor);
+    }
+
+    #[test]
+    fn concurrent_registration_has_one_owner_and_atomic_reverse_index() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("workspace");
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let results: Vec<_> = (0..8)
+            .map(|i| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state
+                        .register_workspace(
+                            format!("ws-{i}"),
+                            path.clone(),
+                            SnapshotIndex::new(path),
+                        )
+                        .is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            results
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .filter(|ok| *ok)
+                .count(),
+            1
+        );
+        let entries = state.collect_workspace_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(state.all_workspaces().len(), 1);
+        assert!(Arc::ptr_eq(
+            &state.get_by_path(&path).unwrap(),
+            &state.get_by_wsid(&entries[0].ws_id).unwrap()
+        ));
     }
 }

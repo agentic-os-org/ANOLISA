@@ -13,5 +13,6 @@ pub use service::{AuditService, AuditServiceError};
 #[cfg(target_os = "linux")]
 pub use store::DueContainmentAction;
 pub use store::{
-    AuditError, AuditEventStore, AuditStore, ContainmentActivationResult, ContainmentClaimResult,
+    AuditError, AuditEventStore, AuditMaintenancePolicy, AuditMaintenanceReport, AuditStore,
+    ContainmentActivationResult, ContainmentClaimResult,
 };

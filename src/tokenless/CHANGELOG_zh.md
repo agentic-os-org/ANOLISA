@@ -9,6 +9,22 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.4] - 2026-09-22
+
+### 新增
+
+- 在 npm 安装之外新增独立安装脚本及 `install-tokenless` OS Skill 入口。安装脚本在开始安装前选择 npm 或仅限 Linux 的源码构建，记录安装路径归属以供卸载，并在替换失败时恢复原有安装。源码构建仅安装 CLI；npm 还提供 RTK 和适配器（[#2322](https://github.com/alibaba/anolisa/pull/2322)）。
+
+### 变更
+
+- npm 安装现在要求 Node.js 16.7 或更新版本，并保留属于其他安装的共享适配器资源。用户可通过 `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` 显式替换；否则安装程序会报告包内适配器的位置（[#2322](https://github.com/alibaba/anolisa/pull/2322)）。
+- 独立卸载仅移除安装记录中仍归本次安装所有的资源，除非指定 `--purge`，否则保留运行数据；无法确认框架注册已移除时保留适配器资源。Codex 插件显示为 `not installed` 时视为已成功移除，使重复卸载可以正常完成（[#2322](https://github.com/alibaba/anolisa/pull/2322)、[#3412](https://github.com/alibaba/anolisa/pull/3412)）。
+
+### 修复
+
+- HTML 提取现在将页面 `</html>` 结束标签后的命令输出（如构建日志和 HTTP 状态码）保留在渲染后的页面之后，避免内容丢失。模仿页面边界标记的文本会被转义，并继续支持恢复原文（[#3386](https://github.com/alibaba/anolisa/pull/3386)）。
+- HTML 提取不再将包含大量自闭合 SVG 元素的浅层页面误判为嵌套过深。深度限制现在依据解析后的页面结构，异常标记和宽表格也不会再触发可能拖慢工具结果返回的重复扫描（[#3396](https://github.com/alibaba/anolisa/pull/3396)）。
+
 ## [0.8.3] - 2026-09-20
 
 ### 新增

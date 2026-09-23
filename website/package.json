@@ -13,6 +13,7 @@
     "generate:agents": "node scripts/generate-agent-index.mjs",
     "validate:locales": "node scripts/validate-locales.mjs",
     "validate:agent-index": "node scripts/validate-agent-index.mjs",
+    "test:layout": "node --test scripts/generate-agent-index.test.mjs",
     "check:links": "node scripts/check-links.mjs",
     "typecheck": "tsc --noEmit"
   },
