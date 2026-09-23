@@ -48,3 +48,21 @@ The new bincode enum variants are appended; existing request and response tags
 are unchanged. Legacy `Recover` remains available to old clients. New CLI builds
 require a daemon supporting preview and fail visibly rather than falling back to
 an unchecked recovery. Upgrade or roll back the CLI and daemon together.
+
+## Recovered snapshot provenance and deletion
+
+Filesystem reconstruction pins snapshots whose metadata is lost and records
+those IDs in the index's `recovered_orphans` set. Existing indexes default to an
+empty set. Provenance survives checkpoint writes and restarts and is removed
+with the corresponding snapshot record. Pinning excludes recovered snapshots
+from both Count and Age cleanup without inferring their original policy.
+
+`ListOrphans { workspace }` is appended at request tag 28 and returns the existing
+`ListOk` response, filtered by provenance rather than pin state. `SnapshotMeta`,
+legacy request tags and response layouts remain unchanged. The CLI exposes this
+as `list --orphans`; an older daemon does not support this request. Older index
+writers may discard provenance, though they preserve the existing pinned flag.
+
+Delete resolves only exact IDs, including global lookup and forced requests.
+Global duplicate IDs require workspace scope. An absent ID is never reinterpreted
+as a prefix of another snapshot; rollback and diff retain their prefix rules.

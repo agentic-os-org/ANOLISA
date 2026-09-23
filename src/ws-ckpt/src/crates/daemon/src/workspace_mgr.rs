@@ -5,9 +5,7 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use ws_ckpt_common::{
-    load_workspace_policy_with_failsafe, ErrorCode, ResolveError, Response, SnapshotIndex,
-};
+use ws_ckpt_common::{load_workspace_policy_with_failsafe, ErrorCode, Response, SnapshotIndex};
 
 use crate::index_store;
 use crate::state::{normalize_registration_path, DaemonState};
@@ -549,22 +547,14 @@ pub async fn delete_snapshot(
     // 2. Write lock after the mutation mutex.
     let mut ws = ws_lock.write().await;
 
-    // 2a. Resolve snapshot by prefix within this workspace
-    let resolved_id = match ws.index.resolve_by_prefix(snapshot_id) {
-        Ok((id, _)) => id.clone(),
-        Err(ResolveError::NotFound) => {
-            return Ok(error_resp(
-                ErrorCode::SnapshotNotFound,
-                format!("snapshot not found: {}", snapshot_id),
-            ));
-        }
-        Err(ResolveError::Ambiguous(n)) => {
-            return Ok(error_resp(
-                ErrorCode::SnapshotNotFound,
-                format!("ambiguous snapshot prefix '{}': {} matches", snapshot_id, n),
-            ));
-        }
-    };
+    // Never reinterpret a previously valid ID as a prefix after its removal.
+    if !ws.index.snapshots.contains_key(snapshot_id) {
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot not found: {snapshot_id}"),
+        ));
+    }
+    let resolved_id = snapshot_id.to_string();
 
     // 3. Check pinned
     if let Some(meta) = ws.index.snapshots.get(&resolved_id) {
@@ -576,13 +566,27 @@ pub async fn delete_snapshot(
         }
     }
 
-    // 4. Delete subvolume (skip if snapshot is marked missing — subvolume already gone)
-    let is_missing = ws
-        .index
-        .snapshots
-        .get(&resolved_id)
-        .map(|m| m.missing)
-        .unwrap_or(false);
+    // Check disk as well: cleanup may have stopped before persisting a marker.
+    let is_missing = !tokio::fs::try_exists(
+        state
+            .backend
+            .snapshots_root()
+            .join(&ws.ws_id)
+            .join(&resolved_id),
+    )
+    .await
+    .with_context(|| format!("inspect snapshot {resolved_id}"))?;
+    if is_missing && ws.index.governed_evidence.contains_key(&resolved_id) {
+        if let Some(meta) = ws.index.snapshots.get_mut(&resolved_id) {
+            meta.missing = true;
+        }
+        index_store::save(&state.index_dir(&ws.ws_id), &ws.index).await?;
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot subvolume is missing: {resolved_id}; guarded evidence retained"),
+        ));
+    }
+
     if !is_missing {
         state
             .backend
@@ -594,6 +598,7 @@ pub async fn delete_snapshot(
     ws.index.unlink_node(&resolved_id);
     ws.index.snapshots.remove(&resolved_id);
     ws.index.governed_evidence.remove(&resolved_id);
+    ws.index.recovered_orphans.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
     tokio::fs::create_dir_all(&snap_dir)
         .await
@@ -606,6 +611,13 @@ pub async fn delete_snapshot(
     // 5b. Save manifest
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after delete_snapshot: {:#}", e);
+    }
+
+    if is_missing {
+        return Ok(error_resp(
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot subvolume is missing: {resolved_id}; record removed"),
+        ));
     }
 
     // 6. Return
@@ -1793,6 +1805,27 @@ mod tests {
             .register_workspace(ws_id.to_string(), ws_link.clone(), index)
             .unwrap();
         (state, ws_link, temp)
+    }
+
+    #[tokio::test]
+    async fn delete_absent_subvolume_prunes_record_and_remains_not_found() {
+        let (state, _, _temp) = live_topology("ws-del-absent");
+        for _ in 0..2 {
+            let response = delete_snapshot(&state, "ws-del-absent", "snap-1", false)
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::SnapshotNotFound,
+                    ..
+                }
+            ));
+            let index = index_store::load(&state.index_dir("ws-del-absent"))
+                .await
+                .unwrap();
+            assert!(index.snapshots.is_empty());
+        }
     }
 
     #[tokio::test]

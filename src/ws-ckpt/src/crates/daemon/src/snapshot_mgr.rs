@@ -20,7 +20,7 @@ pub(crate) struct CleanupOutcome {
 /// Batch-deletes eligible snapshots while the caller holds `state.lock_wsid(ws_id)`.
 ///
 /// The index stays unchanged during the backend call. Once every outcome is known,
-/// one write-lock acquisition applies only confirmed removals and `NotFound` markers.
+/// one write-lock acquisition prunes absent ordinary records and marks absent evidence.
 pub(crate) async fn delete_snapshots_locked(
     state: &DaemonState,
     arc: &Arc<RwLock<WorkspaceState>>,
@@ -130,12 +130,21 @@ pub(crate) async fn delete_snapshots_locked(
 
     let index_changed = !removed.is_empty() || !not_found.is_empty();
     if index_changed {
-        let removed_set = removed.iter().cloned().collect();
         let mut ws = arc.write().await;
+        not_found.retain(|id| {
+            if ws.index.governed_evidence.contains_key(id) {
+                true
+            } else {
+                removed.push(id.clone());
+                false
+            }
+        });
+        let removed_set = removed.iter().cloned().collect();
         ws.index.prune_chain(&removed_set);
         for id in &removed {
             ws.index.snapshots.remove(id);
             ws.index.governed_evidence.remove(id);
+            ws.index.recovered_orphans.remove(id);
         }
         for id in &not_found {
             if let Some(meta) = ws.index.snapshots.get_mut(id) {
@@ -463,7 +472,10 @@ fn reject_missing_snapshot(
     if index.snapshots.get(snapshot_id).is_some_and(|s| s.missing) {
         return Err(Box::new(Response::Error {
             code: ErrorCode::SnapshotNotFound,
-            message: format!("Snapshot '{}' subvolume is missing (data lost). Use 'ws-ckpt delete --force -w <workspace> -s {}' to remove the record.", snapshot_id, snapshot_id),
+            message: format!(
+                "Snapshot '{}' is unavailable: subvolume is missing",
+                snapshot_id
+            ),
         }));
     }
 
@@ -476,7 +488,11 @@ pub async fn warmup_snapshot_metadata(snap_path: &Path) {
 }
 
 /// List all snapshots for a workspace, sorted by created_at ascending.
-pub async fn list_snapshots(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<Response> {
+pub async fn list_snapshots(
+    state: &Arc<DaemonState>,
+    workspace: &str,
+    orphans_only: bool,
+) -> anyhow::Result<Response> {
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
@@ -494,6 +510,7 @@ pub async fn list_snapshots(state: &Arc<DaemonState>, workspace: &str) -> anyhow
         .index
         .snapshots
         .iter()
+        .filter(|(id, _)| !orphans_only || ws.index.recovered_orphans.contains(*id))
         .map(|(id, meta)| (id.clone(), meta.clone()))
         .collect();
 
@@ -515,7 +532,10 @@ pub async fn list_snapshots(state: &Arc<DaemonState>, workspace: &str) -> anyhow
 }
 
 /// List snapshots across all registered workspaces, sorted by created_at ascending.
-pub async fn list_all_snapshots(state: &Arc<DaemonState>) -> anyhow::Result<Response> {
+pub async fn list_all_snapshots(
+    state: &Arc<DaemonState>,
+    orphans_only: bool,
+) -> anyhow::Result<Response> {
     let all_ws = state.all_workspaces();
     let mut all_entries: Vec<SnapshotEntry> = Vec::new();
 
@@ -523,6 +543,9 @@ pub async fn list_all_snapshots(state: &Arc<DaemonState>) -> anyhow::Result<Resp
         let ws = arc.read().await;
         let ws_path = ws.index.workspace_path.to_string_lossy().to_string();
         for (id, meta) in &ws.index.snapshots {
+            if orphans_only && !ws.index.recovered_orphans.contains(id) {
+                continue;
+            }
             all_entries.push(SnapshotEntry {
                 id: id.clone(),
                 workspace: ws_path.clone(),
@@ -577,6 +600,12 @@ pub async fn diff_snapshots(
         }
         None => None,
     };
+
+    for id in std::iter::once(&from_id).chain(to_id.iter()) {
+        if let Err(resp) = reject_missing_snapshot(&ws.index, id) {
+            return Ok(*resp);
+        }
+    }
 
     let changes = state
         .backend
@@ -883,7 +912,7 @@ mod tests {
                 .unwrap();
             assert_detach_error(resp, "rollback_preview", expect_dir_note);
 
-            let resp = list_snapshots(&fx.state, &ws_ref).await.unwrap();
+            let resp = list_snapshots(&fx.state, &ws_ref, false).await.unwrap();
             assert_detach_error(resp, "list_snapshots", expect_dir_note);
 
             let resp = diff_snapshots(&fx.state, &ws_ref, "snap-1", None)
@@ -935,7 +964,7 @@ mod tests {
         }
 
         assert!(matches!(
-            list_snapshots(&fx.state, &ws_ref).await.unwrap(),
+            list_snapshots(&fx.state, &ws_ref, false).await.unwrap(),
             Response::ListOk { .. }
         ));
 
@@ -2145,6 +2174,215 @@ mod tests {
         }
         idx.head = Some(format!("snap-{}", n));
         idx
+    }
+
+    #[tokio::test]
+    async fn deleting_absent_exact_id_never_retargets_its_prefix_peer() {
+        for gc_before_delete in [false, true] {
+            for scoped in [false, true] {
+                let fx = GuardFixture::new("ws-exact");
+                fx.add_snapshot("snap-1").await;
+                fx.add_snapshot("snap-10").await;
+                let peer = fx
+                    .state
+                    .backend
+                    .snapshots_root()
+                    .join(&fx.ws_id)
+                    .join("snap-10");
+                std::fs::create_dir_all(&peer).unwrap();
+                std::fs::write(peer.join("canary"), "preserved").unwrap();
+                let arc = fx.state.get_by_wsid(&fx.ws_id).unwrap();
+                index_store::save(&fx.state.index_dir(&fx.ws_id), &arc.read().await.index)
+                    .await
+                    .unwrap();
+                fx.state.save_manifest().await.unwrap();
+                let state = if gc_before_delete {
+                    let manifest = ws_ckpt_common::persist::load_state(&fx.state.state_dir)
+                        .unwrap()
+                        .unwrap();
+                    Arc::new(
+                        DaemonState::rebuild_from_persisted(
+                            &manifest,
+                            test_config(),
+                            fx.state.backend.clone(),
+                            fx.state.state_dir.clone(),
+                            "persisted",
+                        )
+                        .await
+                        .unwrap(),
+                    )
+                } else {
+                    fx.state.clone()
+                };
+                state.mark_bootstrapped();
+                // Includes the first NotFound that removes a stale record and
+                // identical retries, with and without force or workspace scope.
+                for force in [false, false, true, true] {
+                    let response = crate::dispatcher::dispatch(
+                        &state,
+                        ws_ckpt_common::Request::Delete {
+                            workspace: scoped.then(|| fx.ws_id.clone()),
+                            snapshot: "snap-1".into(),
+                            force,
+                        },
+                    )
+                    .await;
+                    assert!(
+                        matches!(
+                            response,
+                            Response::Error {
+                                code: ErrorCode::SnapshotNotFound,
+                                ..
+                            }
+                        ),
+                        "{response:?}"
+                    );
+                    assert!(state
+                        .get_by_wsid(&fx.ws_id)
+                        .unwrap()
+                        .read()
+                        .await
+                        .index
+                        .snapshots
+                        .contains_key("snap-10"));
+                    assert_eq!(
+                        std::fs::read_to_string(peer.join("canary")).unwrap(),
+                        "preserved"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_interrupted_cleanup_and_preserves_evidence() {
+        let fx = GuardFixture::new("ws-reconcile");
+        let arc = fx.state.get_by_wsid(&fx.ws_id).unwrap();
+        let mut index = chain_index(&fx.ws_link, &fx.ws_id, 5);
+        for id in ["snap-2", "snap-3", "snap-5"] {
+            index.governed_evidence.remove(id);
+        }
+        index.snapshots.get_mut("snap-5").unwrap().pinned = true;
+        index.snapshots.get_mut("snap-1").unwrap().missing = true;
+        arc.write().await.index = index.clone();
+        index_store::save(&fx.state.index_dir(&fx.ws_id), &index)
+            .await
+            .unwrap();
+        fx.state.save_manifest().await.unwrap();
+        let manifest = ws_ckpt_common::persist::load_state(&fx.state.state_dir)
+            .unwrap()
+            .unwrap();
+        let snapshots = fx.state.backend.snapshots_root().join(&fx.ws_id);
+        // Persisted chain survives a crash after physical deletion of snap-2/3.
+        // snap-4 is governed, snap-5 pinned, and an orphan has no index entry.
+        for id in ["snap-1", "orphan", ".hidden", "index.json"] {
+            std::fs::create_dir_all(snapshots.join(id)).unwrap();
+            std::fs::write(snapshots.join(id).join("canary"), id).unwrap();
+        }
+        for _ in 0..2 {
+            let restarted = Arc::new(
+                DaemonState::rebuild_from_persisted(
+                    &manifest,
+                    test_config(),
+                    fx.state.backend.clone(),
+                    fx.state.state_dir.clone(),
+                    "persisted",
+                )
+                .await
+                .unwrap(),
+            );
+            let restored = index_store::load(&restarted.index_dir(&fx.ws_id))
+                .await
+                .unwrap();
+            assert_eq!(restored.snapshots.len(), 6);
+            assert!(restored.snapshots.contains_key(".hidden"));
+            assert!(restored.snapshots.contains_key("index.json"));
+            assert!(!restored.snapshots.contains_key("snap-2"));
+            assert!(!restored.snapshots.contains_key("snap-3"));
+            assert!(!restored.snapshots["snap-1"].missing);
+            assert_eq!(
+                restored.snapshots["snap-4"].parent_id.as_deref(),
+                Some("snap-1")
+            );
+            assert_eq!(restored.snapshots["snap-1"].child_ids, vec!["snap-4"]);
+            assert!(restored.snapshots["snap-4"].missing);
+            assert!(restored.snapshots["snap-5"].missing);
+            assert_eq!(restored.governed_evidence, index.governed_evidence);
+            assert_eq!(restored.head.as_deref(), Some("snap-5"));
+            assert!(!restored.snapshots["orphan"].missing);
+            assert!(restored.snapshots["orphan"].pinned);
+            assert!(restored.recovered_orphans.contains("orphan"));
+            assert_eq!(restored.snapshots["orphan"].parent_id, None);
+            let Response::ListOk { snapshots: listed } =
+                list_snapshots(&restarted, &fx.ws_id, false).await.unwrap()
+            else {
+                panic!("expected list response");
+            };
+            assert_eq!(listed.len(), 6);
+            for (from, to) in [("snap-4", None), ("snap-1", Some("snap-4"))] {
+                assert!(matches!(
+                    diff_snapshots(&restarted, &fx.ws_id, from, to)
+                        .await
+                        .unwrap(),
+                    Response::Error {
+                        code: ErrorCode::SnapshotNotFound,
+                        ..
+                    }
+                ));
+            }
+            assert!(matches!(
+                crate::workspace_mgr::delete_snapshot(&restarted, &fx.ws_id, "snap-4", false)
+                    .await
+                    .unwrap(),
+                Response::Error {
+                    code: ErrorCode::SnapshotNotFound,
+                    ..
+                }
+            ));
+            let restored = index_store::load(&restarted.index_dir(&fx.ws_id))
+                .await
+                .unwrap();
+            assert_eq!(restored.governed_evidence, index.governed_evidence);
+            for id in ["snap-1", "orphan", ".hidden", "index.json"] {
+                assert_eq!(
+                    std::fs::read_to_string(snapshots.join(id).join("canary")).unwrap(),
+                    id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_not_found_prunes_ordinary_record_but_keeps_failed_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            PartialFailBackend::new(temp.path().join("data"), ["snap-2".to_string()])
+                .with_not_found(["snap-1".to_string()]),
+        );
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let subvol = backend.data_root().join("ws-ordinary");
+        std::fs::create_dir_all(&subvol).unwrap();
+        let link = temp.path().join("workspace");
+        std::os::unix::fs::symlink(&subvol, &link).unwrap();
+        let mut index = chain_index(&link, "ws-ordinary", 2);
+        index.governed_evidence.clear();
+        state
+            .register_workspace("ws-ordinary".into(), link, index)
+            .unwrap();
+        assert!(cleanup_snapshots(&state, "ws-ordinary", Some(0))
+            .await
+            .is_err());
+        let index = index_store::load(&state.index_dir("ws-ordinary"))
+            .await
+            .unwrap();
+        assert_eq!(index.snapshots.len(), 1);
+        assert!(!index.snapshots["snap-2"].missing);
+        assert_eq!(index.snapshots["snap-2"].parent_id, None);
+        assert_eq!(index.head.as_deref(), Some("snap-2"));
     }
 
     #[tokio::test]

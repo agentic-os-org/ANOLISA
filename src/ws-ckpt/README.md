@@ -111,6 +111,14 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
 
+After interrupted cleanup, restart reconciles missing ordinary snapshots and
+pins recovered orphans until explicitly deleted. Query them with
+`ws-ckpt list -w <workspace> --orphans --format json`, then delete selected full
+IDs with `ws-ckpt delete -w <workspace> -s <complete-id> --force`. Delete no longer
+accepts prefixes. Missing pinned snapshots and guarded evidence remain unavailable;
+deleting an absent target returns `SnapshotNotFound`. Upgrade CLI and daemon together.
+See [snapshot recovery](../../docs/user-guide/en/runtime/ws-ckpt.md#snapshot-recovery-after-an-interrupted-cleanup).
+
 ### Recovering interrupted initialization
 
 Recovery confirmation uses the daemon-resolved workspace and snapshot count.

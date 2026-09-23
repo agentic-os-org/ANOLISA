@@ -37,3 +37,18 @@ CLI 展示该结果并发送 `RecoverConfirmed { preview }`。daemon 使用返�
 新增 bincode 枚举变体追加在末尾，原有请求和响应编号保持不变。旧客户端仍可使用
 `Recover`。新版 CLI 要求 daemon 支持预览，不支持时明确失败，不退回未经校验的恢复。
 升级或回滚时应同步操作 CLI 和 daemon。
+
+## 恢复快照来源与删除
+
+从文件系统重建元数据丢失的快照时，将其设为 pinned，并把 ID 记录到索引的
+`recovered_orphans` 集合。旧索引默认使用空集合。来源记录在 checkpoint 写入和重启后
+保留，随对应快照记录一起删除。Pinned 机制使恢复快照同时避开 Count 和 Age 清理，
+不推测它们原来的保护策略。
+
+`ListOrphans { workspace }` 追加为请求编号 28，复用现有 `ListOk` 响应，
+按恢复来源而非 pinned 状态过滤。`SnapshotMeta`、旧请求编号和响应布局保持不变。
+CLI 将其暴露为 `list --orphans`；旧 daemon 不支持该请求。旧版本写索引时可能丢弃
+来源记录，但仍会保留已有的 pinned 标记。
+
+Delete 仅解析完整 ID，全局查询和强制请求同样如此。全局存在重复 ID 时必须指定
+工作区。不存在的 ID 不会被重新解释为其他快照的前缀；rollback 和 diff 保留前缀规则。

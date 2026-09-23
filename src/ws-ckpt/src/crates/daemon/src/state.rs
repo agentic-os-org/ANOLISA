@@ -6,7 +6,7 @@ use anyhow::Context;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use ws_ckpt_common::backend::BackendType;
 use ws_ckpt_common::backend::StorageBackend;
@@ -15,8 +15,8 @@ use ws_ckpt_common::persist::{
 };
 use ws_ckpt_common::{
     load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, ErrorCode,
-    LoadPolicyOutcome, ResolveError, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy,
-    INDEXES_DIR, INDEX_FILE,
+    LoadPolicyOutcome, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy, INDEXES_DIR,
+    INDEX_FILE,
 };
 
 use crate::fs_watcher::WorkspaceWatcher;
@@ -245,16 +245,14 @@ impl DaemonState {
                 index.clone()
             } else {
                 match tokio::fs::read_to_string(&index_path).await {
-                    Ok(content) => match serde_json::from_str::<SnapshotIndex>(&content) {
-                        Ok(idx) => idx,
-                        Err(e) => {
-                            warn!("Failed to parse index file {:?}: {}", index_path, e);
-                            SnapshotIndex::new(workspace_path.clone())
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Failed to read index file {:?}: {}", index_path, e);
+                    Ok(content) => serde_json::from_str::<SnapshotIndex>(&content)
+                        .with_context(|| format!("parse snapshot index {index_path:?}"))?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         SnapshotIndex::new(workspace_path.clone())
+                    }
+                    Err(e) => {
+                        return Err(e)
+                            .with_context(|| format!("read snapshot index {index_path:?}"))
                     }
                 }
             };
@@ -293,45 +291,15 @@ impl DaemonState {
             }
         }
 
-        // Reconcile: mark phantom snapshots whose subvolumes no longer exist
-        let snapshots_root = state.backend.snapshots_root().to_path_buf();
-        let ws_ids = state.workspace_ids();
-        for ws_id in &ws_ids {
-            if let Some(ws_arc) = state.get_by_wsid(ws_id) {
+        // Reconcile both sides of a crash between backend mutation and index save.
+        for ws_id in state.workspace_ids() {
+            if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
                 let mut ws = ws_arc.write().await;
-                let mut changed = false;
-                // Need to iterate with keys, so use a collected list
-                let snap_ids: Vec<String> = ws.index.snapshots.keys().cloned().collect();
-                for snap_id in &snap_ids {
-                    let snap_path = snapshots_root.join(ws_id).join(snap_id);
-                    if !snap_path.exists() {
-                        if let Some(snap) = ws.index.snapshots.get_mut(snap_id) {
-                            if !snap.missing {
-                                error!(
-                                    "Snapshot {} subvolume missing at {:?}, marking as unavailable",
-                                    snap_id, snap_path
-                                );
-                                snap.missing = true;
-                                changed = true;
-                            }
-                        }
-                    } else if let Some(snap) = ws.index.snapshots.get_mut(snap_id) {
-                        if snap.missing {
-                            info!(
-                                "Snapshot {} subvolume recovered at {:?}",
-                                snap_id, snap_path
-                            );
-                            snap.missing = false;
-                            changed = true;
-                        }
-                    }
-                }
-                if changed {
-                    // Save reconciled index
-                    let index_dir = state.index_dir(ws_id);
-                    if let Err(e) = index_store::save(&index_dir, &ws.index).await {
-                        warn!("Failed to save reconciled index for {}: {}", ws_id, e);
-                    }
+                let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
+                if index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await? {
+                    index_store::save(&state.index_dir(&ws_id), &ws.index)
+                        .await
+                        .with_context(|| format!("save reconciled index for {ws_id}"))?;
                 }
             }
         }
@@ -1047,23 +1015,16 @@ impl DaemonState {
             .collect()
     }
 
-    /// Cross-workspace snapshot lookup by ID (exact match or unique prefix).
+    /// Cross-workspace snapshot lookup by exact ID.
     /// Returns `(workspace_path, snapshot_id)` if exactly one match is found.
     pub async fn resolve_snapshot_globally(&self, snapshot_ref: &str) -> Option<(String, String)> {
         let mut found: Vec<(String, String)> = Vec::new();
 
         for workspace in self.all_workspaces() {
             let ws = workspace.read().await;
-            match ws.index.resolve_by_prefix(snapshot_ref) {
-                Ok((id, _)) => {
-                    let ws_path = ws.path.to_string_lossy().to_string();
-                    found.push((ws_path, id.clone()));
-                }
-                Err(ResolveError::Ambiguous(_)) => {
-                    // Ambiguous within one workspace → treat as globally ambiguous
-                    return None;
-                }
-                Err(ResolveError::NotFound) => {}
+            if ws.index.snapshots.contains_key(snapshot_ref) {
+                let ws_path = ws.path.to_string_lossy().to_string();
+                found.push((ws_path, snapshot_ref.to_string()));
             }
         }
 
@@ -1213,6 +1174,33 @@ mod tests {
             .unwrap();
         state.save_manifest().await.unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_invalid_indexes_instead_of_adopting_protected_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(temp.path()).await;
+        let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let path = state.index_dir("ws-restart").join(INDEX_FILE);
+        // Invalid JSON and an unreadable index must both stop reconciliation.
+        for contents in [b"{broken".as_slice(), b"\xff".as_slice()] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(DaemonState::rebuild_from_persisted(
+                &manifest,
+                test_config(),
+                state.backend.clone(),
+                state.state_dir.clone(),
+                "persisted",
+            )
+            .await
+            .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+            assert!(state
+                .backend
+                .snapshots_root()
+                .join("ws-restart/retained-snapshot")
+                .exists());
+        }
     }
 
     #[tokio::test]
@@ -1500,7 +1488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_snapshot_globally_prefix_match() {
+    async fn resolve_snapshot_globally_rejects_prefix() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         let mut index = SnapshotIndex::new(PathBuf::from("/ws1"));
         index.snapshots.insert(
@@ -1520,9 +1508,7 @@ mod tests {
             .unwrap();
 
         let result = state.resolve_snapshot_globally("abcdef").await;
-        assert!(result.is_some());
-        let (_, snap_id) = result.unwrap();
-        assert_eq!(snap_id, "abcdef1234567890abcdef1234567890abcdef12");
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -1553,23 +1539,19 @@ mod tests {
         };
 
         let mut idx1 = SnapshotIndex::new(PathBuf::from("/ws1"));
-        idx1.snapshots.insert(
-            "abcdef1111111111111111111111111111111111".to_string(),
-            meta.clone(),
-        );
+        idx1.snapshots.insert("same-id".to_string(), meta.clone());
         state
             .register_workspace("ws-1".to_string(), PathBuf::from("/ws1"), idx1)
             .unwrap();
 
         let mut idx2 = SnapshotIndex::new(PathBuf::from("/ws2"));
-        idx2.snapshots
-            .insert("abcdef2222222222222222222222222222222222".to_string(), meta);
+        idx2.snapshots.insert("same-id".to_string(), meta);
         state
             .register_workspace("ws-2".to_string(), PathBuf::from("/ws2"), idx2)
             .unwrap();
 
-        // Prefix "abcdef" matches in both workspaces
-        let result = state.resolve_snapshot_globally("abcdef").await;
+        // The exact ID exists in both workspaces
+        let result = state.resolve_snapshot_globally("same-id").await;
         assert!(result.is_none());
     }
 

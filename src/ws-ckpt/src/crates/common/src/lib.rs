@@ -200,6 +200,11 @@ pub enum Request {
     RecoverConfirmed {
         preview: RecoveryPreview,
     },
+    /// List snapshots recovered without their original metadata.
+    ListOrphans {
+        /// Omit to query all registered workspaces.
+        workspace: Option<String>,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -669,6 +674,9 @@ pub struct SnapshotIndex {
     /// Durable guarded rollback receipts keyed by caller idempotency identifier.
     #[serde(default)]
     pub guarded_rollbacks: HashMap<String, GuardedRollbackEvidenceV2>,
+    /// Snapshot IDs adopted from disk without their original metadata.
+    #[serde(default)]
+    pub recovered_orphans: HashSet<String>,
 }
 
 impl SnapshotIndex {
@@ -679,6 +687,7 @@ impl SnapshotIndex {
             head: None,
             governed_evidence: HashMap::new(),
             guarded_rollbacks: HashMap::new(),
+            recovered_orphans: HashSet::new(),
         }
     }
 }
@@ -3323,6 +3332,25 @@ mod tests {
     }
 
     #[test]
+    fn orphan_query_preserves_legacy_list_wire_layout() {
+        let old = Request::List {
+            workspace: Some("/ws".into()),
+            format: Some("json".into()),
+        };
+        assert_eq!(
+            bincode::serialize(&old).unwrap(),
+            bincode::serialize(&(4_u32, Some("/ws"), Some("json"))).unwrap()
+        );
+        let request = Request::ListOrphans {
+            workspace: Some("/ws".into()),
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        assert_eq!(encoded, bincode::serialize(&(28_u32, Some("/ws"))).unwrap());
+        assert!(matches!(bincode::deserialize::<Request>(&encoded).unwrap(),
+            Request::ListOrphans { workspace: Some(ws) } if ws == "/ws"));
+    }
+
+    #[test]
     fn recovery_protocol_extensions_preserve_existing_wire_layout() {
         let preview = RecoveryPreview {
             ws_id: Some("ws-preview".into()),
@@ -3607,6 +3635,7 @@ mod tests {
         assert_eq!(index.workspace_path, PathBuf::from("/workspace"));
         assert!(index.governed_evidence.is_empty());
         assert!(index.guarded_rollbacks.is_empty());
+        assert!(index.recovered_orphans.is_empty());
     }
 
     #[test]

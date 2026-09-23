@@ -109,12 +109,8 @@ pub(crate) async fn dispatch_with_context(
                             let mut match_count = 0usize;
                             for entry in state.all_workspaces() {
                                 let ws = entry.read().await;
-                                match ws.index.resolve_by_prefix(&snapshot) {
-                                    Ok(_) => match_count += 1,
-                                    Err(ws_ckpt_common::ResolveError::Ambiguous(_)) => {
-                                        match_count += 2
-                                    }
-                                    Err(ws_ckpt_common::ResolveError::NotFound) => {}
+                                if ws.index.snapshots.contains_key(&snapshot) {
+                                    match_count += 1;
                                 }
                             }
                             if match_count > 1 {
@@ -137,8 +133,12 @@ pub(crate) async fn dispatch_with_context(
             },
         },
         Request::List { workspace, .. } => match workspace {
-            Some(ws) => crate::snapshot_mgr::list_snapshots(state, &ws).await,
-            None => crate::snapshot_mgr::list_all_snapshots(state).await,
+            Some(ws) => crate::snapshot_mgr::list_snapshots(state, &ws, false).await,
+            None => crate::snapshot_mgr::list_all_snapshots(state, false).await,
+        },
+        Request::ListOrphans { workspace } => match workspace {
+            Some(ws) => crate::snapshot_mgr::list_snapshots(state, &ws, true).await,
+            None => crate::snapshot_mgr::list_all_snapshots(state, true).await,
         },
         Request::Diff {
             workspace,

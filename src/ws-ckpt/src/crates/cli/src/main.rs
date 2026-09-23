@@ -189,7 +189,7 @@ enum Commands {
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
-        /// Snapshot ID or unique prefix
+        /// Complete snapshot ID (prefixes are not accepted)
         #[arg(long, short = 's', value_parser = snapshot_id_value_parser())]
         snapshot: String,
 
@@ -203,6 +203,10 @@ enum Commands {
         /// Workspace path or ID (optional; omit to list all workspaces)
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
+
+        /// Only snapshots recovered without their original metadata
+        #[arg(long)]
+        orphans: bool,
 
         /// Output format: table or json (default: table)
         #[arg(long, default_value = "table")]
@@ -494,10 +498,19 @@ async fn run(cli: Cli) -> Result<()> {
             let response = send_request_to_daemon(&request).await?;
             handle_response(response, &request).await?;
         }
-        Commands::List { workspace, format } => {
-            let request = Request::List {
-                workspace: workspace.as_deref().map(resolve_workspace_arg),
-                format: Some(format.clone()),
+        Commands::List {
+            workspace,
+            format,
+            orphans,
+        } => {
+            let workspace = workspace.as_deref().map(resolve_workspace_arg);
+            let request = if orphans {
+                Request::ListOrphans { workspace }
+            } else {
+                Request::List {
+                    workspace,
+                    format: Some(format.clone()),
+                }
             };
             let response = send_request_to_daemon(&request).await?;
             handle_list_response(response, &format)?;
@@ -1111,10 +1124,13 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                     let w_date = 19_usize.max(hdr_date.len()); // "YYYY-MM-DD HH:MM:SS"
 
                     println!(
-                        "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
+                        "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
                         hdr_ws, hdr_snap, hdr_date, hdr_msg,
                     );
-                    println!("{}", "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 3));
+                    println!(
+                        "{}",
+                        "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
+                    );
                     for entry in &snapshots {
                         let id_display = if entry.meta.missing {
                             format!("{} [MISSING]", entry.id)
@@ -1122,7 +1138,7 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                             entry.id.clone()
                         };
                         println!(
-                            "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
+                            "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
                             entry.workspace,
                             id_display,
                             entry
@@ -1130,6 +1146,7 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                                 .created_at
                                 .with_timezone(&chrono::Local)
                                 .format("%Y-%m-%d %H:%M:%S"),
+                            entry.meta.pinned,
                             entry.meta.message.as_deref().unwrap_or("-"),
                         );
                     }
@@ -3026,12 +3043,40 @@ mod tests {
     fn parse_list() {
         let cli = Cli::try_parse_from(["ws-ckpt", "list", "--workspace", "/tmp/test"]).unwrap();
         match cli.command {
-            Commands::List { workspace, format } => {
+            Commands::List {
+                workspace, format, ..
+            } => {
                 assert_eq!(workspace.as_deref(), Some("/tmp/test"));
                 assert_eq!(format, "table"); // default
             }
             _ => panic!("expected List"),
         }
+    }
+
+    #[test]
+    fn parse_list_orphans_with_and_without_workspace() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "list",
+            "-w",
+            "/ws",
+            "--orphans",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::List { workspace: Some(ws), orphans: true, format } if ws == "/ws" && format == "json")
+        );
+        let cli = Cli::try_parse_from(["ws-ckpt", "list", "--orphans"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::List {
+                workspace: None,
+                orphans: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3150,7 +3195,9 @@ mod tests {
     fn list_without_workspace_parses_ok() {
         let cli = Cli::try_parse_from(["ws-ckpt", "list"]).unwrap();
         match cli.command {
-            Commands::List { workspace, format } => {
+            Commands::List {
+                workspace, format, ..
+            } => {
                 assert!(workspace.is_none());
                 assert_eq!(format, "table");
             }

@@ -74,9 +74,9 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | Create a new checkpoint |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
-| `ws-ckpt list [-w <workspace>] [--format table\|json]` | List all checkpoints |
+| `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json]` | List all checkpoints |
 | `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | Show differences between checkpoints |
-| `ws-ckpt delete [-w <workspace>] -s <snapshot> [--force]` | Delete a specific checkpoint |
+| `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | Delete a specific checkpoint |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | Show current workspace status |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | Remove old checkpoints |
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | View/edit configuration |
@@ -114,6 +114,42 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # Enable auto-cleanup for workspace
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### Snapshot recovery after an interrupted cleanup
+
+After restart, the daemon removes missing ordinary, unpinned snapshot records
+and repairs their parent/child links. Pinned snapshots and guarded evidence
+remain marked unavailable; `list` shows the missing marker and `diff` returns
+`SnapshotNotFound`. A `delete` whose subvolume is already absent also returns
+`SnapshotNotFound`, removes the ordinary record, and retains guarded evidence.
+Pinned records still require `--force`.
+
+Snapshot directories absent from the index are registered as **pinned recovered
+orphans**. Their original protection state, message, metadata, creation time and
+ancestry are unknown: the displayed timestamp is the recovery time, not the
+original creation time. Count/Age cleanup excludes them, including after new
+checkpoints and restarts. A retained guarded receipt prevents adopting an
+unverified orphan under that ID.
+
+Query recovered orphans separately from ordinary pinned snapshots, then delete
+only the ones you have confirmed are no longer needed:
+
+```bash
+ws-ckpt list -w "/path/to/workspace" --orphans --format json
+ws-ckpt delete -w "/path/to/workspace" -s "complete-snapshot-id" --force
+```
+
+Omit `-w` to query recovered orphans across all workspaces. JSON includes the
+complete `id`, `workspace`, and `meta.pinned`; table output also shows protection.
+Recovered orphans continue to occupy disk space until explicitly deleted.
+
+**Delete accepts complete IDs only**, with or without `-w`; short prefixes are
+rejected even with `--force`. If the complete ID exists in multiple workspaces,
+specify `-w`. Other commands retain their existing prefix behavior. Upgrade the
+CLI and daemon together for `--orphans` and exact deletion semantics.
+
+Recovery reconciles completed deletions; it does not resume the interrupted
+cleanup's remaining plan. Run `cleanup` again to finish ordinary retention.
 
 ### Recovering interrupted initialization and stale registrations
 

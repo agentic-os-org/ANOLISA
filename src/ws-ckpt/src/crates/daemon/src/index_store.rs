@@ -52,8 +52,47 @@ pub async fn load(ws_dir: &Path) -> anyhow::Result<SnapshotIndex> {
     Ok(index)
 }
 
+/// Reconcile interrupted snapshot mutations without discarding protected records.
+pub(crate) async fn reconcile_from_fs(
+    ws_dir: &Path,
+    index: &mut SnapshotIndex,
+) -> anyhow::Result<bool> {
+    let recovered = match tokio::fs::try_exists(ws_dir).await? {
+        true => rebuild_from_fs(ws_dir, index.workspace_path.clone()).await?,
+        false => SnapshotIndex::new(index.workspace_path.clone()),
+    };
+    let mut changed = false;
+    let mut absent = std::collections::HashSet::new();
+    for (id, meta) in &mut index.snapshots {
+        // Unlike Path::exists, IO failures must not be treated as data loss.
+        let missing = !tokio::fs::try_exists(ws_dir.join(id))
+            .await
+            .with_context(|| format!("inspect snapshot {id:?} in {ws_dir:?}"))?;
+        changed |= meta.missing != missing;
+        meta.missing = missing;
+        if missing && !meta.pinned && !index.governed_evidence.contains_key(id) {
+            tracing::warn!("Pruning missing snapshot {id} from {ws_dir:?}");
+            absent.insert(id.clone());
+        }
+    }
+    changed |= !absent.is_empty();
+    index.prune_chain(&absent);
+    index.snapshots.retain(|id, _| !absent.contains(id));
+    for (id, meta) in recovered.snapshots {
+        // A retained receipt must never identify an unverified orphan as the
+        // original guarded checkpoint. Orphans require explicit deletion.
+        if !index.snapshots.contains_key(&id) && !index.governed_evidence.contains_key(&id) {
+            tracing::warn!("Recovering orphan snapshot {id} from {ws_dir:?}");
+            index.recovered_orphans.insert(id.clone());
+            index.snapshots.insert(id, meta);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 /// Rebuild a SnapshotIndex from the filesystem directory structure.
-/// Scans for all subdirectories (excluding hidden dirs and known non-snapshot files).
+/// Directory names are snapshot IDs, including hidden names and `index.json`.
 pub async fn rebuild_from_fs(
     ws_dir: &Path,
     workspace_path: std::path::PathBuf,
@@ -65,20 +104,21 @@ pub async fn rebuild_from_fs(
         .with_context(|| format!("Failed to read directory {:?}", ws_dir))?;
     while let Some(entry) = entries.next_entry().await? {
         let name = entry.file_name().to_string_lossy().to_string();
-        // Skip non-directories, hidden directories, and known non-snapshot files
-        if !entry.file_type().await?.is_dir() || name.starts_with('.') || name == INDEX_FILE {
+        // Metadata files are not directories; their names are also valid IDs.
+        if !entry.file_type().await?.is_dir() {
             continue;
         }
         // Rebuild with minimal metadata (message lost)
         let meta = SnapshotMeta {
             message: None,
             metadata: None,
-            pinned: false,
+            pinned: true,
             created_at: chrono::Utc::now(),
             missing: false,
             parent_id: None,
             child_ids: vec![],
         };
+        index.recovered_orphans.insert(name.clone());
         index.snapshots.insert(name, meta);
     }
     Ok(index)
@@ -90,6 +130,34 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
     use ws_ckpt_common::{SnapshotIndex, SnapshotMeta};
+
+    #[tokio::test]
+    async fn reconcile_rejects_scan_errors_and_prunes_an_absent_head() {
+        let dir = tempdir().unwrap();
+        let snapshots = dir.path().join("snapshots");
+        let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+        index.head = Some("gone".into());
+        index.snapshots.insert(
+            "gone".into(),
+            SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![ws_ckpt_common::LIVE_CHILD.into()],
+            },
+        );
+        std::fs::write(&snapshots, "not a directory").unwrap();
+        assert!(reconcile_from_fs(&snapshots, &mut index).await.is_err());
+        assert!(index.snapshots.contains_key("gone"));
+        std::fs::remove_file(&snapshots).unwrap();
+        assert!(reconcile_from_fs(&snapshots, &mut index).await.unwrap());
+        assert!(index.snapshots.is_empty());
+        assert!(index.head.is_none());
+        assert!(!reconcile_from_fs(&snapshots, &mut index).await.unwrap());
+    }
 
     #[tokio::test]
     async fn save_and_load_round_trip() {
@@ -169,13 +237,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_from_fs_ignores_hidden_dirs_and_files() {
+    async fn rebuild_from_fs_includes_hidden_ids_but_ignores_files() {
         let dir = tempdir().unwrap();
         // Create matching and non-matching entries
         std::fs::create_dir(dir.path().join("abcdef1234567890abcdef1234567890abcdef12")).unwrap();
         std::fs::create_dir(dir.path().join("msg1-step0")).unwrap();
         std::fs::create_dir(dir.path().join("my-snapshot")).unwrap();
-        // Hidden directory should be ignored
+        // Hidden names are valid snapshot IDs
         std::fs::create_dir(dir.path().join(".hidden")).unwrap();
         // Regular file should be ignored
         std::fs::write(dir.path().join("index.json"), "{}").unwrap();
@@ -184,7 +252,8 @@ mod tests {
             .await
             .expect("rebuild_from_fs failed");
 
-        assert_eq!(index.snapshots.len(), 3);
+        assert_eq!(index.snapshots.len(), 4);
+        assert!(index.snapshots.contains_key(".hidden"));
         assert!(index
             .snapshots
             .contains_key("abcdef1234567890abcdef1234567890abcdef12"));

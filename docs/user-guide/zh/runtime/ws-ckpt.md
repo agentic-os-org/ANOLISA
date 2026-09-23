@@ -74,9 +74,9 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | 创建新检查点 |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
-| `ws-ckpt list [-w <workspace>] [--format table\|json]` | 列出所有检查点 |
+| `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json]` | 列出所有检查点 |
 | `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | 显示检查点间差异 |
-| `ws-ckpt delete [-w <workspace>] -s <snapshot> [--force]` | 删除指定检查点 |
+| `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | 清理旧检查点 |
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | 查看/编辑配置 |
@@ -114,6 +114,36 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # 为工作区启用自动清理
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### cleanup 中断后的快照恢复
+
+重启后，daemon 会删除普通、未 pinned 快照的缺失记录，并修复父子链关系。
+Pinned 快照和 guarded evidence 保留 unavailable 状态；`list` 显示缺失标记，
+`diff` 返回 `SnapshotNotFound`。当目标 subvolume 已不存在时，`delete` 同样返回
+`SnapshotNotFound`，删除普通记录并保留 guarded evidence。Pinned 记录仍需要
+`--force`。
+
+磁盘上存在而索引中缺失的快照目录会登记为 **pinned 的恢复孤儿**。
+原来的保护状态、消息、metadata、创建时间和祖先关系均未知；显示的时间为恢复时间，
+并非原始创建时间。Count/Age 清理会跳过这些快照，创建新 checkpoint 和再次重启后
+保护仍然有效。若 ID 仍有 guarded receipt，则不会将身份未经验证的孤儿关联到该 ID。
+
+可以单独查询恢复孤儿，将其与普通 pinned 快照区分；确认不再需要后再显式删除：
+
+```bash
+ws-ckpt list -w "/path/to/workspace" --orphans --format json
+ws-ckpt delete -w "/path/to/workspace" -s "complete-snapshot-id" --force
+```
+
+省略 `-w` 可查询所有工作区的恢复孤儿。JSON 包含完整 `id`、`workspace` 和
+`meta.pinned`，表格同样显示保护状态。恢复孤儿在显式删除前会持续占用磁盘空间。
+
+**delete 只接受完整 ID**，带或不带 `-w` 都不会退回短前缀匹配，`--force` 也不例外。
+若多个工作区存在相同的完整 ID，必须指定 `-w`。其他命令保留原有前缀匹配能力。
+使用 `--orphans` 和精确删除语义时，请同步升级 CLI 和 daemon。
+
+恢复只对账已完成的删除，不会继续执行中断前尚未完成的清理计划；
+需要再次运行 `cleanup` 完成普通快照的保留清理。
 
 ### 恢复中断的初始化与悬空注册
 
