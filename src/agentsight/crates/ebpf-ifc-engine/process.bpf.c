@@ -1848,7 +1848,7 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 	return 0;
 }
 
-static __always_inline int te_handle_file_event(pid_t pid, const char *target,
+static __noinline int te_handle_file_event(pid_t pid, const char *target,
 						struct file_id *fid, __u32 access,
 						__u32 mode)
 {
