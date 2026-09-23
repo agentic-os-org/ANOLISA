@@ -246,6 +246,11 @@ fn error_response(request_id: Option<RequestId>, error: &GatewayDaemonError) -> 
             "request violates the Gateway contract",
             false,
         ),
+        GatewayDaemonError::Contract {
+            code,
+            message,
+            recoverable,
+        } => (code.as_str(), message.as_str(), *recoverable),
         GatewayDaemonError::Store(StoreError::TaskNotFound) => {
             ("not_found", "Task was not found", false)
         }
