@@ -61,6 +61,8 @@ pub(crate) const SLASH_CONFIG_ZH_FORBIDDEN_UI: &[&str] = &[
     "Use /config language [auto|en-US|zh-CN].",
     "│ Registry",
     "组稿一次性 Agent 请求",
+    "多行组稿",
+    "可组稿多行",
 ];
 
 pub(crate) const MODE_ZH_FORBIDDEN_UI: &[&str] = &[
