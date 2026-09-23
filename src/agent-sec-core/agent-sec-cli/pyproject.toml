@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "agent-sec-cli"
-version = "0.13.0"
+version = "0.13.1"
 description = "Agent Security Core CLI - System hardening, sandbox isolation, and asset integrity verification for AI Agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
