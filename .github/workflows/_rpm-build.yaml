@@ -93,8 +93,8 @@ jobs:
               ;;
           esac
 
-      # agent-sec-core requires Rust 1.93+, Python 3.11 + uv, Node.js 20
-      # These are installed via GitHub Actions (validated in sec-core-rpmbuild.yaml)
+      # agent-sec-core requires Rust 1.93+, Python 3.11 + uv, Node.js 22.23.2
+      # These are installed via GitHub Actions (aligned with sec-core-rpmbuild.yaml)
       - name: "Setup Rust toolchain (agent-sec-core)"
         if: inputs.component == 'agent-sec-core'
         uses: dtolnay/rust-toolchain@stable
@@ -130,7 +130,7 @@ jobs:
         if: inputs.component == 'agent-sec-core'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.23.2'
 
       - name: Setup rpmbuild tree
         run: rpmdev-setuptree
