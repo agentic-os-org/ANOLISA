@@ -59,7 +59,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-On macOS arm64, use user scope instead:
+On macOS 11+ (arm64 / x86_64), use user scope instead:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -74,7 +74,7 @@ sudo yum install cosh-ng
 
 The published Linux raw contract is not currently portable across all routed
 distributions, so it is not the recommended Linux installation path. The raw
-package supports macOS arm64, where Linux-only package and service operations
+package supports macOS 11+ (arm64 / x86_64), where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
 

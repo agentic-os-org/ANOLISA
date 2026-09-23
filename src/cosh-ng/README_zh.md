@@ -55,7 +55,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-在 macOS arm64 上改用 user 范围：
+在 macOS 11+ (arm64 / x86_64) 上改用 user 范围：
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -69,7 +69,7 @@ sudo yum install cosh-ng
 ```
 
 当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
-Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
+Linux 安装路径。raw 包支持 macOS 11+ (arm64 / x86_64)，但依赖 Linux 的软件包和服务操作
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
 

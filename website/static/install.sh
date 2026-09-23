@@ -219,10 +219,6 @@ detect_platform() {
     *)               err "unsupported architecture: $arch" ;;
   esac
 
-  if [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
-    err "macOS x86_64 is not supported; only Apple Silicon (arm64) is available"
-  fi
-
   case "$OS" in
     linux)  TARGET="${ARCH}-unknown-linux-gnu" ;;
     darwin) TARGET="${ARCH}-apple-darwin" ;;
