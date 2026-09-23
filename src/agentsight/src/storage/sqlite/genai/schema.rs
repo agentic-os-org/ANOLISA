@@ -1,34 +1,20 @@
 //! Schema initialization, migrations, and size limit management for GenAI SQLite store.
 
-use rusqlite::params;
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, MaintenanceStatus, SizeBasis, SizePolicy, checkpoint_truncate,
+    enforce_size_policy, measure_database, retention_cutoff_ns,
+};
+use rusqlite::{Connection, params};
 
 use super::GenAISqliteStore;
 
-// ─── Size limit configuration ──────────────────────────────────────────────────
-
-/// Environment variable name for max database size in MB
-const ENV_MAX_DB_SIZE_MB: &str = "AGENTSIGHT_GENAI_DB_MAX_SIZE_MB";
-/// Default max database size: 200 MB
-const DEFAULT_MAX_DB_SIZE_MB: u64 = 200;
-/// Percentage of records to prune per attempt
+/// Percentage of records pruned before retrying a `SQLITE_FULL` write.
 const PRUNE_PERCENT: f64 = 0.05;
-/// Maximum prune retry attempts to avoid infinite loop
+/// Maximum prune retry attempts to avoid infinite loops.
 pub(super) const MAX_PRUNE_RETRIES: u32 = 3;
-
-/// Get max database size from environment variable or use default
-pub(super) fn get_max_db_size() -> u64 {
-    std::env::var(ENV_MAX_DB_SIZE_MB)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_MAX_DB_SIZE_MB)
-        * 1024
-        * 1024
-}
-
-/// Get prune threshold (90% of max)
-pub(super) fn get_prune_threshold() -> u64 {
-    (get_max_db_size() as f64 * 0.9) as u64
-}
 
 impl GenAISqliteStore {
     /// Initialize database tables
@@ -222,256 +208,215 @@ impl GenAISqliteStore {
 
     // ─── Size limit methods ───────────────────────────────────────────────────
 
-    /// Get total database size (main db + wal + shm)
+    pub(super) fn size_snapshot(
+        &self,
+    ) -> Result<agentsight_sqlite_lifecycle::SizeSnapshot, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        measure_database(&self.db_path, &conn).map_err(Into::into)
+    }
+
+    #[cfg(test)]
     pub(super) fn get_total_db_size(&self) -> u64 {
-        let mut total = 0u64;
-
-        // Main database file
-        if let Ok(meta) = std::fs::metadata(&self.db_path) {
-            total += meta.len();
-        }
-
-        // WAL file
-        let wal_path = format!("{}-wal", self.db_path.display());
-        if let Ok(meta) = std::fs::metadata(&wal_path) {
-            total += meta.len();
-        }
-
-        // SHM file
-        let shm_path = format!("{}-shm", self.db_path.display());
-        if let Ok(meta) = std::fs::metadata(&shm_path) {
-            total += meta.len();
-        }
-
-        total
+        self.size_snapshot()
+            .map(|snapshot| snapshot.physical_bytes)
+            .unwrap_or(0)
     }
 
-    /// Logical data size: physical size minus freelist pages.
-    ///
-    /// Purge convergence is measured on this: deleting rows does not shrink
-    /// the file without VACUUM — freed pages go to the freelist and are
-    /// reused by future inserts, so the physical file stabilizes at its
-    /// historical peak while the logical size reflects live data.
+    #[cfg(test)]
     pub(super) fn effective_db_size(&self) -> u64 {
-        let physical = self.get_total_db_size();
-        let free_bytes = {
-            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            let freelist: i64 = match conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)) {
-                Ok(v) => v,
-                Err(e) => {
-                    // Fall back to the physical size (conservative: the prune
-                    // loop may over-delete by the freelist amount) — but make
-                    // the degraded measurement visible.
-                    log::warn!(
-                        "freelist_count query failed; logical size falls back \
-                         to physical size: {e}"
-                    );
-                    0
-                }
-            };
-            let page_size: i64 = conn
-                .query_row("PRAGMA page_size", [], |r| r.get(0))
-                .unwrap_or(4096);
-            (freelist.max(0) * page_size.max(0)) as u64
-        };
-        physical.saturating_sub(free_bytes)
+        self.size_snapshot()
+            .map(|snapshot| snapshot.logical_bytes)
+            .unwrap_or(0)
     }
 
-    /// Check database size and prune if approaching limit.
-    ///
-    /// Uses adaptive pruning: the fraction of records deleted per iteration
-    /// scales with how far the database exceeds the configured maximum, so a
-    /// severely oversized database is brought back under control quickly
-    /// instead of inching down 5% at a time.
-    ///
-    /// The loop never runs VACUUM: rebuilding the whole file would push its
-    /// pages through the page cache, which counts against the service's
-    /// cgroup memory limit and can OOM-kill the process on large databases
-    /// (#2888). Deleting rows + a truncating WAL checkpoint is enough — the
-    /// freelist is reused by future inserts, so the physical file stops
-    /// growing once the logical size fits.
+    /// Runs configured maintenance after the configured number of writes.
     pub(super) fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let physical_size = self.get_total_db_size();
-        let threshold = get_prune_threshold();
+        let interval = self.storage_policy.check_interval_inserts;
+        if interval == 0 {
+            return Ok(());
+        }
+        let count = self
+            .maintenance_insert_count
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if !count.is_multiple_of(interval) {
+            return Ok(());
+        }
+        self.run_maintenance()
+    }
 
-        // Trigger on physical size (disk safety is physical), converge on
-        // logical size (deletes only shrink the logical size via freelist).
-        if physical_size < threshold {
+    /// Applies age retention followed by capacity enforcement.
+    pub(super) fn run_maintenance(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let deleted_by_age = self.purge_expired()?;
+        if deleted_by_age > 0 && self.checkpoint_outcome()? == CheckpointOutcome::Busy {
+            log::warn!("GenAI WAL checkpoint remained busy after age retention");
             return Ok(());
         }
 
-        let mut current_size = self.effective_db_size();
-        if current_size < threshold {
-            // Physically large but mostly freelist: future writes reuse free
-            // pages, no rows need to be deleted.
-            return Ok(());
-        }
-
-        let max_size = get_max_db_size();
-        let overshoot = current_size as f64 / max_size as f64;
-
-        // Delete a larger fraction when the database is far over the limit.
-        //   1–2× over → 10% per iteration
-        //   2–5× over → 25% per iteration
-        //   5×+  over → 50% per iteration
-        let prune_pct = if overshoot > 5.0 {
-            0.50
-        } else if overshoot > 2.0 {
-            0.25
-        } else {
-            0.10
+        let limit_bytes = self
+            .storage_policy
+            .max_db_size_mb
+            .saturating_mul(1024 * 1024);
+        let policy = SizePolicy {
+            limit_bytes,
+            trigger_bytes: limit_bytes,
+            target_bytes: limit_bytes.saturating_mul(9) / 10,
+            trigger_basis: SizeBasis::Physical,
+            target_basis: SizeBasis::Logical,
+            max_rounds: 20,
+            max_stalled_rounds: 3,
         };
-
-        log::info!(
-            "Database size {}MB exceeding threshold {}MB (overshoot {:.1}×), \
-             pruning {:.0}% per iteration",
-            current_size / 1024 / 1024,
-            threshold / 1024 / 1024,
-            overshoot,
-            prune_pct * 100.0
-        );
-
-        const MAX_ITERATIONS: u32 = 20;
-        let mut iterations = 0u32;
-
-        while current_size >= threshold && iterations < MAX_ITERATIONS {
-            iterations += 1;
-
-            if let Err(e) = self.prune_old_records_with_percent(prune_pct) {
-                log::warn!("Prune failed on iteration {iterations}: {e}");
-                break;
-            }
-
-            // Flush and truncate the WAL so freed pages are visible and the
-            // WAL does not grow unbounded. Never VACUUM here (#2888). A busy
-            // checkpoint (another connection holds a read snapshot) leaves the
-            // WAL intact — stop pruning: further deletes would keep appending
-            // WAL frames and never converge.
-            match self.wal_checkpoint() {
-                Ok(true) => {
-                    log::warn!(
-                        "WAL checkpoint busy on iteration {iterations}; \
-                         stopping prune (the WAL could not be truncated)"
-                    );
-                    break;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    log::warn!("WAL checkpoint failed on iteration {iterations}: {e}");
-                }
-            }
-
-            let new_size = self.effective_db_size();
-            current_size = new_size;
-
-            if current_size >= threshold {
-                log::info!(
-                    "Database still {}MB (threshold {}MB), continue pruning \
-                     (iteration {iterations}/{MAX_ITERATIONS})",
-                    current_size / 1024 / 1024,
-                    threshold / 1024 / 1024,
-                );
-            }
+        let report = enforce_size_policy::<Box<dyn std::error::Error>>(
+            policy,
+            || self.size_snapshot(),
+            |fraction| self.prune_old_records_with_percent(fraction),
+            || self.checkpoint_outcome(),
+        )?;
+        match report.status {
+            MaintenanceStatus::CheckpointBusy => log::warn!(
+                "GenAI size maintenance stopped at a busy checkpoint after deleting {} rows",
+                report.deleted_rows
+            ),
+            MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => log::warn!(
+                "GenAI size maintenance stopped with {:?} at {} logical bytes",
+                report.status,
+                report.after.logical_bytes
+            ),
+            _ => {}
         }
-
-        if current_size >= threshold {
-            log::warn!(
-                "Database size {}MB still above threshold {}MB after pruning; \
-                 will retry on next write",
-                current_size / 1024 / 1024,
-                threshold / 1024 / 1024,
-            );
-        } else {
-            log::info!(
-                "Pruning complete, database size now {}MB",
-                current_size / 1024 / 1024
-            );
-        }
-
         Ok(())
+    }
+
+    fn purge_expired(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        if self.storage_policy.retention_days == 0 {
+            return Ok(0);
+        }
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let cutoff_ns = retention_cutoff_ns(now_ns, self.storage_policy.retention_days)?;
+        let cutoff_i64 = i64::try_from(cutoff_ns).unwrap_or(i64::MAX);
+        let cutoff_seconds = cutoff_i64 / 1_000_000_000;
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let mut deleted = conn.execute(
+            "DELETE FROM genai_events WHERE start_timestamp_ns < ?1",
+            params![cutoff_i64],
+        )?;
+        deleted += conn.execute(
+            "DELETE FROM agent_resource_samples WHERE timestamp_ns < ?1",
+            params![cutoff_i64],
+        )?;
+        if table_exists(&conn, "evaluation_runs")? {
+            deleted += conn.execute(
+                "DELETE FROM evaluation_runs
+                 WHERE CAST(strftime('%s', created_at) AS INTEGER) < ?1",
+                params![cutoff_seconds],
+            )?;
+        }
+        Ok(deleted)
     }
 
     /// Prune old records using the default 5% ratio.
     ///
     /// Thin wrapper around [`prune_old_records_with_percent`] for callers that
     /// only need the conservative default (e.g. SQLITE_FULL retry).
-    pub(super) fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn prune_old_records(&self) -> Result<usize, Box<dyn std::error::Error>> {
         self.prune_old_records_with_percent(PRUNE_PERCENT)
     }
 
-    /// Delete the oldest `percent` fraction of records, ordered by id.
-    ///
-    /// `percent` is clamped to \[0.0, 1.0\]. At least one record is deleted
-    /// when the table is non-empty and `percent` > 0.
+    /// Delete the oldest `percent` fraction from every lifecycle-owned table.
     fn prune_old_records_with_percent(
         &self,
         percent: f64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         let pct = percent.clamp(0.0, 1.0);
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-
-        let event_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))?;
-        let resource_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM agent_resource_samples", [], |row| {
-                row.get(0)
-            })?;
-
-        if event_count == 0 && resource_count == 0 {
-            return Ok(());
+        if pct == 0.0 {
+            return Ok(0);
         }
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
 
-        let event_delete_count = if event_count > 0 {
-            ((event_count as f64) * pct).max(1.0) as i64
+        let event_count = row_count(&conn, "genai_events")?;
+        let resource_count = row_count(&conn, "agent_resource_samples")?;
+        let evaluation_count = if table_exists(&conn, "evaluation_runs")? {
+            row_count(&conn, "evaluation_runs")?
         } else {
             0
         };
-        let resource_delete_count = if resource_count > 0 {
-            ((resource_count as f64) * pct).max(1.0) as i64
-        } else {
-            0
-        };
-
-        log::info!(
-            "Pruning {event_delete_count}/{event_count} GenAI events and \
-             {resource_delete_count}/{resource_count} resource samples ({:.1}%)",
-            pct * 100.0
-        );
+        let event_delete_count = prune_count(event_count, pct);
+        let resource_delete_count = prune_count(resource_count, pct);
+        let evaluation_delete_count = prune_count(evaluation_count, pct);
 
         let deleted_events = conn.execute(
             "DELETE FROM genai_events WHERE id IN (
-                SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1
+                SELECT id FROM genai_events ORDER BY start_timestamp_ns ASC, id ASC LIMIT ?1
             )",
             params![event_delete_count],
         )?;
         let deleted_resources = conn.execute(
             "DELETE FROM agent_resource_samples WHERE id IN (
-                SELECT id FROM agent_resource_samples ORDER BY id ASC LIMIT ?1
+                SELECT id FROM agent_resource_samples ORDER BY timestamp_ns ASC, id ASC LIMIT ?1
             )",
             params![resource_delete_count],
         )?;
+        let deleted_evaluations = if evaluation_count > 0 {
+            conn.execute(
+                "DELETE FROM evaluation_runs WHERE id IN (
+                    SELECT id FROM evaluation_runs ORDER BY created_at ASC, id ASC LIMIT ?1
+                )",
+                params![evaluation_delete_count],
+            )?
+        } else {
+            0
+        };
 
-        log::info!(
-            "Deleted {deleted_events} GenAI events and {deleted_resources} resource samples"
-        );
+        Ok(deleted_events + deleted_resources + deleted_evaluations)
+    }
 
-        Ok(())
+    fn checkpoint_outcome(&self) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        checkpoint_truncate(&conn).map_err(Into::into)
     }
 
     /// Flush WAL frames to the main database and truncate the WAL file.
     ///
-    /// Call during graceful shutdown to clean up `-wal` / `-shm` files —
-    /// mirrors the sibling stores (token, http, audit) which do this via
-    /// `connection::wal_checkpoint` in their own `checkpoint()` methods.
-    ///
-    /// Returns `Ok(true)` when the checkpoint was blocked by another
-    /// connection's read snapshot (busy): the statement succeeds but the WAL
-    /// is NOT truncated. Purge loops must stop deleting in that case — the
-    /// WAL stays in the size measurement while deletes keep appending frames,
-    /// so the loop never converges (#2888).
+    /// Returns `Ok(true)` when another reader keeps the checkpoint busy.
     pub fn wal_checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
-        Ok(busy != 0)
+        Ok(self.checkpoint_outcome()? == CheckpointOutcome::Busy)
+    }
+}
+
+fn table_exists(conn: &Connection, table_name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+        )",
+        params![table_name],
+        |row| row.get(0),
+    )
+}
+
+fn row_count(conn: &Connection, table_name: &str) -> rusqlite::Result<i64> {
+    match table_name {
+        "genai_events" => conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0)),
+        "agent_resource_samples" => {
+            conn.query_row("SELECT COUNT(*) FROM agent_resource_samples", [], |row| {
+                row.get(0)
+            })
+        }
+        "evaluation_runs" => {
+            conn.query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))
+        }
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            table_name.to_string(),
+        )),
+    }
+}
+
+fn prune_count(count: i64, fraction: f64) -> i64 {
+    if count > 0 {
+        ((count as f64) * fraction).max(1.0) as i64
+    } else {
+        0
     }
 }

@@ -35,7 +35,11 @@ fn load_genai_rows(
             "SQLite storage is not enabled or no events have been captured yet.".to_string(),
         );
     }
-    let store = GenAISqliteStore::new_with_path(&data.storage_path).map_err(|e| e.to_string())?;
+    let store = GenAISqliteStore::new_with_path(
+        &data.storage_path,
+        crate::config::InsertStoragePolicy::default(),
+    )
+    .map_err(|e| e.to_string())?;
     let raw = store
         .get_preference_window_events(since_ns)
         .map_err(|e| e.to_string())?;

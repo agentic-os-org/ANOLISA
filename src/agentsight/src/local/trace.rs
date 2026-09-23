@@ -40,6 +40,11 @@ pub fn run_local_trace(verbose: bool) {
         scan_interval_secs: 300,
         scan_dirs,
         db_path: db_path.clone(),
+        maintenance: agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+            retention_days: 30,
+            max_db_size_mb: 500,
+        },
+        maintenance_interval_secs: 300,
     };
 
     scan_once(&store, &config);

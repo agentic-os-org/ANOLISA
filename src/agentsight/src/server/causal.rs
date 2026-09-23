@@ -302,8 +302,11 @@ pub async fn run_causal_attribution(
         }
     };
 
-    let genai_store =
-        crate::storage::sqlite::GenAISqliteStore::new_with_path(&state.storage_path).ok();
+    let genai_store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+        &state.storage_path,
+        crate::config::InsertStoragePolicy::default(),
+    )
+    .ok();
     let trajectory_store = state.trajectory_store();
 
     // Scope resolution: "conversation" means the frontend is asking us to

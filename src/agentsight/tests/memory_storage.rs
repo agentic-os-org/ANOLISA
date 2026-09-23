@@ -109,7 +109,12 @@ fn run_with_batch(path: &PathBuf, batch: Option<BatchConfig>) -> RunResult {
     let db = path.join("genai_events.db");
 
     let rss_before = read_vm_rss_kb();
-    let store = GenAISqliteStore::new_with_path_and_batch(&db, batch).expect("create store");
+    let store = GenAISqliteStore::new_with_path_and_batch(
+        &db,
+        batch,
+        agentsight::config::InsertStoragePolicy::default(),
+    )
+    .expect("create store");
 
     let events = make_events(EVENT_COUNT);
     let start = Instant::now();

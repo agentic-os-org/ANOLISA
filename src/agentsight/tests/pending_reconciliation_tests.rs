@@ -20,7 +20,11 @@ impl Fixture {
         let dir = common::temp_dir("pending-reconciliation");
         let path = dir.join("genai.db");
         Self {
-            store: GenAISqliteStore::new_with_path(&path).unwrap(),
+            store: GenAISqliteStore::new_with_path(
+                &path,
+                agentsight::config::InsertStoragePolicy::default(),
+            )
+            .unwrap(),
             db: Connection::open(path).unwrap(),
             dir,
         }
@@ -165,7 +169,13 @@ fn concurrent_connections_do_not_duplicate_formal_calls() {
                 .unwrap();
         }
         let stores: Vec<_> = (0..8)
-            .map(|_| GenAISqliteStore::new_with_path(&fixture.dir.join("genai.db")).unwrap())
+            .map(|_| {
+                GenAISqliteStore::new_with_path(
+                    &fixture.dir.join("genai.db"),
+                    agentsight::config::InsertStoragePolicy::default(),
+                )
+                .unwrap()
+            })
             .collect();
         let barrier = Arc::new(Barrier::new(stores.len()));
         let threads: Vec<_> = stores

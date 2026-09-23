@@ -6,12 +6,14 @@ mod retention;
 #[cfg(target_os = "linux")]
 pub use containment::DueContainmentAction;
 pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
+pub use retention::{AuditMaintenancePolicy, AuditMaintenanceReport};
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use agentsight_enforcement_protocol::{DestinationClass, SecurityEvent, SecurityEventKind};
+use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
@@ -35,7 +37,10 @@ const EVENT_QUERY: &str = "SELECT event_json FROM security_events
 /// Typed local-security persistence failures.
 #[derive(Debug, Error)]
 pub enum AuditError {
-    /// Opening the configured database through the shared helper failed.
+    /// Opening or maintaining the database through the shared lifecycle failed.
+    #[error(transparent)]
+    Lifecycle(#[from] agentsight_sqlite_lifecycle::LifecycleError),
+    /// Opening a private database through the host helper failed.
     #[error("failed to open security database: {0}")]
     Open(String),
     /// SQLite schema, write, or query failed.
@@ -93,7 +98,7 @@ impl AuditStore {
     ///
     /// Returns a typed open or schema error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
-        let conn = open_connection(path.as_ref())?;
+        let conn = open_connection(path.as_ref(), ConnectionOptions::default())?;
         Self::from_connection(conn)
     }
 
@@ -840,19 +845,6 @@ impl AuditStore {
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, AuditError> {
         self.conn.lock().map_err(|_| AuditError::Poisoned)
     }
-}
-
-fn open_connection(path: &Path) -> Result<Connection, AuditError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            AuditError::Open(format!("create database directory {parent:?}: {error}"))
-        })?;
-    }
-    let conn = Connection::open(path)
-        .map_err(|error| AuditError::Open(format!("open SQLite {path:?}: {error}")))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-    conn.busy_timeout(std::time::Duration::from_millis(500))?;
-    Ok(conn)
 }
 
 fn ensure_containment_source_binding_column(connection: &Connection) -> Result<(), AuditError> {

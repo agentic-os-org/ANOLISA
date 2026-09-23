@@ -468,7 +468,10 @@ pub async fn get_token_savings(
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
-    let sessions = match GenAISqliteStore::new_with_path(db_path) {
+    let sessions = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(store) => match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
             Ok(s) => s,
             Err(e) => {
@@ -490,7 +493,10 @@ pub async fn get_token_savings(
     // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
     // This gives us all known tool_use_ids and their session membership.
     let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-    let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
+    let turn_indices = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(store) => store
             .get_tool_call_turn_indices(&session_ids)
             .unwrap_or_default(),
@@ -735,7 +741,10 @@ pub async fn get_session_savings(
     let db_path = &data.storage_path;
 
     // FIX(#3): query single session by id instead of full-table scan
-    let store = match GenAISqliteStore::new_with_path(db_path) {
+    let store = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -767,7 +776,10 @@ pub async fn get_session_savings(
 
     // Step 2: Get turn indices for tool_call_ids
     let session_ids = vec![session_id.as_str()];
-    let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
+    let turn_indices = match GenAISqliteStore::new_with_path(
+        db_path,
+        crate::config::InsertStoragePolicy::default(),
+    ) {
         Ok(st) => st
             .get_tool_call_turn_indices(&session_ids)
             .unwrap_or_default(),
@@ -886,7 +898,11 @@ mod tests {
     fn setup_genai_db(dir: &std::path::Path) -> std::path::PathBuf {
         let db_path = dir.join("genai_events.db");
         // Use GenAISqliteStore to create proper schema
-        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(&db_path).unwrap();
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .unwrap();
         // Insert test data directly via raw connection
         drop(store);
         let conn = rusqlite::Connection::open(&db_path).unwrap();

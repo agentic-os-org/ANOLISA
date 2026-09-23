@@ -181,7 +181,10 @@ fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
     if !path.exists() {
         return SessionStats::default();
     }
-    let store = match GenAISqliteStore::new_with_path(path) {
+    let store = match GenAISqliteStore::new_with_path(
+        path,
+        agentsight::config::InsertStoragePolicy::default(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("warning: cannot open genai database: {e}");

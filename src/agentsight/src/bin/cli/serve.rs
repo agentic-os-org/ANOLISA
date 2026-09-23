@@ -45,20 +45,25 @@ impl ServeCommand {
         #[cfg(target_os = "linux")]
         {
             use agentsight::server::run_server;
-            use agentsight::storage::sqlite::GenAISqliteStore;
 
+            let mut server_config = super::load_server_config(&self.config);
             let db_path = self
                 .db
                 .as_ref()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(GenAISqliteStore::default_path);
-
-            let server_config = super::load_server_config(&self.config);
+                .unwrap_or_else(|| server_config.storage.genai_path());
+            if self.db.is_some() {
+                server_config.storage.base_path = db_path
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+            }
             // Initialize logging before warning: standalone `serve` does not
             // register a logger, so a `log::warn!` before this point is lost.
             server_config.apply_verbose();
             let auth_config = server_config.server_auth;
-            let retention_days = server_config.retention_days;
+            let storage_config = server_config.storage;
             let judge_enabled = server_config.features.reuse_llm_judge_enabled;
 
             if let Some(dir) = db_path.parent() {
@@ -71,7 +76,7 @@ impl ServeCommand {
                     port,
                     db_path,
                     auth_config,
-                    retention_days,
+                    storage_config,
                     judge_enabled,
                 )
                 .await

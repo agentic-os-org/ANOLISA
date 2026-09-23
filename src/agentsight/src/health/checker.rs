@@ -666,7 +666,11 @@ mod tests {
     ) {
         let dir = unique_tmp_dir(tag);
         let genai_store = Arc::new(
-            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::InsertStoragePolicy::default(),
+            )
+            .expect("genai store"),
         );
         let istore = Arc::new(
             InterruptionStore::new_with_path(&dir.join("interruption_events.db"))

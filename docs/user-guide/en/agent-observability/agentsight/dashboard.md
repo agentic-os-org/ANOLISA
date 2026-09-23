@@ -172,11 +172,15 @@ This is the page to open when you need to know exactly what the Agent sent and r
 
 ## Settings
 
-Configures the LLM used by the optimization and semantic-search features (provider, base URL, model,
-API key). The key is masked when read back and stored in `optimization_config.json` next to the
-databases.
+The SQLite storage card shows each database's effective retention and size policy, physical and
+logical usage, and whether cleanup is due. Logical usage excludes reusable freelist pages, so a
+large physical file can still be within policy; the card does not claim that the background cleanup
+worker is healthy. The data comes from authenticated `GET /api/storage/status`, which never exposes
+filesystem paths.
 
-![Settings page](../../../../images/agentsight/en/dashboard-settings.png)
+This page also configures the LLM used by optimization and semantic search (provider, base URL,
+model, API key). The key is masked when read back and stored in `optimization_config.json` next to
+the databases.
 
 ## Language
 

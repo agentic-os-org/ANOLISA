@@ -11,6 +11,7 @@ const {
   fetchLatencyMetrics,
   fetchSecurityCase,
   fetchSecurityStatus,
+  fetchStorageStatus,
   reviewSecurityCase,
   semanticSearchSessions,
 } = require(process.env.AGENTSIGHT_API_CLIENT_BUILD);
@@ -117,6 +118,46 @@ test('fetchSecurityStatus preserves a non-2xx availability state envelope', asyn
 
   assert.equal(response.state, 'daemon_unreachable');
   assert.deepEqual(response.data, { error: 'socket unavailable' });
+});
+
+test('fetchStorageStatus uses the authenticated storage endpoint and preserves policy fields', async () => {
+  let requestedUrl = null;
+  const payload = {
+    schema_version: 1,
+    observed_at_unix_ms: 42,
+    stores: [{
+      id: 'primary',
+      availability: 'present',
+      size: {
+        database_bytes: 100,
+        wal_bytes: 20,
+        shm_bytes: 10,
+        freelist_bytes: 30,
+        physical_bytes: 130,
+        logical_bytes: 100,
+      },
+      policy: {
+        retention_days: 30,
+        size_limit_bytes: 500,
+        cleanup_trigger_bytes: 500,
+        cleanup_target_bytes: 500,
+        check_interval: 1000,
+        check_interval_unit: 'inserts',
+        enforced_by: 'trace',
+      },
+      coverage: 'full',
+      size_state: 'within_policy',
+    }],
+  };
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify(payload), { status: 200 });
+  };
+
+  const response = await fetchStorageStatus();
+
+  assert.equal(new URL(requestedUrl).pathname, '/api/storage/status');
+  assert.deepEqual(response, payload);
 });
 
 test('fetchLatencyMetrics forwards ranges and preserves nullable percentile data', async () => {

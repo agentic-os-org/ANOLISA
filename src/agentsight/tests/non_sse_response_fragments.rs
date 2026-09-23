@@ -100,7 +100,11 @@ fn check(chunks: &[&[u8]]) {
             call.metadata
                 .insert("session_id".into(), "fragment-session".into());
             let dir = common::temp_dir("response-fragments");
-            let store = GenAISqliteStore::new_with_path(&dir.join("genai.db")).unwrap();
+            let store = GenAISqliteStore::new_with_path(
+                &dir.join("genai.db"),
+                agentsight::config::InsertStoragePolicy::default(),
+            )
+            .unwrap();
             store.export(&events);
             store.flush();
             // This is the output index used by the tokenless savings lookup.

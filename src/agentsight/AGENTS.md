@@ -121,6 +121,7 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
+| **SQLiteLifecycle** | `crates/agentsight-sqlite-lifecycle/` | 无业务模型依赖的 SQLite 连接、容量计量、checkpoint 与清理策略驱动 | `ConnectionOptions`, `SizeSnapshot`, `SizePolicy` |
 | **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
 | **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
@@ -272,6 +273,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
 | `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
 | `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |
+| `/api/storage/status` | GET | 各 SQLite store 的生效策略、物理/逻辑占用和治理覆盖状态，不返回文件路径 |
 
 ## 9. Frontend
 
@@ -291,7 +293,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 `agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
 
-- **版本缺失或过旧**（如从 0.6 升级到 0.7）：先把旧文件复制为 `config.json.bak.<unix秒>`，再写入浅合并结果——以内嵌默认配置为底，逐个顶层键叠加用户已设置的内容（`schema_version` 除外），最后提升版本号（`config.rs` 的 `ensure_default_agents_config`，见 #1496）
+- **版本缺失或过旧**：先把旧文件复制为 `config.json.bak.<unix秒>`，再用当前内嵌默认配置整体替换；旧字段不迁移
 - **版本一致或更新**：保留用户自定义配置不动
 - **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
 

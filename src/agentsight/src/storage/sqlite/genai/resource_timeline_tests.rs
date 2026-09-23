@@ -9,7 +9,9 @@ fn test_store(label: &str) -> (std::path::PathBuf, GenAISqliteStore) {
         "agentsight-resource-{label}-{}-{nonce}.db",
         std::process::id()
     ));
-    let store = GenAISqliteStore::new_with_path(&path).expect("resource test store");
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+            .expect("resource test store");
     (path, store)
 }
 

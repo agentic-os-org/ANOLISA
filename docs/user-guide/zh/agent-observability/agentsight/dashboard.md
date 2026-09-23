@@ -154,10 +154,12 @@ Skill 数量分布，以及按周的热度排行。统计单位是一次 LLM 调
 
 ## 设置
 
-配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key）。Key 回读时会脱敏，保存在数据
-库旁边的 `optimization_config.json`。
+SQLite 存储卡片会分别展示每个数据库当前生效的保留与容量策略、物理占用、逻辑占用，以及是否需要清理。
+逻辑占用会扣除可复用的 freelist 页面，因此物理文件较大时仍可能符合策略；卡片不会据此声称后台清理任务
+一定健康。数据来自需要认证的 `GET /api/storage/status`，接口不会返回文件路径。
 
-![设置页面](../../../../images/agentsight/zh/dashboard-settings.png)
+本页也用于配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key）。Key 回读时会脱敏，
+保存在数据库旁边的 `optimization_config.json`。
 
 ## 语言
 

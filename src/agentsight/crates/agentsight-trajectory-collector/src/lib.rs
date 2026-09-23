@@ -15,8 +15,8 @@ pub mod store;
 
 pub use store::{
     strip_system_context, StepContext, StepHit, StepScanFilter, StepScanOutcome, StepView,
-    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryRecord, TrajectoryStore,
-    TrajectorySummary,
+    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryMaintenancePolicy,
+    TrajectoryMaintenanceReport, TrajectoryRecord, TrajectoryStore, TrajectorySummary,
 };
 
 use std::path::PathBuf;
@@ -38,6 +38,10 @@ pub struct CollectorConfig {
     pub scan_dirs: Option<Vec<PathBuf>>,
     /// Path of the `trajectories.db` SQLite file.
     pub db_path: PathBuf,
+    /// Retention and capacity settings for the trajectory store.
+    pub maintenance: TrajectoryMaintenancePolicy,
+    /// Seconds between maintenance passes; zero disables scheduled maintenance.
+    pub maintenance_interval_secs: u64,
 }
 
 /// Scan-convert-persist loop; returns when `stop` is cleared.
@@ -63,9 +67,20 @@ pub fn run_collector_loop(config: &CollectorConfig, stop: &AtomicBool) {
         config.db_path.display()
     );
 
+    let mut last_maintenance = None;
     // Single exit point: the loop always exits via the `sleep_or_stop` check,
     // avoiding split semantics between the while-condition and the helper.
     loop {
+        if config.maintenance_interval_secs > 0
+            && last_maintenance.is_none_or(|last: std::time::Instant| {
+                last.elapsed() >= Duration::from_secs(config.maintenance_interval_secs)
+            })
+        {
+            if let Err(error) = store.maintain(config.maintenance) {
+                log::warn!("Trajectory store maintenance failed: {error}");
+            }
+            last_maintenance = Some(std::time::Instant::now());
+        }
         scan_once(&store, config);
         if !sleep_or_stop(stop, config.scan_interval_secs) {
             break;
@@ -81,7 +96,7 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
     let sessions = discovery::discover_sessions(config.scan_dirs.as_deref());
     let mut collected = 0usize;
     for session in &sessions {
-        match process_session(store, session) {
+        match process_session(store, session, config.maintenance.retention_days) {
             Ok(true) => collected += 1,
             Ok(false) => {}
             Err(e) => {
@@ -107,7 +122,11 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
 
 /// Ingest a single session file. Returns `Ok(true)` when the row was
 /// (re)written, `Ok(false)` when the file is unchanged.
-fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Result<bool> {
+fn process_session(
+    store: &TrajectoryStore,
+    session: &DiscoveredSession,
+    retention_days: u64,
+) -> Result<bool> {
     let meta = std::fs::metadata(&session.path)
         .with_context(|| format!("stat {}", session.path.display()))?;
     let file_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
@@ -119,6 +138,17 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         .unwrap_or(0);
 
     let file_path = session.path.to_string_lossy().to_string();
+    if retention_days > 0 {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let cutoff_ns = agentsight_sqlite_lifecycle::retention_cutoff_ns(now_ns, retention_days)?;
+        if file_mtime_ns < i64::try_from(cutoff_ns).unwrap_or(i64::MAX) {
+            store.set_file_state(&file_path, file_size, file_mtime_ns)?;
+            return Ok(false);
+        }
+    }
     if let Some((size, mtime)) = store.get_file_state(&file_path)? {
         if size == file_size && mtime == file_mtime_ns {
             return Ok(false);
@@ -262,6 +292,8 @@ mod tests {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects.clone()]),
             db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);
@@ -297,6 +329,8 @@ mod tests {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
             db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+            maintenance_interval_secs: 1,
         };
         let stop = Arc::new(AtomicBool::new(true));
         let stop_clone = Arc::clone(&stop);
@@ -332,6 +366,8 @@ mod tests {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
             db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);
@@ -357,6 +393,8 @@ mod tests {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![sessions_root]),
             db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);

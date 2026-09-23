@@ -1920,7 +1920,11 @@ mod tests {
             1_100_000_000u64
         ));
         let _ = std::fs::remove_file(&path);
-        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::InsertStoragePolicy::default(),
+        )
+        .unwrap();
         let event = crate::genai::semantic::GenAISemanticEvent::LLMCall(call);
         store.complete_pending(&event).unwrap();
 

@@ -1,0 +1,8 @@
+[package]
+name = "agentsight-sqlite-lifecycle"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
