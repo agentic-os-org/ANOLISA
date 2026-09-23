@@ -6,6 +6,21 @@
 
 ## [未发布]
 
+## [0.26.0] — 2026-09-23
+
+### 新增
+- Enhanced Bash 宿主启动的登录会话在 Bash 4+ 上具备真实 login 身份：`shopt -q login_shell` 返回 yes、`$0` 为 `-bash`，并读取 `/etc/profile` 与 `~/.bash_profile`，与原生 `bash -l` 登录一致；设置 `shell.login_identity = false` 可回退旧行为，Bash 3.2 或能力探测失败时也会自动回退 (#3358)
+- cosh-ng 现可在 Intel Mac 上安装：raw 后端新增 macOS x86_64 预编译产物（最低支持 macOS 11.0），公开安装脚本可识别 Intel Mac，不再直接报错或回退到 ARM 包 (#3448, #3449)
+- `cosh-cli checkpoint recover` 现在支持在原始工作区路径已不存在的情况下恢复被中断的初始化，恢复提示通过 `meta.warning` 返回 (#3356)
+
+### 变更
+- 诊断日志默认级别由 `warn` 调整为 `info`：`~/.copilot-shell/logs/cosh-{shell,core}.log.<date>` 默认记录 shell/core 启动、core 派生与错误收敛点等此前仅在界面中可见的事件；显式设置的 `COSH_LOG`、`RUST_LOG` 或 `[logging] level` 依然优先生效，`debug: true` 会把有效级别提升到 `debug` (#3331)
+
+### 修复
+- 修复 auto 模式下经 rtk 包装的只读命令（如 `find /tmp -name '*x*' 2>/dev/null` 被包装为 `env TOKENLESS_* /usr/bin/rtk …`）被误判为需要审批的问题：判定时剥离包装层、执行时仍使用包装形式以保留 RTK 输出压缩，行为出现偏差时回到审批卡片 (#3436)
+- 修复在空工作区创建 `checkpoint = on` 任务并对接旧版 daemon 时失败却没有任何说明的问题：现在会说明未生成快照的原因，并给出升级 ws-ckpt、添加文件后重新提交或改用 `checkpoint = off` 的明确指引 (#3437)
+- 修复切换任务快照成功后新启动的 Core 与 Codex 任务仍使用旧工作区视图、需要重启 Gateway 的问题：现在刷新后的工作区立即生效，刷新失败时新启动按 fail-closed 拒绝执行 (#3438)
+
 ## [0.25.0] — 2026-09-20
 
 ### 新增

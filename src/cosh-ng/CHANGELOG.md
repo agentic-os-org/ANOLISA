@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-09-23
+
+### Added
+- Login sessions started by the Enhanced Bash host now carry a real login identity on Bash 4+: `shopt -q login_shell` reports yes, `$0` is `-bash`, and `/etc/profile` plus `~/.bash_profile` are read, matching a native `bash -l` session; set `shell.login_identity = false` to opt out, and the previous behavior is restored automatically on Bash 3.2 or when the capability probe fails (#3358)
+- cosh-ng can now be installed on Intel Macs: the raw backend ships an x86_64 macOS archive with a minimum of macOS 11.0, and the public installer recognizes Intel Macs instead of failing or falling back to the ARM package (#3448, #3449)
+- `cosh-cli checkpoint recover` can recover an interrupted initialization even when the original workspace path no longer exists, reporting the notices through `meta.warning` (#3356)
+
+### Changed
+- Diagnostic logging now defaults to the `info` level, so `~/.copilot-shell/logs/cosh-{shell,core}.log.<date>` records shell/core startup, core spawn, and error choke-points that previously surfaced only in the UI; explicit `COSH_LOG`, `RUST_LOG`, or `[logging] level` settings still win, and `debug: true` raises the effective level to `debug` (#3331)
+
+### Fixed
+- rtk-wrapped readonly commands whose only redirection suppresses stderr to `/dev/null` (e.g. `find /tmp -name '*x*' 2>/dev/null` wrapped as `env TOKENLESS_* /usr/bin/rtk …`) are auto-approved again in auto mode: the wrapper is peeled for classification while the wrapped form still executes, keeping RTK output compression active, and any deviation falls back to the approval card (#3436)
+- When a Task created with `checkpoint = on` in an empty workspace fails against an older daemon, the Task now states why no snapshot was taken and offers clear next steps (upgrade ws-ckpt, add a file and resubmit, or select `checkpoint = off`) instead of failing without explanation (#3437)
+- After a successful Task snapshot switch, new Core and Codex Tasks use the rebuilt workspace without a Gateway restart; if the workspace refresh cannot be established, new Runtime launches fail closed instead of using a stale view (#3438)
+
 ## [0.25.0] — 2026-09-20
 
 ### Added
