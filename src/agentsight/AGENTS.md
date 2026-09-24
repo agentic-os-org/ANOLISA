@@ -296,7 +296,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 `agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
 
-- **版本缺失或过旧**：先把旧文件复制为 `config.json.bak.<unix秒>`，再用当前内嵌默认配置整体替换；旧字段不迁移
+- **版本缺失或过旧**：先把旧文件复制为 `config.json.bak.<unix秒>`，再将用户配置的顶层键浅合并到当前内嵌默认配置，并更新到当前 schema 版本；嵌套配置不递归合并
 - **版本一致或更新**：保留用户自定义配置不动
 - **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
 
@@ -305,9 +305,10 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 2. 是否改变了字段语义（如默认值翻转）？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
 3. 是否纯新增可选字段（旧配置完全兼容）？→ 无需 bump
 
-当前配置为 schema v4。所有 `storage` 策略统一使用 `retention_days`、`max_db_size_mb`、
-`check_interval_secs`；旧 `check_interval_inserts` 不受支持。旧 schema 按上述机制备份后整体替换。三个值中
-任一为 `0` 都关闭对应的按时间、按容量或定时治理。
+当前配置为 schema v5。所有 `storage` 策略统一使用 `retention_days`、`max_db_size_mb`、
+`check_interval_secs`；旧 `check_interval_inserts` 不受支持。旧 schema 按上述机制备份后进行顶层浅合并：
+已有配置节整体保留，缺失的顶层配置节由默认配置补齐，已移除的嵌套字段不会自动迁移。三个值中任一为
+`0` 都关闭对应的按时间、按容量或定时治理。
 
 `storage.max_total_size_mb`（默认 2200，即各库默认上限之和）是全局总上限，Dashboard 设置页只暴露这一项；
 `0` 关闭总量治理，启用时最小值为 9 MiB。总占用超过上限时，超出部分按占用从大到小分摊给各库，由各库按自身安全删除规则清理。
