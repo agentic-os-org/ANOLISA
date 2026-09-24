@@ -227,11 +227,17 @@ runs:
     # Run the adapter unit suite on nightly and release packaging paths as
     # well as PR CI, so a failing plugin cannot ship inside an RPM.
     #
-    # Both ordering constraints come from `build-openclaw-plugin` above: it
-    # runs `sync-versions` first and manifest-config-schema-test.ts asserts on
-    # the rewritten openclaw.plugin.json, so the suite has to run after it and
-    # not before; and its `npm install` leaves this same directory warm, so the
-    # suite's own install is a no-op and the tests add ~4 s.
+    # No ordering constraint ties this step to `build-openclaw-plugin` above. The
+    # suite installs from the committed package-lock.json (`npm ci`) and none of
+    # its tests read the `.version` that `sync-versions` rewrites --
+    # manifest-config-schema-test.ts only touches the manifest's configSchema /
+    # uiHints and src/config.ts -- so it runs green on a bare checkout, which is
+    # exactly what the per-PR `Test agent-memory` job does. It stays after the
+    # build step so a broken plugin fails packaging before the archive is created
+    # below; the `npm ci` in `test-openclaw-plugin` deliberately gives up the
+    # warm node_modules the build left behind, because a gate should resolve
+    # dependencies from the lockfile rather than from whatever the registry
+    # served during the build.
     - name: Setup Node.js (agent-memory plugin tests)
       if: inputs.component == 'agent-memory'
       uses: actions/setup-node@v4
