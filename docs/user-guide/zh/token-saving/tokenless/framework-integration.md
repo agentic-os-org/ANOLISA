@@ -203,6 +203,18 @@ DeepSeek Harness 按 profile 管理，因此必须至少提供一个 `--profile`
 将其列为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不再收到该参数，
 安全扫描改由 `security.installPolicy` 决定。
 
+`install.sh` 可以拒绝这份同意授予：设置 `ANOLISA_ACCEPT_CAPABILITIES=0` 后
+它不再传递 `--accept-capabilities`，带同意门禁的宿主因此拒绝本次安装，
+脚本以退出码 3 结束，而不是代你授予同意。此时可交互式授予
+（`openclaw plugins install <插件目录> --force --accept-capabilities`），
+或取消该变量让脚本代为授予。`ANOLISA_ACCEPT_CAPABILITIES` 是与 agent-memory
+的 OpenClaw 安装脚本共用的同意开关，两者使用同一张取值表：
+`1`/`true`/`yes`/`on` 授予，`0`/`false`/`no`/`off` 拒绝（大小写不敏感，
+仅去除首尾空白），未设置或为空视为授予，其他任何取值都在探测安装器之前
+以退出码 2 中止。若拒绝授予后安装因其他原因失败，仍返回退出码 1 并说明
+情况，绝不把真实的安装失败报成策略拒绝。驱动路径
+（`anolisa adapter enable tokenless openclaw`）目前仍无条件授予同意。
+
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
 ```bash

@@ -224,6 +224,21 @@ the option as effective; hosts that list it as a deprecated no-op (OpenClaw
 2026.6.5+) no longer receive it, and the safety scan there follows
 `security.installPolicy`.
 
+`install.sh` can withhold that consent grant: with `ANOLISA_ACCEPT_CAPABILITIES=0`
+it omits `--accept-capabilities`, so a host that gates consent rejects the
+install and the script exits with code 3 rather than granting consent on your
+behalf. Grant consent interactively (`openclaw plugins install <plugin-dir>
+--force --accept-capabilities`) or unset the variable to let the script grant
+it. `ANOLISA_ACCEPT_CAPABILITIES` is the consent switch shared with the
+agent-memory OpenClaw installer and uses one token table on both:
+`1`/`true`/`yes`/`on` grant, `0`/`false`/`no`/`off` withhold (case-insensitive,
+outer whitespace trimmed), unset or empty grants, and any other value aborts
+with exit code 2 before the installer is probed. A withheld install that fails
+for an unrelated reason keeps exit code 1 and says so, so a real install failure
+is never reported as a policy refusal. The driver path
+(`anolisa adapter enable tokenless openclaw`) still grants consent
+unconditionally.
+
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
 ```bash
