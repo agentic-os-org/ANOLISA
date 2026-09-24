@@ -312,7 +312,7 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression defaults to enabled; RTK rewriting is opt-in through `TOKENLESS_RTK_ENABLED=1` or the plugin setting `rtk_enabled: true`. TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
 ### Hermes
 

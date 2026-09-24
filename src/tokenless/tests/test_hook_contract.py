@@ -78,7 +78,7 @@ class PreToolHookContract(unittest.TestCase):
         return contract_runner.run_case(
             corpus.PRE_TOOL_HOOK,
             payload,
-            PRE_TOOL_AGENTS[agent],
+            {**PRE_TOOL_AGENTS[agent], "TOKENLESS_RTK_ENABLED": "1"},
             behavior,
         )
 

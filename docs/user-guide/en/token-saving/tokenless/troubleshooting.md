@@ -257,7 +257,7 @@ command -v rtk
 
 If RTK works directly but not in the agent, inspect the framework support matrix, adapter status, and whether the session was restarted.
 
-`TOKENLESS_COMPRESSION_ENABLED=0` does not disable rewriting. Disable the adapter, or set OpenClaw's `rtk_enabled=false` when using that plugin, if the original shell input must be preserved.
+`TOKENLESS_COMPRESSION_ENABLED=0` does not disable rewriting. Rewriting is disabled by default. Set `TOKENLESS_RTK_ENABLED=0` in the host environment to override any explicit SDK/plugin opt-in and preserve the original shell input.
 
 ## Tool Ready still reports `NOT_READY`
 

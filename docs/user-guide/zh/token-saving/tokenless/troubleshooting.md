@@ -242,7 +242,7 @@ command -v rtk
 
 如果 RTK 正常但 Agent 中不生效，检查框架支持矩阵、Adapter 状态和是否已经重启会话。
 
-`TOKENLESS_COMPRESSION_ENABLED=0` 不会关闭命令重写。如果必须保留原始 Shell 输入，应禁用 Adapter；使用 OpenClaw Plugin 时也可以设置 `rtk_enabled=false`。
+`TOKENLESS_COMPRESSION_ENABLED=0` 不会关闭命令重写。命令重写默认关闭；在宿主环境中设置 `TOKENLESS_RTK_ENABLED=0` 可覆盖显式 SDK/插件启用配置，保留原始 Shell 输入。
 
 ## Tool Ready 仍然报告 `NOT_READY`
 
