@@ -52,8 +52,6 @@ const LOGO_COLORS: &[&str] = &[
 
 const RESET: &str = "\x1b[0m";
 const LOGO_MIN_WIDTH: u16 = 42;
-const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
-const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
 const BOOTSTRAP_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_PATH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -63,11 +61,13 @@ mod recommendations;
 pub(crate) use bash_capability::{exported_bash_functions_posix_compatible, resolve_bash_for_r2};
 #[cfg(test)]
 use recommendations::{
-    append_startup_auth_hint, plan_startup_for_render, record_visible_personal_impressions,
-    visible_personal_candidates, write_startup_suggestion_card,
+    append_startup_auth_hint, append_startup_upgrade_hint, plan_startup_for_render,
+    record_visible_personal_impressions, visible_personal_candidates,
+    write_startup_suggestion_card,
 };
 pub(crate) use recommendations::{
-    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+    render_pending_recommendation_notice, render_pending_upgrade_notice, render_startup_banner,
+    render_startup_health_banner,
 };
 
 fn restore_startup_prompt<W: Write>(
