@@ -99,19 +99,19 @@ Local compression and original recovery have been verified on finite samples.
 Stable whole-Agent token savings have not been established, so this feature remains
 opt-in.
 
-## Optional HTML page rendering
+## HTML page rendering
 
-HTML page rendering is disabled by default. Set `TOKENLESS_HTML_EXTRACTION_ENABLED=1`
-in the environment inherited by Tokenless or its host agent to enable it; unset the
-variable or set it to `0` to disable it. `1`, `true`, and `yes` enable it
-(case-insensitively). This option is independent of the general compression switch
-and is not a `config.json` field. With rendering enabled,
+HTML page rendering is enabled by default. Set `TOKENLESS_HTML_EXTRACTION_ENABLED=0`
+in the environment inherited by Tokenless or its host agent to disable it. When unset
+or empty it stays enabled; `1`, `true`, and `yes` also enable it (case-insensitively),
+and any other value disables it. This option is independent of the general compression
+switch and is not a `config.json` field. With rendering enabled,
 `TOKENLESS_COMPRESSION_ENABLED=0` measures candidates but returns the original.
 
-Rust callers use `RuntimeConfig.html_extraction_enabled`; Python callers use
-`TokenlessConfig(html_extraction_enabled=True)` or the native `TokenlessRuntime`
-keyword of the same name. SDK options default to false and are explicit; this CLI
-environment variable does not override them.
+The SDKs and native bindings do not read this environment variable. To turn rendering
+off there, Rust callers set `RuntimeConfig.html_extraction_enabled` to `false`, and
+Python callers pass `TokenlessConfig(html_extraction_enabled=False)` or the native
+`TokenlessRuntime` keyword of the same name.
 
 The compressor handles complete HTML documents (starting with `<!doctype html` or
 `<html>`) received as successful command output or API responses, for example a page
@@ -151,10 +151,11 @@ print-only script, optionally after `cd … &&`) as `file_read`. JSON, CSV, buil
 and diffs in such output still compress, but a printed HTML page is source the agent
 may edit and stays verbatim. A read combined with a pipe, redirection or another
 command, and a page returned by an MCP file tool, is still rendered like a fetched page
-and must be retrieved to see its source.
+and must be retrieved to see its source. The DSH, OpenClaw, QwenPaw, and AgentScope
+adapters report every shell command as command output without that print-only check, so a page
+printed there is rendered like a fetched page as well.
 
-Local rendering and original recovery have been verified on finite samples. Stable
-whole-Agent token savings have not been established, so this feature remains opt-in.
+Local rendering and original recovery have been verified on finite samples.
 
 ## Environment variables
 
@@ -170,7 +171,7 @@ whole-Agent token savings have not been established, so this feature remains opt
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
-| `TOKENLESS_HTML_EXTRACTION_ENABLED` | Enable HTML page rendering | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 
 ### Adapter and diagnostic variables
 
@@ -213,7 +214,7 @@ them from source control or backups as required by your data policy.
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | No automatic TTL; retained until cleared | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, and build/log gaps | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
+| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, and the complete original of rendered HTML pages | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
 | Configuration | `~/.tokenless/config.json` | Three Boolean toggles | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 

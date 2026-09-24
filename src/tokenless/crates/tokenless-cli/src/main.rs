@@ -272,11 +272,17 @@ enum StatsCommands {
 }
 
 /// Boolean switch from the environment: `1`, `true`, or `yes` (case-insensitive)
-/// enable it; any other value disables it; unset keeps `default`.
+/// enable it; any other non-empty value disables it; unset or empty keeps
+/// `default`.
+// Empty counts as unset so that the recording toggles in `tokenless-stats`
+// and these switches follow one rule.
 fn env_flag(name: &str, default: bool) -> bool {
-    std::env::var(name).map_or(default, |value| {
-        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
-    })
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map_or(default, |value| {
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -575,7 +581,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         true,
                     ),
                     diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
-                    html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", false),
+                    html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
                     stash_enabled: true,
                     rtk_path,
                     rtk_data_dir,

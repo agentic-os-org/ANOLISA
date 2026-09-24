@@ -38,7 +38,7 @@ pub struct EntryOptions {
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,
-    /// Whether complete HTML documents are rendered as Markdown with original recovery. Disabled by default.
+    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
@@ -989,6 +989,8 @@ mod tests {
 
     use super::*;
 
+    // A local fixture, not the runtime defaults: these tests set each
+    // switch explicitly.
     fn options() -> EntryOptions {
         EntryOptions {
             compression_enabled: true,

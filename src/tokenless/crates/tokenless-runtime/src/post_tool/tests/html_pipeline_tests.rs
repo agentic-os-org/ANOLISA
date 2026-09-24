@@ -15,7 +15,7 @@ fn html_input(paragraphs: usize) -> String {
 }
 
 #[test]
-fn html_is_opt_in_and_requires_recovery_and_text_replacement() {
+fn html_is_switchable_and_requires_recovery_and_text_replacement() {
     let input = html_input(10);
     for mode in 0..11 {
         let mut req = request(&input);

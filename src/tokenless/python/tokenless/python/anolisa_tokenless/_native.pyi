@@ -55,7 +55,7 @@ class TokenlessRuntime:
         compression_enabled: bool = True,
         search_path_sharing_enabled: bool = True,
         diff_compression_enabled: bool = False,
-        html_extraction_enabled: bool = False,
+        html_extraction_enabled: bool = True,
         stats_enabled: bool = True,
         sls_enabled: bool = False,
     ) -> None: ...

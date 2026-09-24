@@ -68,7 +68,7 @@ pub struct RuntimeConfig {
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,
-    /// Whether complete HTML documents are rendered as Markdown with original recovery. Disabled by default.
+    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
 }
 
@@ -81,7 +81,7 @@ impl Default for RuntimeConfig {
             compression_enabled: true,
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
-            html_extraction_enabled: false,
+            html_extraction_enabled: true,
         }
     }
 }
@@ -1761,15 +1761,23 @@ mod tests {
     /// Entry options matching the ones `TokenlessRuntime::before_model` builds
     /// from a default [`RuntimeConfig`].
     fn runtime_entry_options() -> EntryOptions {
+        let config = RuntimeConfig::default();
         EntryOptions {
-            compression_enabled: true,
-            search_path_sharing_enabled: true,
-            diff_compression_enabled: false,
-            html_extraction_enabled: false,
+            compression_enabled: config.compression_enabled,
+            search_path_sharing_enabled: config.search_path_sharing_enabled,
+            diff_compression_enabled: config.diff_compression_enabled,
+            html_extraction_enabled: config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: None,
         }
+    }
+
+    #[test]
+    fn html_rendering_is_on_and_diff_cropping_off_by_default() {
+        let config = RuntimeConfig::default();
+        assert!(config.html_extraction_enabled);
+        assert!(!config.diff_compression_enabled);
     }
 
     #[test]

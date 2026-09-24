@@ -170,7 +170,7 @@ class TokenlessConfig:
     rtk_enabled: bool = True
     search_path_sharing_enabled: bool = True
     diff_compression_enabled: bool = False
-    html_extraction_enabled: bool = False
+    html_extraction_enabled: bool = True
 
     def __post_init__(self) -> None:
         try:

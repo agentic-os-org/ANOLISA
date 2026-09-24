@@ -253,7 +253,7 @@ tokenless stats summary \
 - **收益高**：返回大量统一结构记录的工具（列表、表格、搜索结果），携带 `debug`/`trace`/`logs` 等冗余字段的 Payload，或描述冗长的 Schema。
 - **收益中等**：Shell 输出只有超过 Layer 2 阈值（字符串 65,536 字符、数组头部窗口 128 项、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损清理和记录缩减（至少 33 条记录的对象数组）。
 - **收益接近零**：短于 200 字符最小门禁的响应；已足够紧凑、没有冗余的 JSON；任何没有变小的输入（尺寸保护会保留原文）。
-- **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 默认原样透传，显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 后才做上下文裁剪；其他纯文本、Stack Trace、HTML 和源码目前原样透传。
+- **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 默认原样透传，显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 后才做上下文裁剪；来自命令输出或 API 响应的完整 HTML 文档默认转写为 Markdown，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭；其他纯文本、Stack Trace 和源码目前原样透传。
 
 参考数字总是属于测量时的确切 commit——可复现负载、当前快照及其限制见上文[运行仓库参考负载](#运行仓库参考负载)。实际会话收益还需乘以工具 Payload 占会话总 Token 的比例，见[正确解释节省率](#正确解释节省率)。完整触发规则见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 

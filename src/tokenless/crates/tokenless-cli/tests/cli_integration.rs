@@ -2448,7 +2448,18 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
         "window.x = 1;".repeat(40)
     );
     let state = temp.path().join("data");
-    for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+    // An empty value counts as unset and keeps the default; `on` is not a
+    // recognised true value and disables rendering.
+    for enabled in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("false"),
+        Some("on"),
+        Some("1"),
+        Some("TRUE"),
+        Some("yes"),
+    ] {
         let mut command = tokenless_bin();
         command
             .env("TOKENLESS_DATA_DIR", &state)
@@ -2474,7 +2485,7 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
         let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let result = &response["result"];
         assert_eq!(result["content_type"], "html");
-        if enabled.is_none() || enabled == Some("0") {
+        if matches!(enabled, Some("0") | Some("false") | Some("on")) {
             assert_eq!(result["disposition"], "passthrough");
             assert_eq!(result["output"], html);
             assert_eq!(result["stash_keys"], serde_json::json!([]));

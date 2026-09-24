@@ -90,17 +90,17 @@ Tokenless 不读取宿主持久化输出文件以补全被截断的 Diff，也�
 有限样本已验证局部压缩及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
 因此该功能保持可选启用。
 
-## 可选 HTML 页面转写
+## HTML 页面转写
 
-HTML 页面转写默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
-`TOKENLESS_HTML_EXTRACTION_ENABLED=1` 启用；取消变量或设为 `0` 关闭。
-`1`、`true`、`yes`（不区分大小写）表示启用。此开关独立于总压缩开关，
-不是 `config.json` 字段。启用转写后，设置 `TOKENLESS_COMPRESSION_ENABLED=0`
-会测量候选，但仍返回原文。
+HTML 页面转写默认开启。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭。未设置或为空时保持开启，`1`、`true`、`yes`
+（不区分大小写）也表示开启；其他值均关闭。此开关独立于总压缩开关，
+不是 `config.json` 字段。
+转写开启时，设置 `TOKENLESS_COMPRESSION_ENABLED=0` 会测量候选，但仍返回原文。
 
-Rust 使用 `RuntimeConfig.html_extraction_enabled`；Python 使用
-`TokenlessConfig(html_extraction_enabled=True)` 或原生 `TokenlessRuntime`
-的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
+SDK 与原生绑定不读取该环境变量。要在那里关闭转写，Rust 将
+`RuntimeConfig.html_extraction_enabled` 设为 `false`，Python 传入
+`TokenlessConfig(html_extraction_enabled=False)` 或原生 `TokenlessRuntime` 的同名参数。
 
 压缩器处理成功命令输出或 API 响应中收到的完整 HTML 文档（以 `<!doctype html`
 或 `<html>` 开头），例如 `curl` 抓取的页面或 MCP 工具返回的页面，需要文本替换
@@ -128,10 +128,10 @@ adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 He
 打印范围的 `sed`，可带 `cd … &&` 前缀）报告为 `file_read`。这类输出里的 JSON、CSV、构建
 日志和 diff 照常压缩，但打印出的 HTML 页面是 Agent 可能要编辑的源码，保持原样。带管道、
 重定向或其他命令的读取，以及 MCP 文件工具返回的页面，仍与抓取的页面一样被转写，需要取回
-才能看到源码。
+才能看到源码。DSH、OpenClaw、QwenPaw 和 AgentScope 的 adapter 把所有 shell 命令报告为命令输出，
+没有这项只打印判定，因此在那里打印出的页面也与抓取的页面一样被转写。
 
-有限样本已验证局部转写及原文恢复，尚未证实稳定的 Agent 整轮 token 收益，
-因此该功能保持可选启用。
+有限样本已验证局部转写及原文恢复。
 
 ## 环境变量
 
@@ -147,7 +147,7 @@ adapter 分类：文件读取工具的结果透传；共享 PostTool Hook 与 He
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
-| `TOKENLESS_HTML_EXTRACTION_ENABLED` | 启用 HTML 页面转写 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 
@@ -187,7 +187,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |
 |------|----------|----------|----------|--------------|
 | 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 无自动 TTL，直到清理 | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述和 build/log 间隙内容 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
+| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容，以及被转写 HTML 页面的完整原文 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
 | 配置 | `~/.tokenless/config.json` | 三个布尔开关 | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 

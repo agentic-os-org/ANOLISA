@@ -48,7 +48,8 @@ disposition keeps the original. The hook currently routes:
 | CSV/TSV tables when the host can replace output with text | Full compaction; tables with more than 32 data rows may reduce rows when Stash-backed recovery is available |
 | API search-result listings when path sharing is enabled and the host can replace output with text | Lossless search path sharing; every received match is retained |
 | Git diffs from command output when `TOKENLESS_DIFF_COMPRESSION_ENABLED` opts in (default off) and the host can replace output with text | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
-| Long plain text, stack trace, HTML, source code, unknown | Passthrough until a matching domain compressor is connected |
+| Complete HTML documents from command output or API responses (not file reads) when the host can replace output with text and Stash-backed recovery is available; enabled by default, `TOKENLESS_HTML_EXTRACTION_ENABLED=0` disables it | Main-content rendering as Markdown with removal counts in the view header; the complete original stays retrievable through Stash, and marginal candidates are rejected |
+| Long plain text, stack trace, source code, unknown | Passthrough until a matching domain compressor is connected |
 
 Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
 selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
