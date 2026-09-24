@@ -21,6 +21,7 @@ pub(crate) struct ShellAuditRecorder {
     mode: AuditMode,
     shell_session_id: String,
     seen_events: usize,
+    truncation_reported: bool,
     hash_salt: String,
     degraded: bool,
     warning_emitted: bool,
@@ -78,6 +79,7 @@ impl ShellAuditRecorder {
             mode: settings.mode,
             shell_session_id,
             seen_events: 0,
+            truncation_reported: false,
             hash_salt: uuid::Uuid::new_v4().to_string(),
             warning_emitted: false,
             owned_approvals: std::collections::HashSet::new(),
@@ -99,6 +101,7 @@ impl ShellAuditRecorder {
             mode: AuditMode::Required,
             shell_session_id: shell_session_id.into(),
             seen_events: 0,
+            truncation_reported: false,
             hash_salt: "test-salt".to_string(),
             degraded: true,
             warning_emitted: false,
@@ -117,6 +120,7 @@ impl ShellAuditRecorder {
             mode: AuditMode::BestEffort,
             shell_session_id: "audit-test-session".to_string(),
             seen_events: 0,
+            truncation_reported: false,
             hash_salt: "salt".to_string(),
             degraded: false,
             warning_emitted: false,
@@ -127,9 +131,29 @@ impl ShellAuditRecorder {
     }
 
     /// Projects newly observed native command events exactly once.
+    ///
+    /// `events` is a cumulative per-session snapshot that callers only ever
+    /// grow. A shorter snapshot means the upstream buffer was truncated or
+    /// rebuilt; replaying it would duplicate persisted records, so the batch
+    /// is skipped while the high-water mark stays put, and the gap is
+    /// persisted as one `audit.truncated` record per shrink episode
+    /// (re-armed once projection advances again) so reconciliation can tell
+    /// an omission from a complete stream.
     pub(crate) fn observe_shell_events(&mut self, events: &[ShellEvent]) {
         if self.seen_events > events.len() {
-            self.seen_events = 0;
+            tracing::warn!(
+                target: "cosh_audit",
+                seen = self.seen_events,
+                len = events.len(),
+                "shell event snapshot shrank; skipping the batch to keep audit records exactly-once"
+            );
+            if !self.truncation_reported {
+                self.truncation_reported = self.record_truncation(events.len());
+            }
+            return;
+        }
+        if events.len() > self.seen_events {
+            self.truncation_reported = false;
         }
         for event in &events[self.seen_events..] {
             if matches!(
@@ -632,6 +656,9 @@ fn approval_identity(request: &ShellApprovalAuditInput<'_>) -> AuditIdentity {
 
 #[path = "audit/host_execution.rs"]
 mod host_execution;
+
+#[path = "audit/truncation.rs"]
+mod truncation;
 
 #[cfg(test)]
 #[path = "audit_tests.rs"]
