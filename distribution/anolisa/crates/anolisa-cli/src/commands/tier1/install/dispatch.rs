@@ -680,6 +680,11 @@ pub(super) fn execute_planned(
             });
         }
         (PlannedRoute::Delegated { .. }, PreparedExecution::Preview { steps, .. }) => {
+            // A dry-run previews the real transaction, so it must hit the same
+            // refusal: without a configured rpm backend (or an override pinning
+            // the source) the apply path rejects — the preview must not print a
+            // plan that would never run.
+            require_configured_rpm_backend(&repo_config, index_base_override.as_deref(), &command)?;
             (steps, true, None)
         }
         (PlannedRoute::Delegated { .. }, PreparedExecution::Apply { steps, .. }) => {

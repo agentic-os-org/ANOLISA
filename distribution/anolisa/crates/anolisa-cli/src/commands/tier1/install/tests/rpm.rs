@@ -959,6 +959,35 @@ fn delegated_install_requires_configured_rpm_backend() {
 }
 
 #[test]
+fn delegated_install_dry_run_requires_configured_rpm_backend() {
+    // Same refusal as the apply path: a dry-run preview must not print a
+    // plan the real transaction would refuse (#3468).
+    let (_tmp, ctx) = system_ctx_with_raw_repo(true);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("missing rpm backend config must block the dry-run preview too");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("backend 'rpm' is not configured"),
+        "got: {}",
+        err.reason()
+    );
+    assert_eq!(fake.install_calls.get(), 0);
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "refused preview must not write state"
+    );
+}
+
+#[test]
 fn system_install_without_rpm_tooling_warns_and_exits() {
     // Rpm-family host, system scope, fresh state: with rpm/dnf absent the
     // probe cannot prove the component is not an unobserved system RPM
