@@ -275,7 +275,7 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `memory_consent` | — | `action` (query/allow/deny), `scope` (all/consolidation/capture) | grant/revoke memory operations |
 | `memory_forget` | `topic` | `confirm` (default `false`=preview, `true`=delete) | delete memory entries about a topic |
 | `mem_export` | — | `category`, `source` | export the store as an AMA JSON string (does not write a file) |
-| `mem_import` | `json_data` | `strategy` (skip-existing/overwrite, default skip-existing), `dry_run` (default false) | import memory from an AMA JSON string |
+| `mem_import` | `json_data` | `strategy` (skip-existing/overwrite, default skip-existing), `dry_run` (default false) | import memory from an AMA JSON string. `overwrite` deletes every existing note first, so it writes a recoverable backup of the current store to `.anolisa/backups/<timestamp>-pre-import.ama.json` (last 8 kept) and refuses to run if that backup cannot be persisted; the path is returned in the summary and recorded in the audit log |
 | `memory_task_save` | `title` | `status`, `progress`, `next_steps`, `blockers`, `files_modified`, `decisions`, `context`, `id` | save/update a task; returns the task id (pass `id` to update an existing task) |
 | `memory_task_list` | — | `status` (in-progress/blocked/done/cancelled) | JSON array of task summaries |
 | `memory_task_resume` | `id` | — | resume task context (formatted for continuing in a new session) |
