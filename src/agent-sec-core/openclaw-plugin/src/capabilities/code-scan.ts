@@ -31,6 +31,20 @@ export const codeScan: SecurityCapability = {
     }
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
+      const startedAt = performance.now();
+      const traceContext = buildTraceContext(event, ctx);
+      let failureReason = "cli-error";
+      const report = (level: "info" | "warn", message: string, details: Record<string, unknown>) => {
+        api.logger[level](
+          `[scan-code] ${JSON.stringify({
+            schemaVersion: 1,
+            ...traceContext,
+            policy,
+            ...details,
+            message,
+          })}`,
+        );
+      };
       try {
         if (!hookEnabled) {
           return undefined;
@@ -44,14 +58,25 @@ export const codeScan: SecurityCapability = {
 
         const result = await callAgentSecCli(
           ["scan-code", "--code", command, "--language", "bash"],
-          { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
+          { timeout: 10000, traceContext },
         );
 
         if (result.exitCode !== 0) {
+          report("warn", "scanner failed; allowing execution", { outcome: "scanner-failed", reason: failureReason, exitCode: result.exitCode, decision: "allow" });
           return undefined;
         }
 
+        failureReason = "invalid-response";
         const scanResult = JSON.parse(result.stdout);
+        if (!scanResult || !["pass", "warn", "deny", "error"].includes(scanResult.verdict) ||
+            (scanResult.findings !== undefined && !Array.isArray(scanResult.findings))) {
+          throw new SyntaxError("Invalid scanner response");
+        }
+        if (scanResult.verdict === "error") {
+          report("warn", "scanner failed; allowing execution", { outcome: "scanner-failed", reason: "scanner-error", decision: "allow" });
+          return undefined;
+        }
+        failureReason = "decision-error";
         const verdict = scanResult.verdict;
         const findings = scanResult.findings ?? [];
 
@@ -61,12 +86,12 @@ export const codeScan: SecurityCapability = {
         );
         if (selfProtectFinding) {
           const msg = `[agent-sec-core] 自我保护：该命令将禁用 agent-sec 安全插件。如果您确实需要禁用，请手动执行以下命令：\n\n  ${command}\n\n出于安全原因，AI agent 无法执行此操作。`;
-          api.logger.warn(`[scan-code] SELF-PROTECT block — ${command}`);
+          report("warn", `SELF-PROTECT block — ${command}`, { outcome: "scan-result", verdict, decision: "block" });
           return { block: true, blockReason: msg };
         }
 
         if (verdict === "pass" || findings.length === 0) {
-          api.logger.info(`[scan-code] ✅ pass — allowing command`);
+          report("info", "✅ pass — allowing command", { outcome: "scan-result", verdict, decision: "allow" });
           return undefined;
         }
 
@@ -75,9 +100,16 @@ export const codeScan: SecurityCapability = {
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
 
         if (verdict === "deny") {
-          api.logger.warn(
-            `[scan-code] DENY (policy=${policy}) — ${msg}`,
-          );
+          report("warn", `DENY (policy=${policy}) — ${msg}`, {
+            outcome: "scan-result",
+            verdict,
+            decision:
+              policy === "ask"
+                ? "requireApproval"
+                : policy === "block"
+                  ? "block"
+                  : "allow",
+          });
           if (policy === "block") {
             return { block: true, blockReason: msg };
           }
@@ -94,7 +126,16 @@ export const codeScan: SecurityCapability = {
         }
 
         if (verdict === "warn") {
-          api.logger.warn(`[scan-code] WARN (policy=${policy}) — ${msg}`);
+          report("warn", `WARN (policy=${policy}) — ${msg}`, {
+            outcome: "scan-result",
+            verdict,
+            decision:
+              policy === "ask"
+                ? "requireApproval"
+                : policy === "block"
+                  ? "block"
+                  : "allow",
+          });
           if (policy === "block") {
             return { block: true, blockReason: msg };
           }
@@ -112,6 +153,13 @@ export const codeScan: SecurityCapability = {
 
         return undefined;
       } catch (err) {
+        report("warn", "hook failed; allowing execution", {
+          outcome: failureReason === "decision-error" ? "hook-error" : "scanner-failed",
+          reason: failureReason,
+          errorType: err instanceof Error ? err.name : typeof err,
+          elapsedMs: Math.round(performance.now() - startedAt),
+          decision: "allow",
+        });
         return undefined; // crash ≠ threat → allow
       }
     });

@@ -95,6 +95,44 @@ describe("scan-code", () => {
     }
   });
 
+  it("logs one readable correlated result per scan without a diagnostics flag", async () => {
+    const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
+    mockCli({ exitCode: 0, stdout: JSON.stringify({ verdict: "deny", findings: [{ desc_zh: "fixture" }] }), stderr: "" });
+    await handler(execEvent("printf probe"), { runId: "run", toolCallId: "tool" });
+    const lines = logs.filter((line) => line.startsWith("[scan-code] "));
+    assert.equal(lines.length, 1);
+    const record = JSON.parse(lines[0].slice("[scan-code] ".length));
+    assert.equal(record.run_id, "run");
+    assert.equal(record.tool_call_id, "tool");
+    assert.equal(record.verdict, "deny");
+    assert.equal(record.decision, "requireApproval");
+    assert.ok(record.message.includes("DENY (policy=ask)"));
+    mockCli({ exitCode: 0, stdout: "", stderr: "" });
+    await handler(execEvent("printf probe"), { runId: "run2", toolCallId: "tool2" });
+    const failures = logs.filter((line) => line.includes('"outcome":"scanner-failed"'));
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0].includes('"reason":"invalid-response"'));
+  });
+
+  it("does not retry a valid denial", async () => {
+    const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+    let calls = 0;
+    _setCliMock(async () => {
+      calls += 1;
+      return { exitCode: 0, stdout: JSON.stringify({ verdict: "deny", findings: [{ desc_zh: "fixture" }] }), stderr: "" };
+    });
+    assert.ok((await handler(execEvent("printf probe"), {})).requireApproval);
+    assert.equal(calls, 1);
+  });
+
+  it("does not retry an unavailable CLI and remains fail-open", async () => {
+    const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+    let calls = 0;
+    _setCliMock(async () => { calls += 1; throw new Error("ENOENT"); });
+    assert.equal(await handler(execEvent("printf probe"), {}), undefined);
+    assert.equal(calls, 1);
+  });
+
   // =========================================================================
   // Dimension 2: Hook Registration Correctness
   // =========================================================================
@@ -479,19 +517,21 @@ describe("scan-code", () => {
     });
 
     it("CLI timeout (exitCode 124) → undefined, never throws", async () => {
-      const { handler } = registerAndGetHandler();
+      const { handler, logs } = registerAndGetHandler();
       mockCli({ exitCode: 124, stdout: "", stderr: "timed out" });
 
       const result = await handler(execEvent("ls"), {});
       assert.equal(result, undefined);
+      assert.ok(logs.some((line) => line.includes('"exitCode":124')));
     });
 
     it("malformed JSON → undefined (JSON.parse caught)", async () => {
-      const { handler } = registerAndGetHandler();
+      const { handler, logs } = registerAndGetHandler();
       mockCli({ exitCode: 0, stdout: "not json at all", stderr: "" });
 
       const result = await handler(execEvent("ls"), {});
       assert.equal(result, undefined);
+      assert.ok(logs.some((line) => line.includes('"errorType":"SyntaxError"')));
     });
 
     it("CLI mock throws → undefined (catch block)", async () => {
