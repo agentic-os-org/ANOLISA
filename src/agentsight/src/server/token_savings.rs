@@ -7,7 +7,6 @@ use actix_web::{HttpResponse, Responder, get, web};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Query parameters ────────────────────────────────────────────────────────
@@ -460,7 +459,6 @@ pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = query
         .start_ns
@@ -468,17 +466,12 @@ pub async fn get_token_savings(
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
-    let sessions = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(store) => match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
-            Ok(s) => s,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    let sessions = match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
+        Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()}));
@@ -493,15 +486,9 @@ pub async fn get_token_savings(
     // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
     // This gives us all known tool_use_ids and their session membership.
     let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-    let turn_indices = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(store) => store
-            .get_tool_call_turn_indices(&session_ids)
-            .unwrap_or_default(),
-        Err(_) => std::collections::HashMap::new(),
-    };
+    let turn_indices = store
+        .get_tool_call_turn_indices(&session_ids)
+        .unwrap_or_default();
 
     // Step 4: Query stats.db by tool_use_ids (instead of session_ids)
     let stats_by_session = if let Some(ref store) = stats_store {
@@ -738,18 +725,11 @@ pub async fn get_session_savings(
     path: web::Path<String>,
 ) -> impl Responder {
     let session_id = path.into_inner();
-    let db_path = &data.storage_path;
 
     // FIX(#3): query single session by id instead of full-table scan
-    let store = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
 
     let session = match store.get_session_for_savings(&session_id) {
@@ -776,15 +756,9 @@ pub async fn get_session_savings(
 
     // Step 2: Get turn indices for tool_call_ids
     let session_ids = vec![session_id.as_str()];
-    let turn_indices = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(st) => st
-            .get_tool_call_turn_indices(&session_ids)
-            .unwrap_or_default(),
-        Err(_) => std::collections::HashMap::new(),
-    };
+    let turn_indices = store
+        .get_tool_call_turn_indices(&session_ids)
+        .unwrap_or_default();
 
     // Step 3: Open stats.db
     let stats_path = tokenless::default_stats_path();
@@ -900,7 +874,7 @@ mod tests {
         // Use GenAISqliteStore to create proper schema
         let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
             &db_path,
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .unwrap();
         // Insert test data directly via raw connection
@@ -952,11 +926,17 @@ mod tests {
     }
 
     fn make_app_state(db_path: std::path::PathBuf) -> AppState {
+        let genai_store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: db_path.clone(),
+            genai_store: Some(Arc::new(genai_store)),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
             interruption_store: None,

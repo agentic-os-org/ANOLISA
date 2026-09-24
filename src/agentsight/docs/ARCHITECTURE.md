@@ -85,7 +85,7 @@ graph TB
 | **L3: Aggregate** | `src/aggregator/` | 请求-响应关联、进程生命周期聚合 | → L2 |
 | **L4: Analyze** | `src/analyzer/`, `src/tokenizer/` | Token 提取、审计记录、消息解析 | → L3, L2 |
 | **L5: Semantic** | `src/genai/`, `src/atif/` | 语义事件构建、轨迹格式导出 | → L4, L3, L2, Cross |
-| **L6: Persist** | `src/storage/`、`src/storage_status.rs`、`crates/agentsight-sqlite-lifecycle/` | 业务数据持久化与跨平台只读状态；独立 leaf crate 统一 SQLite 连接、容量计量、checkpoint 与清理策略驱动 | → L4, L5；lifecycle crate 不依赖业务层 |
+| **L6: Persist** | `src/storage/`、`src/database.rs`、`src/storage_status.rs`、`crates/agentsight-sqlite-lifecycle/` | 业务 Store 保留 schema 与安全删除；`DatabaseManager` 是生产 typed Store 的组合边界；独立 lifecycle leaf crate 提供连接、计量、checkpoint、锁与调度 | → L4, L5；manager/lifecycle 不反向依赖业务模型 |
 | **L7: Serve and Control** | `src/server/`, `src/health/`, `src/agent_sec/`, `src/grader/`, `src/security/`, `src/enforcement/` | HTTP API、前端、agent-sec daemon 代理、健康检查、会话质量评估、安全审计与特权执行协调 | → L6, L5, L7 control peers |
 | **L8: Entry** | `src/bin/`, `src/unified.rs`, `src/config.rs` | CLI 入口、编排器、配置 | → L1-L7 |
 | **Cross** | `src/discovery/` | Agent 进程发现与匹配 | 被 L1, L8 使用 |
@@ -103,6 +103,7 @@ graph LR
     tokenizer[tokenizer]
     genai[genai]
     storage[storage]
+    database_manager[DatabaseManager]
     sqlite_lifecycle[agentsight-sqlite-lifecycle]
     discovery[discovery]
     health[health]
@@ -122,6 +123,7 @@ graph LR
     unified --> analyzer
     unified --> genai
     unified --> storage
+    unified --> database_manager
     unified --> discovery
     unified --> tokenizer
 
@@ -142,9 +144,11 @@ graph LR
     storage --> genai
     storage --> security
     storage --> sqlite_lifecycle
+    database_manager --> sqlite_lifecycle
     grader --> sqlite_lifecycle
     grader --> storage
     server --> storage
+    server --> database_manager
     server --> health
     server --> atif
     server --> agent_sec
@@ -223,6 +227,26 @@ sequenceDiagram
 
 **实现**: `src/genai/exporter.rs` — `trait GenAIExporter`，`src/unified.rs:AgentSight::new()` 第 122-149 行。
 
+### 6. SQLite Composition and Lifecycle Boundaries
+
+`DatabaseManager` 是生产环境打开 typed Store 的统一组合边界。它按进程角色登记稳定的数据库 ID、物理路径、
+访问方式与治理覆盖，再把路径交给业务 Store 构造器；业务 Store 继续拥有 schema、引用完整性和“哪些记录
+可安全删除”的规则。CI 的 `scripts/check-sqlite-entrypoints.py` 禁止生产代码绕过边界直接调用
+`Connection::open*`。明确例外只有 lifecycle leaf crate 的统一连接实现、`private_sqlite` 的私有文件权限与
+`NOFOLLOW` 语义，以及 AgentSight 对外部 Tokenless 数据库的只读访问。
+
+`crates/agentsight-sqlite-lifecycle/` 保持无业务模型依赖，只提供连接选项、DB/WAL/SHM 与 freelist 计量、
+checkpoint 结果、容量策略、跨进程锁和单线程调度。每个长期运行的 trace、serve 或 local 进程最多启动一个
+`sqlite-maintenance` 线程，顺序运行该进程登记的所有物理库任务，不创建新的维护进程。trace 与 serve 对
+同一数据库使用 `<db>.maintenance.lock`；只有拿到锁的一方会重新测量并执行维护。
+
+每个业务 Store 的维护顺序一致：先执行 age retention；若删除了数据，checkpoint 必须成功才继续；物理
+占用超过阈值后才触发容量删除，并以逻辑占用降至阈值的 90% 为目标。自动维护不执行 `VACUUM`，释放页留在
+freelist 复用。GenAI 事件、资源采样与 evaluation run 共用一个物理治理目标。reuse 与 enforcement 是
+partial coverage：前者保护人工或已确认标签，后者保护 bindings、pending/indeterminate transition 和
+credential 状态；causal 的最旧缓存允许淘汰，命中缺失时可能触发新的付费归因计算。Tokenless 由外部组件
+管理，AgentSight 只读。
+
 ## File Structure
 
 ```
@@ -230,6 +254,7 @@ src/
 ├── lib.rs                 # 库入口，re-exports 所有公共类型
 ├── unified.rs             # AgentSight 主编排器
 ├── config.rs              # AgentsightConfig 配置结构
+├── database.rs            # DatabaseManager：typed Store 组合、物理库清单与 worker 所有权
 ├── event.rs               # Event 统一枚举
 ├── chrome_trace.rs        # Chrome Trace 导出
 ├── ffi.rs                 # FFI 绑定

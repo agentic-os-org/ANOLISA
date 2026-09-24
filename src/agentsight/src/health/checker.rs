@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -101,26 +102,28 @@ impl HealthChecker {
         self
     }
 
-    /// Spawn the health check loop on a background thread.
-    ///
-    /// Returns the `JoinHandle` — the thread runs until the process exits.
-    pub fn start(self) -> thread::JoinHandle<()> {
-        thread::spawn(move || self.run())
+    /// Spawns the health check loop on a background thread.
+    pub fn start(self, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+        thread::spawn(move || self.run(&running))
     }
 
     /// Main health check loop (blocking).
-    fn run(self) {
+    fn run(self, running: &AtomicBool) {
         log::info!(
             "Health checker started: interval={}s, http_timeout={}s",
             self.interval.as_secs(),
             self.http_timeout.as_secs(),
         );
 
-        // Do an initial check immediately, then loop with interval
-        loop {
+        while running.load(Ordering::SeqCst) {
             self.check_once();
-            thread::sleep(self.interval);
+            let deadline = Instant::now() + self.interval;
+            while running.load(Ordering::SeqCst) && Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
         }
+        log::info!("Health checker stopped");
     }
 
     /// Perform a single health check cycle for all discovered agents.
@@ -587,6 +590,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn health_checker_stops_and_joins() {
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(store, Duration::from_secs(60));
+        let running = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+
+        checker.start(running).join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn test_read_ppid_current_process() {
         // Whatever the parent is, our own stat entry parses.
         assert!(read_ppid(std::process::id()).is_some());
@@ -668,7 +683,7 @@ mod tests {
         let genai_store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &dir.join("genai_events.db"),
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("genai store"),
         );

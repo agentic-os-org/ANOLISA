@@ -9,6 +9,8 @@ use crate::LifecycleError;
 pub enum ConnectionMode {
     /// Open for reads and writes, creating the database when absent.
     ReadWriteCreate,
+    /// Open an existing database for reads and writes without creating it.
+    ReadWriteExisting,
     /// Open an existing database without allowing writes or creation.
     ReadOnlyExisting,
 }
@@ -38,8 +40,8 @@ impl Default for ConnectionOptions {
 ///
 /// # Errors
 ///
-/// Returns an error when the database is missing in read-only mode, its parent
-/// directory cannot be created, or SQLite rejects the connection settings.
+/// Returns an error when an existing-only mode cannot find the database, a
+/// create-mode parent directory cannot be created, or SQLite rejects the settings.
 pub fn open_connection(
     path: &Path,
     options: ConnectionOptions,
@@ -56,6 +58,12 @@ pub fn open_connection(
             }
             Connection::open(path)?
         }
+        ConnectionMode::ReadWriteExisting => {
+            if !path.is_file() {
+                return Err(LifecycleError::DatabaseMissing(path.to_path_buf()));
+            }
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?
+        }
         ConnectionMode::ReadOnlyExisting => {
             if !path.is_file() {
                 return Err(LifecycleError::DatabaseMissing(path.to_path_buf()));
@@ -65,7 +73,7 @@ pub fn open_connection(
     };
 
     connection.busy_timeout(options.busy_timeout)?;
-    if options.enable_wal && options.mode == ConnectionMode::ReadWriteCreate {
+    if options.enable_wal && options.mode != ConnectionMode::ReadOnlyExisting {
         connection.execute_batch("PRAGMA journal_mode=WAL;")?;
     }
 
@@ -167,17 +175,56 @@ mod tests {
     }
 
     #[test]
-    fn read_only_open_never_creates_missing_database() {
-        let path = test_path("missing");
-        let result = open_connection(
+    fn existing_only_modes_never_create_missing_database_or_parent() {
+        for mode in [
+            ConnectionMode::ReadWriteExisting,
+            ConnectionMode::ReadOnlyExisting,
+        ] {
+            let parent = test_path("missing-parent");
+            let path = parent.join("database.db");
+            let result = open_connection(
+                &path,
+                ConnectionOptions {
+                    mode,
+                    ..ConnectionOptions::default()
+                },
+            );
+            assert!(matches!(result, Err(LifecycleError::DatabaseMissing(p)) if p == path));
+            assert!(!parent.exists());
+        }
+    }
+
+    #[test]
+    fn read_write_existing_is_writable_and_can_enable_wal() {
+        let path = test_path("existing");
+        let initial = open_connection(
             &path,
             ConnectionOptions {
-                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
                 ..ConnectionOptions::default()
             },
-        );
-        assert!(matches!(result, Err(LifecycleError::DatabaseMissing(p)) if p == path));
-        assert!(!path.exists());
+        )
+        .unwrap();
+        drop(initial);
+
+        let connection = open_connection(
+            &path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadWriteExisting,
+                ..ConnectionOptions::default()
+            },
+        )
+        .unwrap();
+        connection
+            .execute_batch("CREATE TABLE writable (value INTEGER NOT NULL);")
+            .unwrap();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+
+        drop(connection);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

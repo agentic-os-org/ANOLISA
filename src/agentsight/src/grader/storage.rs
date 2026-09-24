@@ -1,14 +1,9 @@
 //! SQLite persistence for grader evaluation runs.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentsight_sqlite_lifecycle::{
-    CheckpointOutcome, ConnectionOptions, SizeBasis, SizePolicy, checkpoint_truncate,
-    enforce_size_policy, measure_database, open_connection, retention_cutoff_ns,
-};
+use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
 use rusqlite::{Connection, params};
 
 use super::types::{
@@ -19,29 +14,15 @@ use super::types::{
 /// SQLite-backed persistence for evaluation runs.
 pub struct EvaluationStore {
     conn: Mutex<Connection>,
-    db_path: PathBuf,
-    storage_policy: crate::config::InsertStoragePolicy,
-    maintenance_insert_count: AtomicU64,
 }
 
 impl EvaluationStore {
-    /// Open an evaluation store using the given SQLite path without automatic maintenance.
+    /// Open an evaluation store using the given SQLite path.
     pub fn new_with_path(path: &Path) -> Result<Self, GraderError> {
-        Self::new_with_policy(path, crate::config::InsertStoragePolicy::default())
-    }
-
-    /// Open an evaluation store with an explicit shared GenAI lifecycle policy.
-    pub fn new_with_policy(
-        path: &Path,
-        storage_policy: crate::config::InsertStoragePolicy,
-    ) -> Result<Self, GraderError> {
         let conn = open_connection(path, ConnectionOptions::default())
             .map_err(|error| GraderError::Storage(error.to_string()))?;
         let store = EvaluationStore {
             conn: Mutex::new(conn),
-            db_path: path.to_path_buf(),
-            storage_policy,
-            maintenance_insert_count: AtomicU64::new(0),
         };
         store.init_tables()?;
         Ok(store)
@@ -171,105 +152,7 @@ impl EvaluationStore {
             )
             .map_err(|error| GraderError::Storage(error.to_string()))?
         };
-        if inserted > 0 {
-            self.maybe_maintain()?;
-        }
         Ok(inserted > 0)
-    }
-
-    fn maybe_maintain(&self) -> Result<(), GraderError> {
-        let interval = self.storage_policy.check_interval_inserts;
-        if interval == 0 {
-            return Ok(());
-        }
-        let count = self
-            .maintenance_insert_count
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        if !count.is_multiple_of(interval) {
-            return Ok(());
-        }
-        self.maintain()
-            .map_err(|error| GraderError::Storage(error.to_string()))
-    }
-
-    fn maintain(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let deleted_by_age = if self.storage_policy.retention_days > 0 {
-            let now_ns = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
-                .unwrap_or(0);
-            let cutoff = retention_cutoff_ns(now_ns, self.storage_policy.retention_days)?;
-            let cutoff_seconds = i64::try_from(cutoff / 1_000_000_000).unwrap_or(i64::MAX);
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|error| format!("evaluation store connection mutex poisoned: {error}"))?;
-            conn.execute(
-                "DELETE FROM evaluation_runs
-                 WHERE CAST(strftime('%s', created_at) AS INTEGER) < ?1",
-                params![cutoff_seconds],
-            )?
-        } else {
-            0
-        };
-        if deleted_by_age > 0 {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|error| format!("evaluation store connection mutex poisoned: {error}"))?;
-            if checkpoint_truncate(&conn)? == CheckpointOutcome::Busy {
-                return Ok(());
-            }
-        }
-
-        let limit_bytes = self
-            .storage_policy
-            .max_db_size_mb
-            .saturating_mul(1024 * 1024);
-        enforce_size_policy::<Box<dyn std::error::Error>>(
-            SizePolicy {
-                limit_bytes,
-                trigger_bytes: limit_bytes,
-                target_bytes: limit_bytes.saturating_mul(9) / 10,
-                trigger_basis: SizeBasis::Physical,
-                target_basis: SizeBasis::Logical,
-                max_rounds: 20,
-                max_stalled_rounds: 3,
-            },
-            || {
-                let conn = self.conn.lock().map_err(|error| {
-                    format!("evaluation store connection mutex poisoned: {error}")
-                })?;
-                measure_database(&self.db_path, &conn).map_err(Into::into)
-            },
-            |fraction| {
-                let conn = self.conn.lock().map_err(|error| {
-                    format!("evaluation store connection mutex poisoned: {error}")
-                })?;
-                let count: i64 =
-                    conn.query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))?;
-                let limit = if count > 0 {
-                    ((count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1)
-                } else {
-                    0
-                };
-                conn.execute(
-                    "DELETE FROM evaluation_runs WHERE id IN (
-                        SELECT id FROM evaluation_runs ORDER BY created_at ASC, id ASC LIMIT ?1
-                    )",
-                    params![limit],
-                )
-                .map_err(Into::into)
-            },
-            || {
-                let conn = self.conn.lock().map_err(|error| {
-                    format!("evaluation store connection mutex poisoned: {error}")
-                })?;
-                checkpoint_truncate(&conn).map_err(Into::into)
-            },
-        )?;
-        Ok(())
     }
 
     /// Return the latest completed run for a target.
@@ -476,17 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_writes_apply_shared_retention_policy() {
+    fn evaluation_writes_leave_maintenance_to_genai_target() {
         let path = temp_db_path("grader_store_retention");
-        let store = EvaluationStore::new_with_policy(
-            &path,
-            crate::config::InsertStoragePolicy {
-                retention_days: 1,
-                max_db_size_mb: 0,
-                check_interval_inserts: 1,
-            },
-        )
-        .unwrap();
+        let store = EvaluationStore::new_with_path(&path).unwrap();
         let expired = evaluation_result("run-expired", "expired-hash");
         assert!(store.insert_completed(&expired).unwrap());
         store
@@ -501,7 +376,6 @@ mod tests {
 
         let current = evaluation_result("run-current", "current-hash");
         assert!(store.insert_completed(&current).unwrap());
-
         assert!(
             store
                 .find_completed(
@@ -512,7 +386,28 @@ mod tests {
                     RULE_GRADER_VERSION,
                 )
                 .unwrap()
-                .is_none()
+                .is_some(),
+            "evaluation writes must not run synchronous cleanup"
+        );
+
+        let genai = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::PeriodicStoragePolicy::new(1, 0, 60),
+        )
+        .unwrap();
+        genai.maintain().unwrap();
+        assert!(
+            store
+                .find_completed(
+                    TargetType::Conversation,
+                    "conv-1",
+                    "expired-hash",
+                    GraderType::Rule,
+                    RULE_GRADER_VERSION,
+                )
+                .unwrap()
+                .is_none(),
+            "the GenAI physical target must maintain evaluation rows"
         );
         cleanup_db(&path);
     }

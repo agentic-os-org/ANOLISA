@@ -18,15 +18,18 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
-    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_inserts": 1000 },
-    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_inserts": 1 },
+    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 60 },
+    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 60 },
     "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
     "trajectories": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 300 },
     "optimization": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
-    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 }
+    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 },
+    "reuse": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "causal": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "enforcement": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 }
   },
   "runtime": {
     "sls_logtail_path": ""
@@ -82,21 +85,33 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ## SQLite storage policies
 
-`storage.base_path` is the directory shared by AgentSight-owned databases. Each store has an
-independent retention period, logical size limit, and maintenance interval. A value of `0` disables
-the corresponding retention, size, or scheduled-maintenance rule.
+`storage.base_path` is the directory shared by AgentSight-owned databases. In schema v4, every
+policy uses the same keys: `retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero
+value disables the corresponding age-retention, capacity, or scheduled-maintenance rule. If
+`check_interval_secs` is `0`, no automatic pass is scheduled even when the other two values are
+non-zero.
 
 | Store | Retention | Size limit | Check interval |
 |---|---:|---:|---:|
-| `storage.primary` (`agentsight.db`) | 30 days | 500 MiB | 1,000 inserts |
-| `storage.genai` (`genai_events.db`, including evaluations) | 30 days | 200 MiB | every insert |
+| `storage.primary` (`agentsight.db`) | 30 days | 500 MiB | 60 seconds |
+| `storage.genai` (`genai_events.db`, including evaluations) | 30 days | 200 MiB | 60 seconds |
 | `storage.interruptions` | 30 days | 100 MiB | 60 seconds |
 | `storage.trajectories` | 30 days | 500 MiB | 300 seconds |
 | `storage.optimization` | 30 days | 200 MiB | 300 seconds |
 | `storage.security_audit` | 30 days | 200 MiB | 3,600 seconds |
+| `storage.reuse` | 30 days | 200 MiB | 300 seconds |
+| `storage.causal` | 30 days | 200 MiB | 300 seconds |
+| `storage.enforcement` | 30 days | 100 MiB | 60 seconds |
 
-The configuration format is replaced as a unit when `schema_version` changes. Start custom files
-from the shipped `agentsight.json`; settings from an older schema are not merged into schema v3.
+Maintenance first removes expired eligible rows. If that changed the database, a successful WAL
+checkpoint gates the capacity phase. Physical allocation above `max_db_size_mb` triggers pruning;
+the pass deletes the oldest eligible records until logical usage is at most 90% of the limit. It
+does not run `VACUUM`, so freed pages remain on the SQLite freelist for later writes.
+
+`check_interval_inserts` is no longer supported. The configuration format is replaced as a unit when
+`schema_version` changes: a missing or pre-v4 version is backed up and replaced with schema v4
+instead of merging old settings. Start custom files from the shipped `agentsight.json` and do not
+copy the old key into the replacement.
 
 ## Feature switches
 
@@ -246,15 +261,16 @@ this table. If a new Codex release is not captured, regenerate the entry with
 
 ## schema_version and upgrades
 
-`schema_version` (currently `3`) marks the config format. On start, AgentSight compares it with the
+`schema_version` (currently `4`) marks the config format. On start, AgentSight compares it with the
 built-in version:
 
 - equal or newer → your file is left untouched;
 - missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>` and replaces it
   with the current default file.
 
-Custom settings from an older schema are not merged. Reapply required custom rules to the new file,
-then reload the service.
+Schema v4 replaces insert-count storage checks with `check_interval_secs` for every policy and adds
+`reuse`, `causal`, and `enforcement`. Custom settings from an older schema are not merged. Reapply
+required custom rules to the new file, then reload the service.
 
 ## Environment variables
 

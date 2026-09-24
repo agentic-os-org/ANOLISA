@@ -10,7 +10,11 @@ use std::cell::RefCell;
 use agentsight_enforcement_protocol::{
     Binding, BindingState, CredentialExfiltrationPolicy, CredentialPolicySnapshot, ViolationEvent,
 };
-use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, ConnectionOptions, MaintenanceReport, MaintenanceStatus, SizeBasis,
+    SizePolicy, checkpoint_truncate, enforce_size_policy, measure_database, open_connection,
+    retention_cutoff_ns,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
@@ -59,6 +63,9 @@ pub enum EnforcementStoreError {
     /// SQLite open, schema, or query failure.
     #[error("enforcement SQLite failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Shared retention, checkpoint, or size measurement failure.
+    #[error("enforcement SQLite lifecycle failed: {0}")]
+    Lifecycle(#[from] agentsight_sqlite_lifecycle::LifecycleError),
     /// Binding or violation JSON could not be encoded or decoded.
     #[error("enforcement JSON failed: {0}")]
     Json(#[from] serde_json::Error),
@@ -106,6 +113,17 @@ pub enum EnforcementStoreError {
     },
 }
 
+/// Outcome of one enforcement database maintenance pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnforcementMaintenanceReport {
+    /// Violation rows removed by age retention.
+    pub expired_violations: usize,
+    /// Terminal transition rows removed by age retention.
+    pub expired_transitions: usize,
+    /// Result of physical-triggered, logical-targeted capacity enforcement.
+    pub size: MaintenanceReport,
+}
+
 /// Thread-safe local enforcement state.
 #[derive(Clone)]
 pub struct EnforcementStore {
@@ -135,9 +153,11 @@ impl EnforcementStore {
     ///
     /// Returns a private-path, SQLite, schema, or migration error.
     pub(crate) fn open_private(state_dir: impl AsRef<Path>) -> Result<Self, EnforcementStoreError> {
-        let connection =
-            crate::private_sqlite::open_private_connection(state_dir.as_ref(), "enforcement.db")
-                .map_err(|error| EnforcementStoreError::Open(error.to_string()))?;
+        let connection = crate::private_sqlite::open_private_connection(
+            state_dir.as_ref(),
+            crate::config::ENFORCEMENT_DB_NAME,
+        )
+        .map_err(|error| EnforcementStoreError::Open(error.to_string()))?;
         Self::from_connection(connection)
     }
 
@@ -329,6 +349,188 @@ impl EnforcementStore {
             events.push(serde_json::from_str(&row?)?);
         }
         Ok(events)
+    }
+
+    /// Applies age retention and capacity limits to deletable enforcement history.
+    ///
+    /// Only violations, forward `source_restored` transitions, and completed
+    /// forward/reverse pairs are eligible. A completed forward transition remains
+    /// protected until reverse restoration completes. Bindings, retryable transitions,
+    /// credential snapshots, and credential intents are retained. Capacity enforcement
+    /// starts when physical bytes exceed the limit and deletes toward 90% of that limit.
+    /// A busy checkpoint stops the pass, and this method never runs `VACUUM`.
+    /// A zero argument disables the corresponding age or capacity policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a named mutex, SQLite, retention calculation, measurement, or checkpoint error.
+    pub fn maintain(
+        &self,
+        retention_days: u64,
+        max_db_size_mb: u64,
+    ) -> Result<EnforcementMaintenanceReport, EnforcementStoreError> {
+        let (expired_violations, expired_transitions) = if retention_days == 0 {
+            (0, 0)
+        } else {
+            let cutoff_ns = retention_cutoff_ns(now_ns(), retention_days)?;
+            self.delete_expired_history(cutoff_ns)?
+        };
+
+        let limit_bytes = max_db_size_mb.saturating_mul(1024 * 1024);
+        if (expired_violations.saturating_add(expired_transitions) > 0 || limit_bytes > 0)
+            && self.checkpoint()? == CheckpointOutcome::Busy
+        {
+            let snapshot = self.size_snapshot()?;
+            return Ok(EnforcementMaintenanceReport {
+                expired_violations,
+                expired_transitions,
+                size: MaintenanceReport {
+                    status: MaintenanceStatus::CheckpointBusy,
+                    rounds: 0,
+                    deleted_rows: 0,
+                    before: snapshot,
+                    after: snapshot,
+                },
+            });
+        }
+
+        let size = enforce_size_policy::<EnforcementStoreError>(
+            SizePolicy {
+                limit_bytes,
+                trigger_bytes: limit_bytes,
+                target_bytes: limit_bytes.saturating_mul(9) / 10,
+                trigger_basis: SizeBasis::Physical,
+                target_basis: SizeBasis::Logical,
+                max_rounds: 20,
+                max_stalled_rounds: 3,
+            },
+            || self.size_snapshot(),
+            |fraction| self.delete_oldest_history_fraction(fraction),
+            || self.checkpoint(),
+        )?;
+        Ok(EnforcementMaintenanceReport {
+            expired_violations,
+            expired_transitions,
+            size,
+        })
+    }
+
+    fn delete_expired_history(
+        &self,
+        cutoff_ns: u64,
+    ) -> Result<(usize, usize), EnforcementStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let cutoff_ns = sqlite_i64(cutoff_ns);
+        let violations = transaction.execute(
+            "DELETE FROM enforcement_violations WHERE occurred_at_ns < ?1",
+            params![cutoff_ns],
+        )?;
+        let transitions = transaction.execute(
+            "DELETE FROM enforcement_transitions AS transitions
+             WHERE updated_at_ns < ?1
+               AND (
+                   (direction = 'forward' AND phase = 'source_restored')
+                   OR (
+                       phase = 'completed'
+                       AND EXISTS (
+                           SELECT 1 FROM enforcement_transitions AS reverse
+                           WHERE reverse.action_id = transitions.action_id
+                             AND reverse.direction = 'reverse'
+                             AND reverse.phase = 'completed'
+                       )
+                   )
+               )",
+            params![cutoff_ns],
+        )?;
+        transaction.commit()?;
+        Ok((violations, transitions))
+    }
+
+    fn delete_oldest_history_fraction(
+        &self,
+        fraction: f64,
+    ) -> Result<usize, EnforcementStoreError> {
+        if fraction <= 0.0 {
+            return Ok(0);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let violation_count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM enforcement_violations", [], |row| {
+                row.get(0)
+            })?;
+        let transition_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM enforcement_transitions AS transitions
+             WHERE (direction = 'forward' AND phase = 'source_restored')
+                OR (
+                    phase = 'completed'
+                    AND EXISTS (
+                        SELECT 1 FROM enforcement_transitions AS reverse
+                        WHERE reverse.action_id = transitions.action_id
+                          AND reverse.direction = 'reverse'
+                          AND reverse.phase = 'completed'
+                    )
+                )",
+            [],
+            |row| row.get(0),
+        )?;
+        let eligible_count = violation_count.saturating_add(transition_count);
+        if eligible_count <= 0 {
+            transaction.commit()?;
+            return Ok(0);
+        }
+
+        let batch = ((eligible_count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1);
+        let deleted_violations = transaction.execute(
+            "DELETE FROM enforcement_violations WHERE event_id IN (
+                 SELECT event_id FROM enforcement_violations
+                 ORDER BY occurred_at_ns ASC, event_id ASC LIMIT ?1
+             )",
+            params![batch],
+        )?;
+        let remaining = usize::try_from(batch)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(deleted_violations);
+        let deleted_transitions = if remaining == 0 {
+            0
+        } else {
+            transaction.execute(
+                "DELETE FROM enforcement_transitions WHERE rowid IN (
+                     SELECT transitions.rowid FROM enforcement_transitions AS transitions
+                     WHERE (direction = 'forward' AND phase = 'source_restored')
+                        OR (
+                            phase = 'completed'
+                            AND EXISTS (
+                                SELECT 1 FROM enforcement_transitions AS reverse
+                                WHERE reverse.action_id = transitions.action_id
+                                  AND reverse.direction = 'reverse'
+                                  AND reverse.phase = 'completed'
+                            )
+                        )
+                     ORDER BY updated_at_ns ASC, action_id ASC, direction ASC LIMIT ?1
+                 )",
+                params![i64::try_from(remaining).unwrap_or(i64::MAX)],
+            )?
+        };
+        transaction.commit()?;
+        Ok(deleted_violations.saturating_add(deleted_transitions))
+    }
+
+    fn size_snapshot(
+        &self,
+    ) -> Result<agentsight_sqlite_lifecycle::SizeSnapshot, EnforcementStoreError> {
+        let connection = self.connection()?;
+        let path = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .unwrap_or(":memory:");
+        measure_database(Path::new(path), &connection).map_err(Into::into)
+    }
+
+    fn checkpoint(&self) -> Result<CheckpointOutcome, EnforcementStoreError> {
+        let connection = self.connection()?;
+        checkpoint_truncate(&connection).map_err(Into::into)
     }
 
     /// Marks active desired state degraded without deleting it.
@@ -725,6 +927,66 @@ mod tests {
         }
     }
 
+    fn insert_raw_transition(store: &EnforcementStore, phase: &str, updated_at_ns: u64) -> Uuid {
+        let action_id = Uuid::new_v4();
+        insert_raw_transition_for(store, action_id, "forward", phase, updated_at_ns);
+        action_id
+    }
+
+    fn insert_raw_transition_for(
+        store: &EnforcementStore,
+        action_id: Uuid,
+        direction: &str,
+        phase: &str,
+        updated_at_ns: u64,
+    ) {
+        store
+            .connection()
+            .expect("test connection should lock")
+            .execute(
+                "INSERT INTO enforcement_transitions
+                   (action_id, direction, request_json, phase, updated_at_ns)
+                 VALUES (?1, ?2, '{}', ?3, ?4)",
+                params![
+                    action_id.to_string(),
+                    direction,
+                    phase,
+                    sqlite_i64(updated_at_ns)
+                ],
+            )
+            .expect("raw transition should insert");
+    }
+
+    fn table_count(store: &EnforcementStore, table: &str) -> i64 {
+        let sql = match table {
+            "bindings" => "SELECT COUNT(*) FROM enforcement_bindings",
+            "violations" => "SELECT COUNT(*) FROM enforcement_violations",
+            "transitions" => "SELECT COUNT(*) FROM enforcement_transitions",
+            "snapshots" => "SELECT COUNT(*) FROM enforcement_credential_policy_snapshots",
+            "intents" => "SELECT COUNT(*) FROM enforcement_credential_policy_intents",
+            _ => panic!("unknown test table {table}"),
+        };
+        store
+            .connection()
+            .expect("test connection should lock")
+            .query_row(sql, [], |row| row.get(0))
+            .expect("test row count should load")
+    }
+
+    fn transition_exists(store: &EnforcementStore, action_id: Uuid) -> bool {
+        store
+            .connection()
+            .expect("test connection should lock")
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM enforcement_transitions WHERE action_id = ?1
+                 )",
+                params![action_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("transition existence should load")
+    }
+
     #[test]
     fn credential_intent_is_durable_before_backend_ack_and_immutable() {
         let database = TestDatabase::new();
@@ -898,6 +1160,240 @@ mod tests {
                 .iter()
                 .any(|event| event.event_id == events[0].event_id)
         );
+    }
+
+    #[test]
+    fn age_retention_only_removes_eligible_history() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let old_ns = now_ns().saturating_sub(2 * 24 * 60 * 60 * 1_000_000_000);
+        let current_ns = now_ns();
+        let old_violation = violation(old_ns, old_ns);
+        let current_violation = violation(current_ns, current_ns);
+        store
+            .insert_violation(&old_violation)
+            .expect("old violation should insert");
+        store
+            .insert_violation(&current_violation)
+            .expect("current violation should insert");
+
+        let completed = insert_raw_transition(&store, "completed", old_ns);
+        let restored = insert_raw_transition(&store, "source_restored", old_ns);
+        let pending = insert_raw_transition(&store, "pending", old_ns);
+        let indeterminate = insert_raw_transition(&store, "indeterminate", old_ns);
+        let current_terminal = insert_raw_transition(&store, "completed", current_ns);
+
+        let mut binding = transition_binding(BindingState::Enforced);
+        let policy = credential_policy(300);
+        binding.request.policy_id = policy.policy_id.clone();
+        binding.request.policy_revision = policy.revision.to_string();
+        binding.request.policy_mode = Some(policy.mode);
+        store
+            .upsert_credential_binding(&binding, &policy)
+            .expect("protected credential state should seed");
+
+        let report = store
+            .maintain(1, 0)
+            .expect("age maintenance should succeed");
+
+        assert_eq!(report.expired_violations, 1);
+        assert_eq!(report.expired_transitions, 1);
+        assert_eq!(report.size.status, MaintenanceStatus::Disabled);
+        assert_eq!(table_count(&store, "violations"), 1);
+        assert!(transition_exists(&store, completed));
+        assert!(!transition_exists(&store, restored));
+        assert!(transition_exists(&store, pending));
+        assert!(transition_exists(&store, indeterminate));
+        assert!(transition_exists(&store, current_terminal));
+        assert_eq!(table_count(&store, "bindings"), 1);
+        assert_eq!(table_count(&store, "snapshots"), 1);
+        assert_eq!(table_count(&store, "intents"), 1);
+    }
+
+    #[test]
+    fn completed_forward_transition_survives_until_reverse_completion() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let target = transition_binding(BindingState::Enforced);
+        let action_id = Uuid::new_v4();
+        let forward = PolicyTransition::pending(
+            TransitionKey {
+                action_id,
+                direction: TransitionDirection::Forward,
+            },
+            ReplacePolicy {
+                expected: source.clone(),
+                source: ReplacementSource::Generic,
+                replacement: ReplacementPolicy::Generic(target.request.clone()),
+            },
+        );
+        store
+            .upsert_binding(&source)
+            .expect("source binding should seed");
+        store
+            .begin_transition(&forward)
+            .expect("forward transition should seed");
+        store
+            .complete_transition(&forward.key, &target)
+            .expect("forward transition should complete");
+        let old_ns = now_ns().saturating_sub(2 * 24 * 60 * 60 * 1_000_000_000);
+        store
+            .connection()
+            .expect("test connection should lock")
+            .execute(
+                "UPDATE enforcement_transitions SET updated_at_ns = ?1 WHERE action_id = ?2",
+                params![sqlite_i64(old_ns), action_id.to_string()],
+            )
+            .expect("forward transition should age");
+
+        let report = store.maintain(1, 0).expect("maintenance should succeed");
+        assert_eq!(report.expired_transitions, 0);
+
+        let retained_forward = store
+            .transition(&forward.key)
+            .expect("forward transition should load")
+            .expect("forward transition must survive maintenance");
+        let reverse = PolicyTransition::pending(
+            TransitionKey {
+                action_id,
+                direction: TransitionDirection::Reverse,
+            },
+            retained_forward.request.reverse(
+                retained_forward
+                    .acknowledgement
+                    .expect("completed forward acknowledgement should persist"),
+            ),
+        );
+        store
+            .begin_transition(&reverse)
+            .expect("reverse transition should begin after maintenance");
+        store
+            .complete_transition(&reverse.key, &source)
+            .expect("reverse transition should restore the source");
+        store
+            .connection()
+            .expect("test connection should lock")
+            .execute(
+                "UPDATE enforcement_transitions SET updated_at_ns = ?1 WHERE action_id = ?2",
+                params![sqlite_i64(old_ns), action_id.to_string()],
+            )
+            .expect("transition pair should age");
+
+        let report = store
+            .maintain(1, 0)
+            .expect("post-rollback maintenance should succeed");
+        assert_eq!(report.expired_transitions, 2);
+        assert!(!transition_exists(&store, action_id));
+    }
+
+    #[test]
+    fn capacity_batches_delete_violations_before_terminal_transitions() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let older_violation = violation(100, 100);
+        let newer_violation = violation(200, 200);
+        store
+            .insert_violation(&older_violation)
+            .expect("older violation should insert");
+        store
+            .insert_violation(&newer_violation)
+            .expect("newer violation should insert");
+        let older_transition = insert_raw_transition(&store, "source_restored", 1);
+        let newer_transition = insert_raw_transition(&store, "completed", 2);
+
+        assert_eq!(
+            store
+                .delete_oldest_history_fraction(0.25)
+                .expect("first capacity batch should delete"),
+            1
+        );
+        let retained = store
+            .violations(10)
+            .expect("remaining violations should load");
+        assert_eq!(retained, [newer_violation]);
+        assert!(transition_exists(&store, older_transition));
+        assert!(transition_exists(&store, newer_transition));
+
+        assert_eq!(
+            store
+                .delete_oldest_history_fraction(0.34)
+                .expect("second capacity batch should delete"),
+            1
+        );
+        assert_eq!(table_count(&store, "violations"), 0);
+        assert!(transition_exists(&store, older_transition));
+
+        assert_eq!(
+            store
+                .delete_oldest_history_fraction(0.5)
+                .expect("terminal capacity batch should delete"),
+            1
+        );
+        assert!(!transition_exists(&store, older_transition));
+        assert!(transition_exists(&store, newer_transition));
+    }
+
+    #[test]
+    fn capacity_maintenance_reports_no_rows_when_only_protected_state_remains() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let binding = transition_binding(BindingState::Pending);
+        store
+            .upsert_binding(&binding)
+            .expect("protected binding should seed");
+        store
+            .connection()
+            .expect("test connection should lock")
+            .execute(
+                "UPDATE enforcement_bindings
+                 SET desired_json = desired_json || CAST(zeroblob(1572864) AS TEXT)
+                 WHERE binding_id = ?1",
+                params![binding.request.binding_id.to_string()],
+            )
+            .expect("protected state should exceed the size limit");
+
+        let report = store
+            .maintain(0, 1)
+            .expect("capacity maintenance should complete");
+
+        assert_eq!(report.size.status, MaintenanceStatus::NoRows);
+        assert_eq!(report.size.deleted_rows, 0);
+        assert!(report.size.before.physical_bytes > 1024 * 1024);
+        assert_eq!(table_count(&store, "bindings"), 1);
+    }
+
+    #[test]
+    fn capacity_maintenance_deletes_history_toward_logical_target() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let connection = store.connection().expect("test connection should lock");
+        for timestamp in 1..=24 {
+            connection
+                .execute(
+                    "INSERT INTO enforcement_violations
+                       (event_id, binding_id, occurred_at_ns, event_json)
+                     VALUES (?1, ?2, ?3, CAST(zeroblob(65536) AS TEXT))",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        Uuid::new_v4().to_string(),
+                        timestamp,
+                    ],
+                )
+                .expect("sized violation should insert");
+        }
+        drop(connection);
+
+        let report = store
+            .maintain(0, 1)
+            .expect("capacity maintenance should succeed");
+
+        assert!(report.size.before.physical_bytes > 1024 * 1024);
+        assert!(report.size.deleted_rows > 0);
+        assert!(matches!(
+            report.size.status,
+            MaintenanceStatus::TargetReached | MaintenanceStatus::NoRows
+        ));
+        assert!(report.size.after.logical_bytes <= 9 * 1024 * 1024 / 10);
     }
 
     #[test]

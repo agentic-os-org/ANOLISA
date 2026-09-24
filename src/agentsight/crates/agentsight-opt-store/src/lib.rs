@@ -265,7 +265,9 @@ impl OptimizationStore {
                 retention_cutoff_ns(u64::try_from(now_ns()).unwrap_or(0), policy.retention_days)?;
             self.prune_before(i64::try_from(cutoff).unwrap_or(i64::MAX))?
         };
-        if expired_results > 0 && self.checkpoint()? == CheckpointOutcome::Busy {
+        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        if (expired_results > 0 || limit_bytes > 0) && self.checkpoint()? == CheckpointOutcome::Busy
+        {
             let snapshot = self.size_snapshot()?;
             return Ok(OptimizationMaintenanceReport {
                 expired_results,
@@ -279,7 +281,6 @@ impl OptimizationStore {
             });
         }
 
-        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
         let size = enforce_size_policy::<OptStoreError>(
             SizePolicy {
                 limit_bytes,

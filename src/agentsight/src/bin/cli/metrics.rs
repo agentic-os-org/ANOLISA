@@ -1,5 +1,6 @@
 //! Metrics subcommand — print per-agent token usage in Prometheus text format
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::storage::sqlite::GenAISqliteStore;
 use structopt::StructOpt;
 
@@ -16,9 +17,11 @@ impl MetricsCommand {
             std::process::exit(1);
         }
 
-        let store = match GenAISqliteStore::new_with_path(
+        let store = match DatabaseManager::open_query(
+            DatabaseId::GenAi,
             &db_path,
-            agentsight::config::InsertStoragePolicy::default(),
+            DatabaseCoverage::Full,
+            GenAISqliteStore::open_read_only_existing,
         ) {
             Ok(s) => s,
             Err(e) => {

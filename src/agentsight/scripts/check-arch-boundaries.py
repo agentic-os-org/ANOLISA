@@ -95,6 +95,7 @@ ALLOWED_DEPS = {
 # Cross-cutting modules — any module may import these.
 CROSS_CUTTING = {
     "config",          # global configuration
+    "database",        # cross-platform SQLite registry and maintenance owner
     "chrome_trace",    # data format helpers
     "interruption",    # cross-layer event detection
     "response_map",    # session mapping helpers

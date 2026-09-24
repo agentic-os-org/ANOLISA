@@ -2,7 +2,7 @@
 
 mod maintenance;
 
-use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
+use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -67,6 +67,24 @@ impl InterruptionStore {
         };
         store.init_tables()?;
         Ok(store)
+    }
+
+    /// Opens an existing interruption database without creating or modifying it.
+    pub fn open_read_only_existing(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+        })
     }
 
     fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1607,6 +1625,31 @@ mod tests {
 
         // Clearing an absent pid is a no-op, not an error.
         store.clear_process_exit(9999).unwrap();
+    }
+
+    #[test]
+    fn periodic_maintenance_removes_stale_process_exits_without_new_writes() {
+        let store = temp_store();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO process_exits (pid, raw_exit_code, exited_at_ns) VALUES (?1, ?2, ?3)",
+                params![1234, 0, 1],
+            )
+            .unwrap();
+
+        let deleted = store.purge_old_and_oversized(0, 0).unwrap();
+
+        assert_eq!(deleted, 1);
+        let remaining: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM process_exits", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     // ── purge ────────────────────────────────────────────────────────────────

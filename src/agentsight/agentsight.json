@@ -1,16 +1,16 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "primary": {
       "retention_days": 30,
       "max_db_size_mb": 500,
-      "check_interval_inserts": 1000
+      "check_interval_secs": 60
     },
     "genai": {
       "retention_days": 30,
       "max_db_size_mb": 200,
-      "check_interval_inserts": 1
+      "check_interval_secs": 60
     },
     "interruptions": {
       "retention_days": 30,
@@ -31,6 +31,21 @@
       "retention_days": 30,
       "max_db_size_mb": 200,
       "check_interval_secs": 3600
+    },
+    "reuse": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "causal": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "enforcement": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
     }
   },
   "runtime": {

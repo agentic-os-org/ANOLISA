@@ -26,10 +26,17 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use agentsight_sqlite_lifecycle::LifecycleError;
+use agentsight_trajectory_collector::TrajectoryStore;
 
 use crate::aggregator::Aggregator;
 use crate::analyzer::Analyzer;
-use crate::config::{AgentsightConfig, StorageConfig};
+use crate::config::AgentsightConfig;
+use crate::database::{
+    DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
+};
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::FfiEventSender;
@@ -102,8 +109,6 @@ pub struct AgentSight {
     ffi_sender: Option<FfiEventSender>,
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
-    /// Rate-limiter for interruption DB purge (at most once per 60 s)
-    last_interruption_purge: std::time::Instant,
     /// Rate-limiter for the buffer watermark log (at most once per 60 s)
     last_watermark_log: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
@@ -124,8 +129,8 @@ pub struct AgentSight {
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
     /// Cached feature flags so runtime paths can check them without the config.
     features: crate::config::FeatureFlags,
-    /// Effective SQLite lifecycle policies.
-    storage_config: StorageConfig,
+    /// Process-wide database inventory and maintenance worker owner.
+    database_manager: Arc<DatabaseManager>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -162,6 +167,35 @@ const RETRO_FIXUP_CAPACITY: usize = 256;
 /// (call_id, registration time, agent_name of the pid at registration time).
 /// The agent name guards against pid reuse (see `apply_retro_session_fixup`).
 type RetroFixupEntry = (String, std::time::Instant, Option<String>);
+
+fn trace_database_specs(config: &AgentsightConfig) -> Vec<DatabaseSpec> {
+    vec![
+        DatabaseSpec::new(
+            DatabaseId::Primary,
+            config.storage.primary_path(),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::GenAi,
+            config.storage.genai_path(),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Interruptions,
+            config.storage.interruption_path(),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Trajectories,
+            config.storage.trajectory_path(),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Partial,
+        ),
+    ]
+}
 
 impl AgentSight {
     /// Create a new AgentSight instance from configuration
@@ -224,6 +258,10 @@ impl AgentSight {
         // Persistence check runs after the config file load so the warning
         // targets the storage directory actually in effect.
         crate::container::warn_if_data_dir_not_persistent(&config.storage.base_path);
+        let database_manager = Arc::new(DatabaseManager::new(
+            DatabaseRole::Trace,
+            trace_database_specs(&config),
+        )?);
 
         let all_cmdline_rules = config.cmdline_rules.clone();
 
@@ -351,11 +389,13 @@ impl AgentSight {
         // Start polling (non-blocking)
         let _poller = probes.run().context("Failed to start probe poller")?;
 
-        // Initialize unified storage based on config.  When sqlite_storage is
+        // Initialize unified storage based on config. When sqlite_storage is
         // disabled we still create an empty storage object so the rest of the
         // pipeline can call storage methods without Option plumbing.
         let storage = if config.features.sqlite_storage_enabled {
-            Self::create_storage(&config)?
+            database_manager.open_read_write(DatabaseId::Primary, |db_path| {
+                Self::create_storage(db_path, &config)
+            })?
         } else {
             Storage::noop()?
         };
@@ -408,12 +448,13 @@ impl AgentSight {
         } else {
             // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
             if config.features.sqlite_storage_enabled {
-                let db_path = config.storage.genai_path();
-                match GenAISqliteStore::new_with_path_and_batch(
-                    &db_path,
-                    config.features.sqlite_batch,
-                    config.storage.genai,
-                ) {
+                match database_manager.open_read_write(DatabaseId::GenAi, |db_path| {
+                    GenAISqliteStore::new_with_path_and_batch(
+                        db_path,
+                        config.features.sqlite_batch,
+                        config.storage.genai,
+                    )
+                }) {
                     Ok(store) => {
                         log::info!(
                             "SQLite GenAI exporter enabled (batch={:?})",
@@ -499,14 +540,15 @@ impl AgentSight {
         // Initialize interruption store only when interruption detection is enabled.
         let interruption_store: Option<Arc<InterruptionStore>> =
             if config.features.interruption_detection_enabled {
-                let db_path = config.storage.interruption_path();
-                match InterruptionStore::new_with_path(&db_path) {
+                match database_manager
+                    .open_read_write(DatabaseId::Interruptions, InterruptionStore::new_with_path)
+                {
                     Ok(store) => {
-                        log::info!("Interruption events store initialized at {db_path:?}");
+                        log::info!("Interruption events store initialized");
                         Some(Arc::new(store))
                     }
-                    Err(e) => {
-                        log::warn!("Failed to initialize interruption store: {e}");
+                    Err(error) => {
+                        log::warn!("Failed to initialize interruption store: {error}");
                         None
                     }
                 }
@@ -551,7 +593,94 @@ impl AgentSight {
             }
         }
 
-        // Spawn background threads (config watcher, stale scanner).
+        let trajectory_store = if config.features.trajectory_collection_enabled {
+            match database_manager
+                .open_read_write(DatabaseId::Trajectories, TrajectoryStore::new_with_path)
+            {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    log::warn!("Trajectory collector disabled: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut maintenance_jobs = Vec::new();
+        if config.features.sqlite_storage_enabled && config.storage.primary.check_interval_secs > 0
+        {
+            // The primary facade uses bare rusqlite connections and is Send but
+            // not Sync. Give the worker its own connection set to the same
+            // physical target while the runtime keeps the Arc-owned facade.
+            let target = database_manager.open_read_write(DatabaseId::Primary, |db_path| {
+                Self::create_storage(db_path, &config)
+            })?;
+            maintenance_jobs.push(database_manager.maintenance_job(
+                DatabaseId::Primary,
+                Duration::from_secs(config.storage.primary.check_interval_secs),
+                move || {
+                    target.maintain().map_err(|error| {
+                        LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
+                    })
+                },
+            )?);
+        }
+        if let Some(target) = genai_sqlite_store.as_ref()
+            && config.storage.genai.check_interval_secs > 0
+        {
+            let target = Arc::clone(target);
+            maintenance_jobs.push(database_manager.maintenance_job(
+                DatabaseId::GenAi,
+                Duration::from_secs(config.storage.genai.check_interval_secs),
+                move || {
+                    target.maintain().map_err(|error| {
+                        LifecycleError::MaintenanceJobFailed(format!("genai: {error}"))
+                    })
+                },
+            )?);
+        }
+        if let Some(target) = interruption_store.as_ref()
+            && config.storage.interruptions.check_interval_secs > 0
+        {
+            let target = Arc::clone(target);
+            let policy = config.storage.interruptions;
+            maintenance_jobs.push(database_manager.maintenance_job(
+                DatabaseId::Interruptions,
+                Duration::from_secs(policy.check_interval_secs),
+                move || {
+                    target
+                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .map(|_| ())
+                        .map_err(|error| {
+                            LifecycleError::MaintenanceJobFailed(format!("interruptions: {error}"))
+                        })
+                },
+            )?);
+        }
+        if let Some(target) = trajectory_store.as_ref()
+            && config.storage.trajectories.check_interval_secs > 0
+        {
+            let target = Arc::clone(target);
+            let policy = agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+                retention_days: config.storage.trajectories.retention_days,
+                max_db_size_mb: config.storage.trajectories.max_db_size_mb,
+            };
+            maintenance_jobs.push(database_manager.maintenance_job(
+                DatabaseId::Trajectories,
+                Duration::from_secs(config.storage.trajectories.check_interval_secs),
+                move || {
+                    target.maintain(policy).map(|_| ()).map_err(|error| {
+                        LifecycleError::MaintenanceJobFailed(format!("trajectories: {error}"))
+                    })
+                },
+            )?);
+        }
+        database_manager.start_maintenance(maintenance_jobs)?;
+
+        // Start auxiliary threads only after every fallible database target and
+        // the maintenance worker are ready, so constructor errors cannot leave
+        // detached workers observing a permanently-true running flag.
         if let Some(ref cfg_path) = config.config_path {
             crate::background::start_config_watcher(
                 cfg_path.clone(),
@@ -574,7 +703,7 @@ impl AgentSight {
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
-        if config.features.trajectory_collection_enabled {
+        if let Some(store) = trajectory_store {
             let collector_config = agentsight_trajectory_collector::CollectorConfig {
                 scan_interval_secs: config.features.trajectory_scan_interval_secs,
                 scan_dirs: config
@@ -582,18 +711,20 @@ impl AgentSight {
                     .trajectory_scan_dirs
                     .as_ref()
                     .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
-                db_path: config.storage.trajectory_path(),
                 maintenance: agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
                     retention_days: config.storage.trajectories.retention_days,
                     max_db_size_mb: config.storage.trajectories.max_db_size_mb,
                 },
-                maintenance_interval_secs: config.storage.trajectories.check_interval_secs,
             };
             let stop = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("trajectory-collector".to_string())
                 .spawn(move || {
-                    agentsight_trajectory_collector::run_collector_loop(&collector_config, &stop);
+                    agentsight_trajectory_collector::run_collector_loop(
+                        store,
+                        &collector_config,
+                        &stop,
+                    );
                 })
                 .ok();
         }
@@ -633,7 +764,6 @@ impl AgentSight {
             runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
-            last_interruption_purge: std::time::Instant::now(),
             last_watermark_log: std::time::Instant::now(),
             pid_agent_name_cache,
             resource_targets,
@@ -644,21 +774,29 @@ impl AgentSight {
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
             features: config.features.clone(),
-            storage_config: config.storage.clone(),
+            database_manager,
         })
     }
 
-    /// Create storage backend from configuration
-    fn create_storage(config: &AgentsightConfig) -> Result<Storage> {
+    /// Create storage backend from configuration.
+    fn create_storage(db_path: &Path, config: &AgentsightConfig) -> Result<Storage> {
+        let base_path = db_path
+            .parent()
+            .context("primary database path has no parent directory")?
+            .to_path_buf();
+        let db_name = db_path
+            .file_name()
+            .context("primary database path has no file name")?
+            .to_string_lossy()
+            .into_owned();
         let sqlite_config = SqliteConfig {
-            base_path: config.storage.base_path.clone(),
-            db_name: crate::config::PRIMARY_DB_NAME.to_string(),
+            base_path,
+            db_name,
             audit_table: config.audit_table.clone(),
             token_table: config.token_table.clone(),
             http_table: config.http_table.clone(),
             token_consumption_table: "token_consumption".to_string(),
             retention_days: config.storage.primary.retention_days,
-            purge_interval: config.storage.primary.check_interval_inserts,
             max_db_size_mb: config.storage.primary.max_db_size_mb,
         };
         Storage::with_sqlite_config(&sqlite_config)
@@ -1215,8 +1353,6 @@ impl AgentSight {
                 self.drain_and_persist_idle_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
-                // Periodically purge old/oversized interruption DB entries
-                self.maybe_purge_interruption_store();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -1230,6 +1366,9 @@ impl AgentSight {
     /// Shutdown gracefully
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Err(error) = self.database_manager.stop_maintenance() {
+            log::warn!("SQLite maintenance worker shutdown failed: {error}");
+        }
         if let Some(handle) = self.resource_sampler_handle.take()
             && handle.join().is_err()
         {
@@ -2275,25 +2414,6 @@ impl AgentSight {
         }
     }
 
-    /// Periodically purge old/oversized interruption DB entries.
-    fn maybe_purge_interruption_store(&mut self) {
-        let policy = self.storage_config.interruptions;
-        if policy.check_interval_secs == 0
-            || self.last_interruption_purge.elapsed()
-                < std::time::Duration::from_secs(policy.check_interval_secs)
-        {
-            return;
-        }
-        self.last_interruption_purge = std::time::Instant::now();
-        if let Some(ref istore) = self.interruption_store {
-            if let Err(e) =
-                istore.purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
-            {
-                log::warn!("Interruption store purge failed: {e}");
-            }
-        }
-    }
-
     /// Periodically report event-buffer watermarks.
     ///
     /// The tracer runs under `MemoryMax=350M`; when it is killed the journal is
@@ -2750,7 +2870,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &dir.join("genai_events.db"),
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("genai store"),
         );
@@ -2791,7 +2911,7 @@ mod tests {
         let genai_store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &dir.join("genai_events.db"),
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("genai store"),
         );
@@ -3142,7 +3262,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &db_path,
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("create test store"),
         );
@@ -3189,7 +3309,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &db_path,
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("create test store"),
         );
@@ -3227,7 +3347,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &db_path,
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("create test store"),
         );
@@ -3324,7 +3444,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &db_path,
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .expect("create test store"),
         );
@@ -3488,7 +3608,7 @@ mod tests {
         let dir = unique_tmp_dir("retro-fixup");
         let store = GenAISqliteStore::new_with_path(
             &dir.join("genai_events.db"),
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .expect("genai store");
         let mut info = make_test_pending_info("retro-call-1");
@@ -3532,7 +3652,7 @@ mod tests {
         let dir = unique_tmp_dir("retro-fixup-dual");
         let store = GenAISqliteStore::new_with_path(
             &dir.join("genai_events.db"),
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .expect("genai store");
         let istore = InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
@@ -3616,7 +3736,7 @@ mod tests {
         let dir = unique_tmp_dir("retro-wait");
         let store = GenAISqliteStore::new_with_path(
             &dir.join("genai_events.db"),
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .expect("genai store");
         let mut info = make_test_pending_info("retro-call-2");
@@ -3664,7 +3784,7 @@ mod tests {
         let dir = unique_tmp_dir("retro-expired");
         let store = GenAISqliteStore::new_with_path(
             &dir.join("genai_events.db"),
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .expect("genai store");
         let mut info = make_test_pending_info("retro-call-3");
@@ -3702,7 +3822,7 @@ mod tests {
         let dir = unique_tmp_dir("retro-pid-reuse");
         let store = GenAISqliteStore::new_with_path(
             &dir.join("genai_events.db"),
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .expect("genai store");
         let mut info = make_test_pending_info("retro-call-4");

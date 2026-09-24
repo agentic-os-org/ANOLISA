@@ -62,6 +62,9 @@
 //! agentsight interruption list --last 24 --json
 //! ```
 
+use agentsight::database::{
+    DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
+};
 use agentsight::interruption::InterruptionType;
 use agentsight::storage::sqlite::{GenAISqliteStore, InterruptionRecord, InterruptionStore};
 use std::sync::OnceLock;
@@ -239,10 +242,38 @@ impl InterruptionCommand {
             std::process::exit(1);
         }
 
-        let store = match InterruptionStore::new_with_path(&db_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error opening interruption database {db_path:?}: {e}");
+        let access = if matches!(&self.action, InterruptionAction::Resolve { .. }) {
+            DatabaseAccess::ReadWrite
+        } else {
+            DatabaseAccess::ReadOnly
+        };
+        let manager = match DatabaseManager::new(
+            DatabaseRole::Query,
+            [DatabaseSpec::new(
+                DatabaseId::Interruptions,
+                &db_path,
+                access,
+                DatabaseCoverage::Full,
+            )],
+        ) {
+            Ok(manager) => manager,
+            Err(error) => {
+                eprintln!("Error registering interruption database: {error}");
+                std::process::exit(1);
+            }
+        };
+        let opened = if access == DatabaseAccess::ReadWrite {
+            manager.open_read_write(DatabaseId::Interruptions, InterruptionStore::new_with_path)
+        } else {
+            manager.open_read_only(
+                DatabaseId::Interruptions,
+                InterruptionStore::open_read_only_existing,
+            )
+        };
+        let store = match opened {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("Error opening interruption database {db_path:?}: {error}");
                 std::process::exit(1);
             }
         };

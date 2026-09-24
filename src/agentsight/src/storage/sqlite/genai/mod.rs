@@ -18,14 +18,13 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
-use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
+use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
-use crate::config::{BatchConfig, InsertStoragePolicy};
+use crate::config::{BatchConfig, PeriodicStoragePolicy};
 
 /// SQL mirror of [`TokenRecord::billed_input_tokens`], as a `CASE` expression
 /// over the raw columns.
@@ -80,14 +79,12 @@ pub struct GenAISqliteStore {
     /// Timestamp of the last successful flush.
     last_flush: Mutex<Instant>,
     /// Retention and capacity settings supplied by the owning runtime.
-    storage_policy: InsertStoragePolicy,
-    /// Number of writes observed since construction.
-    maintenance_insert_count: AtomicU64,
+    storage_policy: PeriodicStoragePolicy,
 }
 
 impl GenAISqliteStore {
     /// Create a new GenAI SQLite store at the default path.
-    pub fn new(storage_policy: InsertStoragePolicy) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(storage_policy: PeriodicStoragePolicy) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::default_path();
         Self::new_with_path(&path, storage_policy)
     }
@@ -95,16 +92,42 @@ impl GenAISqliteStore {
     /// Create a new GenAI SQLite store at an arbitrary path with default batch config.
     pub fn new_with_path(
         path: &std::path::Path,
-        storage_policy: InsertStoragePolicy,
+        storage_policy: PeriodicStoragePolicy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_path_and_batch(path, None, storage_policy)
+    }
+
+    /// Opens an existing GenAI database without creating or modifying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database does not exist or cannot be opened read-only.
+    pub fn open_read_only_existing(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+            batch_config: BatchConfig::default(),
+            pending: Mutex::new(Vec::new()),
+            last_flush: Mutex::new(Instant::now()),
+            storage_policy: PeriodicStoragePolicy::default(),
+        })
     }
 
     /// Create a new GenAI SQLite store with explicit batch and lifecycle configuration.
     pub fn new_with_path_and_batch(
         path: &std::path::Path,
         batch: Option<BatchConfig>,
-        storage_policy: InsertStoragePolicy,
+        storage_policy: PeriodicStoragePolicy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = open_connection(path, ConnectionOptions::default())?;
         let batch_config = batch.unwrap_or_default();
@@ -115,7 +138,6 @@ impl GenAISqliteStore {
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
             storage_policy,
-            maintenance_insert_count: AtomicU64::new(0),
         };
         store.init_tables()?;
 
@@ -130,12 +152,6 @@ impl GenAISqliteStore {
             store.batch_config.max_size,
             store.batch_config.flush_ms,
         );
-
-        if storage_policy.check_interval_inserts > 0 {
-            if let Err(error) = store.run_maintenance() {
-                log::warn!("GenAI startup maintenance failed: {error}");
-            }
-        }
 
         Ok(store)
     }

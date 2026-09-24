@@ -716,6 +716,12 @@ jobs:
           cd src/agentsight
           python3 scripts/check-arch-boundaries.py
 
+      - name: Check SQLite entry points
+        run: |
+          cd src/agentsight
+          python3 scripts/check-sqlite-entrypoints.py --self-test
+          python3 scripts/check-sqlite-entrypoints.py
+
       - name: Lint
         run: |
           cd src/agentsight

@@ -265,7 +265,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &dir.join("test.db"),
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .unwrap(),
         );
@@ -283,7 +283,7 @@ mod tests {
         let store = Arc::new(
             GenAISqliteStore::new_with_path(
                 &dir.join("test.db"),
-                crate::config::InsertStoragePolicy::default(),
+                crate::config::PeriodicStoragePolicy::default(),
             )
             .unwrap(),
         );

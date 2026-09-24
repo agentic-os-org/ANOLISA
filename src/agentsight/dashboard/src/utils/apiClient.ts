@@ -2046,13 +2046,25 @@ export async function login(token: string): Promise<boolean> {
 // ─── Storage status API ─────────────────────────────────────────────────────
 
 export type StorageAvailability = 'present' | 'missing' | 'error' | 'external';
-export type StorageCoverage = 'full' | 'row_bounded' | 'unmanaged' | 'external';
+export type StorageCoverage = 'full' | 'partial' | 'row_bounded' | 'unmanaged' | 'external';
 export type StorageSizeState =
   | 'within_policy'
   | 'cleanup_due'
   | 'reusable_capacity'
   | 'disabled'
   | 'unknown';
+export type StorageStoreId =
+  | 'primary'
+  | 'genai'
+  | 'interruptions'
+  | 'trajectories'
+  | 'optimization'
+  | 'reuse'
+  | 'causal'
+  | 'security_audit'
+  | 'enforcement'
+  | 'tokenless';
+export type StorageMaintenanceResult = 'success' | 'error' | 'lock_busy' | 'panicked';
 
 export interface StorageSizeStatus {
   database_bytes: number;
@@ -2069,21 +2081,33 @@ export interface StoragePolicyStatus {
   cleanup_trigger_bytes: number;
   cleanup_target_bytes: number;
   check_interval: number;
-  check_interval_unit: 'inserts' | 'seconds' | 'none' | 'external' | string;
+  check_interval_unit: 'seconds' | 'none' | 'external';
   enforced_by: string;
 }
 
+export interface StorageMaintenanceStatus {
+  scheduled: boolean;
+  worker_running: boolean;
+  worker_heartbeat_unix_ms: number | null;
+  last_attempt_unix_ms: number | null;
+  last_success_unix_ms: number | null;
+  last_result: StorageMaintenanceResult | null;
+  consecutive_failures: number;
+  next_run_unix_ms: number | null;
+}
+
 export interface StorageStoreStatus {
-  id: string;
+  id: StorageStoreId;
   availability: StorageAvailability;
   size: StorageSizeStatus | null;
   policy: StoragePolicyStatus;
   coverage: StorageCoverage;
   size_state: StorageSizeState;
+  maintenance: StorageMaintenanceStatus;
 }
 
 export interface StorageStatusResponse {
-  schema_version: number;
+  schema_version: 2;
   observed_at_unix_ms: number;
   stores: StorageStoreStatus[];
 }

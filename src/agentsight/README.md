@@ -36,7 +36,7 @@ AgentSight operates a unified data pipeline:
 | **Aggregator** | Correlates request-response pairs; tracks process lifecycle via LRU cache |
 | **Analyzer** | Produces audit records, token usage stats, and LLM API messages |
 | **GenAI** | Transforms results into semantic events (LLM calls, tool use, agent interactions) |
-| **Storage** | Persists to local SQLite database and optionally uploads to Alibaba Cloud SLS |
+| **Storage** | Opens typed SQLite Stores through `DatabaseManager`, applies schema-aware lifecycle policies, and optionally exports to Alibaba Cloud SLS |
 
 ### eBPF Probes
 
@@ -63,8 +63,11 @@ agentsight/
 │   ├── local/          # macOS-only: trajectory viewer server + collector dispatch
 │   ├── bin/            # CLI entry points (agentsight, cli subcommands)
 │   ├── unified.rs      # Main pipeline orchestrator
+│   ├── database.rs     # Typed Store registry and maintenance ownership
 │   ├── config.rs       # Unified configuration management
 │   └── event.rs        # Unified event type definitions
+├── crates/
+│   └── agentsight-sqlite-lifecycle/ # Business-model-free SQLite lifecycle primitives
 ├── Cargo.toml
 ├── build.rs            # eBPF skeleton generation for three probes
 └── agentsight.spec     # RPM packaging spec
@@ -408,11 +411,16 @@ AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/co
 
 ### SQLite Storage (`storage`)
 
-`storage.base_path` selects the common database directory. Each store has independent
-`retention_days`, `max_db_size_mb`, and a write- or time-based check interval; `0` disables the
-corresponding rule. Defaults range from 100 MiB for interruptions to 500 MiB for primary events and
-trajectories. The Dashboard Settings page shows each effective policy and current physical/logical
-usage. See the [configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
+`agentsight.json` schema v4 gives every AgentSight-owned SQLite store the same three policy keys:
+`retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero value disables the
+corresponding age, capacity, or scheduled-maintenance rule. Primary and GenAI maintenance default
+to 60 seconds; reuse, causal, and enforcement stores also have explicit policies. One lightweight
+maintenance thread per long-running process schedules all of that process's databases, while
+per-database locks coordinate `trace` and `serve`. Cleanup removes expired records first, checkpoints
+before size pruning, and targets 90% logical usage after physical allocation crosses the limit;
+automatic maintenance never runs `VACUUM` and leaves freed pages reusable. The Dashboard Settings
+page shows policy, capacity, coverage, and worker health without exposing database paths. See the
+[configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
 
 ### Feature Flags (`features`)
 

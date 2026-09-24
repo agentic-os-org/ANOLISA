@@ -1,6 +1,5 @@
 //! Schema initialization, migrations, and size limit management for GenAI SQLite store.
 
-use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentsight_sqlite_lifecycle::{
@@ -15,6 +14,13 @@ use super::GenAISqliteStore;
 const PRUNE_PERCENT: f64 = 0.05;
 /// Maximum prune retry attempts to avoid infinite loops.
 pub(super) const MAX_PRUNE_RETRIES: u32 = 3;
+
+#[derive(Clone, Copy)]
+enum PruneTable {
+    Events,
+    Resources,
+    Evaluations,
+}
 
 impl GenAISqliteStore {
     /// Initialize database tables
@@ -229,34 +235,20 @@ impl GenAISqliteStore {
             .unwrap_or(0)
     }
 
-    /// Runs configured maintenance after the configured number of writes.
-    pub(super) fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let interval = self.storage_policy.check_interval_inserts;
-        if interval == 0 {
-            return Ok(());
-        }
-        let count = self
-            .maintenance_insert_count
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        if !count.is_multiple_of(interval) {
-            return Ok(());
-        }
-        self.run_maintenance()
-    }
-
-    /// Applies age retention followed by capacity enforcement.
-    pub(super) fn run_maintenance(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Applies age retention followed by capacity enforcement for every table
+    /// in the GenAI physical database.
+    pub(crate) fn maintain(&self) -> Result<(), Box<dyn std::error::Error>> {
         let deleted_by_age = self.purge_expired()?;
-        if deleted_by_age > 0 && self.checkpoint_outcome()? == CheckpointOutcome::Busy {
-            log::warn!("GenAI WAL checkpoint remained busy after age retention");
-            return Ok(());
-        }
-
         let limit_bytes = self
             .storage_policy
             .max_db_size_mb
             .saturating_mul(1024 * 1024);
+        if (deleted_by_age > 0 || limit_bytes > 0)
+            && self.checkpoint_outcome()? == CheckpointOutcome::Busy
+        {
+            log::warn!("GenAI WAL checkpoint remained busy before size maintenance");
+            return Ok(());
+        }
         let policy = SizePolicy {
             limit_bytes,
             trigger_bytes: limit_bytes,
@@ -325,7 +317,7 @@ impl GenAISqliteStore {
         self.prune_old_records_with_percent(PRUNE_PERCENT)
     }
 
-    /// Delete the oldest `percent` fraction from every lifecycle-owned table.
+    /// Deletes the oldest eligible rows from the table contributing the most payload bytes.
     fn prune_old_records_with_percent(
         &self,
         percent: f64,
@@ -335,42 +327,76 @@ impl GenAISqliteStore {
             return Ok(0);
         }
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let (event_count, event_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(event_json, ''))), 0)
+             FROM genai_events WHERE status != 'pending'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (resource_count, resource_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COUNT(*) * 64 FROM agent_resource_samples",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (evaluation_count, evaluation_bytes): (i64, i64) =
+            if table_exists(&conn, "evaluation_runs")? {
+                conn.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(result_json, ''))), 0)
+                     FROM evaluation_runs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?
+            } else {
+                (0, 0)
+            };
 
-        let event_count = row_count(&conn, "genai_events")?;
-        let resource_count = row_count(&conn, "agent_resource_samples")?;
-        let evaluation_count = if table_exists(&conn, "evaluation_runs")? {
-            row_count(&conn, "evaluation_runs")?
-        } else {
-            0
+        let candidates = [
+            (
+                event_bytes.max(event_count),
+                PruneTable::Events,
+                event_count,
+            ),
+            (
+                resource_bytes.max(resource_count),
+                PruneTable::Resources,
+                resource_count,
+            ),
+            (
+                evaluation_bytes.max(evaluation_count),
+                PruneTable::Evaluations,
+                evaluation_count,
+            ),
+        ];
+        let Some((_, table, count)) = candidates
+            .into_iter()
+            .filter(|(_, _, count)| *count > 0)
+            .max_by_key(|(bytes, _, _)| *bytes)
+        else {
+            return Ok(0);
         };
-        let event_delete_count = prune_count(event_count, pct);
-        let resource_delete_count = prune_count(resource_count, pct);
-        let evaluation_delete_count = prune_count(evaluation_count, pct);
-
-        let deleted_events = conn.execute(
-            "DELETE FROM genai_events WHERE id IN (
-                SELECT id FROM genai_events ORDER BY start_timestamp_ns ASC, id ASC LIMIT ?1
-            )",
-            params![event_delete_count],
-        )?;
-        let deleted_resources = conn.execute(
-            "DELETE FROM agent_resource_samples WHERE id IN (
-                SELECT id FROM agent_resource_samples ORDER BY timestamp_ns ASC, id ASC LIMIT ?1
-            )",
-            params![resource_delete_count],
-        )?;
-        let deleted_evaluations = if evaluation_count > 0 {
-            conn.execute(
+        let delete_count = prune_count(count, pct);
+        match table {
+            PruneTable::Events => Ok(conn.execute(
+                "DELETE FROM genai_events WHERE id IN (
+                    SELECT id FROM genai_events WHERE status != 'pending'
+                    ORDER BY start_timestamp_ns ASC, id ASC LIMIT ?1
+                )",
+                params![delete_count],
+            )?),
+            PruneTable::Resources => Ok(conn.execute(
+                "DELETE FROM agent_resource_samples WHERE id IN (
+                    SELECT id FROM agent_resource_samples
+                    ORDER BY timestamp_ns ASC, id ASC LIMIT ?1
+                )",
+                params![delete_count],
+            )?),
+            PruneTable::Evaluations => Ok(conn.execute(
                 "DELETE FROM evaluation_runs WHERE id IN (
                     SELECT id FROM evaluation_runs ORDER BY created_at ASC, id ASC LIMIT ?1
                 )",
-                params![evaluation_delete_count],
-            )?
-        } else {
-            0
-        };
-
-        Ok(deleted_events + deleted_resources + deleted_evaluations)
+                params![delete_count],
+            )?),
+        }
     }
 
     fn checkpoint_outcome(&self) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
@@ -394,23 +420,6 @@ fn table_exists(conn: &Connection, table_name: &str) -> rusqlite::Result<bool> {
         params![table_name],
         |row| row.get(0),
     )
-}
-
-fn row_count(conn: &Connection, table_name: &str) -> rusqlite::Result<i64> {
-    match table_name {
-        "genai_events" => conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0)),
-        "agent_resource_samples" => {
-            conn.query_row("SELECT COUNT(*) FROM agent_resource_samples", [], |row| {
-                row.get(0)
-            })
-        }
-        "evaluation_runs" => {
-            conn.query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))
-        }
-        _ => Err(rusqlite::Error::InvalidParameterName(
-            table_name.to_string(),
-        )),
-    }
 }
 
 fn prune_count(count: i64, fraction: f64) -> i64 {

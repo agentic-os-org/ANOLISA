@@ -242,7 +242,7 @@ mod tests {
             std::process::id()
         ));
         let store = Arc::new(
-            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
                 .expect("resource store"),
         );
         let targets = Arc::new(RwLock::new(HashMap::new()));

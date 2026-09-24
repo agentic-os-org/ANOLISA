@@ -142,9 +142,34 @@ pub enum GenAISemanticEvent {
 | TokenConsumptionStores | token_consumption | Token consumption breakdown |
 | GenAISqliteStore | genai_events | GenAI semantic events |
 
-Connection setup, DB/WAL/SHM measurement, checkpoint outcomes, retention cutoffs, and adaptive size-policy control live in the leaf crate `crates/agentsight-sqlite-lifecycle/`. Store modules retain schema ownership and provide their own oldest-row deletion rules, so the lifecycle crate never depends on pipeline or business models.
+`DatabaseManager` (`src/database.rs`) is the production composition boundary for typed Stores. It
+registers stable database identities, resolved physical paths, access modes, and maintenance
+coverage, then invokes each Store's typed opener. Production code may not bypass it with a raw
+`Connection::open*`; CI enforces that rule. The only explicit entry-point exceptions are the common
+lifecycle opener, `private_sqlite` for private-directory ownership and no-follow guarantees, and the
+read-only adapter for Tokenless's externally managed database.
 
-**Source**: `src/storage/unified.rs`, `src/storage/sqlite/`, `crates/agentsight-sqlite-lifecycle/`
+Connection setup, DB/WAL/SHM and freelist measurement, checkpoint outcomes, retention cutoffs,
+per-database maintenance locks, and the scheduler live in the business-model-free leaf crate
+`crates/agentsight-sqlite-lifecycle/`. Store modules retain schema ownership, referential integrity,
+and their own oldest-safe-row deletion rules. GenAI events, process resource samples, and evaluation
+runs share one physical `genai_events.db` policy target.
+
+No maintenance daemon is created. Each long-running trace, serve, local trace, or local serve process
+owns at most one lightweight `sqlite-maintenance` thread, which schedules its physical databases
+sequentially. Trace and serve can both register a shared file; `<db>.maintenance.lock` elects one
+process for an attempt, and the winner remeasures after acquiring the lock.
+
+A Store pass applies age retention first. If it deletes rows, a successful WAL checkpoint gates the
+size phase. Physical allocation above the configured limit triggers oldest-eligible-row deletion,
+with checkpoint and remeasurement between rounds until logical usage reaches 90% of the limit.
+Automatic maintenance never runs `VACUUM`; released pages stay on the freelist for reuse. Reuse and
+enforcement Stores expose partial coverage because they protect human decisions and active control
+state, while causal cache entries may be evicted and later cause a billed recomputation. Tokenless
+remains externally managed and read-only to AgentSight.
+
+**Source**: `src/database.rs`, `src/storage/unified.rs`, `src/storage/sqlite/`,
+`crates/agentsight-sqlite-lifecycle/`
 
 ## Data Flow Diagram
 

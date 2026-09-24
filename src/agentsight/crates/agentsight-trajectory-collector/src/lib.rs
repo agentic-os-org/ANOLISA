@@ -36,51 +36,28 @@ pub struct CollectorConfig {
     /// Optional override of the projects directories to scan; `None` probes
     /// `/root` + `/home/*` for the default Qoder/QoderWork layout.
     pub scan_dirs: Option<Vec<PathBuf>>,
-    /// Path of the `trajectories.db` SQLite file.
-    pub db_path: PathBuf,
-    /// Retention and capacity settings for the trajectory store.
+    /// Retention used to skip already-expired source files during scans.
     pub maintenance: TrajectoryMaintenancePolicy,
-    /// Seconds between maintenance passes; zero disables scheduled maintenance.
-    pub maintenance_interval_secs: u64,
 }
 
 /// Scan-convert-persist loop; returns when `stop` is cleared.
 ///
-/// Runs one scan immediately, then sleeps `scan_interval_secs` between
-/// rounds (checking `stop` every second). Store open failure is logged and
-/// aborts the loop — the feature is best-effort and must never take the
-/// tracer down.
-pub fn run_collector_loop(config: &CollectorConfig, stop: &AtomicBool) {
-    let store = match TrajectoryStore::new_with_path(&config.db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!(
-                "Trajectory collector disabled: failed to open {}: {e}",
-                config.db_path.display()
-            );
-            return;
-        }
-    };
+/// Runs one scan immediately, then sleeps `scan_interval_secs` between rounds
+/// (checking `stop` every second). Database lifecycle is owned by the caller's
+/// maintenance worker.
+pub fn run_collector_loop(
+    store: std::sync::Arc<TrajectoryStore>,
+    config: &CollectorConfig,
+    stop: &AtomicBool,
+) {
     log::info!(
-        "Trajectory collector started (interval={}s, db={})",
-        config.scan_interval_secs,
-        config.db_path.display()
+        "Trajectory collector started (interval={}s)",
+        config.scan_interval_secs
     );
 
-    let mut last_maintenance = None;
     // Single exit point: the loop always exits via the `sleep_or_stop` check,
     // avoiding split semantics between the while-condition and the helper.
     loop {
-        if config.maintenance_interval_secs > 0
-            && last_maintenance.is_none_or(|last: std::time::Instant| {
-                last.elapsed() >= Duration::from_secs(config.maintenance_interval_secs)
-            })
-        {
-            if let Err(error) = store.maintain(config.maintenance) {
-                log::warn!("Trajectory store maintenance failed: {error}");
-            }
-            last_maintenance = Some(std::time::Instant::now());
-        }
         scan_once(&store, config);
         if !sleep_or_stop(stop, config.scan_interval_secs) {
             break;
@@ -291,9 +268,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects.clone()]),
-            db_path: base.join("t.db"),
             maintenance: TrajectoryMaintenancePolicy::default(),
-            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);
@@ -328,23 +303,32 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
-            db_path: base.join("t.db"),
-            maintenance: TrajectoryMaintenancePolicy::default(),
-            maintenance_interval_secs: 1,
+            maintenance: TrajectoryMaintenancePolicy {
+                retention_days: 1,
+                max_db_size_mb: 1,
+            },
         };
+        let db_path = base.join("t.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        scan_once(&store, &config);
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute("UPDATE collected_trajectories SET collected_at_ns = 1", [])
+            .unwrap();
+        let loop_store = Arc::clone(&store);
         let stop = Arc::new(AtomicBool::new(true));
         let stop_clone = Arc::clone(&stop);
         let config_clone = config.clone();
         let handle = std::thread::spawn(move || {
-            run_collector_loop(&config_clone, &stop_clone);
+            run_collector_loop(loop_store, &config_clone, &stop_clone);
         });
 
         std::thread::sleep(Duration::from_millis(1500));
         stop.store(false, Ordering::SeqCst);
         handle.join().unwrap();
 
-        // The first immediate scan must have ingested the session.
-        let store = TrajectoryStore::new_with_path(&config.db_path).unwrap();
+        // The caller-owned row remains even though its collection timestamp is
+        // expired, proving the collector loop never runs lifecycle maintenance.
         assert_eq!(store.count().unwrap(), 1);
     }
 
@@ -365,9 +349,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
-            db_path: base.join("t.db"),
             maintenance: TrajectoryMaintenancePolicy::default(),
-            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);
@@ -392,9 +374,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![sessions_root]),
-            db_path: base.join("t.db"),
             maintenance: TrajectoryMaintenancePolicy::default(),
-            maintenance_interval_secs: 0,
         };
 
         scan_once(&store, &config);

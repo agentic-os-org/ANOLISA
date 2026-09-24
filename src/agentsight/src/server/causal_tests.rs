@@ -608,3 +608,18 @@ fn a_repeated_failure_alone_does_not_condemn_the_round() {
     assert_eq!(case_.findings.len(), 1);
     assert_eq!(case_.findings[0].kind, "repeated_identical_failure");
 }
+
+#[test]
+fn schema_probe_does_not_create_a_missing_database() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentsight-causal-missing-{}-{nonce}.db",
+        std::process::id()
+    ));
+
+    assert!(probe_atif_column(&path, "missing-session").is_err());
+    assert!(!path.exists());
+}

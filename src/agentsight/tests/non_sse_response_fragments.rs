@@ -102,7 +102,7 @@ fn check(chunks: &[&[u8]]) {
             let dir = common::temp_dir("response-fragments");
             let store = GenAISqliteStore::new_with_path(
                 &dir.join("genai.db"),
-                agentsight::config::InsertStoragePolicy::default(),
+                agentsight::config::PeriodicStoragePolicy::default(),
             )
             .unwrap();
             store.export(&events);

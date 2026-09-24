@@ -10,7 +10,7 @@ fn test_store(label: &str) -> (std::path::PathBuf, GenAISqliteStore) {
         std::process::id()
     ));
     let store =
-        GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
             .expect("resource test store");
     (path, store)
 }

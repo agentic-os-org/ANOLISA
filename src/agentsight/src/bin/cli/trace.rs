@@ -32,6 +32,11 @@ pub struct TraceCommand {
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
 
+    /// Optional path to a JSON configuration file.
+    #[cfg(not(target_os = "linux"))]
+    #[structopt(short, long)]
+    pub config: Option<String>,
+
     /// Skip eBPF probes and collect trajectories only (Linux only)
     ///
     /// Loading probes needs root or CAP_BPF/CAP_PERFMON, so an unprivileged run
@@ -53,7 +58,17 @@ impl TraceCommand {
 
         #[cfg(not(target_os = "linux"))]
         {
-            agentsight::local::trace::run_local_trace(self.verbose);
+            let mut config = self
+                .config
+                .as_deref()
+                .map(super::load_server_config)
+                .unwrap_or_default();
+            if self.config.is_none() {
+                config.storage.base_path = dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("agentsight");
+            }
+            agentsight::local::trace::run_local_trace(self.verbose, config);
         }
     }
 }
@@ -162,9 +177,17 @@ impl TraceCommand {
     /// trajectory data. Blocks until Ctrl+C.
     fn run_trajectory_only(&self) {
         use agentsight::AgentsightConfig;
-        use agentsight_trajectory_collector::{CollectorConfig, run_collector_loop};
+        use agentsight::database::{
+            DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole,
+            DatabaseSpec,
+        };
+        use agentsight_sqlite_lifecycle::LifecycleError;
+        use agentsight_trajectory_collector::{
+            CollectorConfig, TrajectoryStore, run_collector_loop,
+        };
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
 
         let config_path = std::path::PathBuf::from(&self.config);
         let mut config = AgentsightConfig::new()
@@ -202,12 +225,10 @@ impl TraceCommand {
                 .trajectory_scan_dirs
                 .as_ref()
                 .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
-            db_path: db_path.clone(),
             maintenance: agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
                 retention_days: config.storage.trajectories.retention_days,
                 max_db_size_mb: config.storage.trajectories.max_db_size_mb,
             },
-            maintenance_interval_secs: config.storage.trajectories.check_interval_secs,
         };
 
         // `run_collector_loop` treats the flag as "keep running", so Ctrl+C
@@ -240,7 +261,56 @@ impl TraceCommand {
         }
         println!("Press Ctrl+C to stop.");
 
-        run_collector_loop(&collector_config, &running);
+        let manager = match DatabaseManager::new(
+            DatabaseRole::Trace,
+            [DatabaseSpec::new(
+                DatabaseId::Trajectories,
+                &db_path,
+                DatabaseAccess::ReadWrite,
+                DatabaseCoverage::Partial,
+            )],
+        ) {
+            Ok(manager) => manager,
+            Err(error) => {
+                eprintln!("Failed to register trajectory database: {error}");
+                std::process::exit(1);
+            }
+        };
+        let store = match manager
+            .open_read_write(DatabaseId::Trajectories, TrajectoryStore::new_with_path)
+        {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                eprintln!(
+                    "Failed to open trajectory store at {}: {error}",
+                    db_path.display()
+                );
+                std::process::exit(1);
+            }
+        };
+        if config.storage.trajectories.check_interval_secs > 0 {
+            let target = Arc::clone(&store);
+            let policy = collector_config.maintenance;
+            let job = manager
+                .maintenance_job(
+                    DatabaseId::Trajectories,
+                    Duration::from_secs(config.storage.trajectories.check_interval_secs),
+                    move || {
+                        target.maintain(policy).map(|_| ()).map_err(|error| {
+                            LifecycleError::MaintenanceJobFailed(error.to_string())
+                        })
+                    },
+                )
+                .and_then(|job| manager.start_maintenance(vec![job]));
+            if let Err(error) = job {
+                eprintln!("Failed to start trajectory maintenance: {error}");
+                std::process::exit(1);
+            }
+        }
+        run_collector_loop(store, &collector_config, &running);
+        if let Err(error) = manager.stop_maintenance() {
+            log::warn!("Trajectory maintenance worker shutdown failed: {error}");
+        }
     }
 
     /// Pick a writable location for `trajectories.db`.
@@ -269,15 +339,12 @@ impl TraceCommand {
             .map(|(path, _)| path)
     }
 
-    /// Report whether `path` can host the trajectory database, creating its
-    /// parent directory and verifying the database opens.
+    /// Report whether `path` can host the trajectory database.
     ///
-    /// Opening also creates the schema, so the collector's own open cannot then
-    /// fail on permissions. When `private` is set, the directory is restricted to
-    /// `0700` and the database to `0600` before opening: trajectories embed whole
-    /// conversations, which must not be readable by other local users. SQLite
-    /// derives WAL/SHM modes from the main database, so pre-creating it at `0600`
-    /// covers the sidecars as well.
+    /// This only prepares filesystem access; `DatabaseManager` performs the
+    /// actual SQLite open and schema initialization. Private fallback paths use
+    /// `0700` directories and `0600` files because trajectories contain complete
+    /// conversations.
     fn prepare_trajectory_db(path: &std::path::Path, private: bool) -> bool {
         use std::fs::{DirBuilder, OpenOptions, Permissions, set_permissions};
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -291,40 +358,29 @@ impl TraceCommand {
         } else {
             std::fs::create_dir_all(parent)
         };
-        if let Err(e) = created {
-            log::warn!("Trajectory DB directory {parent:?} unusable: {e}");
+        if let Err(error) = created {
+            log::warn!("Trajectory DB directory {parent:?} unusable: {error}");
             return false;
         }
 
-        if private {
-            // `DirBuilder`'s mode only applies to directories it creates, so an
-            // already-present directory from an earlier run needs tightening too.
-            if let Err(e) = set_permissions(parent, Permissions::from_mode(0o700)) {
-                log::warn!("Could not restrict {parent:?} to 0700: {e}");
-                return false;
-            }
-            if let Err(e) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(path)
-            {
-                log::warn!("Trajectory DB {path:?} unusable: {e}");
-                return false;
-            }
-            // The mode above is ignored for a file that already exists.
-            if let Err(e) = set_permissions(path, Permissions::from_mode(0o600)) {
-                log::warn!("Could not restrict {path:?} to 0600: {e}");
-                return false;
-            }
+        if private && let Err(error) = set_permissions(parent, Permissions::from_mode(0o700)) {
+            log::warn!("Could not restrict {parent:?} to 0700: {error}");
+            return false;
         }
 
-        match agentsight_trajectory_collector::TrajectoryStore::new_with_path(path) {
-            Ok(_) => true,
-            Err(e) => {
-                log::warn!("Trajectory DB {path:?} unusable: {e}");
-                false
-            }
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        if private {
+            options.mode(0o600);
         }
+        if let Err(error) = options.open(path) {
+            log::warn!("Trajectory DB {path:?} unusable: {error}");
+            return false;
+        }
+        if private && let Err(error) = set_permissions(path, Permissions::from_mode(0o600)) {
+            log::warn!("Could not restrict {path:?} to 0600: {error}");
+            return false;
+        }
+        true
     }
 }

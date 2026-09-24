@@ -1922,7 +1922,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(
             &path,
-            crate::config::InsertStoragePolicy::default(),
+            crate::config::PeriodicStoragePolicy::default(),
         )
         .unwrap();
         let event = crate::genai::semantic::GenAISemanticEvent::LLMCall(call);

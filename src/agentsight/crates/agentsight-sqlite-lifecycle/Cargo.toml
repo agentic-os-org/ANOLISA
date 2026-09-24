@@ -4,5 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+fs2 = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use crate::semantic_search;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
-const DB_FILE_NAME: &str = "optimization.db";
 
 /// Runtime LLM configuration for optimization analysis.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -104,20 +103,13 @@ impl OptLlmConfig {
 pub struct OptimizeState {
     config_path: PathBuf,
     config: RwLock<OptLlmConfig>,
-    store: Option<OptimizationStore>,
+    store: Option<Arc<OptimizationStore>>,
 }
 
 impl OptimizeState {
-    pub fn init(base_dir: &Path) -> Arc<Self> {
+    pub fn init(base_dir: &Path, store: Option<Arc<OptimizationStore>>) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
         let config = OptLlmConfig::load(&config_path);
-        let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
-            Ok(store) => Some(store),
-            Err(e) => {
-                log::warn!("Failed to open local optimization store: {e}");
-                None
-            }
-        };
         Arc::new(Self {
             config_path,
             config: RwLock::new(config),
@@ -655,11 +647,18 @@ mod tests {
     }
 
     #[test]
-    fn test_optimize_state_init() {
+    fn test_optimize_state_uses_opened_store() {
         let tmp = std::env::temp_dir().join("agentsight_opt_state_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        let state = OptimizeState::init(&tmp);
+        let store = Arc::new(
+            OptimizationStore::new_with_path(&tmp.join(crate::config::OPTIMIZATION_DB_NAME))
+                .unwrap(),
+        );
+        let state = OptimizeState::init(&tmp, Some(Arc::clone(&store)));
         assert!(state.store.is_some());
+        assert!(Arc::ptr_eq(state.store.as_ref().unwrap(), &store));
+        drop(state);
+        drop(store);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

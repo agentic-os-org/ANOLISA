@@ -19,7 +19,6 @@ use crate::preferences::api::{
     resolve_auto, window_start_ns,
 };
 use crate::preferences::{aggregator, analyze_rows, detector, genai_source, trajectory_source};
-use crate::storage::sqlite::GenAISqliteStore;
 
 // ─── Source loading ──────────────────────────────────────────────────────────
 
@@ -30,16 +29,9 @@ fn load_genai_rows(
     data: &AppState,
     since_ns: i64,
 ) -> Result<Vec<detector::PreferenceEventRow>, String> {
-    if !data.storage_path.exists() {
-        return Err(
-            "SQLite storage is not enabled or no events have been captured yet.".to_string(),
-        );
-    }
-    let store = GenAISqliteStore::new_with_path(
-        &data.storage_path,
-        crate::config::InsertStoragePolicy::default(),
-    )
-    .map_err(|e| e.to_string())?;
+    let store = data.genai_store.as_deref().ok_or_else(|| {
+        "SQLite storage is not enabled or no events have been captured yet.".to_string()
+    })?;
     let raw = store
         .get_preference_window_events(since_ns)
         .map_err(|e| e.to_string())?;

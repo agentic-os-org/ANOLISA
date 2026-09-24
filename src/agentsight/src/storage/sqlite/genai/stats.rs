@@ -43,7 +43,7 @@ mod latency_tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store =
-            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         {
             let conn = store.conn.lock().unwrap();
@@ -131,7 +131,7 @@ mod latency_tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store =
-            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         {
             let conn = store.conn.lock().unwrap();
@@ -174,7 +174,7 @@ mod latency_tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store =
-            GenAISqliteStore::new_with_path(&path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         {
             let conn = store.conn.lock().unwrap();

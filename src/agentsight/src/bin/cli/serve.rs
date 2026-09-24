@@ -89,19 +89,27 @@ impl ServeCommand {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let judge_enabled = self
+            let mut config = self
                 .config
                 .as_deref()
-                .map(|path| {
-                    super::load_server_config(path)
-                        .features
-                        .reuse_llm_judge_enabled
-                })
-                .unwrap_or(false);
+                .map(super::load_server_config)
+                .unwrap_or_default();
+            if self.config.is_none() {
+                config.storage.base_path = dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("agentsight");
+            }
+            let judge_enabled = config.features.reuse_llm_judge_enabled;
+            let storage_config = config.storage;
 
             actix_web::rt::System::new().block_on(async move {
-                if let Err(e) =
-                    agentsight::local::server::run_server(&host, port, judge_enabled).await
+                if let Err(e) = agentsight::local::server::run_server(
+                    &host,
+                    port,
+                    storage_config,
+                    judge_enabled,
+                )
+                .await
                 {
                     eprintln!("Server error: {e}");
                     std::process::exit(1);

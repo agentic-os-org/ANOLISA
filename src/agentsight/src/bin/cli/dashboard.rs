@@ -447,12 +447,11 @@ mod tests {
             std::env::temp_dir().join(format!("agentsight_test_{}_{}", std::process::id(), suffix));
         std::fs::create_dir_all(&dir).ok();
         let config_path = dir.join("config.json");
-        let content = if auth_enabled {
-            r#"{"schema_version":3,"server":{"auth":{"enabled":true}}}"#
-        } else {
-            r#"{"schema_version":3,"server":{"auth":{"enabled":false}}}"#
-        };
-        std::fs::write(&config_path, content).unwrap();
+        let content = serde_json::json!({
+            "schema_version": agentsight::config::CURRENT_SCHEMA_VERSION,
+            "server": {"auth": {"enabled": auth_enabled}},
+        });
+        std::fs::write(&config_path, content.to_string()).unwrap();
         config_path.to_string_lossy().to_string()
     }
 

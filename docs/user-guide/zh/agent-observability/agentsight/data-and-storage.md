@@ -36,28 +36,53 @@ tracer 自身始终写入默认目录。
 
 ## 保留与容量上限
 
-| 存储 | 默认策略 | 配置项 |
-|---|---|---|
-| `agentsight.db` | 30 天、500 MiB、每 1,000 次写入检查 | `storage.primary` |
-| `genai_events.db` | 30 天、200 MiB、每次写入检查；包含评估结果 | `storage.genai` |
-| `interruption_events.db` | 30 天、100 MiB、每 60 秒检查 | `storage.interruptions` |
-| `trajectories.db` | 30 天、500 MiB、每 300 秒检查 | `storage.trajectories` |
-| `optimization.db` | 30 天、200 MiB、每 300 秒检查 | `storage.optimization` |
-| `.agentsight-private/security.db` | 30 天、200 MiB、每小时检查，并保护活动案例图 | `storage.security_audit` |
-| `.agentsight-private/enforcement.db` | 保留最新 100,000 条 violation | 固定行数上限 |
+schema v4 为每个 AgentSight 自有数据库统一配置 `retention_days`、`max_db_size_mb` 和
+`check_interval_secs`：
 
-保留时间、容量或检查间隔设为 `0` 时关闭对应规则。上限按逻辑容量计（物理文件大小减去空闲页），清理按最旧
-且允许淘汰的记录优先，直到逻辑容量收敛到阈值内。清理后
-物理文件不会自动缩小：释放的页进入空闲页表并被后续写入复用，文件大小稳定在
-历史峰值。如需向文件系统归还磁盘空间，在低峰期手动执行
-`sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`（VACUUM 会重建整个文件，
-建议先停止服务，避免 cgroup 内存限制下触发 OOM）。
+| 存储 | 默认策略 | 清理覆盖范围 | 配置项 |
+|---|---|---|---|
+| `agentsight.db` | 30 天、500 MiB、每 60 秒 | 完整：审计、Token、HTTP 与消费历史 | `storage.primary` |
+| `genai_events.db` | 30 天、200 MiB、每 60 秒 | 完整：GenAI 事件、资源采样与 evaluation run 共用这个物理库 | `storage.genai` |
+| `interruption_events.db` | 30 天、100 MiB、每 60 秒 | 完整的中断历史 | `storage.interruptions` |
+| `trajectories.db` | 30 天、500 MiB、每 300 秒 | 部分：清理轨迹行，但保护近期跳过文件的指纹 | `storage.trajectories` |
+| `optimization.db` | 30 天、200 MiB、每 300 秒 | 完整的优化结果历史 | `storage.optimization` |
+| `.agentsight-private/security.db` | 30 天、200 MiB、每 3,600 秒 | 部分：清理终态案例图和无引用事件，保护活动案例图 | `storage.security_audit` |
+| `.agentsight-private/reuse.db` | 30 天、200 MiB、每 300 秒 | 部分：仅旧标签事件与未确认的纯自动标签 | `storage.reuse` |
+| `.agentsight-private/causal.db` | 30 天、200 MiB、每 300 秒 | 部分：淘汰最旧缓存，但至少保留最新一条 | `storage.causal` |
+| `.agentsight-private/enforcement.db` | 30 天、100 MiB、每 60 秒 | 部分：仅 violation 与终态 transition | `storage.enforcement` |
+
+Tokenless 的 `stats.db` 会在状态 API 中列为外部存储。AgentSight 只读打开它，不执行生命周期治理；该文件
+仍由 Tokenless 管理。
+
+每项值为 `0` 时分别关闭按时间清理、按容量清理或定时检查。因而检查间隔为零时，即使保留天数和容量上限
+非零，也不会自动治理该存储。旧 `check_interval_inserts` 字段已不支持；v4 之前的配置会按既有 schema
+升级机制先备份再替换。
+
+每个现有的长期运行 `trace`、`serve`、本地 trace 或本地 serve 进程最多启动一个轻量
+`sqlite-maintenance` 线程，不会另起维护进程。该线程顺序执行本进程负责的所有数据库任务。`trace` 与
+`serve` 同时覆盖同一物理文件时，通过 `<db>.maintenance.lock` 协调；拿到锁的进程会重新测量保留与容量
+状态后再执行操作。
+
+每次维护遵循同一顺序：
+
+1. 按各业务 Store 的 schema 安全规则，删除早于保留截止时间且允许淘汰的记录。
+2. 如果按时间删除改变了数据库，必须成功完成 WAL checkpoint 后才能继续。
+3. 仅在物理占用（database、WAL 与 SHM）超过上限时触发容量淘汰。
+4. 按最旧且允许淘汰的记录清理，每轮 checkpoint，直到逻辑占用降至上限的 90%。
+
+自动维护永远不执行 `VACUUM`。释放页保留在 freelist 中供后续写入复用，因此物理文件较大但逻辑占用在
+目标内时仍属正常。如需向文件系统归还空间，请先停止服务，再在维护窗口手动执行
+`sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`。
+
+两个部分覆盖的存储会刻意保护持久决定与控制状态。复用库不会删除人工持有、已确认或已覆盖的标签；拦截库
+会保护 binding、pending 或 indeterminate transition，以及 credential intent/snapshot 状态。因果条目是缓存，
+被淘汰后再次请求可能重新触发付费归因计算。
 
 > 容器部署请注意：这些保留语义只在数据目录持久化时才有意义。不挂卷时容器每次重启都会清空全部数据，
 > 详见 [容器与 Sidecar](deployment.md#容器与-sidecar) 的持久化一节。
 
 修改限制时，编辑 `/etc/agentsight/config.json` 的 `storage` 配置节，再 reload 服务。Settings 页面会展示
-每个数据库当前生效的策略、物理占用和逻辑占用。
+每个数据库当前生效的策略、物理/逻辑占用、清理覆盖范围与维护 worker 状态。
 
 通过 API 查看当前占用：
 
@@ -66,6 +91,13 @@ TOKEN=$(sudo cat /var/log/sysak/.agentsight/.dashboard_token)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/status \
   | python3 -m json.tool
 ```
+
+响应使用 schema version `2`。每个存储都返回 availability、size、policy、coverage、`size_state`，以及包含
+`scheduled`、`worker_running`、`worker_heartbeat_unix_ms`、`last_attempt_unix_ms`、
+`last_success_unix_ms`、`last_result`、`consecutive_failures`、`next_run_unix_ms` 的 `maintenance` 对象。
+轨迹、安全审计、复用、因果与拦截库会因受保护数据而报告 `partial`。运行态字段只描述提供当前响应的进程，
+trace 负责的库显示未调度，并不能证明另一个 trace 进程没有运行。接口不返回数据库路径。
+`within_policy` 只表示容量状态；worker 是否健康必须结合调度、heartbeat、尝试、结果与失败字段判断。
 
 也可以直接检查目录：
 
@@ -115,7 +147,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |
-| 存储 | `GET /api/storage/status` | SQLite 生效策略与物理/逻辑占用，不返回文件路径 |
+| 存储 | `GET /api/storage/status` | schema v2 的 SQLite 策略、容量、覆盖范围与维护 worker 状态，不返回文件路径 |
 | Skill 指标 | `GET /api/skill-metrics`、`/downloads`、`/loads`、`/usage-ratio`、`/distribution`、`/hotness` | Skill 采纳情况 |
 | 优化分析 | `POST /api/optimize/sessions/{id}/{dimension}`、`GET /api/optimize/results`、`GET` 与 `POST /api/optimize/config` | LLM 辅助分析 |
 | 质量与归因 | `POST /api/grader/evaluate`、`GET /api/grader/latest`、`POST /api/causal-attribution` | 会话质量评分、根因归因 |

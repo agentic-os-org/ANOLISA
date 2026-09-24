@@ -1,5 +1,6 @@
 //! Token query subcommand
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::{
     SqliteConfig, TimePeriod, TokenQueryResult, TokenStore, Trend, format_tokens_with_commas,
 };
@@ -51,7 +52,12 @@ impl TokenCommand {
             std::process::exit(1);
         }
 
-        let store = match TokenStore::new(data_path) {
+        let store = match DatabaseManager::open_query(
+            DatabaseId::Primary,
+            data_path,
+            DatabaseCoverage::Full,
+            |path| TokenStore::open_read_only_existing(path, "token_records"),
+        ) {
             Ok(store) => store,
             Err(error) => {
                 eprintln!("Failed to open token database: {error}");

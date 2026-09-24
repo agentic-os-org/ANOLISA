@@ -667,7 +667,8 @@ impl TrajectoryStore {
             Some(cutoff) => self.delete_trajectories_before(cutoff)?,
             None => 0,
         };
-        if (expired_trajectories > 0 || removed_skipped_files > 0)
+        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        if (expired_trajectories > 0 || removed_skipped_files > 0 || limit_bytes > 0)
             && self.checkpoint()? == CheckpointOutcome::Busy
         {
             let snapshot = self.size_snapshot()?;
@@ -684,7 +685,6 @@ impl TrajectoryStore {
             });
         }
 
-        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
         let size = enforce_size_policy::<anyhow::Error>(
             SizePolicy {
                 limit_bytes,

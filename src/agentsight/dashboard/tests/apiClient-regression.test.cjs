@@ -120,44 +120,96 @@ test('fetchSecurityStatus preserves a non-2xx availability state envelope', asyn
   assert.deepEqual(response.data, { error: 'socket unavailable' });
 });
 
-test('fetchStorageStatus uses the authenticated storage endpoint and preserves policy fields', async () => {
+test('fetchStorageStatus preserves schema 2 maintenance and partial inventory fields', async () => {
   let requestedUrl = null;
-  const payload = {
-    schema_version: 1,
-    observed_at_unix_ms: 42,
-    stores: [{
-      id: 'primary',
-      availability: 'present',
-      size: {
-        database_bytes: 100,
-        wal_bytes: 20,
-        shm_bytes: 10,
-        freelist_bytes: 30,
-        physical_bytes: 130,
-        logical_bytes: 100,
-      },
-      policy: {
-        retention_days: 30,
-        size_limit_bytes: 500,
-        cleanup_trigger_bytes: 500,
-        cleanup_target_bytes: 500,
-        check_interval: 1000,
-        check_interval_unit: 'inserts',
-        enforced_by: 'trace',
-      },
-      coverage: 'full',
-      size_state: 'within_policy',
-    }],
+  const policy = {
+    retention_days: 30,
+    size_limit_bytes: 500,
+    cleanup_trigger_bytes: 500,
+    cleanup_target_bytes: 400,
+    check_interval: 60,
+    check_interval_unit: 'seconds',
+    enforced_by: 'serve',
   };
-  global.fetch = async (url) => {
+  const maintenance = {
+    scheduled: true,
+    worker_running: true,
+    worker_heartbeat_unix_ms: 1_700_000_030_000,
+    last_attempt_unix_ms: 1_700_000_000_000,
+    last_success_unix_ms: 1_699_999_000_000,
+    last_result: 'lock_busy',
+    consecutive_failures: 2,
+    next_run_unix_ms: 1_700_000_060_000,
+  };
+  const payload = {
+    schema_version: 2,
+    observed_at_unix_ms: 42,
+    stores: [
+      {
+        id: 'reuse',
+        availability: 'present',
+        size: {
+          database_bytes: 100,
+          wal_bytes: 20,
+          shm_bytes: 10,
+          freelist_bytes: 30,
+          physical_bytes: 130,
+          logical_bytes: 100,
+        },
+        policy,
+        coverage: 'partial',
+        size_state: 'within_policy',
+        maintenance,
+      },
+      {
+        id: 'causal',
+        availability: 'missing',
+        size: null,
+        policy,
+        coverage: 'partial',
+        size_state: 'unknown',
+        maintenance: {
+          ...maintenance,
+          worker_running: false,
+          worker_heartbeat_unix_ms: null,
+          last_attempt_unix_ms: null,
+          last_success_unix_ms: null,
+          last_result: null,
+          next_run_unix_ms: null,
+        },
+      },
+      {
+        id: 'enforcement',
+        availability: 'missing',
+        size: null,
+        policy,
+        coverage: 'partial',
+        size_state: 'unknown',
+        maintenance: {
+          ...maintenance,
+          scheduled: false,
+          worker_running: false,
+          worker_heartbeat_unix_ms: null,
+        },
+      },
+    ],
+  };
+  global.fetch = async (url, init) => {
     requestedUrl = String(url);
+    assert.equal(init.credentials, 'same-origin');
     return new Response(JSON.stringify(payload), { status: 200 });
   };
 
   const response = await fetchStorageStatus();
 
   assert.equal(new URL(requestedUrl).pathname, '/api/storage/status');
-  assert.deepEqual(response, payload);
+  assert.equal(response.schema_version, 2);
+  assert.deepEqual(response.stores.map((store) => store.id), ['reuse', 'causal', 'enforcement']);
+  assert.equal(response.stores[0].coverage, 'partial');
+  assert.equal(response.stores[1].coverage, 'partial');
+  assert.equal(response.stores[2].coverage, 'partial');
+  assert.deepEqual(response.stores[0].maintenance, maintenance);
+  assert.equal(response.stores[1].maintenance.next_run_unix_ms, null);
 });
 
 test('fetchLatencyMetrics forwards ranges and preserves nullable percentile data', async () => {

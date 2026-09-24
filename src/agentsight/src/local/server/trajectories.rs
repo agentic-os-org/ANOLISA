@@ -274,13 +274,35 @@ mod tests {
     use super::*;
     use actix_web::{App, test};
     use agentsight_trajectory_collector::TrajectoryStore;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
+    use crate::database::{
+        DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
+    };
+
+    fn manager(db_path: &Path) -> Arc<DatabaseManager> {
+        Arc::new(
+            DatabaseManager::new(
+                DatabaseRole::LocalServer,
+                [DatabaseSpec::new(
+                    DatabaseId::Trajectories,
+                    db_path,
+                    DatabaseAccess::ReadOnly,
+                    DatabaseCoverage::Partial,
+                )],
+            )
+            .unwrap(),
+        )
+    }
+
     fn make_state(store: Option<Arc<TrajectoryStore>>) -> web::Data<LocalState> {
+        let db_path = PathBuf::from("/nonexistent/trajectories.db");
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(store)),
-            db_path: PathBuf::from("/nonexistent/trajectories.db"),
+            database_manager: manager(&db_path),
+            db_path,
+            storage_config: StorageConfig::default(),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
         })
@@ -292,7 +314,9 @@ mod tests {
     ) -> web::Data<LocalState> {
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(Some(store))),
+            database_manager: manager(&db_path),
             db_path,
+            storage_config: StorageConfig::default(),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
         })

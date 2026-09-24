@@ -103,7 +103,8 @@ impl AuditStore {
                 .unwrap_or(0);
             self.purge_before(retention_cutoff_ns(now_ns, policy.retention_days)?)?
         };
-        if expired_rows > 0 && self.checkpoint()? == CheckpointOutcome::Busy {
+        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        if (expired_rows > 0 || limit_bytes > 0) && self.checkpoint()? == CheckpointOutcome::Busy {
             let snapshot = self.size_snapshot()?;
             return Ok(AuditMaintenanceReport {
                 expired_rows,
@@ -117,7 +118,6 @@ impl AuditStore {
             });
         }
 
-        let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
         let size = enforce_size_policy::<AuditError>(
             SizePolicy {
                 limit_bytes,

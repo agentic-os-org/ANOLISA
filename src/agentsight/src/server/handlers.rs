@@ -1,6 +1,7 @@
 //! API request handlers
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, Responder, get, post, web};
@@ -144,21 +145,17 @@ pub async fn list_sessions(
     data: web::Data<AppState>,
     query: web::Query<SessionQuery>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
-
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = query
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => {
-            match store.list_sessions(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
-                Ok(sessions) => HttpResponse::Ok().json(sessions),
-                Err(e) => HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()})),
-            }
-        }
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.list_sessions(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
+        Ok(sessions) => HttpResponse::Ok().json(sessions),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -175,23 +172,22 @@ pub async fn list_traces_by_session(
     path: web::Path<String>,
     query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let session_id = path.into_inner();
 
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => match store.list_traces_by_session(
-            &session_id,
-            start_ns,
-            end_ns,
-            query.include_auxiliary.unwrap_or(false),
-        ) {
-            Ok(traces) => HttpResponse::Ok().json(traces),
-            Err(e) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()})),
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.list_traces_by_session(
+        &session_id,
+        start_ns,
+        end_ns,
+        query.include_auxiliary.unwrap_or(false),
+    ) {
+        Ok(traces) => HttpResponse::Ok().json(traces),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -222,16 +218,14 @@ pub async fn get_session_resources(
         }));
     }
 
-    let db_path = data.storage_path.clone();
+    let Some(store) = data.genai_store.as_ref().map(Arc::clone) else {
+        return HttpResponse::InternalServerError()
+            .json(json!({"error": "GenAI store unavailable"}));
+    };
     let session_id = path.into_inner();
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
     let loaded = web::block(move || {
-        let store = GenAISqliteStore::new_with_path(
-            &db_path,
-            crate::config::InsertStoragePolicy::default(),
-        )
-        .map_err(|error| error.to_string())?;
         store
             .get_session_resource_timeline(&session_id, start_ns, end_ns, max_points)
             .map_err(|error| error.to_string())
@@ -255,15 +249,14 @@ pub async fn get_trace_detail(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let trace_id = path.into_inner();
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => match store.get_trace_events(&trace_id) {
-            Ok(events) => HttpResponse::Ok().json(events),
-            Err(e) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()})),
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.get_trace_events(&trace_id) {
+        Ok(events) => HttpResponse::Ok().json(events),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -278,15 +271,14 @@ pub async fn get_conversation_events(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let conversation_id = path.into_inner();
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => match store.get_events_by_conversation(&conversation_id) {
-            Ok(events) => HttpResponse::Ok().json(events),
-            Err(e) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()})),
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.get_events_by_conversation(&conversation_id) {
+        Ok(events) => HttpResponse::Ok().json(events),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -320,8 +312,13 @@ pub async fn evaluate_grader(
             .json(json!({"error": "bad_request", "message": "target_id is required"}));
     }
 
+    let Some(genai_store) = data.genai_store.as_deref() else {
+        return grader_error_response(GraderError::Storage(
+            "GenAI SQLite store is unavailable".to_string(),
+        ));
+    };
     let input = match load_conversation_input(
-        &data.storage_path,
+        genai_store,
         data.interruption_store.as_deref(),
         &body.target_id,
         body.force,
@@ -500,16 +497,12 @@ pub async fn get_latency_metrics(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": "start_ns must not exceed end_ns"}));
     }
-    match GenAISqliteStore::new_with_path(
-        &data.storage_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(store) => match store.get_latency_metrics(start_ns, end_ns, query.agent_name.as_deref())
-        {
-            Ok(summary) => HttpResponse::Ok().json(summary),
-            Err(error) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": error.to_string()})),
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.get_latency_metrics(start_ns, end_ns, query.agent_name.as_deref()) {
+        Ok(summary) => HttpResponse::Ok().json(summary),
         Err(error) => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": error.to_string()})),
     }
@@ -523,18 +516,17 @@ pub async fn list_agent_names(
     data: web::Data<AppState>,
     query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = query
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => match store.list_agent_names(start_ns, end_ns) {
-            Ok(names) => HttpResponse::Ok().json(names),
-            Err(e) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()})),
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
+    };
+    match store.list_agent_names(start_ns, end_ns) {
+        Ok(names) => HttpResponse::Ok().json(names),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -557,7 +549,6 @@ pub async fn get_timeseries(
     data: web::Data<AppState>,
     query: web::Query<TimeseriesQuery>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = query
         .start_ns
@@ -565,8 +556,8 @@ pub async fn get_timeseries(
     let buckets = query.buckets.unwrap_or(30);
     let agent_name = query.agent_name.as_deref();
 
-    match GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default()) {
-        Ok(store) => {
+    match data.genai_store.as_deref() {
+        Some(store) => {
             let token_series =
                 match store.get_token_timeseries(start_ns, end_ns, agent_name, buckets) {
                     Ok(v) => v,
@@ -588,9 +579,8 @@ pub async fn get_timeseries(
                 model_series,
             })
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        None => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"})),
     }
 }
 
@@ -1191,6 +1181,7 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: blocked_parent.join("genai.db"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
@@ -1407,6 +1398,13 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    &storage_path,
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
             storage_path,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1427,7 +1425,7 @@ mod tests {
 
     fn write_completed_conversation_event(path: &std::path::Path, conversation_id: &str) {
         let store =
-            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         let mut call = LLMCall::new(
             format!("call-{conversation_id}"),
@@ -1493,7 +1491,7 @@ mod tests {
 
     fn write_pending_conversation_event(path: &std::path::Path, conversation_id: &str) {
         let store =
-            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         store
             .insert_pending(&PendingCallInfo {
@@ -1548,6 +1546,7 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
@@ -1657,6 +1656,7 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
@@ -1818,6 +1818,13 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: storage_path.clone(),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    &storage_path,
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
@@ -1849,6 +1856,7 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: Some(store),
@@ -1927,6 +1935,13 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    &storage_path,
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
             storage_path,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -2319,7 +2334,7 @@ mod tests {
     async fn genai_query_handlers_return_persisted_data() {
         let db_path = unique_handler_db("genai_queries");
         write_completed_conversation_event(&db_path, "conv-handler");
-        GenAISqliteStore::new_with_path(&db_path, crate::config::InsertStoragePolicy::default())
+        GenAISqliteStore::new_with_path(&db_path, crate::config::PeriodicStoragePolicy::default())
             .unwrap()
             .insert_resource_samples(&[crate::storage::sqlite::ResourceSample {
                 timestamp_ns: 1_700_000_000_000_000_250,
@@ -2521,6 +2536,13 @@ mod tests {
                     reuse_llm_judge_enabled: false,
                     causal_store: None,
                     storage_path: db_path.clone(),
+                    genai_store: Some(Arc::new(
+                        GenAISqliteStore::new_with_path(
+                            &db_path,
+                            crate::config::PeriodicStoragePolicy::default(),
+                        )
+                        .unwrap(),
+                    )),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
                     interruption_store: Some(Arc::clone(&istore)),
@@ -3073,6 +3095,7 @@ mod tests {
                     reuse_llm_judge_enabled: false,
                     causal_store: None,
                     storage_path: blocked_db.clone(),
+                    genai_store: None,
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
                     interruption_store: None,
@@ -3143,24 +3166,17 @@ mod tests {
 /// the Prometheus exposition format.
 #[get("/metrics")]
 pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
-    let db_path = &data.storage_path;
-
-    let summaries = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(store) => match store.get_agent_token_summary() {
-            Ok(v) => v,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .content_type("text/plain; version=0.0.4")
-                    .body(format!("# ERROR querying metrics: {e}\n"));
-            }
-        },
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .content_type("text/plain; version=0.0.4")
+            .body("# ERROR opening database: GenAI store unavailable\n");
+    };
+    let summaries = match store.get_agent_token_summary() {
+        Ok(v) => v,
         Err(e) => {
             return HttpResponse::InternalServerError()
                 .content_type("text/plain; version=0.0.4")
-                .body(format!("# ERROR opening database: {e}\n"));
+                .body(format!("# ERROR querying metrics: {e}\n"));
         }
     };
 
@@ -3350,19 +3366,16 @@ fn merge_agent_activity_summaries(
 /// Returns every Agent observed in either the GenAI event or trajectory store.
 #[get("/agent-health")]
 pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
-    let storage_path = data.storage_path.clone();
+    let genai_store = data.genai_store.as_ref().map(Arc::clone);
     let app_state = data.clone();
     let loaded = web::block(move || {
-        let genai = GenAISqliteStore::new_with_path(
-            &storage_path,
-            crate::config::InsertStoragePolicy::default(),
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|store| {
-            store
-                .list_agent_activity_summaries()
-                .map_err(|error| error.to_string())
-        });
+        let genai = genai_store
+            .ok_or_else(|| "GenAI store unavailable".to_string())
+            .and_then(|store| {
+                store
+                    .list_agent_activity_summaries()
+                    .map_err(|error| error.to_string())
+            });
         let trajectories = app_state.trajectory_store().map(|store| {
             store
                 .list_agent_activity_summaries()
@@ -3524,18 +3537,11 @@ pub async fn export_atif_trace(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let trace_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
 
     let events = match store.get_trace_events(&trace_id) {
@@ -3566,18 +3572,11 @@ pub async fn export_atif_session(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let session_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
 
     let events = match store.get_events_by_session(&session_id) {
@@ -3608,18 +3607,11 @@ pub async fn export_atif_conversation(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let db_path = &data.storage_path;
     let conversation_id = path.into_inner();
 
-    let store = match GenAISqliteStore::new_with_path(
-        db_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+    let Some(store) = data.genai_store.as_deref() else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
 
     let events = match store.get_events_by_conversation(&conversation_id) {
@@ -4325,7 +4317,7 @@ pub async fn skill_metrics_all(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions::all(),
     )
@@ -4338,7 +4330,7 @@ pub async fn skill_metrics_downloads(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions {
             downloads: true,
@@ -4354,7 +4346,7 @@ pub async fn skill_metrics_loads(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions {
             loads: true,
@@ -4370,7 +4362,7 @@ pub async fn skill_metrics_usage_ratio(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions {
             usage_ratio: true,
@@ -4386,7 +4378,7 @@ pub async fn skill_metrics_distribution(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions {
             distribution: true,
@@ -4402,7 +4394,7 @@ pub async fn skill_metrics_hotness(
     query: web::Query<SkillMetricsQuery>,
 ) -> impl Responder {
     compute_skill_metrics_response(
-        &data.storage_path,
+        data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions {
             hotness: true,
@@ -4413,7 +4405,7 @@ pub async fn skill_metrics_hotness(
 
 /// Shared implementation for all skill metrics endpoints.
 fn compute_skill_metrics_response(
-    storage_path: &std::path::Path,
+    genai_store: Option<&GenAISqliteStore>,
     query: &SkillMetricsQuery,
     mut options: crate::skill_metrics::MetricOptions,
 ) -> HttpResponse {
@@ -4430,15 +4422,9 @@ fn compute_skill_metrics_response(
         .start_ns
         .unwrap_or_else(|| end_ns - 7 * 86_400_000_000_000i64);
 
-    let store = match GenAISqliteStore::new_with_path(
-        storage_path,
-        crate::config::InsertStoragePolicy::default(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+    let Some(store) = genai_store else {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
 
     let events = match store.get_events_in_time_range(start_ns, end_ns, query.agent_name.as_deref())

@@ -112,7 +112,7 @@ fn run_with_batch(path: &PathBuf, batch: Option<BatchConfig>) -> RunResult {
     let store = GenAISqliteStore::new_with_path_and_batch(
         &db,
         batch,
-        agentsight::config::InsertStoragePolicy::default(),
+        agentsight::config::PeriodicStoragePolicy::default(),
     )
     .expect("create store");
 

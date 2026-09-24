@@ -22,7 +22,7 @@ impl Fixture {
         Self {
             store: GenAISqliteStore::new_with_path(
                 &path,
-                agentsight::config::InsertStoragePolicy::default(),
+                agentsight::config::PeriodicStoragePolicy::default(),
             )
             .unwrap(),
             db: Connection::open(path).unwrap(),
@@ -172,7 +172,7 @@ fn concurrent_connections_do_not_duplicate_formal_calls() {
             .map(|_| {
                 GenAISqliteStore::new_with_path(
                     &fixture.dir.join("genai.db"),
-                    agentsight::config::InsertStoragePolicy::default(),
+                    agentsight::config::PeriodicStoragePolicy::default(),
                 )
                 .unwrap()
             })

@@ -362,21 +362,15 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Store a single GenAI event with size limit enforcement.
+    /// Store a single GenAI event.
     ///
-    /// Size is checked via [`check_and_prune_if_needed`] before the write.
-    /// If the insert fails with `SQLITE_FULL`, up to `MAX_PRUNE_RETRIES`
-    /// retries are attempted — each retry prunes 5% of the oldest records and
-    /// runs a truncating WAL checkpoint. Checkpoint failures (e.g. disk-full)
-    /// are tolerated: the `DELETE` still frees internal pages that SQLite can
-    /// reuse for the retry insert.
+    /// Normal lifecycle work runs on the database maintenance worker. If the
+    /// insert fails with `SQLITE_FULL`, up to `MAX_PRUNE_RETRIES` emergency
+    /// retries prune 5% of the oldest records and checkpoint the WAL.
     pub(super) fn store_event(
         &self,
         event: &GenAISemanticEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Check size before write and prune if needed
-        self.check_and_prune_if_needed()?;
-
         // Attempt insert with retry on SQLITE_FULL
         let mut retries = 0;
         loop {
@@ -400,9 +394,9 @@ impl GenAISqliteStore {
                             // Never VACUUM here (#2888). A busy return is
                             // fine on this path: the freed pages remain
                             // reusable even with the WAL intact.
-                            if let Err(vacuum_err) = self.wal_checkpoint() {
+                            if let Err(checkpoint_error) = self.wal_checkpoint() {
                                 log::warn!(
-                                    "WAL checkpoint failed during SQLITE_FULL retry: {vacuum_err}"
+                                    "WAL checkpoint failed during SQLITE_FULL retry: {checkpoint_error}"
                                 );
                             }
                             continue;

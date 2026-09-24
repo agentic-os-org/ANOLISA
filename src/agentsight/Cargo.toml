@@ -29,6 +29,7 @@ ctrlc = "3.4"
 dirs = "6"
 ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 env_filter = "1.0"
+fs2 = "0.4"
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"

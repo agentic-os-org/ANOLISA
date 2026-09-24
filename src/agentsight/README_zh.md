@@ -36,7 +36,7 @@ AgentSight 采用统一的数据流水线架构：
 | **Aggregator** | 关联请求-响应对；通过 LRU 缓存追踪进程生命周期 |
 | **Analyzer** | 生成审计记录、Token 使用统计和 LLM API 消息 |
 | **GenAI** | 将结果转换为语义事件（LLM 调用、工具使用、Agent 交互） |
-| **Storage** | 持久化到本地 SQLite 数据库，可选上传至阿里云 SLS |
+| **Storage** | 通过 `DatabaseManager` 打开 typed SQLite Store，执行 schema-aware 生命周期策略，并可选上传至阿里云 SLS |
 
 ### eBPF 探针
 
@@ -63,8 +63,11 @@ agentsight/
 │   ├── local/          # macOS 专用：轨迹查看器服务器 + 采集器调度
 │   ├── bin/            # CLI 入口（agentsight 及子命令）
 │   ├── unified.rs      # 主流水线编排器
+│   ├── database.rs     # typed Store 清单与维护所有权
 │   ├── config.rs       # 统一配置管理
 │   └── event.rs        # 统一事件类型定义
+├── crates/
+│   └── agentsight-sqlite-lifecycle/ # 无业务模型依赖的 SQLite 生命周期原语
 ├── Cargo.toml
 ├── build.rs            # 为三个探针生成 eBPF skeleton
 └── agentsight.spec     # RPM 打包规范
@@ -391,9 +394,13 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 
 ### SQLite 存储（`storage`）
 
-`storage.base_path` 指定数据库共用目录。每个数据库分别配置 `retention_days`、`max_db_size_mb`
-和按写入次数或时间触发的检查间隔，值为 `0` 时关闭对应规则。默认容量从中断库的 100 MiB 到主事件库、
-轨迹库的 500 MiB。Dashboard 设置页会展示各库的生效策略以及物理/逻辑占用。详见
+`agentsight.json` schema v4 为每个 AgentSight 自有 SQLite 存储统一使用 `retention_days`、
+`max_db_size_mb` 和 `check_interval_secs` 三个策略项；值为 `0` 时分别关闭按时间、按容量或定时维护。
+主库与 GenAI 库默认每 60 秒维护一次，复用、因果与拦截库也有独立策略。每个长期运行进程最多使用一个
+轻量维护线程顺序调度该进程负责的数据库，`trace` 与 `serve` 再通过逐库锁协调。清理先删除过期记录，
+通过 checkpoint gate 后才按容量淘汰；物理占用超过阈值时，以逻辑占用降至 90% 为目标。自动维护不执行
+`VACUUM`，释放页留在 freelist 供后续写入复用。Dashboard 设置页会展示策略、容量、覆盖范围与 worker
+健康状态，但不返回数据库路径。详见
 [配置指南](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#sqlite-存储策略)。
 
 ### 功能开关（`features`）

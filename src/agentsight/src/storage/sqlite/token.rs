@@ -3,7 +3,7 @@
 //! Uses SQLite for persistent storage of token usage records.
 
 use agentsight_sqlite_lifecycle::{
-    CheckpointOutcome, ConnectionOptions, checkpoint_truncate, open_connection,
+    CheckpointOutcome, ConnectionMode, ConnectionOptions, checkpoint_truncate, open_connection,
 };
 use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
@@ -225,6 +225,8 @@ pub struct TokenStore {
     conn: Connection,
     /// Table name
     table_name: String,
+    /// Whether the table exists on a read-only database opened for queries.
+    table_available: bool,
 }
 
 impl TokenStore {
@@ -282,7 +284,36 @@ impl TokenStore {
         )
         .context("Failed to create agent index")?;
 
-        Ok(TokenStore { conn, table_name })
+        Ok(TokenStore {
+            conn,
+            table_name,
+            table_available: true,
+        })
+    }
+
+    /// Opens an existing token table without creating or modifying the database.
+    pub fn open_read_only_existing(path: impl Into<PathBuf>, table_name: &str) -> Result<Self> {
+        let path = path.into();
+        let conn = open_connection(
+            &path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        let table_available = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+            )",
+            [table_name],
+            |row| row.get(0),
+        )?;
+        Ok(Self {
+            conn,
+            table_name: table_name.to_string(),
+            table_available,
+        })
     }
 
     /// Get default storage path
@@ -363,6 +394,9 @@ impl TokenStore {
 
     /// Get all records (for compatibility, but not recommended for large datasets)
     pub fn all(&self) -> Vec<TokenRecord> {
+        if !self.table_available {
+            return Vec::new();
+        }
         let sql = format!(
             "SELECT id, timestamp_ns, pid, comm, agent, model, provider,
                     input_tokens, output_tokens, cache_creation_tokens,
@@ -406,6 +440,9 @@ impl TokenStore {
 
     /// Get owned records in time range
     pub fn by_time_range_owned(&self, start_ns: u64, end_ns: u64) -> Vec<TokenRecord> {
+        if !self.table_available {
+            return Vec::new();
+        }
         let sql = format!(
             "SELECT id, timestamp_ns, pid, comm, agent, model, provider,
                     input_tokens, output_tokens, cache_creation_tokens,

@@ -19,20 +19,30 @@ mod system_audit;
 mod token_savings;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
-use agentsight_audit::AuditService;
+use agentsight_audit::{AuditService, AuditStore};
+use agentsight_sqlite_lifecycle::{LifecycleError, MaintenanceJob};
 use include_dir::{Dir, include_dir};
 
-use crate::config::{ServerAuthConfig, StorageConfig};
+use crate::config::{
+    CAUSAL_DB_NAME, ENFORCEMENT_DB_NAME, INTERRUPTION_DB_NAME, OPTIMIZATION_DB_NAME,
+    PeriodicStoragePolicy, REUSE_DB_NAME, SECURITY_AUDIT_DB_NAME, ServerAuthConfig, StorageConfig,
+    TRAJECTORY_DB_NAME,
+};
+use crate::database::{
+    DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseManagerError,
+    DatabaseSpec,
+};
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::security::{ContainmentCoordinator, SecurityCoordinator};
-use crate::storage::sqlite::InterruptionStore;
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 use agentsight_trajectory_collector::TrajectoryStore;
 
 use self::auth::{AuthMiddleware, DashboardAuth};
@@ -59,6 +69,8 @@ impl Default for SecurityObservabilityConfig {
 pub struct AppState {
     /// Path to the SQLite database file
     pub storage_path: PathBuf,
+    /// Shared GenAI event store opened once when the server starts.
+    pub genai_store: Option<Arc<GenAISqliteStore>>,
     /// Server start time (for uptime calculation)
     pub start_time: Instant,
     /// Shared health store populated by the background HealthChecker
@@ -705,6 +717,185 @@ fn storage_data_dir(storage_path: &Path) -> &Path {
     }
 }
 
+fn server_database_specs(storage_path: &Path) -> Vec<DatabaseSpec> {
+    let base = storage_data_dir(storage_path);
+    let private = private_state_dir(storage_path);
+    vec![
+        DatabaseSpec::new(
+            DatabaseId::GenAi,
+            storage_path,
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Interruptions,
+            base.join(INTERRUPTION_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Trajectories,
+            base.join(TRAJECTORY_DB_NAME),
+            DatabaseAccess::ReadOnly,
+            DatabaseCoverage::Partial,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Optimization,
+            base.join(OPTIMIZATION_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::SecurityAudit,
+            private.join(SECURITY_AUDIT_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Partial,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Enforcement,
+            private.join(ENFORCEMENT_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Partial,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Reuse,
+            private.join(REUSE_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Partial,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Causal,
+            private.join(CAUSAL_DB_NAME),
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Partial,
+        ),
+        DatabaseSpec::new(
+            DatabaseId::Tokenless,
+            crate::storage::sqlite::tokenless::default_stats_path(),
+            DatabaseAccess::External,
+            DatabaseCoverage::External,
+        ),
+    ]
+}
+
+struct ServerMaintenanceStores {
+    genai: Option<Arc<GenAISqliteStore>>,
+    interruptions: Option<Arc<InterruptionStore>>,
+    optimization: Arc<optimize::OptimizeState>,
+    security_audit: Arc<AuditStore>,
+    reuse: Option<Arc<crate::reuse::ReuseStore>>,
+    causal: Option<Arc<causal_store::CausalCaseStore>>,
+    enforcement: Arc<EnforcementStore>,
+}
+
+fn server_maintenance_schedule(config: &StorageConfig) -> Vec<(DatabaseId, PeriodicStoragePolicy)> {
+    [
+        (DatabaseId::GenAi, config.genai),
+        (DatabaseId::Interruptions, config.interruptions),
+        (DatabaseId::Optimization, config.optimization),
+        (DatabaseId::SecurityAudit, config.security_audit),
+        (DatabaseId::Reuse, config.reuse),
+        (DatabaseId::Causal, config.causal),
+        (DatabaseId::Enforcement, config.enforcement),
+    ]
+    .into_iter()
+    .filter(|(_, policy)| policy.check_interval_secs > 0)
+    .collect()
+}
+
+fn server_maintenance_jobs(
+    manager: &DatabaseManager,
+    config: &StorageConfig,
+    stores: ServerMaintenanceStores,
+) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
+    let mut jobs = Vec::new();
+    for (id, policy) in server_maintenance_schedule(config) {
+        let interval = Duration::from_secs(policy.check_interval_secs);
+        let job = match id {
+            DatabaseId::GenAi => stores.genai.as_ref().map(|store| {
+                let store = Arc::clone(store);
+                manager.maintenance_job(id, interval, move || {
+                    store
+                        .maintain()
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                })
+            }),
+            DatabaseId::Interruptions => stores.interruptions.as_ref().map(|store| {
+                let store = Arc::clone(store);
+                manager.maintenance_job(id, interval, move || {
+                    store
+                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                })
+            }),
+            DatabaseId::Optimization => stores.optimization.has_storage().then(|| {
+                let state = Arc::clone(&stores.optimization);
+                manager.maintenance_job(id, interval, move || {
+                    state
+                        .maintain_storage(policy)
+                        .map(|_| ())
+                        .map_err(LifecycleError::MaintenanceJobFailed)
+                })
+            }),
+            DatabaseId::SecurityAudit => {
+                let store = Arc::clone(&stores.security_audit);
+                Some(manager.maintenance_job(id, interval, move || {
+                    store
+                        .maintain(agentsight_audit::AuditMaintenancePolicy {
+                            retention_days: policy.retention_days,
+                            max_db_size_mb: policy.max_db_size_mb,
+                        })
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                }))
+            }
+            DatabaseId::Reuse => stores.reuse.as_ref().map(|store| {
+                let store = Arc::clone(store);
+                manager.maintenance_job(id, interval, move || {
+                    store
+                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                })
+            }),
+            DatabaseId::Causal => stores.causal.as_ref().map(|store| {
+                let store = Arc::clone(store);
+                manager.maintenance_job(id, interval, move || {
+                    store
+                        .maintain(causal_store::CausalMaintenancePolicy {
+                            retention_days: policy.retention_days,
+                            max_db_size_mb: policy.max_db_size_mb,
+                        })
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                })
+            }),
+            DatabaseId::Enforcement => {
+                let store = Arc::clone(&stores.enforcement);
+                Some(manager.maintenance_job(id, interval, move || {
+                    store
+                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .map(|_| ())
+                        .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
+                }))
+            }
+            DatabaseId::Primary | DatabaseId::Trajectories | DatabaseId::Tokenless => None,
+        };
+        if let Some(job) = job {
+            jobs.push(job?);
+        }
+    }
+    Ok(jobs)
+}
+
+fn stop_database_maintenance(manager: &DatabaseManager) {
+    if let Err(error) = manager.stop_maintenance() {
+        log::warn!("SQLite maintenance worker shutdown failed: {error}");
+    }
+}
+
 /// Start the API server
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
@@ -718,22 +909,37 @@ pub async fn run_server(
     reuse_llm_judge_enabled: bool,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
+    let storage_base = storage_data_dir(&storage_path);
+    let database_manager = Arc::new(
+        DatabaseManager::new(
+            crate::database::DatabaseRole::Server,
+            server_database_specs(&storage_path),
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
 
-    let state_dir = private_state_dir(&storage_path);
     let security_store = Arc::new(
-        crate::security::open_private_store(&state_dir)
+        database_manager
+            .open_read_write(DatabaseId::SecurityAudit, |path| {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                crate::security::open_private_store(parent)
+            })
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
     let audit_service = Arc::new(AuditService::new(security_store.audit_store()));
 
     let evaluation_store = Arc::new(
-        EvaluationStore::new_with_policy(&storage_path, storage_config.genai)
+        database_manager
+            .open_read_write(DatabaseId::GenAi, EvaluationStore::new_with_path)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
 
     // Labels sit beside the other private databases: opening tightens the
     // directory to 0700, which is why it must not be the shared data directory.
-    let reuse_store = match crate::reuse::ReuseStore::open_private(&state_dir) {
+    let reuse_store = match database_manager.open_read_write(DatabaseId::Reuse, |path| {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        crate::reuse::ReuseStore::open_private(parent)
+    }) {
         Ok(store) => Some(Arc::new(store)),
         Err(error) => {
             log::warn!("Reuse label store unavailable, labels disabled: {error}");
@@ -743,7 +949,10 @@ pub async fn run_server(
 
     // Attribution cases are paid pipeline runs; losing them on restart means
     // paying again for the same answer. Same degrade-don't-die rule as labels.
-    let causal_store = match causal_store::CausalCaseStore::open_private(&state_dir) {
+    let causal_store = match database_manager.open_read_write(DatabaseId::Causal, |path| {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        causal_store::CausalCaseStore::open_private(parent)
+    }) {
         Ok(store) => Some(Arc::new(store)),
         Err(error) => {
             log::warn!("Causal case store unavailable, results will not persist: {error}");
@@ -752,40 +961,26 @@ pub async fn run_server(
     };
 
     let enforcement_client = EnforcementClient::new(capabilities::enforcer_socket_path());
+    let enforcement_store = Arc::new(
+        database_manager
+            .open_read_write(DatabaseId::Enforcement, |path| {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                EnforcementStore::open_private(parent)
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
     let enforcement = Arc::new(EnforcementCoordinator::new(
         enforcement_client.clone(),
-        EnforcementStore::open_private(&state_dir)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        enforcement_store.as_ref().clone(),
     ));
-    let enforcement_ingestion = enforcement
-        .start_ingestion()
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let security_coordinator =
         SecurityCoordinator::with_service(enforcement_client, Arc::clone(&audit_service));
-    let security_ingestion = match security_coordinator.start() {
-        Ok(ingestion) => ingestion,
-        Err(error) => {
-            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
-            return Err(std::io::Error::other(error.to_string()));
-        }
-    };
     let containment = Arc::new(ContainmentCoordinator::new(
         Arc::clone(&security_store),
         enforcement.clone(),
     ));
-    let containment_reconciler = match containment::start_reconciler(&containment) {
-        Ok(worker) => worker,
-        Err(error) => {
-            stop_security_ingestion(&security_coordinator, security_ingestion);
-            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
-            return Err(std::io::Error::other(error.to_string()));
-        }
-    };
 
     // Initialize dashboard authentication
-    let storage_base = storage_path
-        .parent()
-        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"));
     let dashboard_auth = Arc::new(DashboardAuth::init(&auth_config, storage_base));
     if dashboard_auth.enabled {
         if let Some(token) = dashboard_auth.read_token_from_file() {
@@ -800,36 +995,33 @@ pub async fn run_server(
         }
     }
 
-    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls).
-    // Open the same database `--db` selected so the checker reads pending calls and
-    // writes agent_crash events into one consistent dataset.
-    let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
-        match crate::storage::sqlite::GenAISqliteStore::new_with_path(
-            &storage_path,
-            storage_config.genai,
-        ) {
-            Ok(store) => {
-                log::info!("GenAI SQLite store initialized for HealthChecker at {storage_path:?}");
-                Some(Arc::new(store))
-            }
-            Err(e) => {
-                log::warn!("Failed to initialize GenAI store for HealthChecker: {e}");
-                None
-            }
-        };
+    // Open the selected GenAI database once and share it with every server
+    // consumer, including the background health checker.
+    let genai_store: Option<Arc<GenAISqliteStore>> = match database_manager
+        .open_read_write(DatabaseId::GenAi, |path| {
+            GenAISqliteStore::new_with_path(path, storage_config.genai)
+        }) {
+        Ok(store) => {
+            log::info!("GenAI SQLite store initialized");
+            Some(Arc::new(store))
+        }
+        Err(error) => {
+            log::warn!("Failed to initialize GenAI store: {error}");
+            None
+        }
+    };
 
     // Initialize interruption store
-    let interruption_store: Option<Arc<InterruptionStore>> = {
-        let db_path = storage_data_dir(&storage_path).join("interruption_events.db");
-        match InterruptionStore::new_with_path(&db_path) {
-            Ok(store) => {
-                log::info!("Interruption store initialized at {db_path:?}");
-                Some(Arc::new(store))
-            }
-            Err(e) => {
-                log::warn!("Failed to open interruption store: {e}");
-                None
-            }
+    let interruption_store: Option<Arc<InterruptionStore>> = match database_manager
+        .open_read_write(DatabaseId::Interruptions, InterruptionStore::new_with_path)
+    {
+        Ok(store) => {
+            log::info!("Interruption store initialized");
+            Some(Arc::new(store))
+        }
+        Err(error) => {
+            log::warn!("Failed to open interruption store: {error}");
+            None
         }
     };
 
@@ -842,7 +1034,6 @@ pub async fn run_server(
     if let Some(ref gstore) = genai_store {
         checker = checker.with_genai_store(Arc::clone(gstore));
     }
-    checker.start();
 
     // Initialize read-only trajectory store (collector writes it in `trace` mode;
     // serve only consumes). Path follows `--db` through storage_data_dir so
@@ -850,31 +1041,78 @@ pub async fn run_server(
     // yields an empty table → empty API results (graceful degradation).
     // Only open when the file already exists to avoid creating an empty DB as a
     // persistent side-effect in serve mode when collection was never enabled.
-    let trajectory_store: Option<Arc<TrajectoryStore>> = {
-        let db_path = storage_data_dir(&storage_path).join("trajectories.db");
-        if !db_path.exists() {
-            log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
+    let trajectory_store: Option<Arc<TrajectoryStore>> = match database_manager.open_read_only(
+        DatabaseId::Trajectories,
+        TrajectoryStore::open_read_only_existing,
+    ) {
+        Ok(store) => {
+            log::info!("Trajectory store initialized");
+            Some(Arc::new(store))
+        }
+        Err(error) => {
+            log::debug!("Trajectory store unavailable; endpoints degrade to empty: {error}");
             None
-        } else {
-            match TrajectoryStore::open_read_only_existing(&db_path) {
-                Ok(store) => {
-                    log::info!("Trajectory store initialized at {db_path:?}");
-                    Some(Arc::new(store))
-                }
-                Err(e) => {
-                    log::warn!("Failed to open trajectory store: {e}");
-                    None
-                }
-            }
         }
     };
 
-    let optimize_state = optimize::OptimizeState::init(storage_base);
-    let optimization_maintenance =
-        start_optimization_maintenance(Arc::clone(&optimize_state), storage_config.optimization);
+    let optimization_store = match database_manager.open_read_write(
+        DatabaseId::Optimization,
+        agentsight_opt_store::OptimizationStore::new_with_path,
+    ) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            log::warn!("Failed to open optimization store: {error}");
+            None
+        }
+    };
+    let optimize_state = optimize::OptimizeState::init(storage_base, optimization_store);
+
+    let maintenance_jobs = server_maintenance_jobs(
+        &database_manager,
+        &storage_config,
+        ServerMaintenanceStores {
+            genai: genai_store.as_ref().map(Arc::clone),
+            interruptions: interruption_store.as_ref().map(Arc::clone),
+            optimization: Arc::clone(&optimize_state),
+            security_audit: Arc::clone(audit_service.store()),
+            reuse: reuse_store.as_ref().map(Arc::clone),
+            causal: causal_store.as_ref().map(Arc::clone),
+            enforcement: Arc::clone(&enforcement_store),
+        },
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    database_manager
+        .start_maintenance(maintenance_jobs)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+    let enforcement_ingestion = match enforcement.start_ingestion() {
+        Ok(ingestion) => ingestion,
+        Err(error) => {
+            stop_database_maintenance(&database_manager);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
+    let security_ingestion = match security_coordinator.start() {
+        Ok(ingestion) => ingestion,
+        Err(error) => {
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            stop_database_maintenance(&database_manager);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
+    let containment_reconciler = match containment::start_reconciler(&containment) {
+        Ok(worker) => worker,
+        Err(error) => {
+            stop_security_ingestion(&security_coordinator, security_ingestion);
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            stop_database_maintenance(&database_manager);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
 
     let data = web::Data::new(AppState {
         storage_path,
+        genai_store,
         start_time: Instant::now(),
         health_store,
         interruption_store,
@@ -890,11 +1128,8 @@ pub async fn run_server(
         causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
-    let audit_retention = start_audit_retention(
-        Arc::clone(&data.audit_service),
-        storage_config.security_audit,
-    );
     let storage_status_config = web::Data::new(storage_config);
+    let database_manager_data = web::Data::from(Arc::clone(&database_manager));
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!("AgentSight API server listening on http://{host}:{port}");
@@ -919,6 +1154,7 @@ pub async fn run_server(
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
             .app_data(storage_status_config.clone())
+            .app_data(database_manager_data.clone())
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
             .configure(configure_routes)
@@ -927,18 +1163,16 @@ pub async fn run_server(
     {
         Ok(server) => server,
         Err(error) => {
-            if let Some(worker) = audit_retention {
-                worker.abort();
-            }
-            if let Some(worker) = optimization_maintenance {
-                worker.abort();
-            }
+            stop_database_maintenance(&database_manager);
             containment::stop_reconciler(&containment, containment_reconciler);
             stop_security_ingestion(&security_coordinator, security_ingestion);
             stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
             return Err(error);
         }
     };
+
+    let health_running = Arc::new(AtomicBool::new(true));
+    let health_worker = checker.start(Arc::clone(&health_running));
 
     // Guide users toward the `dashboard` subcommand when listening on all interfaces
     if host == "0.0.0.0" || host == "::" {
@@ -950,73 +1184,15 @@ pub async fn run_server(
 
     let server_result = server.run().await;
 
-    if let Some(worker) = audit_retention {
-        worker.abort();
+    health_running.store(false, Ordering::SeqCst);
+    if health_worker.join().is_err() {
+        log::error!("AgentSight health checker panicked during shutdown");
     }
-    if let Some(worker) = optimization_maintenance {
-        worker.abort();
-    }
+    stop_database_maintenance(&database_manager);
     containment::stop_reconciler(&containment, containment_reconciler);
     stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
-}
-
-fn start_audit_retention(
-    audit_service: Arc<AuditService>,
-    policy: crate::config::PeriodicStoragePolicy,
-) -> Option<actix_web::rt::task::JoinHandle<()>> {
-    (policy.check_interval_secs > 0).then(|| {
-        actix_web::rt::spawn(async move {
-            loop {
-                match audit_service
-                    .store()
-                    .maintain(agentsight_audit::AuditMaintenancePolicy {
-                        retention_days: policy.retention_days,
-                        max_db_size_mb: policy.max_db_size_mb,
-                    }) {
-                    Ok(report)
-                        if report.expired_rows > 0 || report.size.deleted_rows > 0 =>
-                    {
-                        log::info!(
-                            "system-audit maintenance deleted {} expired rows and {} size-policy rows",
-                            report.expired_rows,
-                            report.size.deleted_rows
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => log::warn!("system-audit maintenance failed: {error}"),
-                }
-                actix_web::rt::time::sleep(Duration::from_secs(policy.check_interval_secs)).await;
-            }
-        })
-    })
-}
-
-fn start_optimization_maintenance(
-    optimize_state: Arc<optimize::OptimizeState>,
-    policy: crate::config::PeriodicStoragePolicy,
-) -> Option<actix_web::rt::task::JoinHandle<()>> {
-    (policy.check_interval_secs > 0).then(|| {
-        actix_web::rt::spawn(async move {
-            loop {
-                match optimize_state.maintain_storage(policy) {
-                    Ok(Some(report))
-                        if report.expired_results > 0 || report.size.deleted_rows > 0 =>
-                    {
-                        log::info!(
-                            "optimization maintenance deleted {} expired rows and {} size-policy rows",
-                            report.expired_results,
-                            report.size.deleted_rows
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => log::warn!("optimization maintenance failed: {error}"),
-                }
-                actix_web::rt::time::sleep(Duration::from_secs(policy.check_interval_secs)).await;
-            }
-        })
-    })
 }
 
 fn stop_security_ingestion(
@@ -1087,7 +1263,7 @@ mod tests {
         json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
         serve_frontend_root,
     };
-    use crate::config::ServerAuthConfig;
+    use crate::config::{ServerAuthConfig, StorageConfig};
 
     #[test]
     fn security_observability_config_defaults_to_five_seconds() {
@@ -1102,6 +1278,46 @@ mod tests {
             private_state_dir(std::path::Path::new("/tmp/agentsight.db")),
             std::path::Path::new("/tmp/.agentsight-private")
         );
+    }
+
+    #[test]
+    fn server_maintenance_job_ids_are_unique_and_writable() {
+        let config = StorageConfig::default();
+        let ids: Vec<_> = super::server_maintenance_schedule(&config)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+
+        assert_eq!(ids.len(), 7);
+        assert_eq!(unique.len(), ids.len());
+        for excluded in [
+            crate::database::DatabaseId::Primary,
+            crate::database::DatabaseId::Trajectories,
+            crate::database::DatabaseId::Tokenless,
+        ] {
+            assert!(!unique.contains(&excluded));
+        }
+
+        let specs = super::server_database_specs(std::path::Path::new("/tmp/genai.db"));
+        for id in ids {
+            let spec = specs.iter().find(|spec| spec.id == id).unwrap();
+            assert_eq!(spec.access, crate::database::DatabaseAccess::ReadWrite);
+        }
+    }
+
+    #[test]
+    fn server_maintenance_skips_zero_interval_policy() {
+        let mut config = StorageConfig::default();
+        config.reuse.check_interval_secs = 0;
+
+        let ids: Vec<_> = super::server_maintenance_schedule(&config)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(ids.len(), 6);
+        assert!(!ids.contains(&crate::database::DatabaseId::Reuse));
     }
 
     #[test]
@@ -1351,6 +1567,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
@@ -1382,6 +1599,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,

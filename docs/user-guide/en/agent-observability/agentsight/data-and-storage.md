@@ -40,32 +40,59 @@ how you browse a copy or an archive. The tracer itself always writes to the defa
 
 ## Retention and size limits
 
-| Store | Default policy | Configuration |
-|---|---|---|
-| `agentsight.db` | 30 days, 500 MiB, checked every 1,000 writes | `storage.primary` |
-| `genai_events.db` | 30 days, 200 MiB, checked on each write; includes evaluation results | `storage.genai` |
-| `interruption_events.db` | 30 days, 100 MiB, checked every 60 seconds | `storage.interruptions` |
-| `trajectories.db` | 30 days, 500 MiB, checked every 300 seconds | `storage.trajectories` |
-| `optimization.db` | 30 days, 200 MiB, checked every 300 seconds | `storage.optimization` |
-| `.agentsight-private/security.db` | 30 days, 200 MiB, checked every hour while preserving active case graphs | `storage.security_audit` |
-| `.agentsight-private/enforcement.db` | Latest 100,000 violation rows | Fixed row bound |
+Schema v4 gives every AgentSight-owned database a `retention_days`, `max_db_size_mb`, and
+`check_interval_secs` policy:
 
-Set a retention, size, or check interval to `0` to disable that rule. The size limit is a
-logical-data cap (physical file size minus free pages); pruning removes the oldest eligible records
-first until the logical size fits. The physical file
-does not shrink after pruning: freed pages go to the freelist and are reused by
-future writes, so the file stabilizes at its historical peak. To return disk
-space to the filesystem, run `sudo sqlite3 /var/log/sysak/.agentsight/<db>
-'VACUUM;'` manually during a low-traffic window — VACUUM rebuilds the whole
-file, so stop the service first to avoid tripping the cgroup memory limit.
+| Store | Default policy | Cleanup coverage | Configuration |
+|---|---|---|---|
+| `agentsight.db` | 30 days, 500 MiB, every 60 seconds | Full: audit, Token, HTTP, and consumption history | `storage.primary` |
+| `genai_events.db` | 30 days, 200 MiB, every 60 seconds | Full: GenAI events, resource samples, and evaluation runs share this physical target | `storage.genai` |
+| `interruption_events.db` | 30 days, 100 MiB, every 60 seconds | Full interruption history | `storage.interruptions` |
+| `trajectories.db` | 30 days, 500 MiB, every 300 seconds | Partial: trajectory rows are pruned while recent skipped-file fingerprints remain protected | `storage.trajectories` |
+| `optimization.db` | 30 days, 200 MiB, every 300 seconds | Full optimization-result history | `storage.optimization` |
+| `.agentsight-private/security.db` | 30 days, 200 MiB, every 3,600 seconds | Partial: terminal graphs and unreferenced events are pruned; active case graphs remain protected | `storage.security_audit` |
+| `.agentsight-private/reuse.db` | 30 days, 200 MiB, every 300 seconds | Partial: old label events and unconfirmed, purely automatic labels only | `storage.reuse` |
+| `.agentsight-private/causal.db` | 30 days, 200 MiB, every 300 seconds | Partial: oldest cache entries are evicted, but the latest entry is retained | `storage.causal` |
+| `.agentsight-private/enforcement.db` | 30 days, 100 MiB, every 60 seconds | Partial: violations and terminal transitions only | `storage.enforcement` |
+
+Tokenless's `stats.db` is listed by the status API as external. AgentSight opens it read-only and
+never applies its lifecycle policy; Tokenless remains responsible for that file.
+
+A zero value disables its corresponding rule: age cleanup, size cleanup, or scheduled checks. An
+interval of zero therefore disables automatic governance for that store even if its age and size
+values are non-zero. The old `check_interval_inserts` key is unsupported; pre-v4 configuration is
+backed up and replaced through the normal schema upgrade mechanism.
+
+Each existing long-running `trace`, `serve`, local trace, or local serve process starts at most one
+lightweight `sqlite-maintenance` thread; no separate maintenance process is launched. That thread
+runs all of its database jobs sequentially. When `trace` and `serve` both cover one physical file,
+they coordinate through `<db>.maintenance.lock`; the process that acquires the lock performs fresh
+retention and size measurements before acting.
+
+Every pass follows the same lifecycle:
+
+1. Delete records older than the retention cutoff, subject to the store's schema-safe eligibility rules.
+2. If age deletion changed the database, require a successful WAL checkpoint before continuing.
+3. Trigger capacity pruning only when physical allocation (database, WAL, and SHM) exceeds the limit.
+4. Delete the oldest eligible records and checkpoint between rounds until logical usage reaches 90% of the limit.
+
+Automatic maintenance never runs `VACUUM`. Freed pages remain on the freelist and are reused by
+future writes, so a large physical file can be healthy when its logical usage is within target. To
+return disk space to the filesystem, stop the service and run
+`sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'` manually during a maintenance window.
+
+The partial stores deliberately preserve durable decisions and control state. Reuse maintenance
+never deletes human-owned, confirmed, or overridden labels. Enforcement maintenance preserves
+bindings, pending or indeterminate transitions, and credential intent/snapshot state. Causal entries
+are caches, so eviction can cause a later request to repeat a billed attribution computation.
 
 > For container deployments: retention only matters when the data directory is
 > persistent. Without a volume mount, every container restart wipes all data —
 > see [Containers and sidecars](deployment.md#containers-and-sidecars).
 
 To change the limits, edit the `storage` section in `/etc/agentsight/config.json` and reload the
-service. The Settings page shows the effective policy plus physical and logical usage for every
-store.
+service. The Settings page shows the effective policy, physical and logical usage, cleanup coverage,
+and maintenance-worker state for every store.
 
 Check current usage from the API:
 
@@ -74,6 +101,15 @@ TOKEN=$(sudo cat /var/log/sysak/.agentsight/.dashboard_token)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/status \
   | python3 -m json.tool
 ```
+
+The response uses schema version `2`. Each store reports availability, size, policy, coverage, and
+`size_state`, plus a `maintenance` object with `scheduled`, `worker_running`,
+`worker_heartbeat_unix_ms`, `last_attempt_unix_ms`, `last_success_unix_ms`, `last_result`,
+`consecutive_failures`, and `next_run_unix_ms`. Trajectories, security audit, reuse, causal, and
+enforcement report `partial` coverage for their protected data. Runtime fields describe only the
+process serving this response, so an unscheduled trace-owned store does not prove that another trace
+process is stopped. No database path is returned. Treat `within_policy` only as a capacity result:
+worker health comes from the scheduling, heartbeat, attempt, result, and failure fields.
 
 You can also inspect the directory directly:
 
@@ -124,7 +160,7 @@ Endpoint groups in 0.11:
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
 | Reuse labels | `POST /api/reuse/triage`, `GET /api/reuse/sessions`, `POST /api/reuse/sessions/{session_id}/label`, `POST /api/reuse/sessions/labels:batch-confirm`, `GET /api/reuse/label-stats`, `POST /api/reuse/judge` | Rule triage and human label decisions. The judge requires `features.reuse_llm_judge=true` and configured LLM credentials; it makes billed model calls |
 | Preferences | `GET /api/preferences`, `/export`, `/turns` | User preference analysis, Markdown export, and source user turns for agent-side reasoning |
-| Storage | `GET /api/storage/status` | Effective SQLite policies and physical/logical usage; paths are not returned |
+| Storage | `GET /api/storage/status` | Schema-v2 policy, capacity, coverage, and maintenance-worker status for every SQLite target; paths are not returned |
 | Skill metrics | `GET /api/skill-metrics`, `/downloads`, `/loads`, `/usage-ratio`, `/distribution`, `/hotness` | Skill adoption |
 | Optimization | `POST /api/optimize/sessions/{id}/{dimension}`, `GET /api/optimize/results`, `GET` and `POST /api/optimize/config` | LLM-assisted analysis |
 | Quality and attribution | `POST /api/grader/evaluate`, `GET /api/grader/latest`, `POST /api/causal-attribution` | Session quality scoring, root-cause attribution |

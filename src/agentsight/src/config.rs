@@ -35,6 +35,10 @@ pub const OPTIMIZATION_DB_NAME: &str = "optimization.db";
 pub const SECURITY_AUDIT_DB_NAME: &str = "security.db";
 /// Private enforcement database filename.
 pub const ENFORCEMENT_DB_NAME: &str = "enforcement.db";
+/// Private trajectory reuse database filename.
+pub const REUSE_DB_NAME: &str = "reuse.db";
+/// Private causal analysis database filename.
+pub const CAUSAL_DB_NAME: &str = "causal.db";
 
 /// Default audit table name.
 pub const DEFAULT_AUDIT_TABLE: &str = "audit_events";
@@ -45,8 +49,8 @@ pub const DEFAULT_HTTP_TABLE: &str = "http_records";
 
 /// Default data retention period in days.
 pub const DEFAULT_RETENTION_DAYS: u64 = 30;
-/// Default primary-store maintenance interval in inserts.
-pub const DEFAULT_PURGE_INTERVAL: u64 = 1_000;
+/// Default primary-store maintenance interval in seconds.
+pub const DEFAULT_MAINTENANCE_INTERVAL_SECS: u64 = 60;
 /// Default primary database size limit in MiB.
 pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
 
@@ -164,7 +168,7 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 /// At startup the on-disk config's `schema_version` is compared against this
 /// value. If the on-disk version is missing or older, the config file is
 /// backed up (`.bak`) and overwritten with the embedded default.
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 // ==================== TCP Target Configuration ====================
 
@@ -274,37 +278,8 @@ impl Default for ServerAuthConfig {
     }
 }
 
-/// Retention and capacity policy checked after a configured number of writes.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InsertStoragePolicy {
-    /// Maximum age in days; zero disables age-based cleanup.
-    pub retention_days: u64,
-    /// Maximum logical database size in MiB; zero disables size cleanup.
-    pub max_db_size_mb: u64,
-    /// Number of writes between checks; zero disables automatic checks.
-    pub check_interval_inserts: u64,
-}
-
-impl InsertStoragePolicy {
-    fn primary_default() -> Self {
-        Self {
-            retention_days: DEFAULT_RETENTION_DAYS,
-            max_db_size_mb: DEFAULT_MAX_DB_SIZE_MB,
-            check_interval_inserts: DEFAULT_PURGE_INTERVAL,
-        }
-    }
-
-    fn genai_default() -> Self {
-        Self {
-            retention_days: 30,
-            max_db_size_mb: 200,
-            check_interval_inserts: 1,
-        }
-    }
-}
-
 /// Retention and capacity policy checked on a timer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodicStoragePolicy {
     /// Maximum age in days; zero disables age-based cleanup.
     pub retention_days: u64,
@@ -315,12 +290,25 @@ pub struct PeriodicStoragePolicy {
 }
 
 impl PeriodicStoragePolicy {
-    const fn new(retention_days: u64, max_db_size_mb: u64, check_interval_secs: u64) -> Self {
+    /// Creates a periodic retention and capacity policy.
+    pub const fn new(retention_days: u64, max_db_size_mb: u64, check_interval_secs: u64) -> Self {
         Self {
             retention_days,
             max_db_size_mb,
             check_interval_secs,
         }
+    }
+
+    const fn primary_default() -> Self {
+        Self::new(
+            DEFAULT_RETENTION_DAYS,
+            DEFAULT_MAX_DB_SIZE_MB,
+            DEFAULT_MAINTENANCE_INTERVAL_SECS,
+        )
+    }
+
+    const fn genai_default() -> Self {
+        Self::new(30, 200, 60)
     }
 }
 
@@ -336,9 +324,9 @@ pub struct StorageConfig {
     /// Directory containing AgentSight-owned databases.
     pub base_path: PathBuf,
     /// Policy for `agentsight.db`.
-    pub primary: InsertStoragePolicy,
+    pub primary: PeriodicStoragePolicy,
     /// Policy for `genai_events.db`.
-    pub genai: InsertStoragePolicy,
+    pub genai: PeriodicStoragePolicy,
     /// Policy for `interruption_events.db`.
     pub interruptions: PeriodicStoragePolicy,
     /// Policy for `trajectories.db`.
@@ -347,18 +335,27 @@ pub struct StorageConfig {
     pub optimization: PeriodicStoragePolicy,
     /// Policy for the private security audit database.
     pub security_audit: PeriodicStoragePolicy,
+    /// Policy for the private trajectory reuse database.
+    pub reuse: PeriodicStoragePolicy,
+    /// Policy for the private causal analysis database.
+    pub causal: PeriodicStoragePolicy,
+    /// Policy for the private enforcement database.
+    pub enforcement: PeriodicStoragePolicy,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             base_path: default_base_path(),
-            primary: InsertStoragePolicy::primary_default(),
-            genai: InsertStoragePolicy::genai_default(),
+            primary: PeriodicStoragePolicy::primary_default(),
+            genai: PeriodicStoragePolicy::genai_default(),
             interruptions: PeriodicStoragePolicy::new(30, 100, 60),
             trajectories: PeriodicStoragePolicy::new(30, 500, 300),
             optimization: PeriodicStoragePolicy::new(30, 200, 300),
             security_audit: PeriodicStoragePolicy::new(30, 200, 3_600),
+            reuse: PeriodicStoragePolicy::new(30, 200, 300),
+            causal: PeriodicStoragePolicy::new(30, 200, 300),
+            enforcement: PeriodicStoragePolicy::new(30, 100, 60),
         }
     }
 }
@@ -417,6 +414,9 @@ impl StorageConfig {
             ("trajectories", self.trajectories),
             ("optimization", self.optimization),
             ("security_audit", self.security_audit),
+            ("reuse", self.reuse),
+            ("causal", self.causal),
+            ("enforcement", self.enforcement),
         ] {
             validate(name, policy.retention_days, policy.max_db_size_mb)?;
         }
@@ -427,12 +427,15 @@ impl StorageConfig {
         if let Some(base_path) = json.base_path {
             self.base_path = base_path;
         }
-        apply_insert_policy(&mut self.primary, json.primary);
-        apply_insert_policy(&mut self.genai, json.genai);
+        apply_periodic_policy(&mut self.primary, json.primary);
+        apply_periodic_policy(&mut self.genai, json.genai);
         apply_periodic_policy(&mut self.interruptions, json.interruptions);
         apply_periodic_policy(&mut self.trajectories, json.trajectories);
         apply_periodic_policy(&mut self.optimization, json.optimization);
         apply_periodic_policy(&mut self.security_audit, json.security_audit);
+        apply_periodic_policy(&mut self.reuse, json.reuse);
+        apply_periodic_policy(&mut self.causal, json.causal);
+        apply_periodic_policy(&mut self.enforcement, json.enforcement);
     }
 }
 
@@ -440,41 +443,23 @@ impl StorageConfig {
 #[serde(default)]
 struct JsonStorageConfig {
     base_path: Option<PathBuf>,
-    primary: Option<JsonInsertStoragePolicy>,
-    genai: Option<JsonInsertStoragePolicy>,
+    primary: Option<JsonPeriodicStoragePolicy>,
+    genai: Option<JsonPeriodicStoragePolicy>,
     interruptions: Option<JsonPeriodicStoragePolicy>,
     trajectories: Option<JsonPeriodicStoragePolicy>,
     optimization: Option<JsonPeriodicStoragePolicy>,
     security_audit: Option<JsonPeriodicStoragePolicy>,
+    reuse: Option<JsonPeriodicStoragePolicy>,
+    causal: Option<JsonPeriodicStoragePolicy>,
+    enforcement: Option<JsonPeriodicStoragePolicy>,
 }
 
 #[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct JsonInsertStoragePolicy {
-    retention_days: Option<u64>,
-    max_db_size_mb: Option<u64>,
-    check_interval_inserts: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct JsonPeriodicStoragePolicy {
     retention_days: Option<u64>,
     max_db_size_mb: Option<u64>,
     check_interval_secs: Option<u64>,
-}
-
-fn apply_insert_policy(policy: &mut InsertStoragePolicy, json: Option<JsonInsertStoragePolicy>) {
-    let Some(json) = json else { return };
-    if let Some(value) = json.retention_days {
-        policy.retention_days = value;
-    }
-    if let Some(value) = json.max_db_size_mb {
-        policy.max_db_size_mb = value;
-    }
-    if let Some(value) = json.check_interval_inserts {
-        policy.check_interval_inserts = value;
-    }
 }
 
 fn apply_periodic_policy(
@@ -1678,7 +1663,7 @@ mod tests {
         assert_eq!(DEFAULT_TOKEN_TABLE, "token_records");
         assert_eq!(DEFAULT_HTTP_TABLE, "http_records");
         assert_eq!(DEFAULT_RETENTION_DAYS, 30);
-        assert_eq!(DEFAULT_PURGE_INTERVAL, 1000);
+        assert_eq!(DEFAULT_MAINTENANCE_INTERVAL_SECS, 60);
     }
 
     #[test]
@@ -1711,10 +1696,23 @@ mod tests {
         assert!(!config.enable_filewatch);
         assert!(!config.cgroup_filter_enabled);
         assert_eq!(config.storage.primary.retention_days, 30);
-        assert_eq!(config.storage.primary.check_interval_inserts, 1000);
+        assert_eq!(config.storage.primary.check_interval_secs, 60);
         assert_eq!(config.storage.primary.max_db_size_mb, 500);
         assert_eq!(config.storage.genai.max_db_size_mb, 200);
+        assert_eq!(config.storage.genai.check_interval_secs, 60);
         assert_eq!(config.storage.interruptions.check_interval_secs, 60);
+        assert_eq!(
+            config.storage.reuse,
+            PeriodicStoragePolicy::new(30, 200, 300)
+        );
+        assert_eq!(
+            config.storage.causal,
+            PeriodicStoragePolicy::new(30, 200, 300)
+        );
+        assert_eq!(
+            config.storage.enforcement,
+            PeriodicStoragePolicy::new(30, 100, 60)
+        );
     }
 
     /// `traceEnabled` is **off** by default (privacy-safe). Conversation
@@ -1756,9 +1754,12 @@ mod tests {
                 r#"{
                     "storage": {
                         "base_path": "/tmp/agentsight-storage",
-                        "primary": {"retention_days": 7, "check_interval_inserts": 25},
+                        "primary": {"retention_days": 7, "check_interval_secs": 25},
                         "genai": {"max_db_size_mb": 321},
-                        "interruptions": {"check_interval_secs": 15}
+                        "interruptions": {"check_interval_secs": 15},
+                        "reuse": {"retention_days": 9},
+                        "causal": {"max_db_size_mb": 123},
+                        "enforcement": {"check_interval_secs": 17}
                     }
                 }"#,
             )
@@ -1770,10 +1771,22 @@ mod tests {
         );
         assert_eq!(config.storage.primary.retention_days, 7);
         assert_eq!(config.storage.primary.max_db_size_mb, 500);
-        assert_eq!(config.storage.primary.check_interval_inserts, 25);
+        assert_eq!(config.storage.primary.check_interval_secs, 25);
         assert_eq!(config.storage.genai.retention_days, 30);
         assert_eq!(config.storage.genai.max_db_size_mb, 321);
         assert_eq!(config.storage.interruptions.check_interval_secs, 15);
+        assert_eq!(config.storage.reuse.retention_days, 9);
+        assert_eq!(config.storage.causal.max_db_size_mb, 123);
+        assert_eq!(config.storage.enforcement.check_interval_secs, 17);
+    }
+
+    #[test]
+    fn test_storage_config_rejects_insert_interval() {
+        let mut config = AgentsightConfig::new();
+        let error = config
+            .load_from_json(r#"{"storage":{"primary":{"check_interval_inserts":1}}}"#)
+            .unwrap_err();
+        assert!(error.contains("unknown field `check_interval_inserts`"));
     }
 
     #[test]

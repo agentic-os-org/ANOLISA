@@ -13,6 +13,7 @@
 //! available" note) rather than aborting the whole report. `summary` always
 //! exits 0 with whatever is available, so it is safe to run on a fresh box.
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::storage::sqlite::tokenless::default_stats_path;
 use agentsight::storage::sqlite::{
     GenAISqliteStore, InterruptionStore, TokenlessStatsStore, TokenlessWindowSummary, format_tokens,
@@ -181,9 +182,11 @@ fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
     if !path.exists() {
         return SessionStats::default();
     }
-    let store = match GenAISqliteStore::new_with_path(
+    let store = match DatabaseManager::open_query(
+        DatabaseId::GenAi,
         path,
-        agentsight::config::InsertStoragePolicy::default(),
+        DatabaseCoverage::Full,
+        GenAISqliteStore::open_read_only_existing,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -218,7 +221,12 @@ fn gather_interruptions(path: &Path, start_ns: i64, end_ns: i64) -> Interruption
     if !path.exists() {
         return InterruptionStats::default();
     }
-    let store = match InterruptionStore::new_with_path(path) {
+    let store = match DatabaseManager::open_query(
+        DatabaseId::Interruptions,
+        path,
+        DatabaseCoverage::Full,
+        InterruptionStore::open_read_only_existing,
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("warning: cannot open interruption database: {e}");

@@ -1,7 +1,5 @@
 //! Snapshot loading and stable input hashing for grader runs.
 
-use std::path::Path;
-
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -29,16 +27,11 @@ pub struct EvaluationInput {
 
 /// Load a conversation snapshot and compute its stable input hash.
 pub fn load_conversation_input(
-    storage_path: &Path,
+    genai_store: &GenAISqliteStore,
     interruption_store: Option<&InterruptionStore>,
     conversation_id: &str,
     force: bool,
 ) -> Result<EvaluationInput, GraderError> {
-    let genai_store = GenAISqliteStore::new_with_path(
-        storage_path,
-        crate::config::InsertStoragePolicy::default(),
-    )
-    .map_err(|error| GraderError::Storage(error.to_string()))?;
     let events = genai_store
         .get_events_by_conversation(conversation_id)
         .map_err(|error| GraderError::Storage(error.to_string()))?;
@@ -174,6 +167,11 @@ mod tests {
         let interruption_path = root.join("interruptions").join("events.db");
         write_conversation_event(&genai_path, "conv-injected");
 
+        let genai_store = GenAISqliteStore::new_with_path(
+            &genai_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         let interruption_store = InterruptionStore::new_with_path(&interruption_path).unwrap();
         let event = InterruptionEvent::new(
             InterruptionType::NetworkTimeout,
@@ -189,7 +187,7 @@ mod tests {
         interruption_store.insert(&event).unwrap();
 
         let input = load_conversation_input(
-            &genai_path,
+            &genai_store,
             Some(&interruption_store),
             "conv-injected",
             false,
@@ -278,7 +276,7 @@ mod tests {
 
     fn write_conversation_event(path: &Path, conversation_id: &str) {
         let store =
-            GenAISqliteStore::new_with_path(path, crate::config::InsertStoragePolicy::default())
+            GenAISqliteStore::new_with_path(path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
         let mut call = LLMCall::new(
             "call-1".to_string(),

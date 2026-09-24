@@ -17,15 +17,18 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
-    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_inserts": 1000 },
-    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_inserts": 1 },
+    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 60 },
+    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 60 },
     "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
     "trajectories": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 300 },
     "optimization": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
-    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 }
+    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 },
+    "reuse": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "causal": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "enforcement": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 }
   },
   "runtime": {
     "sls_logtail_path": ""
@@ -81,20 +84,29 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 ## SQLite 存储策略
 
-`storage.base_path` 是 AgentSight 自有数据库共用的目录。每个数据库分别配置保留天数、逻辑容量上限和维护
-间隔。`retention_days`、`max_db_size_mb` 或检查间隔为 `0` 时，表示关闭对应规则。
+`storage.base_path` 是 AgentSight 自有数据库共用的目录。在 schema v4 中，每项策略统一使用
+`retention_days`、`max_db_size_mb` 和 `check_interval_secs`。值为 `0` 时，分别关闭按时间保留、按容量清理
+或定时维护；如果 `check_interval_secs` 为 `0`，即使另外两项非零也不会自动执行维护。
 
 | 存储 | 保留时间 | 容量上限 | 检查间隔 |
 |---|---:|---:|---:|
-| `storage.primary`（`agentsight.db`） | 30 天 | 500 MiB | 1,000 次写入 |
-| `storage.genai`（`genai_events.db`，含评估结果） | 30 天 | 200 MiB | 每次写入 |
+| `storage.primary`（`agentsight.db`） | 30 天 | 500 MiB | 60 秒 |
+| `storage.genai`（`genai_events.db`，含评估结果） | 30 天 | 200 MiB | 60 秒 |
 | `storage.interruptions` | 30 天 | 100 MiB | 60 秒 |
 | `storage.trajectories` | 30 天 | 500 MiB | 300 秒 |
 | `storage.optimization` | 30 天 | 200 MiB | 300 秒 |
 | `storage.security_audit` | 30 天 | 200 MiB | 3,600 秒 |
+| `storage.reuse` | 30 天 | 200 MiB | 300 秒 |
+| `storage.causal` | 30 天 | 200 MiB | 300 秒 |
+| `storage.enforcement` | 30 天 | 100 MiB | 60 秒 |
 
-`schema_version` 变化时，配置格式整体替换。自定义配置请从随包发布的 `agentsight.json` 开始修改，旧版本
-配置不会自动合并到 schema v3。
+维护先删除允许淘汰且已经过期的行。如果数据库因此发生变化，必须成功完成 WAL checkpoint 后才进入容量
+阶段。物理占用超过 `max_db_size_mb` 时触发淘汰，并以逻辑占用降到上限的 90% 为目标。维护不会执行
+`VACUUM`，释放页会留在 SQLite freelist 中供后续写入复用。
+
+`check_interval_inserts` 已不再支持。`schema_version` 变化时配置格式整体替换：版本缺失或低于 v4 的文件
+会先备份，再替换为 schema v4，不会合并旧设置。自定义配置请从随包发布的 `agentsight.json` 开始修改，
+不要把旧字段复制到新文件。
 
 ## 功能开关
 
@@ -239,12 +251,13 @@ sudo agentsight discover                                   # 跑一次自己的 
 
 ## schema_version 与升级
 
-`schema_version`（当前为 `3`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
+`schema_version`（当前为 `4`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
 
 - 相同或更新 → 保留文件不动；
 - 缺失或更旧 → 先复制为 `config.json.bak.<unix秒>`，再替换为当前默认配置。
 
-旧 schema 中的自定义项不会自动合并。请在新文件上重新应用需要的规则，然后 reload 服务。
+schema v4 把所有存储策略的按写入次数检查统一改为 `check_interval_secs`，并新增 `reuse`、`causal` 和
+`enforcement`。旧 schema 中的自定义项不会自动合并。请在新文件上重新应用需要的规则，然后 reload 服务。
 
 ## 环境变量
 

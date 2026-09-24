@@ -25,6 +25,7 @@
 pub mod atif;
 pub mod chrome_trace;
 pub mod config;
+pub mod database;
 pub mod ecs_metadata;
 // Cross-platform: the deterministic grounding engine is pure ATIF analysis with
 // no eBPF or platform dependency. It used to sit under `server::causal`, which

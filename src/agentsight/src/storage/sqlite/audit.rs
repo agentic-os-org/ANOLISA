@@ -4,8 +4,8 @@
 
 use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 use agentsight_sqlite_lifecycle::{
-    CheckpointOutcome, ConnectionOptions, SizeSnapshot, checkpoint_truncate, measure_database,
-    open_connection,
+    CheckpointOutcome, ConnectionMode, ConnectionOptions, SizeSnapshot, checkpoint_truncate,
+    measure_database, open_connection,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -53,6 +53,22 @@ impl AuditStore {
         ensure_correlation_columns(&conn, &table_name)?;
 
         Ok(AuditStore { conn, table_name })
+    }
+
+    /// Opens an existing audit table without creating or modifying the database.
+    pub fn open_read_only_existing(path: &Path, table_name: &str) -> Result<Self> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn,
+            table_name: table_name.to_string(),
+        })
     }
 
     /// Default database path: ~/.agentsight/audit.db

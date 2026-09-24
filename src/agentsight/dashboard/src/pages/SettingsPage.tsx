@@ -20,6 +20,10 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
 }
 
+function formatUnixMs(unixMs: number | null, locale: string): string {
+  return unixMs === null ? '—' : new Date(unixMs).toLocaleString(locale);
+}
+
 function stateClass(state: StorageSizeState): string {
   switch (state) {
     case 'cleanup_due':
@@ -34,7 +38,7 @@ function stateClass(state: StorageSizeState): string {
 }
 
 const StorageCard: React.FC = () => {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [status, setStatus] = useState<StorageStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,10 +66,11 @@ const StorageCard: React.FC = () => {
       case 'interruptions': return t('comp.settings.storage.store.interruptions');
       case 'trajectories': return t('comp.settings.storage.store.trajectories');
       case 'optimization': return t('comp.settings.storage.store.optimization');
+      case 'reuse': return t('comp.settings.storage.store.reuse');
+      case 'causal': return t('comp.settings.storage.store.causal');
       case 'security_audit': return t('comp.settings.storage.store.security_audit');
       case 'enforcement': return t('comp.settings.storage.store.enforcement');
       case 'tokenless': return t('comp.settings.storage.store.tokenless');
-      default: return store.id;
     }
   };
   const statusLabel = (store: StorageStoreStatus) => {
@@ -80,9 +85,10 @@ const StorageCard: React.FC = () => {
   const coverageLabel = (store: StorageStoreStatus) => {
     switch (store.coverage) {
       case 'full': return t('comp.settings.storage.coverage.full');
+      case 'partial': return t('comp.settings.storage.coverage.partial');
       case 'row_bounded': return t('comp.settings.storage.coverage.row_bounded');
       case 'unmanaged': return t('comp.settings.storage.coverage.unmanaged');
-      default: return t('comp.settings.storage.coverage.external');
+      case 'external': return t('comp.settings.storage.coverage.external');
     }
   };
   const availabilityLabel = (store: StorageStoreStatus) => {
@@ -94,14 +100,22 @@ const StorageCard: React.FC = () => {
     }
   };
   const intervalLabel = (store: StorageStoreStatus) => {
-    if (store.policy.check_interval === 0) return t('comp.settings.storage.disabled');
-    if (store.policy.check_interval_unit === 'inserts') {
-      return t('comp.settings.storage.inserts', { count: store.policy.check_interval });
+    if (store.policy.check_interval_unit === 'external') {
+      return t('comp.settings.storage.external');
     }
-    if (store.policy.check_interval_unit === 'seconds') {
-      return t('comp.settings.storage.seconds', { count: store.policy.check_interval });
+    if (store.policy.check_interval_unit === 'none' || store.policy.check_interval === 0) {
+      return t('comp.settings.storage.disabled');
     }
-    return t('comp.settings.storage.external');
+    return t('comp.settings.storage.seconds', { count: store.policy.check_interval });
+  };
+  const maintenanceResultLabel = (store: StorageStoreStatus) => {
+    switch (store.maintenance.last_result) {
+      case 'success': return t('comp.settings.storage.maintenance.result.success');
+      case 'error': return t('comp.settings.storage.maintenance.result.error');
+      case 'lock_busy': return t('comp.settings.storage.maintenance.result.lock_busy');
+      case 'panicked': return t('comp.settings.storage.maintenance.result.panicked');
+      case null: return '—';
+    }
   };
 
   return (
@@ -178,6 +192,75 @@ const StorageCard: React.FC = () => {
                   <dd className="mt-1 font-medium text-gray-800">{store.policy.enforced_by}</dd>
                 </div>
               </dl>
+
+              <dl className="mt-4 pt-3 border-t border-gray-100 grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.schedule')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {store.maintenance.scheduled
+                      ? t('comp.settings.storage.maintenance.scheduled')
+                      : t('comp.settings.storage.maintenance.unscheduled')}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.worker')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {store.maintenance.worker_running
+                      ? t('comp.settings.storage.maintenance.workerRunning')
+                      : t('comp.settings.storage.maintenance.workerStopped')}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.heartbeat')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {formatUnixMs(store.maintenance.worker_heartbeat_unix_ms, locale)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastResult')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">{maintenanceResultLabel(store)}</dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastAttempt')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {formatUnixMs(store.maintenance.last_attempt_unix_ms, locale)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastSuccess')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {formatUnixMs(store.maintenance.last_success_unix_ms, locale)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.failures')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {store.maintenance.consecutive_failures.toLocaleString(locale)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.nextRun')}</dt>
+                  <dd className="mt-1 font-medium text-gray-800">
+                    {formatUnixMs(store.maintenance.next_run_unix_ms, locale)}
+                  </dd>
+                </div>
+              </dl>
+
+              {store.maintenance.last_result === 'lock_busy' && (
+                <p className="mt-3 text-xs text-amber-700">
+                  {t('comp.settings.storage.maintenance.lockBusyNote')}
+                </p>
+              )}
+              {store.id === 'causal' && (
+                <p className="mt-3 text-xs text-gray-500">
+                  {t('comp.settings.storage.note.causal')}
+                </p>
+              )}
+              {store.coverage === 'partial' && store.id !== 'causal' && (
+                <p className="mt-3 text-xs text-gray-500">
+                  {t('comp.settings.storage.note.protected')}
+                </p>
+              )}
             </div>
           ))}
           <p className="px-6 py-4 text-xs text-gray-500 bg-gray-50 rounded-b-xl">

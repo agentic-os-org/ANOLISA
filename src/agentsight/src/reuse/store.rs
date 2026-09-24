@@ -16,7 +16,7 @@
 //! opening tightens that directory to `0700`, and doing that to the directory
 //! `trajectories.db` lives in would silently cut off every other reader of it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +24,11 @@ use super::label::{
     ConfirmState, LabelAction, LabelEventKind, SessionLabel, TrajectoryIdentity, TrajectoryLabel,
 };
 use super::triage::{TriageMetrics, TriageOutcome};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, MaintenanceReport, MaintenanceStatus, SizeBasis, SizePolicy,
+    checkpoint_truncate, enforce_size_policy, measure_database, retention_cutoff_ns,
+};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 /// Schema version recorded in `PRAGMA user_version`.
@@ -41,6 +45,9 @@ pub enum ReuseStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    /// SQLite lifecycle measurement or maintenance failed.
+    #[error("reuse database lifecycle error: {0}")]
+    Lifecycle(#[from] agentsight_sqlite_lifecycle::LifecycleError),
     #[error("store mutex poisoned")]
     Poisoned,
     /// A decision was submitted for a trajectory that has not been triaged.
@@ -99,6 +106,15 @@ pub struct RuleOverrideStat {
     pub confirmed: usize,
 }
 
+/// Outcome of one retention and capacity maintenance pass.
+#[derive(Debug, Clone, Copy)]
+pub struct ReuseMaintenanceReport {
+    /// Audit events removed because they exceeded the retention period.
+    pub expired_events: usize,
+    /// Capacity-enforcement result after age retention and checkpointing.
+    pub size: MaintenanceReport,
+}
+
 /// Thread-safe store over a dedicated `reuse.db`.
 #[derive(Debug)]
 pub struct ReuseStore {
@@ -107,7 +123,7 @@ pub struct ReuseStore {
 
 impl ReuseStore {
     /// Name of the database inside the private state directory.
-    const DB_NAME: &'static str = "reuse.db";
+    const DB_NAME: &'static str = crate::config::REUSE_DB_NAME;
 
     /// Opens the label store in `state_dir` with owner-only permissions.
     ///
@@ -384,6 +400,134 @@ impl ReuseStore {
         }
         tx.commit()?;
         Ok(confirmed)
+    }
+
+    /// Applies audit-event retention and bounds reusable label storage.
+    ///
+    /// Age retention removes only expired `session_label_events`. Capacity
+    /// maintenance starts when physical allocation exceeds `max_db_size_mb` and
+    /// stops when logical usage reaches 90% of that limit. It deletes oldest
+    /// audit events before removing unconfirmed labels with no human decision;
+    /// confirmed, overridden, or otherwise human-owned labels are never eligible.
+    /// A busy checkpoint stops the pass so repeated deletes cannot grow the WAL
+    /// without converging. This method never runs `VACUUM`.
+    ///
+    /// A zero value disables the corresponding age or capacity policy.
+    ///
+    /// # Errors
+    /// Returns a named SQLite lifecycle error, SQL error, or poisoned-mutex error.
+    pub fn maintain(
+        &self,
+        retention_days: u64,
+        max_db_size_mb: u64,
+    ) -> Result<ReuseMaintenanceReport> {
+        let expired_events = if retention_days == 0 {
+            0
+        } else {
+            let cutoff = retention_cutoff_ns(u64::try_from(now_ns()).unwrap_or(0), retention_days)?;
+            self.delete_events_before(i64::try_from(cutoff).unwrap_or(i64::MAX))?
+        };
+
+        let limit_bytes = max_db_size_mb.saturating_mul(1024 * 1024);
+        if (expired_events > 0 || limit_bytes > 0) && self.checkpoint()? == CheckpointOutcome::Busy
+        {
+            let snapshot = self.size_snapshot()?;
+            return Ok(ReuseMaintenanceReport {
+                expired_events,
+                size: MaintenanceReport {
+                    status: MaintenanceStatus::CheckpointBusy,
+                    rounds: 0,
+                    deleted_rows: 0,
+                    before: snapshot,
+                    after: snapshot,
+                },
+            });
+        }
+
+        let size = enforce_size_policy::<ReuseStoreError>(
+            SizePolicy {
+                limit_bytes,
+                trigger_bytes: limit_bytes,
+                target_bytes: limit_bytes.saturating_mul(9) / 10,
+                trigger_basis: SizeBasis::Physical,
+                target_basis: SizeBasis::Logical,
+                max_rounds: 20,
+                max_stalled_rounds: 3,
+            },
+            || self.size_snapshot(),
+            |fraction| self.delete_oldest_fraction(fraction),
+            || self.checkpoint(),
+        )?;
+
+        Ok(ReuseMaintenanceReport {
+            expired_events,
+            size,
+        })
+    }
+
+    fn delete_events_before(&self, cutoff_ns: i64) -> Result<usize> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM session_label_events WHERE created_at_ns < ?1",
+            params![cutoff_ns],
+        )?)
+    }
+
+    fn delete_oldest_fraction(&self, fraction: f64) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let event_count: i64 =
+            tx.query_row("SELECT COUNT(*) FROM session_label_events", [], |row| {
+                row.get(0)
+            })?;
+        if event_count > 0 {
+            let limit = fractional_count(event_count, fraction);
+            let deleted = tx.execute(
+                "DELETE FROM session_label_events WHERE event_id IN (
+                    SELECT event_id FROM session_label_events
+                    ORDER BY created_at_ns ASC, event_id ASC LIMIT ?1
+                )",
+                params![limit],
+            )?;
+            tx.commit()?;
+            return Ok(deleted);
+        }
+
+        let automatic_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM session_labels
+             WHERE confirm_state = 'unconfirmed'
+               AND human_label IS NULL
+               AND decided_by IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let limit = fractional_count(automatic_count, fraction);
+        let deleted = tx.execute(
+            "DELETE FROM session_labels WHERE session_id IN (
+                SELECT session_id FROM session_labels
+                WHERE confirm_state = 'unconfirmed'
+                  AND human_label IS NULL
+                  AND decided_by IS NULL
+                ORDER BY updated_at_ns ASC, session_id ASC LIMIT ?1
+            )",
+            params![limit],
+        )?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    fn size_snapshot(&self) -> Result<agentsight_sqlite_lifecycle::SizeSnapshot> {
+        let conn = self.lock()?;
+        let path = conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map_or_else(|| PathBuf::from(":memory:"), PathBuf::from);
+        measure_database(&path, &conn).map_err(Into::into)
+    }
+
+    fn checkpoint(&self) -> Result<CheckpointOutcome> {
+        let conn = self.lock()?;
+        checkpoint_truncate(&conn).map_err(Into::into)
     }
 
     /// Reads one label row.
@@ -832,6 +976,14 @@ fn append_event(
         ],
     )?;
     Ok(())
+}
+
+fn fractional_count(count: i64, fraction: f64) -> i64 {
+    if count > 0 && fraction > 0.0 {
+        ((count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1)
+    } else {
+        0
+    }
 }
 
 /// Wall-clock nanoseconds, saturating rather than panicking past 2262.

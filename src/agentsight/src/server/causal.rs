@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::causal_store;
+use crate::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use crate::storage::sqlite::GenAISqliteStore;
 
 // Deterministic grounding engine: establishes what can be checked before the
@@ -302,11 +303,7 @@ pub async fn run_causal_attribution(
         }
     };
 
-    let genai_store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
-        &state.storage_path,
-        crate::config::InsertStoragePolicy::default(),
-    )
-    .ok();
+    let genai_store = state.genai_store.as_ref().map(Arc::clone);
     let trajectory_store = state.trajectory_store();
 
     // Scope resolution: "conversation" means the frontend is asking us to
@@ -420,7 +417,7 @@ pub async fn run_causal_attribution(
     let trajectory = match load_trajectory(
         &state.storage_path,
         &resolved_session_id,
-        genai_store.as_ref(),
+        genai_store.as_deref(),
         trajectory_store.as_deref(),
         req.id_kind.as_deref(),
     ) {
@@ -1211,6 +1208,22 @@ fn session_label(trajectory: &AtifTrajectory) -> &str {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+fn open_existing_read_only(
+    id: DatabaseId,
+    path: &std::path::Path,
+) -> Result<rusqlite::Connection, crate::database::DatabaseManagerError> {
+    DatabaseManager::open_query(id, path, DatabaseCoverage::Full, |registered| {
+        agentsight_sqlite_lifecycle::open_connection(
+            registered,
+            agentsight_sqlite_lifecycle::ConnectionOptions {
+                mode: agentsight_sqlite_lifecycle::ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..agentsight_sqlite_lifecycle::ConnectionOptions::default()
+            },
+        )
+    })
+}
+
 /// Map a user-supplied identifier to the `session_id` the trajectory loaders
 /// understand. The dashboard may hand us one of three shapes:
 ///
@@ -1222,7 +1235,6 @@ fn session_label(trajectory: &AtifTrajectory) -> &str {
 /// Returns `None` when no mapping exists, in which case the caller falls back
 /// to passing the original ID through to the trajectory loader.
 fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<String> {
-    use rusqlite::Connection;
     let base_dir = db_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -1236,37 +1248,33 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
             candidate,
             candidate.exists(),
         );
-        if candidate.exists() {
-            if let Ok(conn) = Connection::open(&candidate) {
-                let sql = "SELECT session_id FROM interruption_events \
-                           WHERE conversation_id = ?1 AND session_id IS NOT NULL \
-                             AND length(session_id) > 0 \
-                           ORDER BY occurred_at_ns DESC LIMIT 1";
-                let found: Option<String> = conn
-                    .query_row(sql, [incoming], |r| r.get::<_, String>(0))
-                    .ok();
-                log::info!("resolver: conversation_id lookup → {:?}", found);
-                if found.is_some() {
-                    return found;
-                }
+        if let Ok(conn) = open_existing_read_only(DatabaseId::Interruptions, &candidate) {
+            let sql = "SELECT session_id FROM interruption_events \
+                       WHERE conversation_id = ?1 AND session_id IS NOT NULL \
+                         AND length(session_id) > 0 \
+                       ORDER BY occurred_at_ns DESC LIMIT 1";
+            let found: Option<String> = conn
+                .query_row(sql, [incoming], |r| r.get::<_, String>(0))
+                .ok();
+            log::info!("resolver: conversation_id lookup → {:?}", found);
+            if found.is_some() {
+                return found;
             }
         }
     }
 
     // 2. trace_id — genai_events
     let genai_candidate = base_dir.join("genai_events.db");
-    if genai_candidate.exists() {
-        if let Ok(conn) = Connection::open(&genai_candidate) {
-            let sql = "SELECT session_id FROM genai_events \
-                       WHERE trace_id = ?1 AND session_id IS NOT NULL \
-                       LIMIT 1";
-            let found: Option<String> = conn
-                .query_row(sql, [incoming], |r| r.get::<_, String>(0))
-                .ok();
-            log::info!("resolver: trace_id lookup → {:?}", found);
-            if found.is_some() {
-                return found;
-            }
+    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, &genai_candidate) {
+        let sql = "SELECT session_id FROM genai_events \
+                   WHERE trace_id = ?1 AND session_id IS NOT NULL \
+                   LIMIT 1";
+        let found: Option<String> = conn
+            .query_row(sql, [incoming], |r| r.get::<_, String>(0))
+            .ok();
+        log::info!("resolver: trace_id lookup → {:?}", found);
+        if found.is_some() {
+            return found;
         }
     }
 
@@ -1355,8 +1363,8 @@ fn probe_atif_column(
     db_path: &std::path::Path,
     session_id: &str,
 ) -> Result<Option<String>, String> {
-    use rusqlite::Connection;
-    let conn = Connection::open(db_path).map_err(|e| format!("open {db_path:?}: {e}"))?;
+    let conn = open_existing_read_only(DatabaseId::Trajectories, db_path)
+        .map_err(|e| format!("open {db_path:?}: {e}"))?;
 
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table'")

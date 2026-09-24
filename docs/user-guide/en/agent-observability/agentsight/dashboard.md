@@ -172,11 +172,20 @@ This is the page to open when you need to know exactly what the Agent sent and r
 
 ## Settings
 
-The SQLite storage card shows each database's effective retention and size policy, physical and
-logical usage, and whether cleanup is due. Logical usage excludes reusable freelist pages, so a
-large physical file can still be within policy; the card does not claim that the background cleanup
-worker is healthy. The data comes from authenticated `GET /api/storage/status`, which never exposes
-filesystem paths.
+The SQLite storage card consumes schema v2 from authenticated `GET /api/storage/status`. On Linux,
+it includes every AgentSight-owned store plus the external Tokenless target, including the new reuse
+and causal entries. Each card shows the effective retention and size policy, physical and logical usage,
+cleanup state, and coverage (`full`, `partial`, or external). Trajectories, security audit, reuse,
+causal, and enforcement are partial because maintenance intentionally protects bookkeeping,
+active graphs, the newest cache entry, human decisions, or live control state.
+
+The same card now shows `scheduled`, `worker_running`, the worker heartbeat, last attempt, last
+successful attempt, `last_result`, consecutive failures, and the next run. These runtime fields describe
+only the process serving the endpoint; an unscheduled trace-owned store does not prove that a separate
+trace process is stopped. A `lock_busy` result means another process held that database's maintenance lock. Do not infer worker health from
+`within_policy`: logical usage can be within the limit while a job is unscheduled, the worker is
+stopped, or recent attempts failed. Logical usage excludes reusable freelist pages, so a large
+physical file can also be healthy. The API never exposes filesystem paths.
 
 This page also configures the LLM used by optimization and semantic search (provider, base URL,
 model, API key, and the semantic-search ranking timeout). A timed-out ranking returns no results and

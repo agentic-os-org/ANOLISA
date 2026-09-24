@@ -23,7 +23,6 @@ use crate::semantic_search;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
-const DB_FILE_NAME: &str = "optimization.db";
 const TRAJECTORIES_DIR_NAME: &str = "opt-trajectories";
 
 /// Directory holding the config file — where the sealing salt lives too.
@@ -162,8 +161,8 @@ pub struct OptimizeState {
 }
 
 impl OptimizeState {
-    /// Initialize from the storage base directory (where the .db files live).
-    pub fn init(base_dir: &Path) -> Arc<Self> {
+    /// Initializes optimization state with its centrally opened result store.
+    pub fn init(base_dir: &Path, store: Option<OptimizationStore>) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
         let (config, needs_reseal) = OptLlmConfig::load(&config_path);
         if needs_reseal {
@@ -174,19 +173,16 @@ impl OptimizeState {
                 Err(e) => log::warn!("Failed to encrypt stored optimization API key: {e}"),
             }
         }
-        let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("Failed to open optimization store: {e}");
-                None
-            }
-        };
         Arc::new(Self {
             config_path,
             config: RwLock::new(config),
             store,
             root_lock: Mutex::new(()),
         })
+    }
+
+    pub(super) fn has_storage(&self) -> bool {
+        self.store.is_some()
     }
 
     /// Applies the configured retention and capacity policy to optimization results.
@@ -302,16 +298,14 @@ pub async fn semantic_search_sessions(
 /// log-collected trajectory store (trajectories.db), whose rows already hold
 /// ready-made ATIF v1.7 JSON.
 fn load_trajectory(
-    db_path: &Path,
+    genai_store: Option<&GenAISqliteStore>,
     trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
-    let store =
-        GenAISqliteStore::new_with_path(db_path, crate::config::InsertStoragePolicy::default())
-            .map_err(|e| {
-                HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}))
-            })?;
+    let store = genai_store.ok_or_else(|| {
+        HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}))
+    })?;
     let events = store.get_events_by_session(session_id).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
@@ -661,8 +655,11 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(&data.storage_path, data.trajectory_store(), &session_id)
-    {
+    let trajectory = match load_trajectory(
+        data.genai_store.as_deref(),
+        data.trajectory_store(),
+        &session_id,
+    ) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -1038,6 +1035,7 @@ mod tests {
         ));
         actix_web::web::Data::new(AppState {
             storage_path: base_dir.join("agentsight.db"),
+            genai_store: None,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::new())),
             interruption_store: None,
@@ -1054,7 +1052,7 @@ mod tests {
             )),
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth,
-            optimize: Some(OptimizeState::init(base_dir)),
+            optimize: Some(OptimizeState::init(base_dir, None)),
             reuse_store: None,
             trajectory_store: Arc::new(RwLock::new(None)),
             reuse_llm_judge_enabled: false,
@@ -1283,7 +1281,13 @@ mod tests {
             .upsert_trajectory(&collected_record("log-1", atif))
             .unwrap();
 
-        let trajectory = load_trajectory(&db_path, Some(Arc::new(tstore)), "log-1").unwrap();
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        let trajectory =
+            load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "log-1").unwrap();
         assert_eq!(trajectory.session_id, "log-1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1293,14 +1297,19 @@ mod tests {
     fn load_trajectory_returns_not_found_when_both_sources_miss() {
         let dir = tmp_dir("miss");
         let db_path = dir.join("genai.db");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
 
         // Store present but session absent → 404.
-        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "nope").unwrap_err();
+        let resp = load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
-        // No store at all → 404 as well.
-        let resp = load_trajectory(&db_path, None, "nope").unwrap_err();
+        // No collected store at all → 404 as well.
+        let resp = load_trajectory(Some(&genai_store), None, "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1310,12 +1319,18 @@ mod tests {
     fn load_trajectory_rejects_corrupt_collected_atif() {
         let dir = tmp_dir("corrupt");
         let db_path = dir.join("genai.db");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
         tstore
             .upsert_trajectory(&collected_record("bad-1", "not json"))
             .unwrap();
 
-        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "bad-1").unwrap_err();
+        let resp =
+            load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "bad-1").unwrap_err();
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
