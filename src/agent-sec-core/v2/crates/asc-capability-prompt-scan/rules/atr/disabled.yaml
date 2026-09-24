@@ -1,0 +1,16 @@
+# Rules disabled by our quality gates (benign-corpus FP gate, embedded
+# test-case regression, or other conversion-time findings). The converter
+# rewrites `enabled: false` into the generated packs; upstream files stay
+# untouched.
+# Entry shape:
+#   - id: ATR-2026-00123
+#     reason: "matches benign Chinese editing instructions"
+disabled:
+  - id: ATR-2026-00030
+    reason: "embedded test case fails under our pipeline: the covering patterns use lookbehind (?<!...) which the regex crate rejects, so two upstream TPs no longer fire"
+  - id: ATR-2026-01007
+    reason: "embedded test case fails under our pipeline: flooding TPs rely on backreference patterns (\\1) the regex crate rejects, so only the keyword-repeat pattern survives conversion"
+  - id: ATR-2026-01454
+    reason: "embedded test case fails under our pipeline: hyperlink patterns use lookbehind (?<!!) which the regex crate rejects, so markdown-link exfil TPs no longer fire"
+  - id: ATR-2026-01463
+    reason: "embedded test case fails under our pipeline: the SYSTEM-marker pattern uses lookahead (?!\\() which the regex crate rejects, so the markdown-heading TP no longer fires"

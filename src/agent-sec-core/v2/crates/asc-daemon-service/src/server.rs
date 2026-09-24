@@ -373,7 +373,11 @@ async fn process_admitted_connection(
         Ok(Ok(frame)) => frame,
     };
 
-    let control = DispatchControl::new(std::time::Instant::now() + config.dispatch_timeout);
+    // The budget is picked per request: an entry in the method-prefix table
+    // overrides the interactive default, so a slow method family cannot
+    // stretch everyone else's dispatch deadline.
+    let budget = dispatch_budget(config, &frame);
+    let control = DispatchControl::new(std::time::Instant::now() + budget);
     let request = DispatchRequest {
         peer,
         payload: frame,
@@ -384,7 +388,7 @@ async fn process_admitted_connection(
         request,
         control,
         config.max_response_frame_bytes,
-        config.dispatch_timeout,
+        budget,
     )
     .await
     {
@@ -432,6 +436,35 @@ async fn reject_on_stream(
         }
         DispatchAttempt::Close | DispatchAttempt::Reject(_) => ConnectionOutcome::RejectedClose,
     }
+}
+
+/// Selects the dispatch budget for one decoded frame: the first entry in
+/// [`ServiceConfig::method_dispatch_timeouts`] whose prefix matches the
+/// request's method name, else the transport default. A frame without a
+/// usable method name always takes the default.
+fn dispatch_budget(config: &ServiceConfig, frame: &[u8]) -> std::time::Duration {
+    let Some(method) = frame_method(frame) else {
+        return config.dispatch_timeout;
+    };
+    config
+        .method_dispatch_timeouts
+        .iter()
+        .find(|(prefix, _)| method.starts_with(prefix.as_str()))
+        .map_or(config.dispatch_timeout, |(_, timeout)| *timeout)
+}
+
+/// Extracts the request's method name without decoding the whole payload:
+/// serde skips the values of unknown fields, so this stays a linear scan.
+/// Returns `None` for a malformed frame or a non-string method; the caller
+/// then applies the default budget.
+fn frame_method(frame: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MethodField {
+        method: String,
+    }
+    serde_json::from_slice::<MethodField>(frame)
+        .ok()
+        .map(|request| request.method)
 }
 
 async fn invoke_dispatch(
@@ -601,10 +634,86 @@ enum ConnectionOutcome {
 mod tests {
     use std::os::unix::fs::MetadataExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use super::*;
 
     static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn budget_config(overrides: &[(&str, Duration)]) -> ServiceConfig {
+        ServiceConfig {
+            dispatch_timeout: Duration::from_secs(5),
+            method_dispatch_timeouts: overrides
+                .iter()
+                .map(|(prefix, timeout)| ((*prefix).to_owned(), *timeout))
+                .collect(),
+            max_request_frame_bytes: 1024,
+            max_response_frame_bytes: 1024,
+            max_connections: 4,
+            max_rejection_connections: 2,
+            rejection_encode_timeout: Duration::from_millis(250),
+            request_read_timeout: Duration::from_secs(1),
+            response_write_timeout: Duration::from_secs(1),
+            drain_timeout: Duration::from_secs(1),
+            accept_error_backoff: Duration::from_millis(10),
+        }
+    }
+
+    #[test]
+    fn a_matching_method_prefix_selects_its_override_budget() {
+        let config = budget_config(&[("action.prompt_scan", Duration::from_secs(35))]);
+        // The warmup method shares the family prefix, so it inherits the
+        // model-backed budget without its own entry.
+        for method in ["action.prompt_scan", "action.prompt_scan.warmup"] {
+            let frame = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}"}}"#);
+            assert_eq!(
+                dispatch_budget(&config, frame.as_bytes()),
+                Duration::from_secs(35)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_method_keeps_the_default_budget() {
+        let config = budget_config(&[("action.prompt_scan", Duration::from_secs(35))]);
+        // A served method outside the family keeps the interactive default.
+        let frame = br#"{"method":"action.code_scan"}"#;
+        assert_eq!(dispatch_budget(&config, frame), Duration::from_secs(5));
+        let frame = br#"{"method":"policy.bindings.create"}"#;
+        assert_eq!(dispatch_budget(&config, frame), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_frame_without_a_usable_method_takes_the_default_budget() {
+        let config = budget_config(&[("action.prompt_scan", Duration::from_secs(35))]);
+        // Malformed frames and non-string method values fall back instead of
+        // failing the request here; dispatch reports the decode error.
+        for frame in [
+            b"not json".as_slice(),
+            br#"{"method":42}"#.as_slice(),
+            br"{}".as_slice(),
+        ] {
+            assert_eq!(dispatch_budget(&config, frame), Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn the_first_matching_prefix_wins() {
+        let config = budget_config(&[
+            ("action.prompt_scan", Duration::from_secs(35)),
+            ("action.prompt_scan.warmup", Duration::from_secs(60)),
+        ]);
+        let frame = br#"{"method":"action.prompt_scan.warmup"}"#;
+        assert_eq!(dispatch_budget(&config, frame), Duration::from_secs(35));
+    }
+
+    #[test]
+    fn frame_method_reads_only_the_method_field() {
+        // Unknown fields (including a large text payload) are skipped
+        // without being decoded into values.
+        let frame = br#"{"method":"action.prompt_scan","params":{"text":"..."}}"#;
+        assert_eq!(frame_method(frame).as_deref(), Some("action.prompt_scan"));
+    }
 
     fn unique_directory(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

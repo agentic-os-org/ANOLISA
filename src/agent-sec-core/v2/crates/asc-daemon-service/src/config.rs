@@ -24,6 +24,14 @@ pub struct ServiceConfig {
     /// Expiration releases the connection permit and requests cooperative
     /// cancellation. It cannot forcibly stop an already running blocking call.
     pub dispatch_timeout: Duration,
+    /// Dispatch budget overrides matched by request method-name prefix.
+    ///
+    /// A request whose wire method starts with a listed prefix gets that
+    /// entry's budget instead of [`ServiceConfig::dispatch_timeout`]; the
+    /// first matching entry wins. This lets the composition root grant slow,
+    /// model-backed method families a longer budget than the interactive
+    /// default while the transport stays method-agnostic.
+    pub method_dispatch_timeouts: Vec<(String, Duration)>,
     /// Whole-response write deadline.
     pub response_write_timeout: Duration,
     /// Maximum graceful wait for admitted connection tasks during shutdown.
@@ -58,6 +66,14 @@ impl ServiceConfig {
         }
         if self.dispatch_timeout.is_zero() {
             return Err(ConfigError::ZeroDispatchTimeout);
+        }
+        for (prefix, timeout) in &self.method_dispatch_timeouts {
+            if prefix.is_empty() {
+                return Err(ConfigError::EmptyMethodDispatchPrefix);
+            }
+            if timeout.is_zero() {
+                return Err(ConfigError::ZeroMethodDispatchTimeout);
+            }
         }
         if self.response_write_timeout.is_zero() {
             return Err(ConfigError::ZeroWriteTimeout);
@@ -96,6 +112,12 @@ pub enum ConfigError {
     /// A zero dispatch deadline would reject every complete request.
     #[error("request dispatch timeout must be positive")]
     ZeroDispatchTimeout,
+    /// An empty prefix would match every method name.
+    #[error("method dispatch timeout prefix must not be empty")]
+    EmptyMethodDispatchPrefix,
+    /// A zero override budget would reject every matching request.
+    #[error("method dispatch timeout must be positive")]
+    ZeroMethodDispatchTimeout,
     /// A zero write deadline would reject every response.
     #[error("response write timeout must be positive")]
     ZeroWriteTimeout,
@@ -120,6 +142,7 @@ mod tests {
             rejection_encode_timeout: Duration::from_millis(250),
             request_read_timeout: Duration::from_secs(1),
             dispatch_timeout: Duration::from_secs(1),
+            method_dispatch_timeouts: Vec::new(),
             response_write_timeout: Duration::from_secs(1),
             drain_timeout: Duration::from_secs(1),
             accept_error_backoff: Duration::from_millis(10),
@@ -146,5 +169,19 @@ mod tests {
         config = valid_config();
         config.dispatch_timeout = Duration::ZERO;
         assert_eq!(config.validate(), Err(ConfigError::ZeroDispatchTimeout));
+
+        config = valid_config();
+        config.method_dispatch_timeouts = vec![("action.prompt_scan".to_owned(), Duration::ZERO)];
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::ZeroMethodDispatchTimeout)
+        );
+
+        config = valid_config();
+        config.method_dispatch_timeouts = vec![(String::new(), Duration::from_secs(35))];
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::EmptyMethodDispatchPrefix)
+        );
     }
 }

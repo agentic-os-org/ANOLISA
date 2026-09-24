@@ -109,35 +109,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use asc_action_runtime::{ActionRuntime, SecurityEventSink, testing::audit_finalizer};
-    use asc_action_types::ActionId;
-    use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
-    use asc_security_events::SecurityEvent;
+    use crate::test_helpers::{
+        NoopSink, RecordingSink, action_service_with_code_executor, action_service_with_sink,
+    };
+    use asc_action_runtime::SecurityEventSink;
 
     use super::*;
 
-    struct NoopSink;
-
-    impl SecurityEventSink for NoopSink {
-        fn write(&self, _: &SecurityEvent) {}
-    }
-
-    #[derive(Default)]
-    struct RecordingSink(std::sync::Mutex<Vec<SecurityEvent>>);
-
-    impl SecurityEventSink for RecordingSink {
-        fn write(&self, event: &SecurityEvent) {
-            self.0.lock().expect("sink lock").push(event.clone());
-        }
-    }
-
     fn with_sink(sink: Arc<dyn SecurityEventSink>) -> CodeScanHandler {
-        CodeScanHandler::new(Arc::new(ActionService::new(ActionRuntime::new(
-            ActionId::CodeScan,
-            CodeScanExecutor,
-            CodeScanAuditProjector,
-            audit_finalizer(sink),
-        ))))
+        CodeScanHandler::new(action_service_with_sink(sink))
     }
 
     fn handler() -> CodeScanHandler {
@@ -248,12 +228,10 @@ mod tests {
     #[test]
     fn unexpected_execution_failure_is_a_safe_core_error_after_finalization() {
         let sink = Arc::new(RecordingSink::default());
-        let handler = CodeScanHandler::new(Arc::new(ActionService::new(ActionRuntime::new(
-            ActionId::CodeScan,
+        let handler = CodeScanHandler::new(action_service_with_code_executor(
+            sink.clone(),
             PanickingExecutor,
-            CodeScanAuditProjector,
-            audit_finalizer(sink.clone()),
-        ))));
+        ));
         let response = handler.handle(
             RequestId::new("test").unwrap(),
             PeerCredentials::new(1001, 1002, 1003),

@@ -5,6 +5,7 @@ mod capabilities;
 mod common;
 mod policy;
 mod scan_code;
+pub(crate) mod scan_prompt;
 mod scope;
 
 use asc_daemon_protocol::DaemonRequest;
@@ -14,6 +15,7 @@ use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
+use self::scan_prompt::ScanPromptCommand;
 use self::scope::ScopeCommand;
 use crate::InputError;
 
@@ -30,6 +32,8 @@ pub(crate) enum Command {
     Binding(BindingCommand),
     /// Scan code for security issues.
     ScanCode(ScanCodeCommand),
+    /// Scan a prompt for injection or jailbreak attempts.
+    ScanPrompt(ScanPromptCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
 }
@@ -41,12 +45,28 @@ impl Command {
             Self::Scope(command) => command.request(),
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
+            // Scan-prompt resolves its own request batch (it may read stdin
+            // or a batch file), so the single-request path refuses it.
+            Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
+        }
+    }
+
+    pub(crate) fn prompt_scan_run(&self) -> Result<scan_prompt::PromptScanPlan, InputError> {
+        match self {
+            Self::ScanPrompt(command) => command.plan().map_err(InputError::from),
+            // The plan resolves stdin and input files before any transport,
+            // so only the scan-prompt command has one.
+            _ => Err(InputError::LocalCommand),
         }
     }
 
     pub(crate) const fn is_scan_code(&self) -> bool {
         matches!(self, Self::ScanCode(_))
+    }
+
+    pub(crate) const fn is_scan_prompt(&self) -> bool {
+        matches!(self, Self::ScanPrompt(_))
     }
 
     /// Returns the command when it runs locally instead of through the daemon.

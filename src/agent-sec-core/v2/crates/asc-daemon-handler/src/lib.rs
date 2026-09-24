@@ -11,7 +11,11 @@
 mod action;
 mod dispatcher;
 mod pap;
+mod prompt_scan;
 mod rejection;
+
+#[cfg(test)]
+mod test_helpers;
 
 pub use dispatcher::DaemonDispatcher;
 pub use rejection::JsonRejectionEncoder;
