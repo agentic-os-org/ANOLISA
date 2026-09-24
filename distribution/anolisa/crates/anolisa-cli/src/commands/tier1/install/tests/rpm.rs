@@ -959,6 +959,37 @@ fn delegated_install_requires_configured_rpm_backend() {
 }
 
 #[test]
+fn dry_run_with_failing_preflight_still_refuses_unconfigured_backend_first() {
+    // Regression for the review finding on #3483: when the rpm backend is
+    // unconfigured AND the DNF preflight would fail, the refusal must be
+    // INVALID_ARGUMENT (BackendNotConfigured), not the preflight's
+    // EXECUTION_FAILED — and no host repository may be queried at all.
+    let (_tmp, ctx) = system_ctx_with_raw_repo(true);
+    let mut fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    fake.preflight_failure_on_call = Some(1);
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("backend config check must precede the failing preflight");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("backend 'rpm' is not configured"),
+        "got: {}",
+        err.reason()
+    );
+    assert_eq!(
+        fake.preflight_calls.get(),
+        0,
+        "preflight must not run without a configured backend"
+    );
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
 fn system_install_without_rpm_tooling_warns_and_exits() {
     // Rpm-family host, system scope, fresh state: with rpm/dnf absent the
     // probe cannot prove the component is not an unobserved system RPM
