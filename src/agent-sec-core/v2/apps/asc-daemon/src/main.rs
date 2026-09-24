@@ -1,4 +1,5 @@
 mod runtime_path;
+mod skill_sec;
 
 use runtime_path::RuntimeLease;
 
@@ -91,6 +92,13 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
+        Ok(service) => service,
+        Err(error) => {
+            report_error(telemetry, &error);
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let repository = Arc::new(ProcessLocalPapRepository::default());
     let (finalizer, event_sinks) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
@@ -101,6 +109,24 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    let skillfs = match prepare_skillfs(skillfs_config) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            report_error(telemetry, &error);
+            return (ExitCode::FAILURE, Some(event_sinks));
+        }
+    };
+    let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
+    if let Some(bridge) = &skillfs {
+        executor = executor.with_environment(bridge.environment());
+    }
+    let actions = asc_daemon::skill_application(finalizer, executor);
+    if let Err(error) =
+        recover_and_start_skillfs(&skill_sec, &actions, skillfs.as_deref(), telemetry)
+    {
+        report_error(telemetry, &error);
+        return (ExitCode::FAILURE, Some(event_sinks));
+    }
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
@@ -122,10 +148,9 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = Arc::new(DaemonDispatcher::new(
-        pap,
-        policy_for_handler,
-        asc_daemon::scan_application(finalizer),
+    let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
+        DaemonDispatcher::new(pap, policy_for_handler, actions),
+        skillfs.clone(),
     ));
     telemetry
         .report("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
@@ -146,15 +171,8 @@ async fn run(
     if let Some(health_task) = health_task {
         health_task.abort();
     }
-    // The UDS service has stopped admission and drained requests. Retain the
-    // blocking join task even on timeout; only process exit may cut off calls.
-    let drain = tokio::task::spawn_blocking(move || {
-        policy_runtime.map_or(Ok(()), ReconciliationRuntime::shutdown)
-    });
-    let exit_code = if matches!(
-        tokio::time::timeout(Duration::from_secs(30), drain).await,
-        Ok(Ok(Ok(())))
-    ) {
+    // UDS has stopped admission and completed its request drain before workers stop.
+    let exit_code = if drain_runtimes(skillfs, policy_runtime).await {
         match result {
             Ok(_) => ExitCode::SUCCESS,
             Err(problem) => {
@@ -163,10 +181,61 @@ async fn run(
             }
         }
     } else {
-        telemetry.report("asc-daemon: reconciliation drain failed or timed out");
+        telemetry.report("asc-daemon: background worker drain failed or timed out");
         ExitCode::FAILURE
     };
     (exit_code, Some(event_sinks))
+}
+
+fn prepare_skillfs(
+    config: Option<asc_daemon::skillfs::SkillFsConfig>,
+) -> Result<Option<Arc<asc_daemon::skillfs::SkillFsBridge>>, asc_daemon::skillfs::SkillFsError> {
+    config
+        .map(asc_daemon::skillfs::SkillFsBridge::prepare)
+        .transpose()
+        .map(|bridge| bridge.map(Arc::new))
+}
+
+fn recover_and_start_skillfs(
+    service: &Arc<asc_capability_skill_sec::SkillSecService>,
+    actions: &Arc<asc_daemon_core::ActionService>,
+    skillfs: Option<&asc_daemon::skillfs::SkillFsBridge>,
+    telemetry: &asc_observability::TelemetryRuntime,
+) -> Result<(), asc_daemon::skillfs::SkillFsError> {
+    let recovery = skill_sec::recover(service, actions).and_then(|()| {
+        if let Some(bridge) = skillfs {
+            bridge
+                .schedule_reconcile(service.managed_skills()?)
+                .map_err(|error| skill_sec::StartupError::Recovery(error.to_string()))?;
+        }
+        Ok(())
+    });
+    if let Err(error) = recovery {
+        report_error(telemetry, &error);
+        telemetry.report(
+            "agent-sec-daemon: SkillSec recovery is degraded; status and administrator retry remain available",
+        );
+    }
+    if let Some(bridge) = skillfs {
+        bridge.start_worker(actions.clone())?;
+    }
+    Ok(())
+}
+
+async fn drain_runtimes(
+    skillfs: Option<Arc<asc_daemon::skillfs::SkillFsBridge>>,
+    policy: Option<ReconciliationRuntime>,
+) -> bool {
+    // Both joins remain tracked by Tokio after timeout; process exit is the final cutoff.
+    let skill =
+        tokio::task::spawn_blocking(move || skillfs.map_or(Ok(()), |bridge| bridge.shutdown()));
+    let policy =
+        tokio::task::spawn_blocking(move || policy.map_or(Ok(()), ReconciliationRuntime::shutdown));
+    let (skill, policy) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(65), skill),
+        tokio::time::timeout(Duration::from_secs(30), policy),
+    );
+    matches!(skill, Ok(Ok(Ok(())))) && matches!(policy, Ok(Ok(Ok(()))))
 }
 
 fn event_finalizer(

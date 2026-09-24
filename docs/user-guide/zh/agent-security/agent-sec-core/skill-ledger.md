@@ -1,5 +1,8 @@
 # Skill Ledger 用户使用手册
 
+本文说明 Python V1 部署和 Agent 集成。Rust V2 核心、系统签名密钥和 root daemon 的使用方式见
+[SkillSec V2 指南](skillsec-v2.md)。
+
 Skill Ledger 是 agent-sec-core 的安全子系统，为 AI Agent Skill 提供文件哈希、扫描结果和密码学签名的版本链，帮助发现 Skill 被篡改或注入恶意内容。默认快速扫描由内置静态扫描器自动执行；可选深度扫描由 Agent 按 `skill-vetter` 协议驱动执行。
 
 ---

@@ -320,12 +320,16 @@ jobs:
           grep -qx 'User=root' /usr/lib/systemd/system/agent-sec-core.service
           grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
           systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
+          test "$(stat -c %a /etc/agent-sec/skillsec.json)" = 600
           echo "=== Verify component manifest ==="
           test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
           echo "=== Assert no V1 Python site-packages ==="
           if [ -e /opt/agent-sec/lib/python3.11/site-packages ]; then
             echo "ERROR: V1 site-packages present in V2 RPM"; exit 1;
           fi
+
+      - name: Verify V2 source installation layout
+        run: V2_BIN_BUILD_DIR=/usr/bin bash src/agent-sec-core/tests/packaging/test-skillsec-install.sh
 
       - name: Verify cosh hook Python imports
         run: |
@@ -377,7 +381,10 @@ jobs:
           daemon_pid="$RUNNER_TEMP/agent-sec-daemon.pid"
           socket="$runtime_dir/daemon.sock"
           chmod 0700 "$runtime_dir"
-          agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
+          printf '{"stateDir":"%s"}\n' "$runtime_dir/skillsec-state" > "$runtime_dir/skillsec.json"
+          chmod 0600 "$runtime_dir/skillsec.json"
+          AGENT_SEC_DATA_DIR="$runtime_dir/audit" agent-sec-daemon --socket "$socket" \
+            --skillsec-config "$runtime_dir/skillsec.json" >"$daemon_log" 2>&1 &
           echo $! >"$daemon_pid"
           echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"

@@ -115,7 +115,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
 		--ignore=tests/e2e/cli/test_scan_pii_e2e.py \
 		--ignore=tests/e2e/cli/test_session_report_e2e.py \
-		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
 		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
@@ -130,11 +129,11 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@#   cli/test_observability_record_*_e2e.py   -> observability record sinks
 	@#   cli/test_scan_pii_e2e.py                 -> PII scanning
 	@#   cli/test_session_report_e2e.py           -> session report
-	@#   cli/test_skill_ledger_analyze_e2e.py     -> skill ledger analyze
 	@#   codex|qoder|qwen hook tests              -> hooks calling the V2 CLI
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
 	@#   prompt-scanner/test_prompt_scanner_e2e.py -> prompt scanning
-	@#   skill-ledger, skill-signing              -> skill ledger and signing
+	@#   skill-ledger, skill-signing              -> retired V1 per-user keys and Agent hooks
+	@# Rust core lifecycle is covered by tests/v2/e2e/test_skillsec_cli_e2e.py.
 	@#   linux-sandbox                            -> privileged container (same as V1)
 
 VENV_PYTHON ?= $(HOME)/.local/lib/anolisa/sec-core/venv/bin/python
@@ -234,6 +233,7 @@ RPM_INSTALL_COMMON_TARGETS := install-cosh-hook install-codex-plugin install-qod
 # V2 Rust binaries are collected here by build-cli-v2 and consumed by
 # install-cli-v2, mirroring the build/install split used for linux-sandbox.
 V2_BIN_BUILD_DIR ?= $(BUILD_DIR)/v2/bin
+V2_CARGO_TARGET_DIR ?= $(abspath v2/target)
 
 define require_single_cli_wheel
 set -- "$(1)"/$(CLI_WHEEL_PATTERN); \
@@ -261,9 +261,10 @@ build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
 
 .PHONY: build-cli-v2
 build-cli-v2: ## Build V2 Rust CLI and daemon binaries
-	cd v2 && cargo build --release --locked --workspace
+	cd v2 && CARGO_TARGET_DIR="$(abspath $(V2_CARGO_TARGET_DIR))" cargo build --release --locked --workspace
 	install -d -m 0755 $(V2_BIN_BUILD_DIR)
-	cp -p v2/target/release/agent-sec-cli v2/target/release/agent-sec-daemon \
+	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-cli" \
+		"$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-daemon" \
 		$(V2_BIN_BUILD_DIR)/
 
 .PHONY: setup
@@ -590,6 +591,9 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 		> $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
+.PHONY: install-core-v2
+install-core-v2: install-cli-v2 install-systemd-system ## Install V2 core binaries and system unit; start explicitly
+
 .PHONY: install-all
 install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install all (user source build)
 
@@ -611,11 +615,17 @@ install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
 
 .PHONY: install-systemd-system
-install-systemd-system: ## Stage V2 system unit
+install-systemd-system: ## Stage V2 system unit and preserve existing settings
 	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)
 	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
 		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	install -d -m 0755 $(DESTDIR)/etc/agent-sec
+	@if [ ! -e "$(DESTDIR)/etc/agent-sec/skillsec.json" ] && \
+		[ ! -L "$(DESTDIR)/etc/agent-sec/skillsec.json" ]; then \
+		install -m 0600 packaging/systemd/skillsec.json \
+			"$(DESTDIR)/etc/agent-sec/skillsec.json"; \
+	fi
 
 # =============================================================================
 # UNINSTALL

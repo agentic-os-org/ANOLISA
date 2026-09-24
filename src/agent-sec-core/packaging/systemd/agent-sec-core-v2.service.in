@@ -1,6 +1,7 @@
 # V2 host service; rendered by install-systemd-system.
 [Unit]
 Description=Agent Security Core V2 daemon
+After=local-fs.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -13,11 +14,15 @@ RuntimeDirectory=agent-sec-core
 RuntimeDirectoryMode=0755
 # Keep the lock inode across stop/restart. The daemon safely reclaims stale sockets.
 RuntimeDirectoryPreserve=yes
-UMask=0007
+UMask=0077
+StateDirectory=agent-sec/skillsec
+StateDirectoryMode=0700
+LogsDirectory=agent-sec
+LogsDirectoryMode=0700
 Restart=on-failure
 RestartSec=2
-# 2s UDS drain + 30s reconciliation join + 1s Tokio shutdown, with margin.
-TimeoutStopSec=45
+# 2s UDS drain + 30s each for SkillFS workers and policy reconciliation + Tokio shutdown.
+TimeoutStopSec=75
 KillSignal=SIGTERM
 KillMode=control-group
 SendSIGKILL=yes
@@ -27,11 +32,13 @@ NoNewPrivileges=true
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 MemoryDenyWriteExecute=true
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
 AmbientCapabilities=
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
+# Skills may live in users' HOME, /tmp, /usr/share or mounted SkillFS trees.
+# These paths must remain visible and writable for scanning, publication and rollback.
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

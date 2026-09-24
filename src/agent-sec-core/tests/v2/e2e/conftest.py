@@ -15,7 +15,9 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -26,8 +28,7 @@ DAEMON_BIN = "agent-sec-daemon"
 # The socket appears shortly after the daemon binds; five seconds is generous
 # for a cold binary start under container I/O without masking a real hang.
 _SOCKET_WAIT_SECONDS = 5.0
-# SIGTERM is cooperative: the daemon drains in-flight work before unlinking the
-# socket, so allow a small margin beyond the daemon's own drain timeout.
+# These process tests shut down idle daemons; worker-drain deadlines have separate coverage.
 _SHUTDOWN_WAIT_SECONDS = 5.0
 _POLL_INTERVAL = 0.02
 
@@ -66,9 +67,15 @@ def run_agent_sec_cli(
 class DaemonHandle:
     """A running ``agent-sec-daemon`` process bound to a known socket path."""
 
-    def __init__(self, process: subprocess.Popen, socket_path: Path) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        socket_path: Path,
+        caller_uid: int | None = None,
+    ) -> None:
         self.process = process
         self.socket_path = socket_path
+        self.caller_uid = caller_uid
 
     def cli(self, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
         """Invokes ``agent-sec-cli --socket <this daemon> <args>``."""
@@ -78,6 +85,9 @@ class DaemonHandle:
             text=True,
             timeout=timeout,
             check=False,
+            user=self.caller_uid,
+            group=self.caller_uid,
+            extra_groups=[] if self.caller_uid is not None else None,
         )
 
     def request(self, *args: str, timeout: float = 30.0) -> dict:
@@ -90,9 +100,37 @@ class DaemonHandle:
         return json.loads(result.stdout)
 
 
+def _daemon_settings(socket_path: Path) -> tuple[Path, dict[str, str]]:
+    """Keep test keys and audit data separate from the installed system daemon."""
+    if os.geteuid() != 0:
+        pytest.fail(
+            "V2 daemon E2E requires container root; clients may drop to an ordinary UID"
+        )
+    config = socket_path.with_suffix(".skillsec.json")
+    config.write_text(json.dumps({"stateDir": str(socket_path.with_suffix(".state"))}))
+    config.chmod(0o600)
+    environment = os.environ.copy()
+    environment["AGENT_SEC_DATA_DIR"] = str(socket_path.with_suffix(".audit"))
+    environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
+    return config, environment
+
+
+@pytest.fixture
+def daemon_settings() -> Callable[[Path], tuple[Path, dict[str, str]]]:
+    """Provide isolated settings for tests that launch the process directly."""
+    return _daemon_settings
+
+
 def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
     """Starts a foreground daemon and waits for a complete protocol response."""
-    argv = [_require(DAEMON_BIN), "--socket", str(socket_path)]
+    config, environment = _daemon_settings(socket_path)
+    argv = [
+        _require(DAEMON_BIN),
+        "--socket",
+        str(socket_path),
+        "--skillsec-config",
+        str(config),
+    ]
     for uid in admin_uids:
         argv += ["--policy-admin-uid", str(uid)]
     process = subprocess.Popen(
@@ -100,6 +138,7 @@ def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
     deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
     while time.monotonic() < deadline:
@@ -191,21 +230,15 @@ def daemon(tmp_path: Path):
 
 
 @pytest.fixture
-def unauthorized_daemon(tmp_path: Path):
-    """Yields a daemon whose admin set excludes the caller.
-
-    Only root is authorized, so a non-root caller acts as a plain local user.
-    Root is unconditionally authorized by design, so this scenario is
-    unreachable when the suite itself runs as root.
-    """
-    if os.getuid() == 0:
-        pytest.skip(
-            "root is unconditionally authorized; cannot exercise denial as root"
-        )
-    socket_path = tmp_path / "daemon.sock"
-    process = _start_daemon(socket_path, [])
-    handle = DaemonHandle(process, socket_path)
-    try:
-        yield handle
-    finally:
-        _terminate(process)
+def unauthorized_daemon() -> Iterator[DaemonHandle]:
+    """Run a root daemon and exercise real kernel-UID denial from an ordinary client."""
+    # A separate public runtime directory avoids changing pytest's private ancestors.
+    with tempfile.TemporaryDirectory(prefix="asc-v2-denied-", dir="/tmp") as directory:
+        runtime = Path(directory)
+        runtime.chmod(0o755)
+        socket_path = runtime / "daemon.sock"
+        process = _start_daemon(socket_path, [])
+        try:
+            yield DaemonHandle(process, socket_path, caller_uid=1001)
+        finally:
+            _terminate(process)

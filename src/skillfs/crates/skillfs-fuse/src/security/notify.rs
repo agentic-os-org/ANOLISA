@@ -438,10 +438,22 @@ impl UnixSocketNotifyClient {
 
 impl NotifyClient for UnixSocketNotifyClient {
     fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
-        if self.auth_secret.is_some() {
-            validate_authenticated_notify_endpoint(&self.socket_path)?;
-        }
+        let expected_peer = if self.auth_secret.is_some() {
+            Some(validate_authenticated_notify_endpoint(&self.socket_path)?)
+        } else {
+            None
+        };
         let mut stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
+        if let Some(expected_uid) = expected_peer {
+            let peer = super::control_socket::get_peer_credentials(&stream).map_err(|error| {
+                endpoint_untrusted_error(format!("cannot verify daemon peer: {error}"))
+            })?;
+            if peer.uid != expected_uid {
+                return Err(endpoint_untrusted_error(
+                    "daemon kernel UID differs from socket owner",
+                ));
+            }
+        }
         stream
             .set_write_timeout(Some(self.timeout))
             .map_err(NotifyError::Write)?;
@@ -525,62 +537,63 @@ impl NotifyClient for UnixSocketNotifyClient {
     }
 }
 
-fn validate_authenticated_notify_endpoint(socket_path: &Path) -> Result<(), NotifyError> {
-    let expected_uid = unsafe { libc::geteuid() };
+fn validate_authenticated_notify_endpoint(socket_path: &Path) -> Result<u32, NotifyError> {
+    let effective_uid = unsafe { libc::geteuid() };
+    let raw = socket_path
+        .to_str()
+        .ok_or_else(|| endpoint_untrusted_error("socket path must be UTF-8"))?;
+    if !socket_path.is_absolute()
+        || raw.contains('\0')
+        || raw.split('/').any(|p| p == "." || p == "..")
+        || raw.contains("//")
+    {
+        return Err(endpoint_untrusted_error(
+            "socket path must be absolute and normalized",
+        ));
+    }
     let parent = socket_path
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
         .ok_or_else(|| endpoint_untrusted_error("socket path has no parent directory"))?;
-    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-        endpoint_stat_error(
-            format!("cannot inspect parent '{}': {error}", parent.display()),
-            &error,
-        )
-    })?;
-    if !parent_metadata.file_type().is_dir() {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' is not a directory",
-            parent.display()
-        )));
+    // Validate ancestors as well as the endpoint. Root-owned sticky /tmp is allowed;
+    // HMAC and the connected kernel peer remain mandatory after this path inspection.
+    for ancestor in parent.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            endpoint_stat_error(
+                format!("cannot inspect parent '{}': {error}", ancestor.display()),
+                &error,
+            )
+        })?;
+        if !metadata.is_dir()
+            || ![0, effective_uid].contains(&metadata.uid())
+            || (metadata.mode() & 0o022 != 0
+                && !(metadata.uid() == 0 && metadata.mode() & 0o1000 != 0))
+        {
+            return Err(endpoint_untrusted_error(
+                "parent has unsafe ownership, type or group or other permissions",
+            ));
+        }
     }
-    if parent_metadata.uid() != expected_uid {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' is not owned by the effective uid",
-            parent.display()
-        )));
-    }
-    if parent_metadata.mode() & 0o077 != 0 {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' must not grant group or other permissions",
-            parent.display()
-        )));
-    }
-
-    let socket_metadata = std::fs::symlink_metadata(socket_path).map_err(|error| {
-        endpoint_stat_error(
-            format!("cannot inspect socket '{}': {error}", socket_path.display()),
-            &error,
-        )
-    })?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| endpoint_stat_error(format!("cannot inspect parent: {error}"), &error))?;
+    let socket_metadata = std::fs::symlink_metadata(socket_path)
+        .map_err(|error| endpoint_stat_error(format!("cannot inspect socket: {error}"), &error))?;
     if !socket_metadata.file_type().is_socket() {
-        return Err(endpoint_untrusted_error(format!(
-            "endpoint '{}' is not a Unix socket",
-            socket_path.display()
-        )));
+        return Err(endpoint_untrusted_error("endpoint is not a Unix socket"));
     }
-    if socket_metadata.uid() != expected_uid {
-        return Err(endpoint_untrusted_error(format!(
-            "socket '{}' is not owned by the effective uid",
-            socket_path.display()
-        )));
+    let private = parent_metadata.uid() == effective_uid
+        && parent_metadata.mode() & 0o077 == 0
+        && socket_metadata.uid() == effective_uid
+        && socket_metadata.mode() & 0o077 == 0;
+    let public = parent_metadata.uid() == 0
+        && parent_metadata.mode() & 0o777 == 0o755
+        && socket_metadata.uid() == 0
+        && socket_metadata.mode() & 0o777 == 0o666;
+    if !private && !public {
+        return Err(endpoint_untrusted_error(
+            "invalid endpoint owner or group or other permissions; expected private socket or root-owned 0755/0666 daemon endpoint",
+        ));
     }
-    if socket_metadata.mode() & 0o077 != 0 {
-        return Err(endpoint_untrusted_error(format!(
-            "socket '{}' must not grant group or other permissions",
-            socket_path.display()
-        )));
-    }
-    Ok(())
+    Ok(socket_metadata.uid())
 }
 
 /// A `stat` failure on the parent directory or the socket itself.
@@ -4539,5 +4552,36 @@ mod tests {
         );
 
         ctrl.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod public_endpoint_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn public_endpoint_requires_root_owner_and_no_writable_or_symlink_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let result = validate_authenticated_notify_endpoint(&socket);
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(result.unwrap(), 0);
+        } else {
+            assert!(matches!(result, Err(NotifyError::EndpointUntrusted(_))));
+        }
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_authenticated_notify_endpoint(&socket).is_err());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = tempfile::tempdir().unwrap();
+        symlink(directory.path(), alias.path().join("linked-parent")).unwrap();
+        assert!(
+            validate_authenticated_notify_endpoint(&alias.path().join("linked-parent/daemon.sock"))
+                .is_err()
+        );
     }
 }

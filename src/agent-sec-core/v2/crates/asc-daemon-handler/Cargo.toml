@@ -22,9 +22,15 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+asc-capability-skill-sec = { workspace = true }
 asc-capability-code-scan.workspace = true
 asc-security-events.workspace = true
 asc-action-runtime = { workspace = true, features = ["testing"] }
+
+tempfile = { workspace = true }
+asc-pap = { workspace = true }
+asc-pap-repository-memory = { workspace = true }
+asc-policy-engine = { workspace = true }
 
 [lints]
 workspace = true

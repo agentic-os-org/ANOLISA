@@ -8,11 +8,11 @@
 //! that the daemon scans and writes activation state through.
 //!
 //! SkillFS creates the backing root (optionally as a bind mount) before the
-//! FUSE over-mount becomes active.  When a bind mount is created, it is
-//! immediately marked `MS_PRIVATE | MS_REC` so that host mount-propagation
-//! events — most critically the in-place FUSE over-mount — are **not**
-//! propagated into the backing root.  Without this isolation the daemon
-//! would see the FUSE hidden view instead of the real source tree.
+//! FUSE over-mount becomes active. The bind is detached and made private
+//! before publication, so copies propagated to an already running daemon
+//! cannot inherit the source mount's propagation group. Making only the
+//! published local copy private would leave those remote copies vulnerable
+//! to the in-place FUSE over-mount hiding the real source tree.
 //!
 //! Daemon live-source operations — activation bootstrap, reload, watching,
 //! and N3 protocol event `skillDir` — use the backing root path. Socket notify
@@ -600,22 +600,42 @@ impl LedgerBackingRoot {
         }
     }
 
-    /// Perform a `mount --bind` from `source` to `target` via the libc
-    /// `mount(2)` syscall.
+    // Isolate the detached bind before any copy reaches another mount namespace.
     #[cfg(target_os = "linux")]
     fn do_bind_mount(source: &Path, target: &Path) -> std::io::Result<()> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
         let src_c = CString::new(source.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
         let tgt_c = CString::new(target.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
 
-        let ret = unsafe {
-            libc::mount(
+        // SAFETY: src_c remains a valid C string; the flags request a new mount fd.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
                 src_c.as_ptr(),
+                libc::OPEN_TREE_CLONE | libc::OPEN_TREE_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful open_tree returns an owned int fd, even through syscall.
+        let mount = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+        Self::do_make_private(Path::new(&format!("/proc/self/fd/{}", mount.as_raw_fd())))?;
+
+        // SAFETY: the owned mount fd and target C string remain valid for this call.
+        // Dropping the fd also destroys an unpublished mount on any failure above/below.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_move_mount,
+                mount.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_FDCWD,
                 tgt_c.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND,
-                std::ptr::null(),
+                libc::MOVE_MOUNT_F_EMPTY_PATH,
             )
         };
         if ret == 0 {

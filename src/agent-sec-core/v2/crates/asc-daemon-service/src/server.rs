@@ -4,7 +4,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -327,21 +327,22 @@ async fn process_connection(
 }
 
 async fn process_admitted_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     peer: PeerCredentials,
     config: &ServiceConfig,
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
 ) -> ConnectionOutcome {
+    let mut reader = BufReader::new(stream);
     let frame = match timeout(
         config.request_read_timeout,
-        read_request_frame(&mut stream, config.max_request_frame_bytes),
+        read_request_frame(&mut reader, config.max_request_frame_bytes),
     )
     .await
     {
         Err(_) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::RequestReadTimeout,
                 config,
@@ -351,7 +352,7 @@ async fn process_admitted_connection(
         }
         Ok(Err(FrameReadError::TooLarge)) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::RequestFrameTooLarge,
                 config,
@@ -361,7 +362,7 @@ async fn process_admitted_connection(
         }
         Ok(Err(FrameReadError::Empty)) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::EmptyRequest,
                 config,
@@ -373,7 +374,23 @@ async fn process_admitted_connection(
         Ok(Ok(frame)) => frame,
     };
 
-    let control = DispatchControl::new(std::time::Instant::now() + config.dispatch_timeout);
+    match dispatcher.start_session(peer, &frame) {
+        Ok(Some((session, step))) => return process_session(reader, session, step).await,
+        Err(_) => return ConnectionOutcome::RejectedClose,
+        Ok(None) => {}
+    }
+    let stream = reader.into_inner();
+
+    let dispatch_timeout =
+        dispatcher
+            .dispatch_timeout(&frame)
+            .map_or(config.dispatch_timeout, |budget| {
+                budget.clamp(
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_secs(120),
+                )
+            });
+    let control = DispatchControl::new(std::time::Instant::now() + dispatch_timeout);
     let request = DispatchRequest {
         peer,
         payload: frame,
@@ -384,7 +401,7 @@ async fn process_admitted_connection(
         request,
         control,
         config.max_response_frame_bytes,
-        config.dispatch_timeout,
+        dispatch_timeout,
     )
     .await
     {
@@ -395,6 +412,43 @@ async fn process_admitted_connection(
         DispatchAttempt::Reject(reason) => {
             reject_on_stream(stream, peer, reason, config, rejection_encoder).await
         }
+    }
+}
+
+async fn process_session(
+    mut reader: BufReader<UnixStream>,
+    mut session: Box<dyn crate::ConnectionSession>,
+    mut step: crate::SessionStep,
+) -> ConnectionOutcome {
+    // Authentication never borrows the potentially long capability execution budget.
+    let exchange = async {
+        for _ in 0..4 {
+            if step.responses.len() > 2 {
+                return Err(());
+            }
+            for response in step.responses {
+                let mut buffer = BoundedResponseBuffer::new(64 * 1024);
+                std::io::Write::write_all(&mut buffer, &response).map_err(|_| ())?;
+                reader
+                    .get_mut()
+                    .write_all(&buffer.finish_send().map_err(|_| ())?)
+                    .await
+                    .map_err(|_| ())?;
+            }
+            if step.complete {
+                reader.get_mut().shutdown().await.map_err(|_| ())?;
+                return Ok(());
+            }
+            let payload = read_request_frame(&mut reader, 64 * 1024)
+                .await
+                .map_err(|_| ())?;
+            step = session.advance(&payload).map_err(|_| ())?;
+        }
+        Err(())
+    };
+    match timeout(std::time::Duration::from_secs(5), exchange).await {
+        Ok(Ok(())) => ConnectionOutcome::DispatchedResponse,
+        _ => ConnectionOutcome::RejectedClose,
     }
 }
 

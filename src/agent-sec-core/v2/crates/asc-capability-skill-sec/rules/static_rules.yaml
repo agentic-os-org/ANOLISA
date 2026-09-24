@@ -1,0 +1,93 @@
+rules:
+  - id: prompt-override
+    target: skill
+    severity: high
+    category: prompt_injection
+    title: Prompt override instruction
+    message: Skill instructions attempt to override prior, system, or developer instructions.
+    remediation: Remove instructions that ask the agent to ignore higher-priority instructions.
+    pattern: "\\b(ignore|disregard|forget|override)\\b.{0,120}\\b(previous|prior|system|developer)\\b.{0,80}\\binstruction"
+
+  - id: prompt-secret-exfiltration
+    target: skill
+    severity: high
+    category: prompt_injection
+    title: Secret or prompt exfiltration
+    message: Skill instructions appear to request secrets, credentials, or hidden prompts.
+    remediation: Remove credential and prompt disclosure requests from Skill instructions.
+    pattern: >-
+      (?:^|[.;!?][ \t]*)(?:(?:(?!\b(?:do[ \t]+not|don't|never|must[ \t]+not|should[ \t]+not)\b)[^.;!?\n]){0,160}?|[^.;!?\n]{0,160}?(?:\b(?:but|then)\b|\band[ \t]+instead\b|,[ \t]*(?:just|yet)\b)(?:(?!\b(?:do[ \t]+not|don't|never|must[ \t]+not|should[ \t]+not)\b)[^.;!?\n]){0,80}?)\b(?:reveal|print|dump|exfiltrate|send|upload)\b[^.;!?\n]{0,120}(?<!no )(?<!no valid )(?<!without )(?<!without a )(?<!without an )\b(?:system prompts?|developer messages?|secrets?|credentials?|api keys?|passwords?|(?<!random )(?<!randomly generated )(?<!test )(?<!dummy )(?<!sample )tokens?)\b
+
+  - id: hidden-html-instruction
+    target: skill
+    severity: medium
+    category: prompt_injection
+    title: Hidden HTML instruction
+    message: Skill instructions contain hidden HTML comments with instruction-like text.
+    remediation: Remove hidden instruction comments from SKILL.md.
+    pattern: "<!--(?s:.){0,400}\\b(ignore|instruction|system|developer|secret|credential)\\b(?s:.){0,400}-->"
+
+  - id: invisible-unicode
+    target: all_text
+    severity: medium
+    category: obfuscation
+    title: Invisible Unicode characters
+    message: File contains invisible Unicode characters that can hide instructions.
+    remediation: Remove invisible control characters unless they are strictly required.
+    pattern: "[\\u200b\\u200c\\u200d\\ufeff\\u2060]"
+
+  - id: shell-download-exec
+    target: code
+    severity: high
+    category: dangerous_script
+    title: Download and execute shell command
+    message: Script downloads remote content and executes it directly.
+    remediation: Download to a file, verify integrity, and avoid pipe-to-shell execution.
+    pattern: "\\b(curl|wget)\\b[^\\n|;]*[|>]\\s*(sh|bash|zsh|python|python3)\\b|\\b(bash|sh|zsh)\\s+<\\s*\\(\\s*(curl|wget)\\b"
+
+  - id: shell-recursive-delete
+    target: code
+    severity: high
+    category: destructive_action
+    title: Dangerous recursive delete
+    message: Script contains a broad recursive delete command.
+    remediation: Restrict deletion to explicit safe paths and add safeguards.
+    pattern: "\\brm\\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\\s+(/|~|\\$HOME|\\$\\{HOME\\}|\\.\\.)"
+
+  - id: dynamic-code-execution
+    target: code
+    severity: high
+    category: dangerous_script
+    title: Dynamic code execution
+    message: Code dynamically evaluates or executes generated content.
+    remediation: Replace dynamic execution with explicit safe operations.
+    pattern: >-
+      (?:^|[^.\s])[ \t]*\b(?:eval|exec)[ \t]*\(|\b(?:(?:builtins|__builtins__)[ \t]*\.[ \t]*(?:eval|exec)|(?:window|global|globalThis)[ \t]*\.[ \t]*eval|(?:child_process|childProcess)[ \t]*\.[ \t]*exec(?:Sync)?|require[ \t]*\([ \t]*['"](?:node:)?child_process['"][ \t]*\)[ \t]*\.[ \t]*exec(?:Sync)?)[ \t]*\(|\bos\.system[ \t]*\(|\bsubprocess\.(Popen|run|call|check_output)[ \t]*\([^\n]{0,160}\bshell[ \t]*=[ \t]*True
+
+  - id: persistence-change
+    target: code
+    severity: high
+    category: persistence
+    title: Persistence or service modification
+    message: Script appears to create persistence or modify system services.
+    remediation: Remove persistence behavior from Skill helper scripts.
+    pattern: >-
+      \b(?:crontab\b|launchctl\s+load|schtasks\s+/create|rc-update\s+add)|(?m:^[ \t]*(?!#)(?:(?:(?:(?:[^"'\\#\n]|\\.)|"(?:\\.|[^"\\])*"|'[^']*')*?(?:;|&&|\|\||\||&|`|[)}]|(?<![=])[({])[ \t]*|(?:(?:[^"'\\#\n]|\\.)|"(?:\\.|[^"\\])*"|'[^']*')*?"(?:\\.|[^"\\])*?(?:\$\(|`)[ \t]*|(?:sudo[ \t]+)?(?:/usr/bin/|/bin/)?(?:bash|sh|zsh|dash|ksh)[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+["'][ \t]*)?(?:(?:if|elif|then|do)[ \t]+)?(?:![ \t]+)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"\\])*"|'[^']*'|(?!["'])[^ \t;|&]+)[ \t]+)*(?:(?:command|exec|as_root)[ \t]+)?(?:sudo(?:[ \t]+(?:(?:-u|-g|-h|-p|--user|--group|--host|--prompt)[ \t]+[^ \t;|&]+|--(?:user|group|host|prompt)=[^ \t;|&]+|--|-{1,2}[A-Za-z][^ \t;|&]*))*[ \t]+)?(?:env[ \t]+(?:(?:--|-{1,2}[A-Za-z][^ \t;|&]*|[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"\\])*"|'[^']*'|(?!["'])[^ \t;|&]+))[ \t]+)*)?(?:sudo(?:[ \t]+(?:(?:-u|-g|-h|-p|--user|--group|--host|--prompt)[ \t]+[^ \t;|&]+|--(?:user|group|host|prompt)=[^ \t;|&]+|--|-{1,2}[A-Za-z][^ \t;|&]*))*[ \t]+)?(?:(?:/usr/bin/|/bin/)?(?:bash|sh|zsh|dash|ksh)[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+["'][ \t]*)?(?:/usr/bin/|/bin/)?systemctl[ \t]+(?:-{1,2}[A-Za-z][^ \t;|&]*[ \t]+)*enable\b))
+
+  - id: sensitive-file-access
+    target: code
+    severity: medium
+    category: credential_access
+    title: Sensitive file access
+    message: Code references sensitive local credential or system files.
+    remediation: Avoid reading user credentials, SSH keys, shell history, or system password files.
+    pattern: "(/etc/shadow|/etc/passwd|\\.ssh/id_(rsa|ed25519)|\\.aws/credentials|\\.netrc|\\.bash_history|\\.zsh_history)"
+
+  - id: encoded-payload
+    target: code
+    severity: medium
+    category: obfuscation
+    title: Encoded payload execution
+    message: Code decodes base64 or hex content near execution primitives.
+    remediation: Store reviewed source directly instead of decoding executable payloads at runtime.
+    pattern: "(base64\\s+(-d|--decode)|base64\\.b64decode|bytes\\.fromhex|xxd\\s+-r).{0,200}(eval|exec|bash|sh|python|subprocess|os\\.system)"

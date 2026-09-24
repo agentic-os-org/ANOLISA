@@ -1,0 +1,28 @@
+[package]
+name = "asc-capability-skill-sec"
+description = "Skill content integrity, scanning, version records and activation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-action-runtime = { workspace = true }
+asc-action-types = { workspace = true }
+asc-capability-code-scan = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+fancy-regex = { workspace = true }
+ring = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+yaml-rust2 = { workspace = true }
+
+[lints]
+workspace = true

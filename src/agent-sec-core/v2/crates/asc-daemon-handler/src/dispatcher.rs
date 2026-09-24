@@ -15,6 +15,7 @@ use crate::pap::PapHandler;
 pub struct DaemonDispatcher {
     pap: PapHandler,
     code_scan: CodeScanHandler,
+    skill_sec: crate::skill_sec::SkillSecHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -30,7 +31,8 @@ impl DaemonDispatcher {
     ) -> Self {
         Self {
             pap: PapHandler::new(application),
-            code_scan: CodeScanHandler::new(actions),
+            code_scan: CodeScanHandler::new(actions.clone()),
+            skill_sec: crate::skill_sec::SkillSecHandler::new(actions),
             principal_policy,
         }
     }
@@ -97,6 +99,10 @@ impl DaemonDispatcher {
                     .handle(request_id, &principal, method, request.params)
             }
             MethodId::Action(method) => match method {
+                method::ActionMethod::SkillSec => {
+                    self.skill_sec
+                        .handle(request_id, peer, control, request.params)
+                }
                 method::ActionMethod::CodeScan => {
                     self.code_scan
                         .handle(request_id, peer, control, request.params)
@@ -117,6 +123,20 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 }
 
 impl RequestDispatcher for DaemonDispatcher {
+    fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
+        let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        if request.method != method::ACTION_SKILL_SEC {
+            return None;
+        }
+        let millis = request
+            .params
+            .get("timeoutMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(60_000)
+            .clamp(1, 120_000);
+        Some(std::time::Duration::from_millis(millis))
+    }
+
     fn dispatch(
         &self,
         request: DispatchRequest,

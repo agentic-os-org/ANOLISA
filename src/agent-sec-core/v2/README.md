@@ -1,4 +1,9 @@
-# AgentSecCore V2 Policy and daemon foundations
+# AgentSecCore V2 Policy, SkillSec and daemon
+
+SkillSec supplies scanning, system-key integrity, versions and activation through the Rust
+`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+and [migration/acceptance boundaries](../docs/design/SKILL_SEC_PHASE_ONE.md).
+Agent Hook migration is separate; the core never calls Python Ledger.
 
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, product Policy-template
@@ -17,10 +22,11 @@ for retry, ownership and staged acceptance.
 Start the daemon with background Binding delivery:
 
 ```sh
-asc-daemon serve --socket /run/agent-sec-core/daemon.sock
+sudo agent-sec-daemon serve --socket /run/agent-sec-core/daemon.sock
 ```
 
-The daemon entrypoint starts the reconciliation service. Its `reconciliation.rs`
+Create the root-owned runtime directory first (0755 for local clients). The daemon entrypoint
+starts the reconciliation service. Its `reconciliation.rs`
 composition module registers `AgentSightClientFactory::default()` without reading
 credentials or contacting the PEP. Each due attempt opens its own Client and reuses
 it through preparation and create/update, or through deletion for a saved route.

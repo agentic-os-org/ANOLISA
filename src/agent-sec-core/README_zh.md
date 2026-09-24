@@ -38,16 +38,23 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
 | **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
 
-后台守护进程 `agent-sec-daemon`（以 `agent-sec-core.service` systemd **user** unit
+V1 后台守护进程 `agent-sec-daemon`（以 `agent-sec-core.service` systemd **user** unit
 形式发布）提供健康检查、SkillFS 通知和安全查询 RPC。Prompt Scanner 通过 Rust 扩展
 在进程内执行；daemon 不会预加载 Prompt Scanner 模型，也不提供扫描 RPC。
 
-## V2 Policy CLI
+## V2 SkillSec 与 Policy CLI
+
+Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
+人工决策、回滚及 SkillFS 激活由一个 root daemon 统一处理。所有本地用户均可管理所有已注册 Skill，
+仅 root 可以更换签名密钥。基线初始化与批量扫描、检查按调用者 XDG/HOME 规则发现 ANOLISA
+用户安装的 Skill，同时保留已有的系统及 Agent 目录发现。配置、命令以及单独的部署和 Agent Hook 验收边界见
+[V2 核心指南](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)。
+不导入 V1 历史及用户密钥；本 PR 保留现有 Agent Hook 实现。
 
 源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供全部 15 条 Policy、Scope、Binding
 CRUD 命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
 和 [V2 workspace](v2/README.md)。当前 PAP 状态仅在进程内存中，Binding 受理不代表策略已生效。
-非 root 开发与 E2E 可通过 daemon 的 `--policy-admin-uid <UID>` 配置管理员；默认仍只授权 root。
+可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游

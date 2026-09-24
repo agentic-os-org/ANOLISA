@@ -144,6 +144,12 @@ fn invalid_and_ambiguous_options_are_usage_errors() {
         let error = Cli::parse_from(args.clone()).unwrap_err();
         assert!(error.use_stderr(), "{args:?} unexpectedly produced help");
     }
+    assert_eq!(
+        Cli::parse_from(["agent-sec-cli", "policy", "list"])
+            .unwrap()
+            .socket(),
+        Some(std::path::Path::new("/run/agent-sec-core/daemon.sock"))
+    );
     assert!(
         Cli::parse_from([
             "agent-sec-cli",
@@ -404,4 +410,68 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
         }
     }
     assert!(!socket.exists());
+}
+
+#[test]
+fn skill_sec_deadline_override_does_not_change_other_commands() {
+    use std::time::Duration;
+
+    let cli = |args: &[&str]| {
+        Cli::parse_from(
+            ["agent-sec-cli", "--socket", "/run/asc.sock"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .unwrap()
+    };
+    let skill = cli(&["skill-ledger", "status"]);
+    assert_eq!(skill.timeout(), Duration::from_secs(60));
+    assert_eq!(skill.request().unwrap().params["timeoutMs"], 60_000);
+    let policy = cli(&["policy", "list"]);
+    assert_eq!(policy.timeout(), Duration::from_secs(5));
+    assert!(policy.request().unwrap().params.get("timeoutMs").is_none());
+    let scan = cli(&["scan-code", "--code", "echo safe"]);
+    assert_eq!(scan.timeout(), Duration::from_secs(5));
+    let explicit = cli(&["--timeout-ms", "8000", "skill-ledger", "status"]);
+    assert_eq!(explicit.timeout(), Duration::from_secs(8));
+    assert_eq!(explicit.request().unwrap().params["timeoutMs"], 8000);
+    let capped = cli(&["--timeout-ms", "180000", "skill-ledger", "status"]);
+    assert_eq!(capped.timeout(), Duration::from_secs(180));
+    assert_eq!(capped.request().unwrap().params["timeoutMs"], 120_000);
+}
+
+#[test]
+fn skill_sec_uses_global_trace_context_without_business_fields() {
+    let cli = Cli::parse_from([
+        "agent-sec-cli",
+        "--trace-context",
+        r#"{"traceId":"skill-call","sessionId":"skill-session","agentName":"skill-agent"}"#,
+        "--socket",
+        "/run/asc.sock",
+        "skill-ledger",
+        "status",
+    ])
+    .unwrap();
+    let request = cli.request().unwrap();
+    assert_eq!(
+        request.params,
+        json!({"command":"status","verbose":false,"timeoutMs":60000})
+    );
+    assert!(request.trace_context.is_none());
+    assert!(request.compatibility.is_none());
+    // The common client injects the active Context when transmitting; business DTOs stay separate.
+    let _attached = cli.context().attach();
+    let snapshot = asc_observability::snapshot();
+    assert_eq!(
+        snapshot.compatibility.trace_id.as_deref(),
+        Some("skill-call")
+    );
+    assert_eq!(
+        snapshot.agent.get("session_id").map(String::as_str),
+        Some("skill-session")
+    );
+    assert_eq!(
+        snapshot.agent.get("agent_name").map(String::as_str),
+        Some("skill-agent")
+    );
 }

@@ -6,6 +6,7 @@ mod common;
 mod policy;
 mod scan_code;
 mod scope;
+mod skill_ledger;
 
 use asc_daemon_protocol::DaemonRequest;
 use clap::Subcommand;
@@ -30,6 +31,9 @@ pub(crate) enum Command {
     Binding(BindingCommand),
     /// Scan code for security issues.
     ScanCode(ScanCodeCommand),
+    /// Manage Skill scanning, signatures, history and activation.
+    #[command(subcommand)]
+    SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
 }
@@ -42,7 +46,19 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
+            Self::SkillLedger(command) => command.request(),
         }
+    }
+
+    pub(crate) const fn is_skill_sec(&self) -> bool {
+        matches!(self, Self::SkillLedger(_))
+    }
+
+    pub(crate) fn after_success(&self, request: &DaemonRequest) -> Result<(), InputError> {
+        if let Self::SkillLedger(command) = self {
+            command.after_success(request)?;
+        }
+        Ok(())
     }
 
     pub(crate) const fn is_scan_code(&self) -> bool {

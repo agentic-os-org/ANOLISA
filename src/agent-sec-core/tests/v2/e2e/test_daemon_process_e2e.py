@@ -20,16 +20,30 @@ import pytest
 def test_bound_socket_allows_ordinary_users(daemon):
     mode = stat.S_IMODE(os.stat(daemon.socket_path).st_mode)
     assert mode == 0o666, f"socket mode is {oct(mode)}, expected 0o666"
+    assert os.stat(daemon.socket_path).st_uid == 0
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")
-def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(daemon_bin):
+def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(
+    daemon_bin, daemon_settings
+):
     client = pwd.getpwnam("nobody")
     with tempfile.TemporaryDirectory(prefix="asc-public-uds-") as directory:
         runtime = Path(directory)
         runtime.chmod(0o755)
         endpoint = runtime / "daemon.sock"
-        process = subprocess.Popen([daemon_bin, "serve", "--socket", str(endpoint)])
+        config, environment = daemon_settings(endpoint)
+        process = subprocess.Popen(
+            [
+                daemon_bin,
+                "serve",
+                "--socket",
+                str(endpoint),
+                "--skillsec-config",
+                str(config),
+            ],
+            env=environment,
+        )
         try:
             deadline = time.monotonic() + 5
             while (
@@ -265,15 +279,23 @@ def test_dproc_012_existing_socket_is_not_blindly_unlinked(daemon_bin, tmp_path,
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_socket_environment_and_explicit_precedence(daemon_bin, tmp_path, explicit):
+def test_socket_environment_and_explicit_precedence(
+    daemon_bin, tmp_path, explicit, daemon_settings
+):
     endpoint = tmp_path / "env.sock"
-    env = dict(
-        os.environ,
-        AGENT_SEC_DAEMON_SOCKET="relative.sock" if explicit else str(endpoint),
-    )
+    config, env = daemon_settings(endpoint)
+    env["AGENT_SEC_DAEMON_SOCKET"] = "relative.sock" if explicit else str(endpoint)
     socket_args = ["--socket", str(endpoint)] if explicit else []
     process = subprocess.Popen(
-        [daemon_bin, "serve", *socket_args, "--policy-admin-uid", str(os.getuid())],
+        [
+            daemon_bin,
+            "serve",
+            *socket_args,
+            "--policy-admin-uid",
+            str(os.getuid()),
+            "--skillsec-config",
+            str(config),
+        ],
         env=env,
     )
     try:

@@ -4,6 +4,9 @@
 
 AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, system hardening, and sandbox isolation.
 
+For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
+The release installation and Agent integrations below describe V1.
+
 ## Overview
 
 | Module | Description |

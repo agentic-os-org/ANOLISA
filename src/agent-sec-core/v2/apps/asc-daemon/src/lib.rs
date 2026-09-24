@@ -8,7 +8,7 @@
 
 mod actions;
 mod bootstrap;
-pub use actions::scan_application;
+pub use actions::{scan_application, skill_application, skill_task_scope};
 mod cli;
 mod reconciliation;
 mod runtime;
@@ -21,3 +21,6 @@ pub use reconciliation::{
 };
 pub use runtime::{RuntimeError, run_with_shutdown_timeout};
 pub use signals::{ProcessSignals, SignalError};
+
+/// Authenticated `SkillFS` integration owned by the daemon process.
+pub mod skillfs;

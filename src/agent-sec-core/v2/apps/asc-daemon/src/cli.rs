@@ -13,6 +13,7 @@ Runs the AgentSecCore V2 UDS service with PAP administration methods.\n\
 Without --socket, uses nonempty $AGENT_SEC_DAEMON_SOCKET or /run/agent-sec-core/daemon.sock.\n\
 Root is always authorized. --policy-admin-uid adds an administrator at startup.\n\
 Repeat this option for multiple UIDs; omitted means root only.\n\
+--skillsec-config selects a root-owned JSON configuration file.\n\
 PAP state is process-local until durable Repository integration lands.\n";
 
 /// Parsed command-line configuration for the daemon process.
@@ -22,6 +23,8 @@ pub struct Cli {
     pub bootstrap: BootstrapConfig,
     /// Additional administrator UIDs selected by the daemon deployment operator.
     pub policy_admin_uids: BTreeSet<u32>,
+    /// Optional root-owned `SkillSec` settings file.
+    pub skillsec_config: Option<PathBuf>,
 }
 
 /// Successful command-line parse outcome.
@@ -65,6 +68,7 @@ impl Cli {
         let mut socket_path = None;
         let mut command_seen = false;
         let mut policy_admin_uids = BTreeSet::new();
+        let mut skillsec_config = None;
 
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new("--help") || argument == OsStr::new("-h") {
@@ -83,6 +87,17 @@ impl Cli {
                     return Err(CliError::MissingSocketValue);
                 }
                 socket_path = Some(PathBuf::from(value));
+                continue;
+            }
+            if argument == OsStr::new("--skillsec-config") {
+                let path = arguments
+                    .next()
+                    .map(PathBuf::from)
+                    .ok_or(CliError::InvalidSkillSecConfig)?;
+                if skillsec_config.is_some() || !path.is_absolute() {
+                    return Err(CliError::InvalidSkillSecConfig);
+                }
+                skillsec_config = Some(path);
                 continue;
             }
             let inline_uid = argument
@@ -131,6 +146,7 @@ impl Cli {
         Ok(ParseOutcome::Serve(Self {
             bootstrap,
             policy_admin_uids,
+            skillsec_config,
         }))
     }
 }
@@ -138,6 +154,9 @@ impl Cli {
 /// Invalid daemon command-line input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CliError {
+    /// Settings must be an explicit absolute path and supplied at most once.
+    #[error("--skillsec-config requires one absolute path")]
+    InvalidSkillSecConfig,
     /// A startup administrator option was not followed by a UID.
     #[error("--policy-admin-uid requires a UID")]
     MissingAdminUid,

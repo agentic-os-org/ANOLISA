@@ -40,17 +40,26 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
 | **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
 
-The background daemon (`agent-sec-daemon`, shipped as the `agent-sec-core.service`
+The V1 background daemon (`agent-sec-daemon`, shipped as the `agent-sec-core.service`
 systemd **user** unit) provides health, SkillFS notification, and security-query
 RPCs. Prompt scanning runs in-process through the Rust extension; the daemon does
 not preload Prompt Scanner models or serve scan RPCs.
 
-## V2 Policy CLI
+## V2 SkillSec and Policy CLI
+
+The Rust V2 core adds **SkillSec** behind the existing `skill-ledger` command: local scanners,
+system-key signing, version history, decisions, rollback and SkillFS activation share one root
+daemon. All local users may manage all registered Skills; only root may rotate the signing key.
+Baseline initialization and batch scan/check discover ANOLISA user-installed Skills using the
+caller's XDG/HOME layout, alongside existing system and Agent locations.
+See the [V2 core guide](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+for configuration, commands and the separate deployment/Agent Hook acceptance boundaries.
+V1 history and per-user keys are not imported. Existing Agent Hooks remain unchanged in this PR.
 
 The source-built Rust `agent-sec-cli` provides all 15 Policy, Scope and Binding CRUD
 commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
 and [V2 workspace](v2/README.md). PAP state is currently process-local; Binding
-acceptance does not imply enforcement. For non-root development and E2E, configure
+acceptance does not imply enforcement. To authorize non-root Policy CLI callers, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.

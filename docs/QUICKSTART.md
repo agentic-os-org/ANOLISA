@@ -49,6 +49,7 @@ macOS 11+ (arm64 / x86_64), use `--backend raw --install-mode user` instead.
 |------|------------|
 | Observe Agent activity and Token usage | [AgentSight](user-guide/en/agent-observability/agentsight/README.md) |
 | Add security enforcement | [Agent Sec Core](user-guide/en/agent-security/agent-sec-core/QUICKSTART.md) |
+| Evaluate the Rust SkillSec core | [SkillSec V2](user-guide/en/agent-security/agent-sec-core/skillsec-v2.md) |
 | Create workspace recovery points | [ws-ckpt](user-guide/en/runtime/ws-ckpt.md) |
 | Mount Skills on demand | [SkillFS](user-guide/en/runtime/skillfs.md) |
 | Reuse context across sessions | [Agent Memory](user-guide/en/token-saving/agent-memory.md) |

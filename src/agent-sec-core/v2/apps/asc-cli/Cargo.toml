@@ -13,6 +13,9 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+asc-action-types = { workspace = true }
+dirs = { workspace = true }
+rustix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }
 tracing.workspace = true
 asc-daemon-client = { workspace = true }
@@ -26,6 +29,8 @@ thiserror = { workspace = true }
 unicode-properties = { workspace = true }
 
 [dev-dependencies]
+asc-capability-skill-sec = { workspace = true }
+asc-security-events = { workspace = true }
 asc-action-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true }
 asc-daemon = { workspace = true }
