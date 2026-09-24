@@ -16,6 +16,7 @@ use crate::raw_input::ZshPathPromptBuffering;
 use super::adapter::{BashAdapter, ShellAdapter, ZshAdapter};
 use super::auth::{generate_marker_token, marker_script_with_token};
 use super::lifecycle::push_shell_started_event;
+use super::login_effect::LoginEffectSource;
 use super::model::ShellHostConfig;
 use super::osc::OscParser;
 
@@ -283,6 +284,9 @@ fn start_shell_session(
     // Build all fallible session-owned storage before spawning the shell so
     // an unwritable spool cannot leave an unmanaged child process behind.
     let child = command.spawn()?;
+    config
+        .login_effect_guard()
+        .mark_possible(LoginEffectSource::ManagedShell);
     push_shell_started_event(&mut parser, config);
 
     Ok(PtySession {
@@ -443,7 +447,39 @@ fn cleanup_expired_output_refs_at(
 
 #[cfg(test)]
 mod tests {
+    use super::super::login_effect::LoginEffectSource;
     use super::*;
+
+    #[test]
+    fn failed_shell_spawn_keeps_login_effects_armed() {
+        let dir = tempfile::tempdir().expect("create shell work directory");
+        let mut config = ShellHostConfig::new("spawn-failure", dir.path());
+        let effects = config.login_effect_guard();
+        config.integration = crate::shell_host::ShellIntegration::Native;
+        config.native_mode = false;
+        config.bash_path = "/definitely/missing/cosh-shell".to_string();
+
+        let result = start_bash_session(&config);
+
+        assert!(result.is_err());
+        assert!(!effects.may_have_started());
+    }
+
+    #[test]
+    fn successful_shell_spawn_marks_managed_shell_effect() {
+        let dir = tempfile::tempdir().expect("create shell work directory");
+        let mut config = ShellHostConfig::new("spawn-success", dir.path());
+        let effects = config.login_effect_guard();
+        config.integration = crate::shell_host::ShellIntegration::Native;
+        config.native_mode = false;
+        config.bash_path = "/bin/bash".to_string();
+
+        let mut session = start_bash_session(&config).expect("spawn managed shell");
+
+        assert!(effects.has(LoginEffectSource::ManagedShell));
+        let _ = session.child.kill();
+        let _ = session.child.wait();
+    }
 
     #[test]
     fn login_inject_body_clears_posix_restores_env_then_marker() {

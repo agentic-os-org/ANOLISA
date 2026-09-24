@@ -45,6 +45,9 @@ mod evidence_request;
 mod external_hook;
 #[path = "raw_cli/failed_command.rs"]
 mod failed_command;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/failopen.rs"]
+mod failopen;
 #[path = "raw_cli/heavy.rs"]
 mod heavy;
 #[path = "raw_cli/host_executed.rs"]
