@@ -30,7 +30,9 @@ OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约�
 候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
 提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
 携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
-Rust Core，而不是 Python 配置中。
+Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
+执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
+HTML 页面因此保持原样，输出中的数据仍照常压缩。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope

@@ -289,15 +289,19 @@ class TokenlessMiddleware(MiddlewareBase):
             if transformed.action is PreToolAction.BLOCK_AND_SUGGEST:
                 raise RuntimeError("Core returned block_and_suggest without host capability")
             optimization = transformed.output_optimization
+            arguments = transformed.arguments
             forwarded = source.model_copy(
                 update={
                     "input": json.dumps(
-                        transformed.arguments,
+                        arguments,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
                 }
             )
+        command = None
+        if contract.command_field is not None:
+            command = arguments.get(contract.command_field)
         async for item in next_handler(**{**input_kwargs, "tool_call": forwarded}):
             if isinstance(item, ToolResponse):
                 yield await self._after_response(
@@ -306,6 +310,7 @@ class TokenlessMiddleware(MiddlewareBase):
                     contract,
                     optimization,
                     attribution,
+                    command if isinstance(command, str) else None,
                 )
             else:
                 yield item
@@ -317,6 +322,7 @@ class TokenlessMiddleware(MiddlewareBase):
         contract: ToolContract,
         optimization: OutputOptimization,
         attribution: Attribution,
+        command: str | None,
     ) -> ToolResponse:
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
@@ -342,6 +348,7 @@ class TokenlessMiddleware(MiddlewareBase):
                         replace_with_text=True,
                     ),
                     attribution=attribution,
+                    command=command,
                 )
             )
             extra_context = extra_context or transformed.additional_context

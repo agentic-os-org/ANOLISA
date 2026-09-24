@@ -1,0 +1,14 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolResponse": {
+        "interrupted": false,
+        "isImage": false,
+        "stderr": "",
+        "stdout": "If needed, run in shell: tokenless retrieve 26d7916f4ec3e2ad8867060a\n[HTML page rendered as Markdown; <main> only, 3 nodes outside it omitted. Retrieve original for the full page.]\nTitle: Guide\n# Guide\n\nSection 0: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 1: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 2: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 3: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 4: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 5: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 6: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n\nSection 7: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose\n[End page]"
+      }
+    },
+    "suppressOutput": true
+  }
+}

@@ -236,6 +236,9 @@ class TokenlessAgentScope:
             return response
         contract = self.contract_for(tool_call["name"])
         optimization = toolkit.output_optimizations.pop(tool_call["id"], OutputOptimization.NONE)
+        command = None
+        if contract.command_field is not None:
+            command = (tool_call.get("input") or {}).get(contract.command_field)
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):
@@ -260,6 +263,7 @@ class TokenlessAgentScope:
                         replace_with_text=True,
                     ),
                     attribution=self._attribution(tool_call["id"]),
+                    command=command if isinstance(command, str) else None,
                 )
             )
             extra_context = extra_context or transformed.additional_context

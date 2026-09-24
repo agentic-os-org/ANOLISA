@@ -360,6 +360,16 @@ for (const name of categories.layer_2_shell.tools) {
 clearRequests()
 await listener(exec, success(), async () => ({ kind: 'accept' }))
 assert.equal(requests()[0].request.input.content_origin, 'api_response')
+assert.equal(requests()[0].request.input.command, undefined)
+
+// Core classifies plain file prints as file_read from the shell command line.
+clearRequests()
+await listener(
+  { ...exec, name: 'Bash', arguments: { command: 'cat page.html' } },
+  success(undefined, { exitCode: 0 }),
+  async () => ({ kind: 'accept' }),
+)
+assert.equal(requests()[0].request.input.command, 'cat page.html')
 
 // Unsafe replacement shapes and a blocking downstream policy remain untouched.
 clearRequests()
