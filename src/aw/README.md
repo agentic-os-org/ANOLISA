@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-AW provides versioned JSON Schemas and offline validators for capability calls and their records. The Rust library checks payload shapes and relationships between invocations, results and observations. It has no service process and does not execute providers or control agents.
+AW provides versioned capability contracts, offline validation and embeddable Core orchestration. `aw-contracts` checks payload shapes and record relationships; `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
 
 The interfaces are experimental. Tests use synthetic records and do not certify runtime integration.
 
@@ -17,7 +17,7 @@ python3 src/aw/scripts/check.py
 
 The entry runs CI behavior tests, formatting, Clippy, all locked workspace tests,
 the Python/JavaScript digest vectors and rustdoc. Missing tools, empty or fully
-ignored contract/plan test targets, invalid vectors and command failures return
+ignored contract, plan, Core execution or journal test targets, invalid vectors and command failures return
 nonzero. Each command has a timeout and its child process group is cleaned up on
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
@@ -37,6 +37,21 @@ it. A cancelled workflow is not a passing gate.
 Upstream CI uses the self-hosted `anolisa-k8s-general-ci-x64` runner; fork CI
 uses GitHub-hosted Ubuntu 24.04. Both use Python 3.12.3, Node.js 24.15.0 and
 the pinned Rust toolchain. Local validation also uses Linux ARM64.
+
+## Core embedding
+
+`aw-core` provides `Core::prepare` and `Core::execute`, trusted Host/Clock/Journal
+ports, and a durable Linux `FileJournal`. Preparation checks the complete plan
+before any provider call. Execution records each call before dispatch and returns
+terminal results only after the journal acknowledges them. Failed or interrupted
+events remain reserved; there is no automatic retry or recovery.
+
+See [Core execution and storage](docs/design/core-execution.md) for ownership,
+cancellation, failure and embedding contracts. The tests use synthetic Hosts;
+this crate does not connect a production Provider or establish native adoption.
+The shared check enforces the two-crate dependency boundary and a 700-line Rust
+file limit (600-line warning); the existing contract validator remains capped at
+711 lines. These checks supplement review, not runtime acceptance.
 
 ## Source reference
 

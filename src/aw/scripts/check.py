@@ -129,14 +129,76 @@ def inventory(text: str) -> set[str]:
 
 
 def check_inventory() -> None:
-    """Require runnable tests in every contract integration target."""
-    for target in ("canonical", "schemas", "contracts", "orchestration"):
-        command = ["cargo", "test", "--locked", "--test", target, "--", "--list"]
+    """Require runnable tests in each contract, execution and journal target."""
+    for package, target in (
+        ("aw-contracts", "canonical"),
+        ("aw-contracts", "schemas"),
+        ("aw-contracts", "contracts"),
+        ("aw-contracts", "orchestration"),
+        ("aw-core", "execution"),
+        ("aw-core", "journal"),
+    ):
+        command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
         ignored = inventory(run([*command, "--ignored"], AW, capture=True))
         if not ignored <= tests or not tests - ignored:
             raise ValueError(f"{target}: no runnable tests or inconsistent ignored inventory")
         print(f"{target}: {len(tests - ignored)} runnable tests", flush=True)
+
+
+def structure(metadata: dict, root: Path) -> None:
+    """Keep the two reviewed crate boundaries and Rust source sizes explicit."""
+    allowed = {
+        "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
+        "aw-core": {"aw-contracts", "serde_json", "thiserror"},
+    }
+    members = {
+        p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
+    }
+    if members.keys() != allowed.keys():
+        raise ValueError("AW workspace members changed; review the crate boundaries")
+    for name, package in members.items():
+        directory = root if name == "aw-contracts" else root / "crates/aw-core"
+        if Path(package["manifest_path"]).resolve() != (directory / "Cargo.toml").resolve():
+            raise ValueError(f"{name}: workspace crate moved outside its reviewed location")
+        source_roots = [directory / kind for kind in ("src", "tests", "examples")]
+        for target in package["targets"]:
+            source = Path(target["src_path"]).resolve()
+            if not any(source.is_relative_to(path.resolve()) for path in source_roots):
+                raise ValueError(f"{name}: Cargo target is outside the audited source layout")
+        for dependency in package["dependencies"]:
+            if dependency["name"] not in allowed[name]:
+                raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
+            if dependency["name"] == "aw-contracts":
+                path = dependency.get("path")
+                if (
+                    not path
+                    or dependency.get("source") is not None
+                    or Path(path).resolve() != root.resolve()
+                ):
+                    raise ValueError("aw-core must use this workspace's aw-contracts")
+            elif dependency.get("path") is not None or dependency.get("source", "").startswith(
+                "git+"
+            ):
+                raise ValueError(f"{name}: dependency must come from the locked registry")
+        for source_root in source_roots:
+            if source_root.is_symlink():
+                raise ValueError(f"source symlink is outside the layout audit: {source_root}")
+            for file in source_root.rglob("*"):
+                if file.is_symlink():
+                    raise ValueError(f"source symlink is outside the layout audit: {file}")
+                if not file.is_file() or file.suffix != ".rs":
+                    continue
+                relative = file.relative_to(root).as_posix()
+                if file.name == "mod.rs" and not relative.endswith("tests/common/mod.rs"):
+                    raise ValueError(f"use named Rust modules instead of mod.rs: {relative}")
+                # Retain the existing contract validator without expanding or refactoring it here.
+                limit = 711 if relative == "src/validation.rs" else 699
+                lines = len(file.read_text(encoding="utf-8").splitlines())
+                if lines > limit:
+                    raise ValueError(f"{relative}: {lines} lines exceed the reviewed limit {limit}")
+                if lines >= 600:
+                    print(f"AW layout: {relative}: {lines} lines (ceiling {limit})", flush=True)
 
 
 def selftest() -> None:
@@ -168,6 +230,16 @@ def check() -> None:
     actual = candidate()
     selftest()
     run(["cargo", "fmt", "--all", "--", "--check"], AW)
+    structure(
+        json.loads(
+            run(
+                ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+                AW,
+                capture=True,
+            )
+        ),
+        AW,
+    )
     run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], AW)
     check_inventory()
     run(["cargo", "test", "--workspace", "--locked"], AW)
