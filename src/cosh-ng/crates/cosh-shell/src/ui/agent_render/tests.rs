@@ -2189,6 +2189,48 @@ fn line_index(lines: &[String], needle: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {needle:?} in {lines:?}"))
 }
 
+/// #3413: on a kernel without `openat2(2)` the startup banner must name the
+/// running kernel and the required release before any agent tool is offered,
+/// because cosh-core exits before the reply instead of degrading.
+#[test]
+fn health_banner_explains_a_kernel_without_openat2() {
+    use crate::config::HealthConfig;
+
+    let mut report = HealthScanReport::new("health-confinement", 100);
+    report.elapsed_ms = 7;
+    report.facts = vec![
+        health_string_fact("kernel.release", "4.19.112-2.el8.x86_64"),
+        HealthFact {
+            id: "kernel.openat2_supported".to_string(),
+            category: HealthFactCategory::Kernel,
+            key: "kernel.openat2_supported".to_string(),
+            value: HealthFactValue::Bool(false),
+            unit: None,
+            source: HealthFactSource::Derived,
+            elapsed_ms: 0,
+        },
+    ];
+    crate::diagnostics::health::apply_judgement_rules(&mut report, &HealthConfig::default());
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.findings[0].id, "J17");
+
+    for (language, expected) in [
+        (crate::Language::EnUs, "has no openat2"),
+        (crate::Language::ZhCn, "\u{4e0d}\u{63d0}\u{4f9b} openat2"),
+    ] {
+        for width in [80, 120] {
+            let renderer = RatatuiInlineRenderer::with_width(width).with_language(language);
+            let text = renderer
+                .health_banner_lines(HealthBannerModel::new(&report))
+                .join("\n");
+
+            assert_rendered_width(&text, width as usize);
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("5.6"), "{text}");
+        }
+    }
+}
+
 fn warning_health_report() -> HealthScanReport {
     let mut report = HealthScanReport::new("health-warning", 100);
     report.elapsed_ms = 145;
