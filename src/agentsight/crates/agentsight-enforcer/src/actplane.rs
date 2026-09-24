@@ -346,6 +346,7 @@ impl ActPlaneBackend {
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<Binding, BackendError> {
         let _lifecycle = self.lifecycle();
+        require_init_pid_ns(self.in_init_pidns)?;
         let mut bindings = self.state.bindings();
         if let Some(existing) = bindings
             .values()
@@ -739,7 +740,9 @@ fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
         }
         BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
         BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
+        BackendError::KernelFailure(_) | BackendError::UnsupportedEnvironment(_) => {
+            ReplaceFailureCode::KernelFailure
+        }
     }
 }
 
@@ -1304,25 +1307,56 @@ fn proc_start_time(pid: i32) -> Result<u64, ()> {
         .ok_or(())
 }
 
+/// Inode of the init PID namespace (`PROC_PID_INIT_INO` in the kernel's
+/// `proc_fs.h`): namespaces created later get dynamically allocated inodes,
+/// so the root namespace is identified exactly by this constant.
+const INIT_PID_NS_INO: u64 = 0xEFFF_FFFC;
+
+/// Parse the inode number out of a `/proc/<pid>/ns/pid` symlink target of the
+/// form `pid:[<ino>]`.
+fn pid_ns_ino(link: &std::path::Path) -> Option<u64> {
+    let text = link.to_str()?;
+    text.strip_prefix("pid:[")?.strip_suffix(']')?.parse().ok()
+}
+
 /// Check whether the current process runs in the init PID namespace by
-/// comparing its pid-namespace inode with that of PID 1.
+/// comparing its pid-namespace inode against `INIT_PID_NS_INO`. Comparing
+/// against `/proc/1/ns/pid` instead would be wrong inside a container: the
+/// container's PID 1 lives in the *container's* namespace, so every container
+/// process would look "in init pidns" (that was the pre-existing detection
+/// bug this fixes).
 fn is_init_pid_namespace() -> bool {
     let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
         return false; // can't read → assume not init, fail-closed
     };
-    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
-        return false;
-    };
-    let result = self_ns == init_ns;
+    let result = pid_ns_ino(&self_ns) == Some(INIT_PID_NS_INO);
     if !result {
         eprintln!(
             "agentsight-enforcer: not in init PID namespace \
-             (self={}, pid1={}); file_delete_guard will be disabled",
+             (self={}); file_delete_guard will be disabled",
             self_ns.display(),
-            init_ns.display(),
         );
     }
     result
+}
+
+/// Refuse policy application when the enforcer cannot satisfy the kernel's
+/// pid checks: `cap_can_submit_for` compares the request's `caller_pid`
+/// (namespace-local `std::process::id()`) against `bpf_get_current_pid_tgid()`
+/// (init-namespace pid), so a PID-namespaced enforcer can never submit a
+/// delta — and cannot learn its own host pid from userspace, since a
+/// container's `/proc` hides the outer `NSpid` values (#3388).
+fn require_init_pid_ns(in_init_pidns: bool) -> Result<(), BackendError> {
+    if in_init_pidns {
+        return Ok(());
+    }
+    Err(BackendError::UnsupportedEnvironment(
+        "ActPlane enforcement requires the init PID namespace: policy admission \
+         compares init-namespace pids that a PID-namespaced enforcer cannot \
+         supply. Run the enforcer on the host or with host PID visibility \
+         (hostPID: true / --pid=host)."
+            .into(),
+    ))
 }
 
 /// Extract concrete file paths from DSL `block (unlink|write|rename) file "..."`
@@ -1971,5 +2005,32 @@ mod tests {
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn apply_outside_init_pidns_is_refused_loudly() {
+        let error = require_init_pid_ns(false).expect_err("pid-ns enforcer must be refused");
+        assert!(
+            matches!(error, BackendError::UnsupportedEnvironment(_)),
+            "expected UnsupportedEnvironment, got: {error}"
+        );
+        assert!(
+            error.to_string().contains("init PID namespace"),
+            "message should name the requirement: {error}"
+        );
+        assert!(require_init_pid_ns(true).is_ok());
+    }
+
+    #[test]
+    fn pid_ns_ino_parses_namespace_links() {
+        use std::path::Path;
+        assert_eq!(
+            pid_ns_ino(Path::new("pid:[4026531836]")),
+            Some(INIT_PID_NS_INO)
+        );
+        assert_eq!(pid_ns_ino(Path::new("pid:[4026532265]")), Some(4026532265));
+        assert_eq!(pid_ns_ino(Path::new("pid:[oops]")), None);
+        assert_eq!(pid_ns_ino(Path::new("mnt:[4026531836]")), None);
+        assert_eq!(pid_ns_ino(Path::new("pid:[4026531836")), None);
     }
 }

@@ -663,6 +663,7 @@ fn remote_backend_error(error: BackendError) -> RemoteError {
         BackendError::StaleProcess { .. } => "stale_process",
         BackendError::CompileFailure(_) => "compile_failure",
         BackendError::KernelFailure(_) => "kernel_failure",
+        BackendError::UnsupportedEnvironment(_) => "unsupported_environment",
     };
     RemoteError {
         code: code.into(),
@@ -1049,5 +1050,14 @@ mod tests {
             .expect("source policy should be restored");
         assert_eq!(restored.request.root_pid, 77);
         assert_eq!(restored.request.process_start_time, 123);
+    }
+
+    #[test]
+    fn remote_backend_error_maps_unsupported_environment_code() {
+        let remote = remote_backend_error(BackendError::UnsupportedEnvironment(
+            "pid-ns container".into(),
+        ));
+        assert_eq!(remote.code, "unsupported_environment");
+        assert!(remote.message.contains("pid-ns container"));
     }
 }
