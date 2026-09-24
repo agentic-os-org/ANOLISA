@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.2
+
+**Build & Packaging**
+
+- Enabled ANOLISA RPM adapter installation to discover hook and skill payloads split across agent-sec-core subpackages. (#3480)
+
 ## 0.13.1
 
 **OpenClaw Hook Integration**

@@ -1,6 +1,6 @@
 {
   "name": "agent-sec-openclaw-plugin",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "type": "module",
   "main": "dist/index.js",
   "files": [
