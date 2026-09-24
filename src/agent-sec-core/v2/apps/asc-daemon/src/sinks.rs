@@ -74,3 +74,30 @@ impl<F: Fn(&str) + Send + Sync> asc_action_runtime::DiagnosticSink for Lifecycle
         (self.0)(&value.to_string());
     }
 }
+
+/// Foreground observability storage reports failure to its caller.
+pub(crate) struct ObservabilitySinkAdapter(pub Arc<asc_event_sink::ConfiguredObservabilitySinks>);
+
+impl asc_daemon_core::ObservabilitySink for ObservabilitySinkAdapter {
+    fn write(
+        &self,
+        record: &asc_observability::ObservabilityRecord,
+    ) -> Result<(), asc_daemon_core::ObservabilityWriteError> {
+        self.0
+            .record(record)
+            .map_err(|_| asc_daemon_core::ObservabilityWriteError::Storage)
+    }
+}
+
+/// Keeps both storage lifecycles alive through transport and blocking-task drain.
+pub(crate) struct DurableSinks {
+    pub security: Arc<asc_event_sink::ConfiguredSecurityEventSinks>,
+    pub observability: Arc<asc_event_sink::ConfiguredObservabilitySinks>,
+}
+
+impl DurableSinks {
+    pub fn close(&self) {
+        self.security.close();
+        self.observability.close();
+    }
+}

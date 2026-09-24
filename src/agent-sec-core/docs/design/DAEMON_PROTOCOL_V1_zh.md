@@ -886,3 +886,12 @@ Rust 响应仍保留公开 `requestId` UUID 和既有 result/error 结构。
 关闭 exporter 不关闭 carrier。
 兼容记录 OTEL-CR-001/002/005/006/007、执行 fixtures、直接消费者和回滚见
 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。冻结 V1 运行时没有增加 OTel 依赖。
+
+## 14. [TARGET V2] 可观测单条采集
+
+新增显式 allowlist 方法 `obs.record`，按 `LocalUser` 授权。业务参数仅含
+`hook / observedAt / metrics`，关联 metadata 通过第 13 节 OTel carrier 的 Baggage 传递。
+成功响应为 `{requestId,result:{}}`，且发生在 JSONL、SQLite 两次写入成功之后。
+完整输入、错误、部分成功语义、V1 CLI 兼容边界与 OBS-001..006 executable fixtures 见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md)。这不是 V1 新增 RPC，
+不改变本文 CURRENT V1 方法清单；本批没有新增查询接口。

@@ -533,18 +533,18 @@ const V1_TO_V2: &[(&str, &str, &str)] = &[
     ),
     (
         "observability.record_observability",
-        "asc_event_sink::record_observability",
-        "returns Result; both paths raise, as in v1",
+        "asc_event_sink::ConfiguredObservabilitySinks::record",
+        "daemon-owned configured sink; returns Result with the v1 write ordering",
     ),
     (
         "observability.get_writer",
-        "asc_event_sink::observability_writer",
-        "prefixed by stream because both modules called it get_writer",
+        "asc_event_sink::ConfiguredObservabilitySinks::new",
+        "global access removed; composition root supplies explicit paths",
     ),
     (
         "observability.get_sqlite_writer",
-        "asc_event_sink::observability_sqlite_writer",
-        "prefixed by stream because both modules called it get_sqlite_writer",
+        "asc_event_sink::ConfiguredObservabilitySinks::new",
+        "global access removed; configured sink lazily owns the SQLite writer",
     ),
     // --- the display layer --------------------------------------------------
     (
@@ -767,8 +767,9 @@ fn reference_writer_and_reader_symbols() {
 )]
 fn reference_assembly_and_display_symbols() {
     let _: fn(&SecurityEvent) = asc_event_sink::log_event;
-    let _: fn(&ObservabilityRecord) -> Result<(), asc_event_sink::SinkError> =
-        asc_event_sink::record_observability;
+    let _ = asc_event_sink::ConfiguredObservabilitySinks::record;
+    let _ = asc_event_sink::ConfiguredObservabilitySinks::new;
+    let _ = asc_event_sink::ConfiguredObservabilitySinks::close;
     let _: fn() = asc_event_sink::shutdown_sinks;
     let _: fn(f64) = asc_event_sink::shutdown_sinks_at;
     let _: fn(&[SecurityEvent], &str) -> String = format_summary;
@@ -776,8 +777,6 @@ fn reference_assembly_and_display_symbols() {
     let _ = asc_event_sink::writer;
     let _ = asc_event_sink::sqlite_writer;
     let _ = asc_event_sink::reader;
-    let _ = asc_event_sink::observability_writer;
-    let _ = asc_event_sink::observability_sqlite_writer;
 }
 
 /// Uses every migrated constant and value type, so a deletion is a compile error.

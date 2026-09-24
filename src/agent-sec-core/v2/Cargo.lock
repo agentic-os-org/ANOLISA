@@ -224,8 +224,10 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-foundation-types",
+ "asc-observability",
  "asc-pap",
  "asc-policy-types",
+ "serde_json",
  "thiserror",
 ]
 

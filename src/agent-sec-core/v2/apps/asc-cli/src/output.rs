@@ -114,6 +114,27 @@ pub fn render_scan_code(
         }
     }
 }
+/// Preserves V1 ingestion's silent success and stderr-only failure.
+///
+/// # Errors
+/// Returns a stderr write failure or a malformed success acknowledgement.
+pub fn render_observability_record(
+    response: &DaemonResponse,
+    stderr: &mut impl Write,
+) -> io::Result<u8> {
+    match response {
+        DaemonResponse::Success(success) if success.result == serde_json::json!({}) => Ok(0),
+        DaemonResponse::Success(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid observability acknowledgement",
+        )),
+        DaemonResponse::Error(error) => {
+            writeln!(stderr, "Error: {}", error.error.message())?;
+            Ok(1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

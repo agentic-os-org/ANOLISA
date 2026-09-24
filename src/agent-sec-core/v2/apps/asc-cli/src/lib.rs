@@ -155,6 +155,11 @@ impl Cli {
         self.command.request()
     }
 
+    /// Whether this invocation uses the V1-compatible observability-record projection.
+    pub const fn is_observability_record(&self) -> bool {
+        self.command.is_observability_record()
+    }
+
     /// Whether this invocation uses the V1-compatible scan-code projection.
     pub const fn is_scan_code(&self) -> bool {
         self.command.is_scan_code()
@@ -190,6 +195,9 @@ fn resolve_socket(
 /// Local input failures, reported as execution failures rather than daemon errors.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
+    /// V1-compatible observability input validation failure.
+    #[error("Error: {0}")]
+    Observability(String),
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,

@@ -514,3 +514,14 @@ SQLite 插入失败、高版本 schema 警告和独立 audit sink 仍写入；
 未确认 terminalization 诊断和 join，RUST_LOG info/off 均执行。原有 DPROC 条款仍由各自 fixtures 验收。
 OTel E2E 从 PATH 解析产品 binary，与现有 `make test-e2e-rpm-v2` 的收集和安装态执行方式一致；
 本机源码进程测试不替代完整 systemd/RPM 验收。
+
+## [TARGET V2] 可观测采集存储接线（DPROC-022）
+
+`obs.record` 的 JSONL/SQLite writers 使用与安全事件相同的已解析 daemon 系统数据目录，
+显式装配、惰性初始化，无 HOME fallback。可观测双写仅通过 daemon 持有的
+`ConfiguredObservabilitySinks` 实例，不提供进程全局可观测写入口。关闭时保留 sinks 到 transport/blocking drain
+之后再执行 close/保留期维护。具体路径、失败及有界关闭语义见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md#3-数据路径与生命周期)。
+DPROC-022 的 executable fixture 为
+`tests/v2/e2e/test_observability_record_e2e.py::test_v1_cli_records_persist_and_survive_restart`；
+验证源码二进制的目录权限、双落盘与进程重启，不替代 RPM/systemd 或跨 UID 验收。
