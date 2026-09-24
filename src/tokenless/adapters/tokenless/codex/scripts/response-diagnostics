@@ -7,6 +7,13 @@ increases the model-visible payload instead of reducing it. This hook only
 adds actionable context for classified environment failures; successful and
 unclassified responses pass through unchanged.
 
+Classification is gated on failure evidence (hook_utils.env_error_signal).
+Codex hands PostToolUse the command output as one bare string with no exit
+status, so a successful run that merely quotes an error phrase -- a `git log`
+subject, a grep hit, a printed source file -- used to be diagnosed as a broken
+environment and the agent was told not to retry a command that had worked.
+Without a host signal, only lines shaped like a tool error report may match.
+
 Protocol:
     stdin  <- Codex PostToolUse JSON (tool_name, tool_response, ...)
     stdout -> {"hookSpecificOutput": {"hookEventName": "PostToolUse",
@@ -105,7 +112,7 @@ else:
         sys.exit(0)
 
     def _classify_env_error(  # type: ignore[assignment,misc]
-        tool_response: object,
+        tool_response: object, input_data: object = None
     ) -> tuple[str | None, str | None]:
         return None, None
 
@@ -150,7 +157,7 @@ def main() -> None:
     if tool_name in SKIP_TOOLS or tool_response is None:
         _skip()
 
-    env_category, env_hint = _classify_env_error(tool_response)
+    env_category, env_hint = _classify_env_error(tool_response, input_data)
     if not env_category or not env_hint:
         _skip()
 
