@@ -48,6 +48,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
+        // "Hooks" stays an English loanword on purpose. The zh catalog says
+        // Hook/Hooks everywhere and never 钩子: HelpSummaryHooks below renders
+        // "显示 Hook 状态" inside this very group, zh/hooks.rs counts "已注册 {count}
+        // 个 Hook。", zh/approval.rs titles its panel "Hook 审查", and zh/health.rs
+        // labels its collector "Hooks". Translating this one title would put 钩子
+        // directly above "显示 Hook 状态".
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "显示命令参考",
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
