@@ -213,6 +213,9 @@ transport failure 会终止当前 worker，并对当前变更最多重新启动�
 最多为 2。worker 返回的领域执行错误是 business failure，不得触发 worker 重启或自动
 重试。
 
+worker 响应完成与 shutdown cancellation 重叠时，取消仍须使 activation task 退出，
+随后完成 worker 清理；不得在收到停止请求后重新进入等待通知的循环。
+
 stop 时先关闭 worker stdin 并等待 2 秒；仍未退出则 terminate，再等待 5 秒；仍未退出则
 kill。该进程协议和三阶段终止流程是 **[CURRENT]** Python 实现细节。Rust core 完成后可以
 进程内执行，但必须保持业务错误不自动重试、transport/执行失败可区分、取消不被解释为
@@ -405,14 +408,18 @@ daemon trace ID。OTel 未采样、未配置 exporter 或 Collector 故障不得
 | --- | --- |
 | DJOB-001 | 默认 registry 恰好包含 `skill-ledger-activation`，status 顺序确定 |
 | DJOB-002 | Job 在 socket bind 前启动；启动/bind 失败执行资源和 Job rollback |
-| DJOB-003 | shutdown 在 request drain 后停止 Job，并等待 worker/task 清理 |
+| DJOB-003 | shutdown 在 request drain 后停止 Job，并等待 worker/task 清理；worker 响应完成与取消重叠时仍能退出 |
 | DJOB-004 | `skill-ledger-activation` health 保留基础字段和当前 state 投影 |
 | DJOB-007 | Skill Ledger startup reconcile 只处理显式 managed 目录 |
 | DJOB-008 | 500 ms debounce、按 canonical directory 合并及 reported Skill ID 覆盖 |
 | DJOB-009 | drain cancellation 将未处理变更重新放回 pending |
 | DJOB-010 | worker transport/protocol/timeout 总尝试数最多 2，domain failure 不重试 |
-| DJOB-011 | 当前 worker 停止后不遗留子进程；具体 stdin/terminate/kill 序列仅属于 Python 实现 |
+| DJOB-011 | 当前 worker 停止后不遗留子进程，包括响应完成与取消重叠的情况；具体 stdin/terminate/kill 序列仅属于 Python 实现 |
 | DJOB-012 | notify accepted 只表示内存接受；显式 managed 目录在重启后通过 startup reconcile 重新求值 |
+
+`DJOB-003/011` 的完成与取消重叠回归对应
+`tests/unit-test/daemon/test_skill_ledger_worker_client.py::test_activation_stop_when_worker_response_completes`。
+该测试复用 fake worker 固定交错顺序；真实子进程退出由既有 daemon 集成测试验证。
 
 ### 11.2 **[CURRENT][HISTORICAL]** Python 通用框架表征
 

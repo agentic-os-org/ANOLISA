@@ -72,10 +72,9 @@ class SkillLedgerWorkerClient:
             for attempt in range(2):
                 try:
                     try:
-                        result = await asyncio.wait_for(
-                            self._process_once(change),
-                            timeout=self._request_timeout_seconds,
-                        )
+                        # Preserve external cancellation when the response completes.
+                        async with asyncio.timeout(self._request_timeout_seconds):
+                            result = await self._process_once(change)
                     except asyncio.TimeoutError as exc:
                         raise SkillLedgerWorkerTransportError(
                             "worker request timed out after "
