@@ -228,3 +228,221 @@ fn sslsniff_fresh_attach_not_rebuilt_before_ttl() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// Enforcement e2e: install a real ActPlane binding that blocks `unlink`,
+/// then verify the child gets a distinguishable EPERM and a matching violation
+/// event is published.
+///
+/// Requires root + BPF-LSM + the `enforcement-e2e` cargo feature (the default
+/// CI clippy pass excludes the vendored ActPlane crates). `#[ignore]` by
+/// default; the kernel-runner workflow runs it with the feature on:
+///
+///     sudo cargo test --features enforcement-e2e --test bpf_load \
+///         -- --ignored --nocapture --test-threads=1
+///
+/// Set `AGENTSIGHT_ENFORCEMENT_E2E_OPTIONAL=1` to downgrade the preflight
+/// checks (no root / no BPF-LSM / backend open failure) to skips — only for
+/// manually probing environments. The CI job leaves it unset, so a configured
+/// runner that fails to satisfy any precondition FAILS instead of passing
+/// silently: the whole point of this gate is to catch enforcement regressions
+/// (#3021 follow-up 2).
+#[test]
+#[ignore]
+#[cfg(feature = "enforcement-e2e")]
+fn enforcement_blocks_unlink() {
+    use agentsight_enforcement_protocol::ApplyPolicy;
+    use agentsight_enforcer::{ActPlaneBackend, EnforcementBackend, SubscriberClass};
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    use uuid::Uuid;
+
+    let optional = std::env::var("AGENTSIGHT_ENFORCEMENT_E2E_OPTIONAL").as_deref() == Ok("1");
+    let skip = |reason: &str| {
+        if optional {
+            eprintln!("skipping (optional mode): {reason}");
+        } else {
+            panic!("enforcement e2e preflight failed: {reason}");
+        }
+    };
+
+    if unsafe { libc::geteuid() } != 0 {
+        skip("enforcement requires root");
+        return;
+    }
+    let lsm = match std::fs::read_to_string("/sys/kernel/security/lsm") {
+        Ok(l) => l,
+        Err(_) => {
+            skip("securityfs not available");
+            return;
+        }
+    };
+    if !lsm.split(',').any(|s| s.trim() == "bpf") {
+        skip(&format!("BPF-LSM not active (lsm={})", lsm.trim()));
+        return;
+    }
+
+    let backend = match ActPlaneBackend::open() {
+        Ok(b) => b,
+        Err(e) => {
+            skip(&format!("{e}"));
+            return;
+        }
+    };
+
+    // Subscribe BEFORE the gate is released so the violation cannot be missed;
+    // BestEffort — this is a diagnostic observer, not an ingestion dependency.
+    let sub_id = Uuid::new_v4();
+    let violations = backend.subscribe(sub_id, SubscriberClass::BestEffort);
+
+    // Fixtures live in one predictable directory so the child references the
+    // exact file path — a glob like /tmp/...* would miss when TMPDIR points
+    // elsewhere and the test would pass without exercising the policy. The
+    // path must also stay under the engine's 63-byte target-pattern ABI
+    // limit (PAT=64 incl. NUL), so the directory and file names stay short.
+    let fixture_dir = Path::new("/tmp/agt-e2e");
+    let _ = std::fs::remove_dir_all(fixture_dir);
+    std::fs::create_dir_all(fixture_dir).expect("create fixture dir");
+    let test_file = fixture_dir.join(format!(
+        "t-{}.txt",
+        &Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::write(&test_file, b"test").expect("create test file");
+    let gate = fixture_dir.join("go");
+
+    // The child polls for the gate file so the deletion starts only after the
+    // binding is installed, and reports a distinguishable errno for the failed
+    // unlink (exit 1 + stderr marker) — plain `rm -f` cannot distinguish EPERM
+    // from a signal kill or a non-LSM denial.
+    let script = format!(
+        "while [ ! -e {gate} ]; do sleep 0.05; done; \
+         if rm {file} 2>err.txt; then exit 0; else \
+           echo \"unlink-failed\" >&2; exit 1; \
+         fi",
+        gate = gate.display(),
+        file = test_file.display()
+    );
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .current_dir(fixture_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+
+    // Kill+reap the child on every exit path (including assert panics) so a
+    // panicked run never leaks a 50 ms poll loop on a reused runner.
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = ChildGuard(child);
+
+    let child_pid = child.0.id() as i32;
+    let policy_dsl = format!(
+        "source AGENT = exec \"**\"\nrule block-unlink:\n  block unlink file \"{}\" if AGENT\n  because \"test enforcement\"",
+        test_file.display()
+    );
+    let binding_id = Uuid::new_v4();
+    let request = ApplyPolicy {
+        binding_id,
+        agent_id: "enforcement-test".into(),
+        session_id: None,
+        root_pid: child_pid,
+        process_start_time: read_start_time(child_pid),
+        policy_id: "block-unlink".into(),
+        policy_revision: "1".into(),
+        policy_dsl,
+        policy_mode: None,
+    };
+
+    let binding = backend.apply(request).expect("binding should install");
+    assert_eq!(
+        binding.state,
+        agentsight_enforcement_protocol::BindingState::Enforced
+    );
+
+    // Release the gate only after the binding is Enforced; then wait for the
+    // child to attempt the (blocked) deletion. Bounded so a stuck child fails
+    // the job instead of hanging until the workflow timeout.
+    std::fs::write(&gate, b"1").expect("release gate");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if child.0.try_wait().expect("child poll").is_some() {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("child did not exit within 30s of gate release");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.0.wait().expect("child should exit");
+    let stderr = String::from_utf8_lossy(
+        &Command::new("bash")
+            .arg("-c")
+            .arg(format!("cat {}/err.txt 2>/dev/null", fixture_dir.display()))
+            .output()
+            .expect("read child stderr")
+            .stdout,
+    )
+    .into_owned();
+
+    // The unlink must have failed with a kernel denial, not a signal or an
+    // unrelated rm error.
+    assert!(
+        !output.success(),
+        "child should have been blocked by enforcement (exit={:?})",
+        output.code()
+    );
+    assert!(
+        stderr.contains("Operation not permitted"),
+        "unlink failure should be EPERM, got stderr: {stderr:?}"
+    );
+    assert!(
+        test_file.exists(),
+        "file should still exist after blocked deletion"
+    );
+
+    // A matching violation event must have been published for this binding.
+    // The engine's op taxonomy groups all file mutations (write/unlink/rename)
+    // under TOP_WRITE, which userspace maps to "write" — there is no distinct
+    // "unlink" operation name (taint.h TOP_* constants). The binding_id +
+    // operation + blocked triple is unique to the child's unlink attempt here:
+    // this fresh binding guards only the fixture, and nothing else mutates it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut found = None;
+    while Instant::now() < deadline {
+        while let Ok(event) = violations.try_recv() {
+            if event.binding_id == binding_id && event.operation == "write" {
+                found = Some(event);
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let event = found
+        .unwrap_or_else(|| panic!("no unlink violation event published for binding {binding_id}"));
+    assert!(event.blocked, "violation should record the kernel denial");
+
+    backend.unsubscribe(sub_id);
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[cfg(feature = "enforcement-e2e")]
+fn read_start_time(pid: i32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("read stat");
+    let after = &stat[stat.rfind(')').expect("comm close") + 2..];
+    after
+        .split_ascii_whitespace()
+        .nth(19)
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("start_time")
+}
