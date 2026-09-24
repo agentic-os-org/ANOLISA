@@ -28,11 +28,7 @@ from standalone_hook_test_loader import load_standalone_hook
 # ---------------------------------------------------------------------------
 
 _HOOKS_DIR = str(
-    Path(__file__).resolve().parents[2]
-    / ".."
-    / "codex-plugin"
-    / "hooks-plugin"
-    / "hooks"
+    Path(__file__).resolve().parents[2] / ".." / "codex-plugin" / "hooks-plugin" / "hooks"
 )
 pii_checker_hook = load_standalone_hook(
     "codex_pii_checker_hook",
@@ -510,10 +506,7 @@ class TestDenyMode:
             (_PRE_TOOL_USE_EVENT, "当前策略已阻断本次工具调用。"),
             (
                 _POST_TOOL_USE_EVENT,
-                (
-                    "工具已经执行；原始工具结果不会进入模型上下文，"
-                    "已发生的外部副作用不会撤销。"
-                ),
+                ("工具已经执行；原始工具结果不会进入模型上下文，" "已发生的外部副作用不会撤销。"),
             ),
         ),
     )
@@ -602,9 +595,7 @@ class TestMainMonkeypatch:
         monkeypatch.setattr(
             pii_checker_hook.sys,
             "stdin",
-            io.StringIO(
-                json.dumps(input_data) if isinstance(input_data, dict) else input_data
-            ),
+            io.StringIO(json.dumps(input_data) if isinstance(input_data, dict) else input_data),
         )
         pii_checker_hook.main()
         out = capsys.readouterr().out
@@ -860,9 +851,7 @@ class TestMainMonkeypatch:
         """CLI error → fail-open."""
 
         def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(
-                args=args, returncode=1, stdout="", stderr="error"
-            )
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="error")
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
@@ -994,12 +983,8 @@ class TestHelpers:
             ("unknown", "warn", "general"),
         ),
     )
-    def test_finding_risk_uses_severity_with_verdict_fallback(
-        self, severity, verdict, expected
-    ):
-        assert (
-            pii_checker_hook._finding_risk({"severity": severity}, verdict) == expected
-        )
+    def test_finding_risk_uses_severity_with_verdict_fallback(self, severity, verdict, expected):
+        assert pii_checker_hook._finding_risk({"severity": severity}, verdict) == expected
 
     @pytest.mark.parametrize(
         ("verdict", "findings", "expected"),
@@ -1016,6 +1001,21 @@ class TestHelpers:
     def test_risk_summary(self, verdict, findings, expected):
         assert pii_checker_hook._risk_summary(verdict, findings) == expected
 
+    def test_truncated_details_use_total_counts_and_reject_malformed_counts(self):
+        summary = {
+            "findings_truncated": True,
+            "total": 20001,
+            "by_severity": {"deny": 1, "warn": 20000},
+        }
+        findings = [{"severity": "deny"}]
+        message = pii_checker_hook._risk_summary("deny", findings, summary)
+        assert "20001" in message and "20000" in message
+        assert "明细已省略" in message
+        summary["total"] = "20001"
+        assert (
+            pii_checker_hook._risk_summary("deny", findings, summary) == "检测到 1 项高风险敏感信息"
+        )
+
 
 class TestFormatBlockReason:
     """Test _format_block_reason output formatting."""
@@ -1025,9 +1025,7 @@ class TestFormatBlockReason:
             {"type": "credential", "severity": "deny", "evidence_redacted": "secret"},
             {"type": "email", "severity": "warn", "evidence_redacted": "a***@x.com"},
         ]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "UserPromptSubmit", "deny"
-        )
+        reason = pii_checker_hook._format_block_reason(findings, "UserPromptSubmit", "deny")
         assert "检测到 2 项敏感信息（高风险 1、一般风险 1）" in reason
         for hidden_value in ("credential", "email", "secret", "a***@x.com", "deny"):
             assert hidden_value not in reason
@@ -1046,9 +1044,7 @@ class TestFormatBlockReason:
 
     def test_user_prompt_submit_message(self):
         findings = [{"type": "credential", "severity": "deny"}]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "UserPromptSubmit", "deny"
-        )
+        reason = pii_checker_hook._format_block_reason(findings, "UserPromptSubmit", "deny")
         assert "当前策略已阻断本次请求。" in reason
 
 

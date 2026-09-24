@@ -112,7 +112,10 @@ async fn uds_failures_preserve_business_and_context() {
             Arc::new(PolicyTemplateCompiler),
         ),
         policy.clone(),
-        asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
     ));
     let directory =
         std::env::temp_dir().join(format!("asc-otel-failures-{}", uuid::Uuid::new_v4()));

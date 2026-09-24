@@ -486,6 +486,7 @@ jobs:
         run: |
           cd src/agent-sec-core/v2
           cargo test --workspace --locked
+          cargo doc --workspace --no-deps --locked
 
       - name: Run Rust tests with coverage
         run: |

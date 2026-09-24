@@ -50,7 +50,7 @@ impl TelemetryRecord {
         ] {
             fields.insert(key.to_owned(), Value::String(value.to_owned()));
         }
-        if input.event_type == "code_scan" {
+        if matches!(input.event_type, "code_scan" | "pii_scan") {
             if let Some(value) = input.result.get("verdict")
                 && matches!(value.as_str(), Some("pass" | "warn" | "deny" | "error"))
             {

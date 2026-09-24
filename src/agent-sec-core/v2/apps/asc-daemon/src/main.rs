@@ -2,6 +2,7 @@ mod runtime_path;
 
 use runtime_path::RuntimeLease;
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use std::time::Duration;
 mod sinks;
 
 use asc_action_runtime::Finalizer;
+use asc_capability_pii_scan::{CustomRuleStatus, PiiRuleSet};
 use asc_daemon::{Cli, ParseOutcome, ProcessSignals, run_with_shutdown_timeout, serve};
 use asc_daemon_core::{PrincipalPolicy, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
@@ -92,6 +94,13 @@ async fn run(
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
+    let pii_rules = match load_pii_rules(cli.pii_rules.as_deref(), telemetry) {
+        Ok(rules) => Arc::new(rules),
+        Err(error) => {
+            telemetry.report(&format!("agent-sec-daemon: {error}"));
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let (finalizer, event_sinks) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
@@ -101,14 +110,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
-        Ok(runtime) => Some(runtime),
-        Err(error) => {
-            telemetry.report("asc-daemon: reconciliation unavailable; Binding mutations disabled");
-            report_error(telemetry, &error);
-            None
-        }
-    };
+    let policy_runtime = start_policy_runtime(repository.clone(), telemetry);
     let enqueuer: Arc<dyn asc_pap::BindingReconcileEnqueuer> = policy_runtime.as_ref().map_or_else(
         || {
             Arc::new(asc_daemon::UnavailableReconciliation)
@@ -125,7 +127,7 @@ async fn run(
     let dispatcher = Arc::new(DaemonDispatcher::new(
         pap,
         policy_for_handler,
-        asc_daemon::scan_application(finalizer),
+        asc_daemon::scan_application(finalizer, pii_rules),
     ));
     telemetry
         .report("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
@@ -167,6 +169,38 @@ async fn run(
         ExitCode::FAILURE
     };
     (exit_code, Some(event_sinks))
+}
+
+fn start_policy_runtime(
+    repository: Arc<ProcessLocalPapRepository>,
+    telemetry: &asc_observability::TelemetryRuntime,
+) -> Option<ReconciliationRuntime> {
+    match asc_daemon::start_policy_reconciliation(repository) {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            telemetry.report("asc-daemon: reconciliation unavailable; Binding mutations disabled");
+            report_error(telemetry, &error);
+            None
+        }
+    }
+}
+
+fn load_pii_rules(
+    path: Option<&Path>,
+    telemetry: &asc_observability::TelemetryRuntime,
+) -> Result<PiiRuleSet, asc_capability_pii_scan::ScanError> {
+    let rules = PiiRuleSet::load(path)?;
+    if rules.custom_rules().status == CustomRuleStatus::Invalid {
+        telemetry.report(&format!(
+            "agent-sec-daemon: custom PII rules disabled ({})",
+            rules
+                .custom_rules()
+                .error_code
+                .as_deref()
+                .unwrap_or("invalid_configuration")
+        ));
+    }
+    Ok(rules)
 }
 
 fn event_finalizer(

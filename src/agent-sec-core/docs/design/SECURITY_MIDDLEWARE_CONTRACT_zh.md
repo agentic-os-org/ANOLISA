@@ -1,5 +1,7 @@
 # AgentSec Security Middleware 跨语言契约
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python 行为基线、compatibility fixtures 及 V2 Action Runtime 目标 |
@@ -631,3 +633,28 @@ blocking thread 的 attached scope 内执行；以后将 finalization 移到其�
 V1 Action lifecycle、verdict、SecurityEvent schema、写入失败语义和历史数据均未由本改动替换。
 实际 observability RPC、本地链路重组和其它 capability 的接入另行迁移。
 证据：[V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。
+
+## PII 第一阶段 V2 Runtime 与 Finalizer
+
+**[TARGET V2，已实现]** `action.pii_scan` 使用 Handler → ActionService → Invocation /
+ActionRuntime → PiiScanExecutor → PiiAuditProjector → Finalizer。daemon 启动逻辑负责组装规则、
+具体 Runtime 和输出；Handler 与 ActionService 不依赖具体检测 capability。
+已识别且已授权的请求发生参数错误时，由 ActionService 构造固定错误及空请求投影，
+通过公共 `Invocation.reject` 进入同一个 Finalizer，随后返回，不调用 Executor。
+执行 panic 沿用 Runtime 的受控 `InvokeError`，收尾后由 Handler 返回安全的内部 RPC 错误。
+正常扫描、部分完成、扫描失败和参数拒绝各在正常生命周期内提交一次扫描终态；无效信封、
+未知方法、授权失败及传输失败在对应入口收尾。崩溃或强制退出不保证 exactly-once。
+
+PII 投影按白名单构造，只持久化摘要、长度、source、规则标识、coverage、脱敏 findings、
+有界 trace/agent 元数据及安全错误码；不存原文、raw_evidence、完整 redacted_text、规则内容、
+输入中字段的原始拼写或任意异常信息。参数拒绝不持久化未校验 params。
+扫描状态与 JSONL/SQLite 存储健康分别验证；启动时 SQLite 初始化要求保持不变。
+
+Finalizer 的审计、遥测与 diagnostic 输出沿用公共框架并隔离故障。PII 遥测只在既有生命周期
+字段之外投影 verdict 与耗时；不写入原文、findings、完整脱敏文本或规则内容。
+PII 复用公共 CLI trace 适配和顶层 OTel 信封；Invocation 仅传可信 `CallerIdentity`。
+Finalizer 从当前 Context 快照补齐事件关联；Handler 仅提取有界 `agent_name` 用于既有
+安全请求投影，检测器不依赖 OTel。UID/GID/PID 仍来自 UDS peer；opaque 标签不是 SDK TraceId。
+ActionRuntime 是执行服务，不等同 PIP；未来 PIP adapter 将复用执行和 Finalizer，
+PDP/PEP 不在此阶段实现。可执行验证为 capability `tests/runtime.rs`、公共 runtime/sink 测试及
+`tests/v2/e2e/test_pii_cli_e2e.py`；设计见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。

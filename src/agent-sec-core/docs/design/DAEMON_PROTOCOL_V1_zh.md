@@ -1,5 +1,7 @@
 # AgentSec daemon 协议 V1
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 wire 基线、兼容语料及 V2 asc-daemon-protocol 候选扩展 |
@@ -886,3 +888,30 @@ Rust 响应仍保留公开 `requestId` UUID 和既有 result/error 结构。
 关闭 exporter 不关闭 carrier。
 兼容记录 OTEL-CR-001/002/005/006/007、执行 fixtures、直接消费者和回滚见
 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。冻结 V1 运行时没有增加 OTel 依赖。
+
+## PII 第一阶段 V2 协议扩展
+
+**[TARGET V2，已实现]** 新增唯一方法 `action.pii_scan`，角色为 `LocalUser`，保持现有
+V2 顶层 OTel 信封及第 13 节独立预算（请求业务 4 MiB + 传播 32 KiB，响应 4 MiB）。
+本文原有 V1 默认 catalogue 不因此改变。
+
+| `params` 字段 | 类型与默认值 |
+|---------------|----------------|
+| `text` | 必填 string，允许空文本 |
+| `source` | string，默认 `unknown`；允许 user_input/tool_input/tool_output/model_output/observability/manual/unknown |
+| `includeLowConfidence`、`rawEvidence`、`redactOutput` | bool，默认 false |
+| `maxBytes` | 可选正整数或 null |
+| `inputTruncated` | bool，默认 false |
+| `inputBytesScanned` | 可选非负整数或 null；必须等于收到文本字节数，截断时可多出最多 3 个 UTF-8 尾字节 |
+
+拒绝未知字段，包括未发布的 `params.traceContext`；不接受输入文件或规则路径，
+也不接受调用者 UID/GID/PID。关联信息仅使用公共顶层 `traceContext` / `compatibility`。
+识别方法并完成授权后，DTO/schema 错误返回 `invalid_request`，无效 source 或语义限制返回
+`invalid_argument`；错误消息固定为 `PII scan parameters are invalid`，通过公共 Finalizer
+记录安全终态。扫描结果（含执行失败报告）置于 daemon success 响应；CLI 对扫描失败退出 1。
+未处理的执行 panic 由公共 Runtime 捕获并收尾，再返回 `internal` 和固定消息
+`capability execution failed`，不把原始异常内容返回给调用者。
+
+可执行契约为 `tests/v2/e2e/test_pii_cli_e2e.py`，实现 DTO 为
+`v2/crates/asc-daemon-protocol/src/action.rs`。当前/未来链路、兼容性和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。

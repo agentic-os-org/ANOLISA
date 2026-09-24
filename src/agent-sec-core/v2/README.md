@@ -106,7 +106,32 @@ in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_
 The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
 maps Prompt Scan and Code Scan migration work onto the repository architecture, including module
 locations, dependency order, interface boundaries, and acceptance requirements.
-It describes planned work; this workspace does not yet expose scan methods.
+The workspace now exposes `action.code_scan` and `action.pii_scan` through the common
+Action Runtime. PII migration and its future policy boundary are described in the
+[two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
+
+## PII scanning
+
+`asc-capability-pii-scan` provides a transport-free Rust detector, immutable centralized
+rule sets, a typed report, executor and safe audit projector. The daemon loads built-ins
+and the optional `/etc/agent-sec/pii-checker/rules.yaml` once; `--pii-rules` accepts an
+administrator-selected absolute path. Restart applies rule changes. There is no HOME
+lookup or caller-selected file access.
+
+`agent-sec-cli --socket /run/agent-sec-core/daemon.sock scan-pii --stdin --redact-output`
+reads input locally and invokes `action.pii_scan` using LocalUser authorization.
+The response preserves V1 fields with coverage, input digests and rule identity under
+`summary`; `deny` classifies findings and is not a PDP decision. Authorized parameter
+failures use the same Finalizer as normal scans. V1-compatible opaque trace metadata
+is accepted through the shared CLI `--trace-context` adapter and top-level OTel
+carrier/compatibility envelope; PII params reject `traceContext`. Finalizer reads
+correlation from Context, while kernel peer identity is passed as `CallerIdentity`.
+Opaque labels are not OpenTelemetry IDs. Business requests retain 4 MiB capacity
+with a separate 32 KiB propagation allowance; responses remain limited to 4 MiB.
+
+See the [PII user guide](../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md)
+for limits, rule migration, compatibility differences and rollback. Hook/RPM tests
+exercise real Rust subprocesses without switching Agent hosts.
 
 ## Daemon service boundary
 
@@ -313,8 +338,11 @@ invocation automatically finalizes; handlers and capabilities do not own sinks.
 `asc-telemetry` provides the V1 scan field allowlist and policy gates;
 `asc-event-sink::telemetry::TelemetryWriter` appends only to an existing uploader-owned
 file. Audit JSONL/SQLite and telemetry attempts remain synchronous and independent.
-This change includes only the code-scan identity, telemetry projection and fixtures.
-Other scan capabilities will add their identities and projections in their own commits.
+Code Scan and PII Scan share this lifecycle. PII parameters and normalized business
+metadata enter the typed `ActionService`; authorized parameter rejection uses
+`Invocation.reject` and the same finalizer. Telemetry retains only allowlisted
+scalars, including PII verdict and elapsed time, independently of audit output.
+Other scan capabilities add their own identities and projections when implemented.
 
 See the [implementation, compatibility and acceptance record](../docs/design/RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)
 for the exact scope, executable checks, deferred work, and rollback procedure.

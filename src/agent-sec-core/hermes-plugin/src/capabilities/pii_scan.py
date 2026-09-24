@@ -48,9 +48,7 @@ class PiiScanCapability(AgentSecCoreCapability):
         self._policy = normalize_hermes_native_policy(raw_policy)
         normalized_policy = normalize_hook_policy(raw_policy, "")
         if raw_policy is not None and normalized_policy not in {"observe", "block"}:
-            display_policy = (
-                raw_policy[:32] if isinstance(raw_policy, str) else raw_policy
-            )
+            display_policy = raw_policy[:32] if isinstance(raw_policy, str) else raw_policy
             logger.warning(
                 "[agent-sec-core] pii-checker Hermes does not support %s=%r; using observe",
                 source,
@@ -222,15 +220,11 @@ class PiiScanCapability(AgentSecCoreCapability):
             return
 
         if verdict not in {"warn", "deny"}:
-            logger.warning(
-                f"[agent-sec-core] {self.id} UNKNOWN verdict={verdict}, fail-open"
-            )
+            logger.warning(f"[agent-sec-core] {self.id} UNKNOWN verdict={verdict}, fail-open")
             return
 
         if self._policy == "observe":
-            logger.info(
-                f"[agent-sec-core] {self.id} {verdict.upper()} observed source={source}"
-            )
+            logger.info(f"[agent-sec-core] {self.id} {verdict.upper()} observed source={source}")
             return
 
         if can_block and self._policy == "block" and verdict == "deny":
@@ -238,10 +232,9 @@ class PiiScanCapability(AgentSecCoreCapability):
                 verdict,
                 findings,
                 outcome="当前策略已阻断本次工具调用。",
+                summary=scan.get("summary"),
             )
-            logger.warning(
-                f"[agent-sec-core] {self.id} {verdict.upper()} blocked source={source}"
-            )
+            logger.warning(f"[agent-sec-core] {self.id} {verdict.upper()} blocked source={source}")
             return {"action": "block", "message": message}
 
         logger.warning(
@@ -255,18 +248,29 @@ class PiiScanCapability(AgentSecCoreCapability):
         return value_to_text(value)
 
     def _format_pii_message(
-        self,
-        verdict: str,
-        findings: list[Any],
-        *,
-        outcome: str,
+        self, verdict: str, findings: list[Any], *, outcome: str, summary: Any = None
     ) -> str:
         """Build a concise block message without exposing scanner-internal fields."""
         typed_findings = [item for item in findings if isinstance(item, dict)]
-        return f"[pii-checker] {self._risk_summary(verdict, typed_findings)}；{outcome}"
+        return f"[pii-checker] {self._risk_summary(verdict, typed_findings, summary=summary)}；{outcome}"
 
-    def _risk_summary(self, verdict: str, findings: list[dict[str, Any]]) -> str:
+    def _risk_summary(
+        self, verdict: str, findings: list[dict[str, Any]], summary: Any = None
+    ) -> str:
         """Summarize per-finding risk without exposing internal labels."""
+        if isinstance(summary, dict) and summary.get("findings_truncated") is True:
+            counts = summary.get("by_severity")
+            if isinstance(counts, dict):
+                high, general = counts.get("deny", 0), counts.get("warn", 0)
+                total = summary.get("total")
+                if (
+                    all(type(value) is int and value >= 0 for value in (high, general, total))
+                    and total == high + general
+                ):
+                    return (
+                        f"检测到 {total} 项敏感信息"
+                        f"（高风险 {high}、一般风险 {general}；明细已省略）"
+                    )
         high_count = sum(
             1 for finding in findings if self._finding_risk(finding, verdict) == "high"
         )

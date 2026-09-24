@@ -49,7 +49,10 @@ async fn tracing_span_remains_open_after_dispatch_timeout_until_work_finishes() 
     let dispatcher = Arc::new(DaemonDispatcher::new(
         pap,
         Arc::new(PausedPolicy(Mutex::new(release_rx))),
-        asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
     ));
     let directory =
         std::env::temp_dir().join(format!("asc-otel-lifetime-{}", uuid::Uuid::new_v4()));

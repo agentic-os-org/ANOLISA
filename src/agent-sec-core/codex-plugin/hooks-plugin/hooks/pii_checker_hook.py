@@ -96,12 +96,23 @@ def _finding_risk(finding: Any, verdict: str) -> str:
     return "high" if verdict == "deny" else "general"
 
 
-def _risk_summary(verdict: str, findings: list[Any]) -> str:
+def _risk_summary(verdict: str, findings: list[Any], summary: Any = None) -> str:
     """Summarize finding counts without exposing scanner-internal fields."""
+    if isinstance(summary, dict) and summary.get("findings_truncated") is True:
+        counts = summary.get("by_severity")
+        if isinstance(counts, dict):
+            high, general = counts.get("deny", 0), counts.get("warn", 0)
+            total = summary.get("total")
+            if (
+                all(type(value) is int and value >= 0 for value in (high, general, total))
+                and total == high + general
+            ):
+                return (
+                    f"检测到 {total} 项敏感信息"
+                    f"（高风险 {high}、一般风险 {general}；明细已省略）"
+                )
     typed_findings = [finding for finding in findings if isinstance(finding, dict)]
-    high_count = sum(
-        1 for finding in typed_findings if _finding_risk(finding, verdict) == "high"
-    )
+    high_count = sum(1 for finding in typed_findings if _finding_risk(finding, verdict) == "high")
     general_count = len(typed_findings) - high_count
 
     if high_count and general_count:
@@ -117,12 +128,16 @@ def _risk_summary(verdict: str, findings: list[Any]) -> str:
 # -- output helpers --------------------------------------------------------
 
 
-def _format_notice(verdict: str, findings: list[Any], action_message: str) -> str:
+def _format_notice(
+    verdict: str, findings: list[Any], action_message: str, summary: Any = None
+) -> str:
     """Build a concise notice without exposing internal labels or evidence."""
-    return f"[pii-checker] {_risk_summary(verdict, findings)}；{action_message}"
+    return f"[pii-checker] {_risk_summary(verdict, findings, summary=summary)}；{action_message}"
 
 
-def _format_block_reason(findings: list[Any], hook_event: str, verdict: str) -> str:
+def _format_block_reason(
+    findings: list[Any], hook_event: str, verdict: str, summary: Any = None
+) -> str:
     """Build an event-specific block reason for the user."""
     if hook_event == "UserPromptSubmit":
         action_message = "当前策略已阻断本次请求。"
@@ -130,18 +145,14 @@ def _format_block_reason(findings: list[Any], hook_event: str, verdict: str) -> 
         action_message = "当前策略已阻断本次工具调用。"
     else:
         action_message = (
-            "工具已经执行；原始工具结果不会进入模型上下文，"
-            "已发生的外部副作用不会撤销。"
+            "工具已经执行；原始工具结果不会进入模型上下文，" "已发生的外部副作用不会撤销。"
         )
 
-    return _format_notice(verdict, findings, action_message)
+    return _format_notice(verdict, findings, action_message, summary=summary)
 
 
 def _format_warning_message(
-    findings: list[Any],
-    hook_event: str,
-    verdict: str,
-    policy: str,
+    findings: list[Any], hook_event: str, verdict: str, policy: str, summary: Any = None
 ) -> str:
     """Build a concise warning that states the actual non-blocking behavior."""
     if hook_event == "PostToolUse":
@@ -159,23 +170,20 @@ def _format_warning_message(
         action_message = "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
     else:
         action_message = "本次仅提醒，未触发确认或阻断。"
-    return _format_notice(verdict, findings, action_message)
+    return _format_notice(verdict, findings, action_message, summary=summary)
 
 
-def _block(findings: list[Any], hook_event: str, verdict: str) -> None:
+def _block(findings: list[Any], hook_event: str, verdict: str, summary: Any = None) -> None:
     """Output block decision JSON to stdout."""
-    reason = _format_block_reason(findings, hook_event, verdict)
+    reason = _format_block_reason(findings, hook_event, verdict, summary=summary)
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
 def _warn(
-    findings: list[Any],
-    hook_event: str,
-    verdict: str,
-    policy: str,
+    findings: list[Any], hook_event: str, verdict: str, policy: str, summary: Any = None
 ) -> None:
     """Output a user-visible warning without changing execution control."""
-    message = _format_warning_message(findings, hook_event, verdict, policy)
+    message = _format_warning_message(findings, hook_event, verdict, policy, summary=summary)
     print(json.dumps({"systemMessage": message}, ensure_ascii=False))
 
 
@@ -312,10 +320,10 @@ def main() -> None:
     if policy == "observe":
         return  # observe mode: don't block, audit only via CLI events
     if policy == "block" and verdict == "deny":
-        _block(findings, hook_event, verdict)
+        _block(findings, hook_event, verdict, summary=scan_result.get("summary"))
         return
     # Codex cannot request approval at all PII hook points; ask falls back to warn.
-    _warn(findings, hook_event, verdict, policy)
+    _warn(findings, hook_event, verdict, policy, summary=scan_result.get("summary"))
 
 
 if __name__ == "__main__":

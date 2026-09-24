@@ -124,9 +124,7 @@ def _scan_target(input_data: dict[str, Any]) -> tuple[str, str, str] | None:
     return None
 
 
-def _scan_pii(
-    input_data: dict[str, Any], text: str, source: str
-) -> dict[str, Any] | None:
+def _scan_pii(input_data: dict[str, Any], text: str, source: str) -> dict[str, Any] | None:
     """Run scan-pii with raw content on stdin and parse its JSON response."""
     args = [
         "agent-sec-cli",
@@ -186,16 +184,27 @@ def _validated_result(
         if isinstance(redacted, str) and redacted.strip():
             has_redacted_evidence = True
         severity = finding.get("severity")
-        sanitized_findings.append(
-            {"severity": severity} if isinstance(severity, str) else {}
-        )
+        sanitized_findings.append({"severity": severity} if isinstance(severity, str) else {})
     if not sanitized_findings or not has_redacted_evidence:
         return None
     return verdict, sanitized_findings
 
 
-def _risk_summary(verdict: str, findings: list[dict[str, str]]) -> str:
+def _risk_summary(verdict: str, findings: list[dict[str, str]], summary: Any = None) -> str:
     """Summarize finding counts without exposing scanner-internal details."""
+    if isinstance(summary, dict) and summary.get("findings_truncated") is True:
+        counts = summary.get("by_severity")
+        if isinstance(counts, dict):
+            high, general = counts.get("deny", 0), counts.get("warn", 0)
+            total = summary.get("total")
+            if (
+                all(type(value) is int and value >= 0 for value in (high, general, total))
+                and total == high + general
+            ):
+                return (
+                    f"Detected {total} sensitive data findings "
+                    f"({high} high risk, {general} general risk; details omitted)"
+                )
     high_count = sum(finding.get("severity") == "deny" for finding in findings)
     general_count = sum(finding.get("severity") == "warn" for finding in findings)
     unknown_count = len(findings) - high_count - general_count
@@ -215,8 +224,8 @@ def _risk_summary(verdict: str, findings: list[dict[str, str]]) -> str:
     return f"Detected {total} {risk} sensitive data {noun}"
 
 
-def _notice(verdict: str, findings: list[dict[str, str]], action: str) -> str:
-    return f"[pii-checker] {_risk_summary(verdict, findings)}. {action}"
+def _notice(verdict: str, findings: list[dict[str, str]], action: str, summary: Any = None) -> str:
+    return f"[pii-checker] {_risk_summary(verdict, findings, summary=summary)}. {action}"
 
 
 def _warning_action(event_name: str) -> str:
@@ -233,10 +242,7 @@ def _warning_action(event_name: str) -> str:
         )
     if event_name == "Stop":
         return "This is a warning only; the response will continue without blocking."
-    return (
-        "This is a warning only; the request will continue without confirmation or "
-        "blocking."
-    )
+    return "This is a warning only; the request will continue without confirmation or " "blocking."
 
 
 def _unsupported_confirmation_action(event_name: str) -> str:
@@ -263,6 +269,7 @@ def _decision(
     event_name: str,
     verdict: str,
     findings: list[dict[str, str]],
+    summary: Any = None,
 ) -> dict[str, Any]:
     """Map one validated scanner verdict to Qwen Code HookOutput."""
     if event_name in {"PostToolUseFailure", "StopFailure"}:
@@ -275,7 +282,9 @@ def _decision(
         return _noop()
     if verdict == "warn" or policy == "warn":
         return {
-            "systemMessage": _notice(verdict, findings, _warning_action(event_name)),
+            "systemMessage": _notice(
+                verdict, findings, _warning_action(event_name), summary=summary
+            ),
         }
 
     if policy == "ask" and event_name == "PreToolUse":
@@ -283,6 +292,7 @@ def _decision(
             verdict,
             findings,
             "Confirmation is required before this tool call can continue.",
+            summary=summary,
         )
         return {
             "hookSpecificOutput": {
@@ -297,6 +307,7 @@ def _decision(
                 verdict,
                 findings,
                 _unsupported_confirmation_action(event_name),
+                summary=summary,
             )
         }
 
@@ -305,6 +316,7 @@ def _decision(
             verdict,
             findings,
             "The current protection settings blocked this request.",
+            summary=summary,
         )
         return {
             "decision": "block",
@@ -316,6 +328,7 @@ def _decision(
             verdict,
             findings,
             "The current protection settings blocked this tool call.",
+            summary=summary,
         )
         return {
             "hookSpecificOutput": {
@@ -330,6 +343,7 @@ def _decision(
             findings,
             "The tool has already run. Its raw output will not enter model context; "
             "external side effects were not undone.",
+            summary=summary,
         )
         # Qwen Code 0.19.9 only stops PostToolUse through
         # shouldStopExecution(), which checks continue=false. Keep the
@@ -348,13 +362,14 @@ def _decision(
                     findings,
                     "This pass is warning-only and will not block the response again, "
                     "avoiding a retry loop.",
+                    summary=summary,
                 )
             }
         reason = _notice(
             verdict,
             findings,
-            "The final response was blocked. Rewrite it without sensitive data, then try "
-            "again.",
+            "The final response was blocked. Rewrite it without sensitive data, then try " "again.",
+            summary=summary,
         )
         return {"decision": "block", "reason": reason}
     return _noop()
@@ -394,7 +409,13 @@ def main() -> None:
         output = (
             _noop()
             if verdict == "pass"
-            else _decision(input_data, event_name, verdict, findings)
+            else _decision(
+                input_data,
+                event_name,
+                verdict,
+                findings,
+                summary=scan_result.get("summary"),
+            )
         )
         print(json.dumps(output, ensure_ascii=False))
     except Exception:  # noqa: BLE001 - hook failures must remain silent and fail-open

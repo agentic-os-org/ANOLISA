@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+asc-capability-pii-scan = { workspace = true }
 asc-capability-code-scan.workspace = true
 asc-security-events.workspace = true
 asc-action-runtime = { workspace = true, features = ["testing"] }

@@ -27,6 +27,7 @@ unicode-properties = { workspace = true }
 
 [dev-dependencies]
 asc-action-runtime = { workspace = true, features = ["testing"] }
+asc-capability-pii-scan = { workspace = true }
 tokio = { workspace = true }
 asc-daemon = { workspace = true }
 asc-daemon-core = { workspace = true }

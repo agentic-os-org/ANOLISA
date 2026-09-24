@@ -114,8 +114,21 @@ def _scan_pii(
     return scan_result if isinstance(scan_result, dict) else None
 
 
-def _risk_summary(verdict: str, findings: list[Any]) -> str:
+def _risk_summary(verdict: str, findings: list[Any], summary: Any = None) -> str:
     """Summarize finding counts without exposing scanner-internal details."""
+    if isinstance(summary, dict) and summary.get("findings_truncated") is True:
+        counts = summary.get("by_severity")
+        if isinstance(counts, dict):
+            high, general = counts.get("deny", 0), counts.get("warn", 0)
+            total = summary.get("total")
+            if (
+                all(type(value) is int and value >= 0 for value in (high, general, total))
+                and total == high + general
+            ):
+                return (
+                    f"Detected {total} sensitive data findings "
+                    f"({high} high risk, {general} general risk; details omitted)"
+                )
     typed_findings = [item for item in findings if isinstance(item, dict)]
     high_count = 0
     general_count = 0
@@ -143,9 +156,9 @@ def _risk_summary(verdict: str, findings: list[Any]) -> str:
     return f"Detected {total} {risk} sensitive data {noun}"
 
 
-def _format_notice(verdict: str, findings: list[Any], action: str) -> str:
+def _format_notice(verdict: str, findings: list[Any], action: str, summary: Any = None) -> str:
     """Build a minimal-disclosure PII notice with the actual host action."""
-    return f"[pii-checker] {_risk_summary(verdict, findings)}. {action}"
+    return f"[pii-checker] {_risk_summary(verdict, findings, summary=summary)}. {action}"
 
 
 def _warning_action(event_name: str) -> str:
@@ -160,10 +173,7 @@ def _warning_action(event_name: str) -> str:
             "The tool has already run. This is a warning only; its raw output will enter "
             "model context, and external side effects were not undone."
         )
-    return (
-        "This is a warning only; the request will continue without confirmation or "
-        "blocking."
-    )
+    return "This is a warning only; the request will continue without confirmation or " "blocking."
 
 
 def _unsupported_confirmation_action(event_name: str) -> str:
@@ -195,9 +205,7 @@ def _invalid_policy_output() -> str:
 
 
 def _format_decision(
-    input_data: dict[str, Any],
-    verdict: str,
-    findings: list[Any],
+    input_data: dict[str, Any], verdict: str, findings: list[Any], summary: Any = None
 ) -> str | None:
     """Map a scan-pii verdict to Qoder hook output."""
     if verdict == "pass" or not findings:
@@ -209,7 +217,7 @@ def _format_decision(
 
     event_name = _hook_event(input_data)
     if verdict == "warn" or _POLICY == "warn":
-        notice = _format_notice(verdict, findings, _warning_action(event_name))
+        notice = _format_notice(verdict, findings, _warning_action(event_name), summary=summary)
         return _warn_output(notice)
 
     if _POLICY == "ask" and event_name == "PreToolUse":
@@ -217,6 +225,7 @@ def _format_decision(
             verdict,
             findings,
             "Confirmation is required before this tool call can continue.",
+            summary=summary,
         )
         return pre_tool_decision_output("ask", notice)
 
@@ -225,6 +234,7 @@ def _format_decision(
             verdict,
             findings,
             _unsupported_confirmation_action(event_name),
+            summary=summary,
         )
         return _warn_output(notice)
 
@@ -233,6 +243,7 @@ def _format_decision(
             verdict,
             findings,
             "The current protection settings blocked this request.",
+            summary=summary,
         )
         return deny_output(notice)
 
@@ -241,6 +252,7 @@ def _format_decision(
             verdict,
             findings,
             "The current protection settings blocked this tool call.",
+            summary=summary,
         )
         return pre_tool_decision_output("deny", notice)
 
@@ -250,6 +262,7 @@ def _format_decision(
             findings,
             "The tool has already run. Its raw output will not enter model context; "
             "external side effects were not undone.",
+            summary=summary,
         )
         return post_tool_output_replacement(notice)
 
@@ -279,7 +292,7 @@ def main() -> None:
 
     verdict = _safe_string(scan_result.get("verdict")) or "pass"
     findings = _as_list(scan_result.get("findings"))
-    output = _format_decision(input_data, verdict, findings)
+    output = _format_decision(input_data, verdict, findings, summary=scan_result.get("summary"))
     if output:
         print(output)
 

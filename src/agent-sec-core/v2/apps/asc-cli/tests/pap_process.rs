@@ -58,7 +58,10 @@ async fn start(
     let inner = Arc::new(DaemonDispatcher::new(
         application,
         Arc::new(TestPolicy(role)),
-        asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let dispatcher = Arc::new(RecordingDispatcher {
@@ -389,4 +392,80 @@ fn failed_binding_results_preserve_cli_stdout_and_mutation_exit_status() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pii_cli_uses_common_context_envelope_and_keeps_params_trace_free() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, requests) = start(&socket, PrincipalRole::LocalUser).await;
+    let native = json!({
+        "version": 1,
+        "traceparent": "00-11111111111111111111111111111111-2222222222222222-01",
+        "baggage": "agentsec.run.id=inherited-run"
+    })
+    .to_string();
+    let legacy = json!({
+        "traceId": " opaque-label ", "sessionId": " session ",
+        "agentName": " codex ", "uid": 424242, "unknown": "PRIVATE_UNKNOWN"
+    })
+    .to_string();
+    let args: Vec<OsString> = [
+        "--trace-context",
+        &legacy,
+        "--otel-context",
+        &native,
+        "--socket",
+        socket.to_str().unwrap(),
+        "scan-pii",
+        "--text",
+        "--otel-context",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    let output = tokio::task::spawn_blocking(move || common::run(&args))
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["verdict"],
+        "pass"
+    );
+    {
+        let wire = requests.lock().unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["method"], "action.pii_scan");
+        assert_eq!(wire[0]["params"]["text"], "--otel-context");
+        assert!(wire[0]["params"].get("traceContext").is_none());
+        let carrier = &wire[0]["traceContext"];
+        assert_eq!(carrier["version"], 1);
+        assert!(
+            carrier["traceparent"]
+                .as_str()
+                .unwrap()
+                .starts_with("00-11111111111111111111111111111111-")
+        );
+        assert_ne!(
+            carrier["traceparent"],
+            "00-11111111111111111111111111111111-2222222222222222-01"
+        );
+        let baggage = carrier["baggage"].as_str().unwrap();
+        for field in [
+            "agentsec.session.id=session",
+            "agentsec.agent.name=codex",
+            "agentsec.run.id=inherited-run",
+        ] {
+            assert!(baggage.split(',').any(|item| item == field), "{baggage}");
+        }
+        assert_eq!(wire[0]["compatibility"]["traceId"], "opaque-label");
+        assert!(!wire[0].to_string().contains("PRIVATE_UNKNOWN"));
+        assert!(!wire[0].to_string().contains("424242"));
+    }
+    shutdown.request();
+    task.await.unwrap();
 }

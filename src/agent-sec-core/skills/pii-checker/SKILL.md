@@ -5,7 +5,8 @@ description: 使用 agent-sec-cli 检查文本、UTF-8 文件或日志中的个�
 
 # PII Checker
 
-复用 V1 `agent-sec-cli scan-pii` 的本地检测规则，检查个人信息和凭证。
+复用已安装的 `agent-sec-cli scan-pii` 检测个人信息和凭证。
+V2 需要预先运行的 Rust daemon 和 `AGENT_SEC_DAEMON_SOCKET`；不自动启动或回退到 Python。
 支持邮箱、中国手机号、身份证号、银行卡号、API Key、Bearer Token、JWT、
 私钥及自定义规则。仅检查用户指定的内容，不主动扩大到整个目录或历史会话。
 
@@ -54,6 +55,8 @@ agent-sec-cli scan-pii --stdin --source manual --format json
 | `verdict=warn` | 存在告警级命中，没有 `deny` 级命中 |
 | `verdict=deny` | 存在 `deny` 级命中；这是扫描判定，不代表已经阻断或撤销凭证 |
 | `summary.truncated=true` | 只扫描了部分输入，不能给出全文结论 |
+| `summary.findings_truncated=true` | 返回的命中明细或证据有省略；使用 `summary.total` / `summary.by_type` 报告统计，不能将返回的 `findings` 当作完整位置清单 |
+| `summary.redacted_text_omitted=true` | 响应省略了完整脱敏正文；`redacted_text` 是整段占位符，不能作为完整脱敏产物使用 |
 | `summary.custom_rules.status=invalid` | 自定义规则未生效，内置规则的结果仍可报告 |
 | `summary.custom_rules.runtime_error_count>0`、`budget_exhausted=true` 或 `truncated=true` | 自定义规则执行或结果不完整，必须说明覆盖限制 |
 
@@ -67,7 +70,11 @@ JSON 缺失、解析失败、关键字段缺失或出现未知 verdict 时，报
 
 ## 脱敏与审计
 
-只在用户要求脱敏时返回 `redacted_text`；它只替换检出的内容。
+只在用户要求脱敏时返回 `redacted_text`，并先检查 `summary.redacted_text_omitted`。
+该标记为 `true` 时，即使扫描成功且覆盖完整，也没有可交付的完整脱敏正文；
+应说明输出大小限制，并报告扫描判定与统计。不得把 `[REDACTED: output size limit]`
+占位符作为完整脱敏文本交付、保存或覆盖原文件，也不要用省略后的 `findings` 重建全文。
+该标记为 `false` 或不存在时，`redacted_text` 在实际扫描范围内替换检出的内容。
 如果扫描或自定义规则不完整，要说明脱敏结果也不完整，不能把截断的片段当作全文。
 `--redact-output` 不修改原文件；仅在用户要求保存或替换文件时执行对应写入。
 

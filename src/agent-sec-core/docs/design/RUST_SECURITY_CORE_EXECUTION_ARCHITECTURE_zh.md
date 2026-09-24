@@ -131,8 +131,8 @@ Rust 应先构造 immutable `FinalizedInvocation`，再做三个有边界的 pro
 
 ### 4.1 ActionId 与 typed request
 
-**实现范围：** 当前 V2 `ActionId` 只有 `CodeScan`。下面八个 action 的 enum 是迁移完成后的
-目标示意，不是当前支持清单；`PromptScan`、`PiiScan` 等须随各自能力实现再加入代码。
+**实现范围：** 当前 V2 `ActionId` 包含 `CodeScan` 和 `PiiScan`。下面八个 action 的 enum
+是迁移完成后的目标示意，不是当前支持清单；其余 action 须随各自能力实现再加入代码。
 
 八个 action 使用封闭的 `ActionId`，每个 action 定义自己的 request/output 类型。adapter
 完成 transport/binding envelope 校验后，把固定 `ActionId`、context 和有大小限制的 raw
@@ -347,7 +347,9 @@ V1 client 不得自动重放执行状态不明的有副作用 action。
 
 `asc-action-runtime` 的 lifecycle 与 Finalizer 是所有扫描 capability 共用的基础设施，
 由 runtime 隐式完成终态处理，具体 capability 和 handler 不拥有 sink。
-当前 code-scan 是已接入的消费者；其 identity、telemetry 投影与 fixture 不限定公共机制的适用范围。
+当前 code-scan 与 PII scan 均已接入。PII 的共享请求类型、应用入口、安全参数拒绝及
+标量遥测复用本节机制，具体迁移与验收见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+下述共享基础设施的原始验收记录保留其当时的 code-scan 范围，不代替 PII 的直接消费者验收。
 其它扫描能力在各自提交中添加 identity、Executor、投影与注册，复用本节的装配与执行路径。
 
 以下为 **[TARGET V2][PARTIAL_MIGRATION]** 的实际实现，不表示 §5.1 的完整目标状态机、

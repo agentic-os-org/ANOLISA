@@ -3,7 +3,7 @@ use crate::{
     AuditProjector, CapabilityExecutor, Diagnostic, ExecutionControl, Finalizer, Invocation,
     InvokeError,
 };
-use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity};
+use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity, Failure};
 use serde_json::Map;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
@@ -76,6 +76,31 @@ where
         } else {
             Ok(outcome)
         }
+    }
+
+    fn reject(
+        &self,
+        caller: &CallerIdentity,
+        failure: Failure,
+        projection: AuditProjection,
+    ) -> ActionOutcome {
+        let started = Instant::now();
+        self.finalizer.diagnostic(Diagnostic::Started(self.action));
+        let outcome = ActionOutcome {
+            success: false,
+            exit_code: failure.exit_code,
+            error: failure.error,
+            error_type: failure.error_type,
+            data: Map::new(),
+        };
+        self.finalizer
+            .finalize(self.action, caller, &outcome, projection, false);
+        self.finalizer.diagnostic(Diagnostic::Completed {
+            action: self.action,
+            succeeded: false,
+            duration: started.elapsed(),
+        });
+        outcome
     }
 }
 

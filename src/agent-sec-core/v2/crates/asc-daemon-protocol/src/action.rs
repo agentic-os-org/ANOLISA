@@ -7,6 +7,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Strict method parameters for `action.pii_scan`; no filesystem paths are accepted.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent V1 response/input switches.
+pub struct PiiScanParams {
+    /// Exact supplied UTF-8 text; empty text is legal.
+    pub text: String,
+    /// Caller-declared origin, validated by the capability adapter.
+    #[serde(default = "unknown_source")]
+    pub source: String,
+    /// Retain findings below the default confidence threshold.
+    #[serde(default)]
+    pub include_low_confidence: bool,
+    /// Return raw evidence to this client only.
+    #[serde(default)]
+    pub raw_evidence: bool,
+    /// Return the full redacted prefix to this client only.
+    #[serde(default)]
+    pub redact_output: bool,
+    /// Optional positive UTF-8 prefix limit.
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    /// The client omitted input before sending this text.
+    #[serde(default)]
+    pub input_truncated: bool,
+    /// Legacy prefix byte count, including a discarded UTF-8 tail of at most 3 bytes.
+    #[serde(default)]
+    pub input_bytes_scanned: Option<usize>,
+}
+
+fn unknown_source() -> String {
+    "unknown".to_owned()
+}
+
 /// Parameters for `action.code_scan`.
 ///
 /// `rules`, when present, narrows the active rule set to the listed ids; a

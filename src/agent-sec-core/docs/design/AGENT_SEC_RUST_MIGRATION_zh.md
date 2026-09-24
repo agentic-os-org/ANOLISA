@@ -402,3 +402,9 @@ CLI/client/daemon/PAP/compiler 已接线，产品 main 启用 runtime feature �
 该基础设施不依赖尚未落地的 Action Runtime、安全事件 Rust sink 或本地链路重组。
 协议/部署/中间件契约同步记录 TARGET V2 条款，V1 实现继续仅作为冻结输入 oracle。
 实施、验收边界及 server-first/caller-first 回滚顺序见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。
+
+## PII Checker 第一阶段实现入口
+
+PII 检测核心、中央规则、Runtime/Finalizer、RPC/CLI 和 Hook/RPM 验收位于
+[PII 两阶段迁移设计](PII_V2_MIGRATION_zh.md)。该文显式区分当前执行服务与未来
+PIP 证据获取、PDP 决策、PEP 执行反馈的覆盖范围；不改变本文的系统级部署及 OTel 目标。

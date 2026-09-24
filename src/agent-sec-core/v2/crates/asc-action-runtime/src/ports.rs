@@ -1,5 +1,5 @@
 //! Application execution and output ports; no concrete scanner or writer dependencies.
-use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity};
+use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CallerIdentity, Failure};
 use asc_security_events::SecurityEvent;
 use asc_telemetry::{TelemetryRecord, TelemetryStatus};
 use std::time::{Duration, Instant};
@@ -41,6 +41,18 @@ pub trait Invocation<R>: Send + Sync {
         caller: &CallerIdentity,
         request: &R,
     ) -> Result<ActionOutcome, InvokeError>;
+
+    /// Finalizes an identified, authorized action rejected before execution.
+    ///
+    /// Callers supply sanitized failure fields and audit data, then return without
+    /// invoking execution. Envelope, authorization, and transport rejections stay
+    /// at their own ingress boundary.
+    fn reject(
+        &self,
+        caller: &CallerIdentity,
+        failure: Failure,
+        projection: AuditProjection,
+    ) -> ActionOutcome;
 }
 
 /// Controlled unhandled execution failure; never contains a panic payload.

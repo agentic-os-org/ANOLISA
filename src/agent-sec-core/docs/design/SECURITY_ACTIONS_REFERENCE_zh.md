@@ -1,5 +1,7 @@
 # AgentSec Security Actions 权威参考
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python capability 基线、compatibility fixtures 及 V2 CapabilityExecutor 目标 |
@@ -666,3 +668,27 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 - PII schema/redaction：`agent_sec_cli/pii_checker/models.py`、`scanner.py`、`audit.py`。
 - Skill Ledger：`agent_sec_cli/skill_ledger/core/`、`signing/`、`scanner/`。
 - action characterization：`tests/unit-test/security_middleware/backends/`。
+
+## PII 第一阶段 V2 替代契约
+
+**[TARGET V2，已实现]** `PiiScanner` 和 `PiiScanExecutor` 保留本文 PII 的 11 类检测、
+校验、置信度、去重排序、Unicode 字符 span、重叠保留与合并脱敏语义。
+顶层 V1 字段保留；新增信息仅放入 `summary`：`execution_status`、`coverage`、
+`input_sha256`、`scanned_input_sha256`、`scanned_bytes`、`scanner_version` 和 `ruleset_id`。
+`coverage` 使用 complete/partial/unavailable；partial 时 verdict 仍仅聚合已有 findings。
+输入摘要对应检测器收到的文本，不冒充调用前被截断的完整操作内容。
+
+本文 V1 用户目录/每次扫描重载规则由版本化 V2 中央配置替代：默认
+`/etc/agent-sec/pii-checker/rules.yaml`，daemon `--pii-rules` 可选绝对路径，启动编译、重启生效。
+默认缺失为 absent，显式读取失败或任一无效规则使自定义集合 invalid，内置检测继续、coverage partial。
+V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
+100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
+与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
+检测语义版本 `scanner_version=2.0.0` 纳入规则标识，成功/失败报告及审计均保留；
+内置 engine 为 regex_v2，自定义为 fancy_regex。此版本修复空 claims JWT 的候选漏报，
+接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
+其他格式、置信度、位置和脱敏契约保留，变化由独立质量用例定义。
+
+差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 142 个
+V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。保留 V1 实现独立回滚。

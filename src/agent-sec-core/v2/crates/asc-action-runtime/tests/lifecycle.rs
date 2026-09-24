@@ -334,3 +334,64 @@ fn disabled_telemetry_is_skipped_by_lifecycle_without_suppressing_audit() {
             })
     );
 }
+
+#[test]
+fn authorized_rejection_skips_execution_and_finalizes_each_output_once() {
+    let context = bind_trace_context_input(
+        &Context::new(),
+        &json!({"trace_id":"legacy-test", "agent_name":"codex", "uid":0}),
+    )
+    .unwrap();
+    let _guard = context.attach();
+    for fail_audit in [false, true] {
+        let output = Arc::new(Outputs {
+            fail_audit,
+            ..Outputs::default()
+        });
+        let runtime = ActionRuntime::new(
+            ActionId::PiiScan,
+            BrokenExecutor,
+            BrokenProjector,
+            finalizer(&output),
+        );
+        let failure = Failure {
+            error: Some("invalid parameters".into()),
+            error_type: "invalid_parameters".into(),
+            exit_code: 1,
+        };
+        let projection = AuditProjection::Failed {
+            request: serde_json::Map::new(),
+            error: "invalid parameters".into(),
+            error_type: "invalid_parameters".into(),
+        };
+        let rejected = runtime.reject(&caller(), failure, projection);
+        assert!(!rejected.success);
+        assert_eq!(rejected.error_type, "invalid_parameters");
+        assert!(rejected.data.is_empty());
+        let events = output.audit.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "pii_scan");
+        assert_eq!(events[0].trace_id, "legacy-test");
+        assert_eq!((events[0].uid, events[0].pid), (1001, 1003));
+        assert_eq!(events[0].details["request"], json!({}));
+        let records = output.telemetry.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["seccore.result"], "failed");
+        assert_eq!(records[0]["seccore.error_type"], "invalid_parameters");
+        assert_eq!(records[0]["component.agent_name"], "codex");
+        assert!(records[0].get("seccore.verdict").is_none());
+        let diagnostics = output.diagnostics.lock().unwrap();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| matches!(d, Diagnostic::Completed { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| matches!(d, Diagnostic::AuditProjectionFailed(_)))
+        );
+    }
+}

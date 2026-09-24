@@ -132,12 +132,22 @@ mod tests {
     }
 
     fn with_sink(sink: Arc<dyn SecurityEventSink>) -> CodeScanHandler {
-        CodeScanHandler::new(Arc::new(ActionService::new(ActionRuntime::new(
-            ActionId::CodeScan,
-            CodeScanExecutor,
-            CodeScanAuditProjector,
-            audit_finalizer(sink),
-        ))))
+        CodeScanHandler::new(Arc::new(ActionService::new(
+            ActionRuntime::new(
+                ActionId::CodeScan,
+                CodeScanExecutor,
+                CodeScanAuditProjector,
+                audit_finalizer(sink),
+            ),
+            ActionRuntime::new(
+                ActionId::PiiScan,
+                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
+                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
+                )),
+                asc_capability_pii_scan::PiiAuditProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+        )))
     }
 
     fn handler() -> CodeScanHandler {
@@ -248,12 +258,22 @@ mod tests {
     #[test]
     fn unexpected_execution_failure_is_a_safe_core_error_after_finalization() {
         let sink = Arc::new(RecordingSink::default());
-        let handler = CodeScanHandler::new(Arc::new(ActionService::new(ActionRuntime::new(
-            ActionId::CodeScan,
-            PanickingExecutor,
-            CodeScanAuditProjector,
-            audit_finalizer(sink.clone()),
-        ))));
+        let handler = CodeScanHandler::new(Arc::new(ActionService::new(
+            ActionRuntime::new(
+                ActionId::CodeScan,
+                PanickingExecutor,
+                CodeScanAuditProjector,
+                audit_finalizer(sink.clone()),
+            ),
+            ActionRuntime::new(
+                ActionId::PiiScan,
+                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
+                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
+                )),
+                asc_capability_pii_scan::PiiAuditProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+        )));
         let response = handler.handle(
             RequestId::new("test").unwrap(),
             PeerCredentials::new(1001, 1002, 1003),

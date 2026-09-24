@@ -63,12 +63,23 @@ def _finding_risk(finding: Any, verdict: str) -> str:
     return "high" if verdict == "deny" else "general"
 
 
-def _risk_summary(verdict: str, findings: list[Any]) -> str:
+def _risk_summary(verdict: str, findings: list[Any], summary: Any = None) -> str:
     """Summarize finding counts without exposing scanner-internal fields."""
+    if isinstance(summary, dict) and summary.get("findings_truncated") is True:
+        counts = summary.get("by_severity")
+        if isinstance(counts, dict):
+            high, general = counts.get("deny", 0), counts.get("warn", 0)
+            total = summary.get("total")
+            if (
+                all(type(value) is int and value >= 0 for value in (high, general, total))
+                and total == high + general
+            ):
+                return (
+                    f"检测到 {total} 项敏感信息"
+                    f"（高风险 {high}、一般风险 {general}；明细已省略）"
+                )
     typed_findings = [finding for finding in findings if isinstance(finding, dict)]
-    high_count = sum(
-        1 for finding in typed_findings if _finding_risk(finding, verdict) == "high"
-    )
+    high_count = sum(1 for finding in typed_findings if _finding_risk(finding, verdict) == "high")
     general_count = len(typed_findings) - high_count
 
     if high_count and general_count:
@@ -85,15 +96,14 @@ def _format_pii_warning(
     verdict: str,
     findings: list[Any],
     action_message: str = "本次仅提醒，未触发确认或阻断。",
+    summary: Any = None,
 ) -> str:
     """Build a concise warning without exposing internal labels or evidence."""
     # Cosh strips this exact hook-name prefix from permissive notifications.
-    return f"[pii-checker] {_risk_summary(verdict, findings)}；{action_message}"
+    return f"[pii-checker] {_risk_summary(verdict, findings, summary=summary)}；{action_message}"
 
 
-def _scan_text(
-    input_data: dict[str, Any], text: str, source: str
-) -> dict[str, Any] | None:
+def _scan_text(input_data: dict[str, Any], text: str, source: str) -> dict[str, Any] | None:
     """Run scan-pii with a source label and parse JSON output."""
     try:
         cmd = with_trace_context(
@@ -218,9 +228,7 @@ def _format_cosh(
     """
     verdict = _safe_text(scan_result.get("verdict")) or "pass"
     findings = [
-        finding
-        for finding in _as_list(scan_result.get("findings"))
-        if isinstance(finding, dict)
+        finding for finding in _as_list(scan_result.get("findings")) if isinstance(finding, dict)
     ]
 
     if verdict == "pass" or not findings:
@@ -262,8 +270,7 @@ def _format_cosh(
         elif event_name == "PostToolUse":
             decision = "block"
             action_message = (
-                "工具已经执行；原始工具结果不会进入模型上下文，"
-                "已发生的外部副作用不会撤销。"
+                "工具已经执行；原始工具结果不会进入模型上下文，" "已发生的外部副作用不会撤销。"
             )
         elif event_name == "PostToolUseFailure":
             action_message = (
@@ -276,7 +283,9 @@ def _format_cosh(
     return json.dumps(
         {
             "decision": decision,
-            "reason": _format_pii_warning(verdict, findings, action_message),
+            "reason": _format_pii_warning(
+                verdict, findings, action_message, summary=scan_result.get("summary")
+            ),
         },
         ensure_ascii=False,
     )

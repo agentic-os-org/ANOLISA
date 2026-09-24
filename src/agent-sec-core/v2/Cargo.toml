@@ -8,6 +8,7 @@ members = [
     "crates/asc-action-runtime",
     "crates/asc-action-types",
     "crates/asc-capability-code-scan",
+    "crates/asc-capability-pii-scan",
     "crates/asc-daemon-client",
     "crates/asc-daemon-core",
     "crates/asc-daemon-handler",
@@ -55,6 +56,7 @@ tracing-opentelemetry = { version = "0.33", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
 percent-encoding = "2"
 url = "2"
+asc-capability-pii-scan = { path = "crates/asc-capability-pii-scan" }
 asc-daemon = { path = "apps/asc-daemon" }
 asc-daemon-client = { path = "crates/asc-daemon-client" }
 asc-daemon-core = { path = "crates/asc-daemon-core" }
@@ -78,6 +80,7 @@ asc-security-events = { path = "crates/asc-security-events" }
 asc-telemetry = { path = "crates/asc-telemetry" }
 asc-security-summary = { path = "crates/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
 fancy-regex = "0.16"

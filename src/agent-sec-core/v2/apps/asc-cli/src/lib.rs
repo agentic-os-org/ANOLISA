@@ -13,8 +13,8 @@ use std::time::Duration;
 use asc_daemon_protocol::DaemonRequest;
 use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
-pub use commands::CapabilitiesCommand;
 use commands::Command;
+pub use commands::{CapabilitiesCommand, PiiOutputFormat};
 
 /// Parsed invocation for one CLI command.
 #[derive(Debug)]
@@ -86,17 +86,20 @@ impl Cli {
         context::parse(None, trace_context_input.as_deref())?;
         let arguments = Arguments::try_parse_from(&argv)?;
         // Clap propagates global values across subcommands using last-wins.
-        // After successful parsing, a standalone --option token cannot be a
-        // value: these commands do not accept hyphen values or positional tails.
+        // Scan text/code accept hyphen values, so their next token is data even
+        // when it happens to spell a global option.
         for option in ["--socket", "--timeout-ms", "--otel-context"] {
-            let count = argv
-                .iter()
-                .skip(1)
-                .filter(|argument| {
-                    argument.as_bytes().split(|byte| *byte == b'=').next()
-                        == Some(option.as_bytes())
-                })
-                .count();
+            let mut tokens = argv.iter().skip(1);
+            let mut count = 0;
+            while let Some(argument) = tokens.next() {
+                if argument == "--text" || argument == "--code" {
+                    tokens.next();
+                } else if argument.as_bytes().split(|byte| *byte == b'=').next()
+                    == Some(option.as_bytes())
+                {
+                    count += 1;
+                }
+            }
             if count > 1 {
                 return Err(clap::Error::raw(
                     clap::error::ErrorKind::ArgumentConflict,
@@ -159,6 +162,11 @@ impl Cli {
     pub const fn is_scan_code(&self) -> bool {
         self.command.is_scan_code()
     }
+
+    /// Selected PII presentation, or `None` for another command.
+    pub const fn pii_format(&self) -> Option<PiiOutputFormat> {
+        self.command.pii_format()
+    }
 }
 
 /// Resolves the daemon endpoint from the option, then the environment.
@@ -190,6 +198,15 @@ fn resolve_socket(
 /// Local input failures, reported as execution failures rather than daemon errors.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
+    /// Local PII file or stdin access failed.
+    #[error("cannot read PII input: {0}")]
+    PiiRead(#[source] std::io::Error),
+    /// Malformed UTF-8 is never silently repaired.
+    #[error("PII input must be valid UTF-8")]
+    PiiUtf8,
+    /// Untruncated input cannot fit the daemon transport.
+    #[error("PII input exceeds the 4 MiB business frame limit")]
+    PiiTooLarge,
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,
@@ -210,6 +227,47 @@ pub enum InputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scanner_hyphen_values_are_data_but_duplicate_global_options_fail() {
+        for (command, input) in [("scan-pii", "--text"), ("scan-code", "--code")] {
+            for literal in ["--socket", "--timeout-ms", "--socket=/literal"] {
+                let cli = Cli::parse_from_with_socket_env(
+                    [
+                        "agent-sec-cli",
+                        "--socket",
+                        "/run/asc.sock",
+                        command,
+                        input,
+                        literal,
+                    ],
+                    None,
+                )
+                .unwrap();
+                let key = if command == "scan-pii" {
+                    "text"
+                } else {
+                    "code"
+                };
+                assert_eq!(cli.request().unwrap().params[key], literal);
+            }
+        }
+        let error = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/one.sock",
+                "scan-pii",
+                "--text",
+                "",
+                "--socket",
+                "/run/two.sock",
+            ],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 
     #[test]
     fn environment_socket_is_used_when_the_option_is_omitted() {

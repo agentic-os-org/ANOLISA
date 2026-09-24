@@ -35,6 +35,7 @@ def test_capabilities_cannot_write_events_or_telemetry_directly():
                 "asc-event-sink",
                 "asc-event-log",
                 "asc-telemetry",
+                "asc-observability",
                 "asc-persistence-sqlite",
                 "rusqlite",
             }
