@@ -1279,6 +1279,54 @@ mod tests {
         );
     }
 
+    /// Contract v1 pin for the wrapper form published in
+    /// `docs/design/rtk-hook-placement.md`. Host risk classifiers unwrap this
+    /// exact shape, so changing the key set, the key order, the quoting rule,
+    /// or the payload is a contract break and must bump the documented version.
+    #[test]
+    fn pre_tool_rtk_wrapper_matches_published_contract_v1() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk git status'\n");
+        // A literal directory with a space: the contract promises `shell_quote`
+        // semantics for every value, and this value needs quoting.
+        let data_dir = Path::new("/var/lib/tokenless state");
+        let response = pre_tool_with_rtk(
+            &PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "git status"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            },
+            &Attribution {
+                agent_id: "cosh".into(),
+                session_id: Some("session 1".into()),
+                tool_use_id: Some("call/1".into()),
+            },
+            &rtk,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::ReplaceArguments);
+        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+        // Fixed key order after `env`, unquoted values when every byte is
+        // alphanumeric or one of `/ _ - .` (`call/1` stays bare), single-quoted
+        // values otherwise, then the RTK payload with its bare `rtk` token
+        // replaced by the wrapper.
+        let quoted_rtk = shell_quote(&rtk.to_string_lossy());
+        assert_eq!(
+            response.arguments["command"].as_str().unwrap(),
+            format!(
+                "env TOKENLESS_AGENT_ID=cosh TOKENLESS_SESSION_ID='session 1' \
+                 TOKENLESS_TOOL_USE_ID=call/1 \
+                 TOKENLESS_DATA_DIR='/var/lib/tokenless state' {quoted_rtk} git status"
+            )
+        );
+    }
+
     #[test]
     fn pre_tool_reserves_supported_build_and_test_commands_for_post_tool() {
         let commands = [
