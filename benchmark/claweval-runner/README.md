@@ -147,6 +147,8 @@ Each task agent is configured with three tool policies working together:
       "canvas", "nodes", "cron", "sessions_list", "sessions_history",
       "sessions_send", "sessions_spawn", "sessions_yield", "subagents",
       "web_fetch", "session_status", "memory_get", "memory_search",
+      "anolisa_memory_search", "anolisa_memory_get", "memory_observe",
+      "memory_get_context",
       "other-mcp-server__*"
     ],
     "exec": { "security": "full", "ask": "off" }
@@ -157,7 +159,7 @@ Each task agent is configured with three tool policies working together:
 | Policy | Role |
 |--------|------|
 | `tools.allow` | Explicit allowlist: `exec` (enables tool execution) + task MCP tools in `serverKey__toolName` format (double underscore). Only listed tools are available to the model. |
-| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.) and other MCP servers' tools. Prevents host filesystem access and cross-task leakage. |
+| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.), the agent-memory plugin's persistent-memory tools, and other MCP servers' tools. Prevents host filesystem access, cross-task memory recall, and cross-task leakage. |
 | `tools.exec` | Sets MCP tool execution security policy (required for tool calls to succeed). |
 
 ### Two MCP Servers Per Task
@@ -173,12 +175,26 @@ Both are registered via `openclaw mcp set` (persisted, stdio transport). The san
 
 In batch mode, each task's deny list also includes other tasks' MCP server names (`claw-eval-mock-<other_task>__*`), preventing one agent from calling another task's mock services.
 
+### Host Memory Isolation
+
+Where the agent-memory OpenClaw plugin is installed and enabled, it registers its tools directly on the gateway instead of through an MCP server, so the `claw-eval-*__*` wildcards above never match them — the same reason the host `memory-core` plugin's `memory_get` / `memory_search` are denied by plain name. Its store persists across tasks, runs, and gateway restarts, which would let one agent read what an earlier task recorded and leave answers behind for the next one. Every task therefore denies all four plugin tools:
+
+| Denied | Provided by |
+|--------|-------------|
+| `anolisa_memory_search`, `anolisa_memory_get` | agent-memory ≥ 0.2.8 (namespaced names) |
+| `memory_observe`, `memory_get_context` | agent-memory (all versions) |
+| `memory_get`, `memory_search` | agent-memory ≤ 0.2.7 and OpenClaw's own `memory-core` |
+
+The last row is why both spellings stay in the list: `memory_get` / `memory_search` were the plugin's own read/search names before 0.2.8 and are also the host `memory-core` built-ins, so denying them covers the old plugin and the host backend at once.
+
 ### Implementation
 
 Core logic: `src/ce_runner/tool_injector.py`
 - `_build_allowlist()` — constructs `alsoAllow` from task.yaml tools + sandbox tools
-- `_build_deny_list()` — constructs `deny` from built-in tools + other MCP servers
+- `_build_deny_list()` — constructs the *extra* `deny` entries from other MCP servers
 - `_DENY_BUILTIN_TOOLS` — static list of gateway built-in tools to block
+- `_DENY_MEMORY_PLUGIN_TOOLS` — static list of agent-memory plugin tools to block
+- `_DENY_HOST_TOOLS` — built-ins + memory plugin tools; the deny baseline `build_agent_tools()` starts from
 
 ## Scripts
 
