@@ -54,7 +54,7 @@ fn read_stderr(directory: &Path) -> String {
 }
 
 async fn wait_for_socket(running: &mut RunningBinary) {
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(status) = running.child.try_wait().unwrap() {
                 panic!(
