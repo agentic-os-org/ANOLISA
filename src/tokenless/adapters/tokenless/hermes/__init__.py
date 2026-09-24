@@ -117,7 +117,7 @@ _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
     #                           content_origin, output_optimization,
     #                           result_kind=..., recovery=..., session_id=...,
     #                           tool_use_id=..., replace_output=True,
-    #                           replace_with_text=True)
+    #                           replace_with_text=True, command=...)
     (
         "build_post_tool_request",
         ("", "", "", "", "", ""),
@@ -128,14 +128,13 @@ _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
             "tool_use_id": "",
             "replace_output": True,
             "replace_with_text": True,
+            "command": None,
         },
     ),
     # Both hooks: run_compress(tokenless_bin, request, timeout, operation)
     ("run_compress", ("", {}, 0, ""), {}),
     # on_transform_tool_result: is_tokenless_retrieve_command(tool_name, args)
     ("is_tokenless_retrieve_command", ("", {}), {}),
-    # on_transform_tool_result: is_file_read_command(tool_name, args)
-    ("is_file_read_command", ("", {}), {}),
     # on_transform_tool_result: tokenless_retrieve_command_available()
     ("tokenless_retrieve_command_available", (), {}),
 )
@@ -294,7 +293,6 @@ from hook_utils import SKIP_TOOLS as _SKIP_TOOLS_SHARED
 from hook_utils import (
     build_post_tool_request,
     build_pre_tool_request,
-    is_file_read_command,
     is_tokenless_retrieve_command,
     resolve_binary,
     run_compress,
@@ -369,8 +367,6 @@ def _protocol_status(status: Any, result: str) -> str | None:
 def _content_origin(tool_name: str, args: Any) -> str:
     if tool_name in _SKIP_TOOLS:
         return "file_content"
-    if is_file_read_command(tool_name, args):
-        return "file_read"
     if tool_name in _SHELL_TOOLS:
         return "command_output"
     return "api_response"
@@ -492,6 +488,12 @@ def on_transform_tool_result(
     # result directly and must keep the existing path.
     shell_envelope = None
     content = result
+    content_origin = _content_origin(tool_name, args)
+    # Core reports a plain file print (`cat page.html`) as file_read from the
+    # command line, so the page stays verbatim while data still compresses.
+    command = None
+    if content_origin == "command_output" and isinstance(args, dict):
+        command = args.get("command")
     if tool_name in _SHELL_TOOLS:
         try:
             parsed_result = json.loads(result)
@@ -506,7 +508,7 @@ def on_transform_tool_result(
         AGENT_ID,
         tool_name,
         protocol_status,
-        _content_origin(tool_name, args),
+        content_origin,
         output_optimization,
         result_kind="retrieve" if retrieve_result else "tool",
         recovery={
@@ -525,6 +527,7 @@ def on_transform_tool_result(
         tool_use_id=str(tool_call_id),
         replace_output=True,
         replace_with_text=True,
+        command=command if isinstance(command, str) else None,
     )
     response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool")
     if not isinstance(response, dict):

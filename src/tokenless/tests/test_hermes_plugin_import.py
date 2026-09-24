@@ -297,7 +297,6 @@ class VersionMismatchTest(unittest.TestCase):
                 "): return {}\n"
                 "def run_compress(*args, **kwargs): return None\n"
                 "def is_tokenless_retrieve_command(*args, **kwargs): return False\n"
-                "def is_file_read_command(*args, **kwargs): return False\n"
                 "def tokenless_retrieve_command_available(): return False\n"
             )
         shutil.copy(

@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -222,63 +221,6 @@ def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
     if not isinstance(command, str):
         return False
     return _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command) is not None
-
-
-# Commands whose only effect is printing local files. `sed` counts when it
-# runs in `-n` mode with a print-only script, e.g. `sed -n '1,80p' page.html`.
-_FILE_READ_COMMANDS = frozenset({"cat", "head", "tail", "nl", "less", "more", "bat"})
-_SED_PRINT_SCRIPT_RE = re.compile(r"[0-9,$ ]*p")
-_SHELL_CONTROL_CHARS = frozenset("|;&<>`")
-
-
-def is_file_read_command(tool_name: str, arguments: object) -> bool:
-    """Recognize a shell command that only prints local files.
-
-    The adapter reports it as ``file_read``: Core still compresses data
-    such as JSON, CSV, build logs and diffs, but keeps a printed HTML page
-    verbatim because it is source the agent may edit. Only a plain
-    invocation qualifies, optionally after ``cd ... &&`` prefixes; a pipe,
-    redirection, heredoc, command list or substitution keeps
-    ``command_output``.
-    """
-    if tool_name not in SHELL_TOOLS or not isinstance(arguments, dict):
-        return False
-    command = arguments.get("command")
-    if not isinstance(command, str):
-        return False
-    # A newline separates commands in the shell but is only whitespace to
-    # shlex; surrounding blank lines separate nothing.
-    command = command.strip()
-    if "\n" in command or "\r" in command:
-        return False
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    groups: list[list[str]] = [[]]
-    for token in tokens:
-        if token == "&&":
-            groups.append([])
-        elif _SHELL_CONTROL_CHARS & set(token) or "$(" in token:
-            return False
-        else:
-            groups[-1].append(token)
-    if any(not group or group[0] != "cd" for group in groups[:-1]):
-        return False
-    words = groups[-1]
-    if not words:
-        return False
-    program, options, operands = words[0], [], []
-    for word in words[1:]:
-        (options if word.startswith("-") else operands).append(word)
-    if program == "sed":
-        return (
-            "-n" in options
-            and not any(option.startswith(("-i", "--in-place")) for option in options)
-            and len(operands) >= 2
-            and _SED_PRINT_SCRIPT_RE.fullmatch(operands[0]) is not None
-        )
-    return program in _FILE_READ_COMMANDS and bool(operands)
 
 
 # Layer 3: API tools (zero-truncation).
@@ -736,9 +678,14 @@ def build_post_tool_request(
     tool_use_id: str = "",
     replace_output: bool = False,
     replace_with_text: bool = False,
+    command: str | None = None,
 ) -> dict:
-    """Build a Protocol v2 PostTool transport request."""
-    return {
+    """Build a Protocol v2 PostTool transport request.
+
+    ``command`` is the shell command line behind a ``command_output`` result;
+    Core reports a plain print of local files as ``file_read``.
+    """
+    request = {
         "protocol_version": 2,
         "operation": "post_tool",
         "attribution": _attribution(agent_id, session_id, tool_use_id),
@@ -756,6 +703,9 @@ def build_post_tool_request(
             },
         },
     }
+    if command is not None:
+        request["input"]["command"] = command
+    return request
 
 
 def run_compress(

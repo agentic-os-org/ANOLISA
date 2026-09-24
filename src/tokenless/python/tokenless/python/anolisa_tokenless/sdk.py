@@ -277,6 +277,10 @@ class PostToolRequest:
     output_optimization: OutputOptimization
     capabilities: PostToolCapabilities
     attribution: Attribution
+    #: Shell command line behind a ``COMMAND_OUTPUT`` result, when the host has
+    #: it. Core reports a plain print of local files such as ``cat page.html``
+    #: as ``FILE_READ``; ignored for every other origin.
+    command: str | None = None
 
     def __post_init__(self) -> None:
         if not self.tool_name:
@@ -389,23 +393,24 @@ class TokenlessSdk:
 
     async def post_tool(self, request: PostToolRequest) -> PostToolResponse:
         """Runs Core PostTool routing and the content-domain Pipeline."""
+        payload: dict[str, Any] = {
+            "result_kind": request.result_kind,
+            "tool_name": request.tool_name,
+            "content": request.content,
+            "status": request.status,
+            "content_origin": request.content_origin,
+            "output_optimization": request.output_optimization,
+            "capabilities": {
+                "replace_output": request.capabilities.replace_output,
+                "recovery": request.capabilities.recovery.as_dict(),
+                "replace_with_text": request.capabilities.replace_with_text,
+            },
+        }
+        if request.command is not None:
+            payload["command"] = request.command
         response = await asyncio.to_thread(
             self.runtime._post_tool_json,
-            _json_dumps(
-                {
-                    "result_kind": request.result_kind,
-                    "tool_name": request.tool_name,
-                    "content": request.content,
-                    "status": request.status,
-                    "content_origin": request.content_origin,
-                    "output_optimization": request.output_optimization,
-                    "capabilities": {
-                        "replace_output": request.capabilities.replace_output,
-                        "recovery": request.capabilities.recovery.as_dict(),
-                        "replace_with_text": request.capabilities.replace_with_text,
-                    },
-                }
-            ),
+            _json_dumps(payload),
             **_attribution_kwargs(request.attribution),
         )
         value = _json_object(response)
