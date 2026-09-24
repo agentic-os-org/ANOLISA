@@ -602,6 +602,11 @@ pub(crate) fn plan_component(
     } = &request.target
         && matches!(route, PlannedRoute::Delegated { .. })
     {
+        // Refuse an unconfigured backend before the DNF preflight: the check
+        // must not query host repositories for a source that cannot exist,
+        // and the refusal must read as INVALID_ARGUMENT (not a preflight
+        // EXECUTION_FAILED) in both apply and dry-run modes.
+        require_configured_rpm_backend(&repo_config, index_base_override.as_deref(), &command)?;
         check_rpm_install(
             &provider,
             &[artifact.as_deref().unwrap_or(package)],
