@@ -438,7 +438,7 @@ Dual-run comparison:
 tokenless stats summary --compare <baseline-session> <active-session>
 ```
 
-A missing session ID fails with a non-zero exit instead of a 0% comparison, matching `stats diff --session`. `stats summary --limit` must be a positive integer; `--limit 0` is rejected at parse time, matching `stats diff --limit`.
+A missing session ID fails with a non-zero exit instead of a 0% comparison, matching `stats diff --session`. `stats summary --limit`, `stats list --limit` and `stats diff --limit` must be positive integers; `--limit 0` is rejected at parse time.
 
 The percentage fields in `stats summary --json` (`chars_saved_percent`, `tokens_saved_percent`) and in `--compare --json` (`saved_percent`) are all computed as a saved amount divided by the original, uncompressed amount; the summary and compare fields clamp the saved amount to zero while `stats diff --json` keeps negative values. See [Measuring savings → Saving-rate field definitions](measuring-savings.md#saving-rate-field-definitions).
 

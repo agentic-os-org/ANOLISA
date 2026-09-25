@@ -440,12 +440,13 @@ tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
 tokenless stats diff 42 --json
 ```
 
-`stats summary --limit` must be a positive integer; `--limit 0` is rejected at
-parse time. `--compare` fails if either session has no records instead of
-reporting 0% savings. Session overviews contain metrics only. Record and
-tool-use reports include a unified content diff; consecutive active stages are
-linked only when their stored output/input content matches exactly, avoiding
-duplicate intermediate token counts. See
+`stats summary --limit`, `stats list --limit` and `stats diff --limit` must be
+positive integers; `--limit 0` is rejected at parse time. `--compare` fails if
+either session has no records instead of reporting 0% savings. Session
+overviews contain metrics only. Record and tool-use reports include a unified
+content diff; consecutive active stages are linked only when their stored
+output/input content matches exactly, avoiding duplicate intermediate token
+counts. See
 [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
 for options and measurement limits.
 

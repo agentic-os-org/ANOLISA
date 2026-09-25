@@ -421,7 +421,7 @@ tokenless stats clear --yes
 tokenless stats summary --compare <baseline-session> <active-session>
 ```
 
-Session ID 不存在时以非零退出码失败，而不是输出 0% 对比，行为与 `stats diff --session` 一致。`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝，行为与 `stats diff --limit` 一致。
+Session ID 不存在时以非零退出码失败，而不是输出 0% 对比，行为与 `stats diff --session` 一致。`stats summary --limit`、`stats list --limit` 与 `stats diff --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
 
 `stats summary --json` 的百分比字段（`chars_saved_percent`、`tokens_saved_percent`）与 `--compare --json` 的 `saved_percent` 都按节省量除以原始未压缩量计算；summary 与 compare 字段会把节省量钳制为 0，而 `stats diff --json` 保留负值。详见[效果度量 → 节省率字段定义](measuring-savings.md#节省率字段定义)。
 

@@ -537,9 +537,9 @@ tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
 tokenless stats diff 42 --json
 ```
 
-`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
-`--compare` 在任一 Session 没有记录时失败，而不是报告 0% 节省。Session
-总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
+`stats summary --limit`、`stats list --limit` 与 `stats diff --limit` 必须为正整数；
+`--limit 0` 会在解析阶段被拒绝。`--compare` 在任一 Session 没有记录时失败，而不是
+报告 0% 节省。Session 总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
 active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
 阶段的 Token。完整选项和度量限制见
 [Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
