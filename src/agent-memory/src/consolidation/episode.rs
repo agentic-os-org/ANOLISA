@@ -256,7 +256,12 @@ fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Epis
         };
 
         let error_count = entries[i..=l].iter().filter(|e| !e.ok).count();
-        let trigger = format!("{} {}", entries[i].tool, entries[i].path);
+        // The trigger becomes the fact's title, so it is quoted like a step.
+        let trigger = format!(
+            "{} {}",
+            entries[i].tool,
+            crate::audit::quotable_path(&entries[i].tool, &entries[i].path)
+        );
         let duration = duration_between(&entries[i].ts, &entries[l].ts);
 
         episodes.push(Episode::new(
@@ -475,11 +480,11 @@ fn duration_between(before: &str, after: &str) -> u64 {
 }
 
 fn make_step(step: usize, entry: &OwnedAuditEntry) -> EpisodeStep {
-    let input = if !entry.path.is_empty() {
-        entry.path.clone()
-    } else {
-        String::new()
-    };
+    // A step's input is quoted into the fact Episode::to_fact produces, which
+    // FactWriter persists under facts/episodic/ and the index then serves back,
+    // so it goes through the audit format's own reader instead of echoing
+    // `path` verbatim — memory_search logs a `len=<N>` marker there.
+    let input = crate::audit::quotable_path(&entry.tool, &entry.path).to_string();
 
     let result = if entry.ok {
         if let Some(bytes) = entry.bytes {
@@ -570,6 +575,78 @@ mod tests {
         let episodes = extract_error_recovery(&entries, "test-sid");
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].outcome, EpisodeOutcome::Recovered);
+    }
+
+    #[test]
+    fn episode_does_not_quote_the_search_length_marker() {
+        // What memory_search really logs (tools/memory_search.rs): the mode and
+        // the query length. to_fact() puts the trigger in the fact's title and
+        // each step's input in its content, both of which are indexed.
+        let entries = vec![
+            make_entry("memory_search", "bm25:len=14", true, None, Some(3)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+            make_entry("mem_edit", "src/config.rs", true, None, Some(1)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+        ];
+        let episodes = extract_edit_cycle(&entries, "test-sid");
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].chain[0].input, "bm25");
+        assert_eq!(episodes[0].trigger, "memory_search bm25");
+
+        let fact = episodes[0].to_fact();
+        assert!(!fact.title.contains("len="), "title: {}", fact.title);
+        assert!(
+            !fact.content.contains("len="),
+            "length marker quoted into an episodic fact: {}",
+            fact.content
+        );
+        // The mode survives: it says which retriever ran.
+        assert!(
+            fact.content.contains("memory_search: bm25"),
+            "content: {}",
+            fact.content
+        );
+        assert!(
+            !episodes[0].to_markdown().contains("len="),
+            "markdown: {}",
+            episodes[0].to_markdown()
+        );
+    }
+
+    #[test]
+    fn general_chain_keeps_the_marker_out_of_the_fact() {
+        // Three non-noise calls clear the default min_episode_steps, so an
+        // ordinary write → search → search session already yields an episode —
+        // with the no-embedding fallback marker, whose mode nests a second name.
+        let entries = vec![
+            make_entry("mem_write", "notes/a.md", true, None, Some(20)),
+            make_entry("memory_search", "bm25:len=14", true, None, Some(3)),
+            make_entry(
+                "memory_search",
+                "bm25(fallback from hybrid):len=11",
+                true,
+                None,
+                Some(2),
+            ),
+        ];
+        let episodes = extract_general_chains(&entries, "test-sid", 3);
+        assert_eq!(
+            episodes.len(),
+            1,
+            "premise: three non-noise calls form one chain"
+        );
+        let fact = episodes[0].to_fact();
+        assert!(
+            !fact.content.contains("len="),
+            "length marker quoted into an episodic fact: {}",
+            fact.content
+        );
+        assert!(
+            fact.content
+                .contains("memory_search: bm25(fallback from hybrid)"),
+            "content: {}",
+            fact.content
+        );
     }
 
     #[test]
