@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -702,9 +703,42 @@ impl BM25Store {
         Ok((warm as usize, cold as usize))
     }
 
-    /// Detect potential conflicts: search for files similar to the given
-    /// text and return those with BM25 score above the threshold.
-    pub fn detect_conflicts(&self, text: &str, threshold: f64) -> Result<Vec<(String, f64)>> {
+    /// Detect potential conflicts: search for indexed files similar to the
+    /// given text and return the ones similar *enough* to be replaced by it.
+    ///
+    /// `scope_prefix` limits the scan to paths under that mount-relative
+    /// directory (e.g. `"facts/"`). Conflict detection exists to feed
+    /// [`BM25Store::supersede`], which hides a row from *every* search path
+    /// and keeps it hidden across re-indexing, so the caller must scope the
+    /// scan to the rows it is allowed to replace: a consolidated fact may
+    /// supersede an older fact, never a user memory file that merely talks
+    /// about the same topic. `None` scans the whole corpus.
+    ///
+    /// A row is flagged when it clears *either* of two tests:
+    ///
+    /// - `threshold`, read on the scale of the branch that produced the score
+    ///   — raw FTS5 `bm25()` (negative, *more negative is more similar*) on
+    ///   the MATCH path, a non-negative term-frequency sum on the LIKE
+    ///   fallback. Each branch compares in its own direction; see the two
+    ///   call sites.
+    /// - [`subsumed_by_probe`], a corpus-independent near-duplicate test.
+    ///   `bm25()` cannot carry the decision on its own: its IDF factor is
+    ///   relative to the whole index and collapses towards zero once a term
+    ///   occurs in about half the rows, which is where a fresh namespace
+    ///   stands when consolidation writes its first repeat. Every score then
+    ///   sits within a few millionths of zero, so no negative threshold fires
+    ///   and the duplicate survives. The LIKE fallback fares no better: its
+    ///   recall-oriented scoring "covers" a small corpus only by flagging
+    ///   every substring match in it, which is not a duplication test.
+    ///
+    /// The returned score stays on the branch's scale, so it can be ~0 for a
+    /// row that only the second test flagged.
+    pub fn detect_conflicts(
+        &self,
+        text: &str,
+        threshold: f64,
+        scope_prefix: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -719,26 +753,43 @@ impl BM25Store {
         // past conflict detection. Fall back to a LIKE substring scan.
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         if tokens.iter().any(|t| t.chars().count() < 3) {
-            return self.detect_conflicts_like(&tokens, threshold);
+            return self.detect_conflicts_like(&tokens, text, threshold, scope_prefix);
         }
 
-        // Search excluding cold and superseded files.
-        let sql = r#"
-            SELECT f.path, bm25(files_fts) AS rank
+        // Search excluding cold and superseded files, optionally restricted
+        // to one directory so the `LIMIT` below is spent on rows the caller
+        // may actually supersede. `body` rides along for the near-duplicate
+        // test, which cannot be answered from a bm25 score.
+        let (scope_filter, scope_param) = scope_filter(scope_prefix, "?2");
+        let sql = format!(
+            r#"
+            SELECT f.path, bm25(files_fts) AS rank, files_fts.body
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
-            WHERE files_fts MATCH ?1 AND f.is_cold = 0 AND f.is_superseded = 0
+            WHERE files_fts MATCH ?1 AND f.is_cold = 0 AND f.is_superseded = 0 {scope_filter}
             ORDER BY rank
             LIMIT 5
-        "#;
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?;
+        "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if let Some(ref pattern) = scope_param {
+            stmt.query_map(params![fts_q, pattern], row_path_score_body)?
+        } else {
+            stmt.query_map(params![fts_q], row_path_score_body)?
+        };
 
+        // FTS5's `bm25()` is negative and *more negative is a better match*
+        // — the same scale `search_scoped` negates into `SearchHit::score`,
+        // and the reason the SQL above orders by `rank` ascending. So "at
+        // least as similar as the threshold" is `score <= threshold`. The
+        // previous `>=` comparison read the scale the other way round: it
+        // discarded the strongest matches in the top 5 and kept only the
+        // marginal ones, so a repeated duplicate (bm25 ≈ -4.0) was never
+        // flagged while a one-sentence overlap (≈ -1.0) was.
         let results: Vec<(String, f64)> = rows
             .flatten()
-            .filter(|(_, score)| *score >= threshold)
+            .filter(|(_, score, body)| *score <= threshold || subsumed_by_probe(body, text))
+            .map(|(path, score, _)| (path, score))
             .collect();
 
         Ok(results)
@@ -751,7 +802,25 @@ impl BM25Store {
     /// recall-oriented: when we can't rank, flag every substring match as a
     /// potential conflict rather than silently miss a duplicate/contradiction.
     /// The caller still reviews flagged conflicts before superseding.
-    fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
+    ///
+    /// Note the comparison direction is the opposite of the MATCH path's
+    /// because the two scales run in opposite directions: here *higher is
+    /// more similar*, so `score >= threshold` keeps the strong matches. A
+    /// positive `threshold` raises the frequency bar; the default negative
+    /// one flags every substring match, as documented above.
+    ///
+    /// [`subsumed_by_probe`] applies here too, on the original `text` rather
+    /// than the sanitised tokens, so both branches agree on what counts as a
+    /// near-duplicate. With the default threshold it can only ever add rows
+    /// the frequency sum already flagged; it is what keeps a duplicate
+    /// flagged when a caller raises `threshold` above this branch's scale.
+    fn detect_conflicts_like(
+        &self,
+        tokens: &[&str],
+        text: &str,
+        threshold: f64,
+        scope_prefix: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -764,20 +833,26 @@ impl BM25Store {
         // has no rank, and ordering by mtime would cut high-frequency old
         // documents before scoring. Fetch a generous pool, score in Rust,
         // then sort + truncate.
+        let (scope_filter, scope_param) = scope_filter(scope_prefix, "?");
         let sql = format!(
             r#"
             SELECT f.path, files_fts.body, f.mtime_ms
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
-            WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
+            WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0 {scope_filter}
             LIMIT 50
             "#
         );
         let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
-        let bind: Vec<rusqlite::types::Value> = like_patterns
+        let mut bind: Vec<rusqlite::types::Value> = like_patterns
             .iter()
             .map(|s| rusqlite::types::Value::Text(s.clone()))
             .collect();
+        // Anonymous `?` binds in order, so the scope pattern goes last —
+        // after the body LIKE patterns that precede it in the WHERE clause.
+        if let Some(ref pattern) = scope_param {
+            bind.push(rusqlite::types::Value::Text(pattern.clone()));
+        }
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
             Ok((
@@ -800,7 +875,7 @@ impl BM25Store {
                 .sum();
             let decay = time_decay(mtime_ms, self.time_decay_lambda);
             let score = freq + self.time_decay_alpha * decay;
-            if score >= threshold {
+            if score >= threshold || subsumed_by_probe(&body, text) {
                 out.push((path, score));
             }
         }
@@ -1148,6 +1223,144 @@ fn agent_scope_sql_like(scope: &AgentScope) -> (String, Option<String>) {
             Some(id.clone()),
         ),
     }
+}
+
+/// Row mapper for the `(path, score, body)` conflict queries. A plain `fn`
+/// (not a closure) so both the scoped and unscoped `query_map` calls can
+/// share it.
+fn row_path_score_body(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, f64, String)> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, f64>(1)?,
+        row.get::<_, String>(2)?,
+    ))
+}
+
+/// Share of a candidate's own trigrams the probe must also contain before the
+/// candidate counts as subsumed — i.e. as a near-duplicate the new text may
+/// replace. Measured with `FactWriter`'s probe (title plus the first 100 chars
+/// of content) against fact files as the indexer stores them: 1.00 for a
+/// re-extracted fact, for an older fact the new one elaborates, and for a body
+/// that states the same sentence several times over; 0.69 for the same fact
+/// restated in other words; 0.51 for the memory file the fact was derived
+/// from; 0.31 for a different fact that mentions the same topic; ≤0.05 for an
+/// unrelated one. 0.85 sits in the empty band above that whole group: a
+/// restatement in other words is left to `bm25()`, which does have signal once
+/// the corpus is big enough for its IDF term, while an exact repeat — the case
+/// a small corpus collapses on — is always caught.
+const COVERAGE_FLOOR: f64 = 0.85;
+
+/// Fewest distinct trigrams a candidate must carry for [`subsumed_by_probe`]
+/// to consider it at all. Below that the text is a handful of characters,
+/// which almost any probe on the same topic contains — `"rust"` is inside
+/// every fact that mentions rust without being a duplicate of any of them.
+/// 12 trigrams is ~14 characters, shorter than any real fact sentence.
+const COVERAGE_MIN_TRIGRAMS: usize = 12;
+
+/// Longest candidate body [`subsumed_by_probe`] tokenises. A work bound, not
+/// a behaviour change: coverage is `|candidate ∩ probe| / |candidate|`, so a
+/// body this long could only reach [`COVERAGE_FLOOR`] against a probe of some
+/// 55k characters — three orders of magnitude past the 100 chars
+/// `FactWriter` sends. Longer rows stay eligible through the bm25 test.
+const COVERAGE_MAX_CANDIDATE_CHARS: usize = 64 * 1024;
+
+/// Corpus-independent near-duplicate test: does `probe` already say
+/// everything `candidate_body` says?
+///
+/// Direction is the point. Coverage of the *candidate* by the *probe* is 1.0
+/// for a re-extracted duplicate and for an older fact the new one elaborates,
+/// and low for a longer document that merely contains the same sentence once
+/// — so the memory file a fact was derived from can never trip it, and an
+/// older fact that says *more* than the new one is left alone instead of
+/// being replaced by a shorter restatement.
+///
+/// This exists because `bm25()` cannot answer the question: FTS5 derives its
+/// IDF factor from the whole index, so on a small corpus every term is
+/// ubiquitous, every score collapses to ~0 and no threshold separates a
+/// duplicate from a stray mention. Comparing the two texts directly gives the
+/// same answer at any corpus size.
+fn subsumed_by_probe(candidate_body: &str, probe: &str) -> bool {
+    let content = content_after_frontmatter(candidate_body);
+    if content.chars().count() > COVERAGE_MAX_CANDIDATE_CHARS {
+        return false;
+    }
+    let probe_grams = trigram_set(probe);
+    if probe_grams.is_empty() {
+        return false;
+    }
+    let candidate_grams = trigram_set(content);
+    if candidate_grams.len() < COVERAGE_MIN_TRIGRAMS {
+        return false;
+    }
+    // The intersection cannot exceed the probe's own trigram count, so a
+    // candidate with more distinct trigrams than that can never reach the
+    // floor — skip the walk over it.
+    if (candidate_grams.len() as f64) * COVERAGE_FLOOR > probe_grams.len() as f64 {
+        return false;
+    }
+    let shared = candidate_grams.intersection(&probe_grams).count();
+    shared as f64 / candidate_grams.len() as f64 >= COVERAGE_FLOOR
+}
+
+/// Distinct 3-character windows of `text`, lowercased with whitespace
+/// removed — the same window width the FTS5 `trigram` tokenizer indexes, so
+/// the measure lines up with the rows MATCH returned. Dropping whitespace
+/// rather than collapsing it keeps two things from changing the answer:
+/// markdown line wrapping inside a fact, and the junction windows a body that
+/// states the same sentence twice would otherwise contribute.
+fn trigram_set(text: &str) -> HashSet<String> {
+    let stripped: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let chars: Vec<char> = stripped.to_lowercase().chars().collect();
+    chars
+        .windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
+}
+
+/// Drop a leading YAML frontmatter block (`---` … `---`) from an indexed body.
+/// Consolidated facts carry one and every fact's block shares the same
+/// skeleton (`id:` / `category:` / `created_at:` / `confidence:` …), so
+/// measuring similarity on the raw file would mostly compare that boilerplate
+/// — two unrelated facts share more of it than they share content. Returns the
+/// body unchanged when there is no closed block to strip.
+fn content_after_frontmatter(body: &str) -> &str {
+    let Some(rest) = body.strip_prefix("---\n") else {
+        return body;
+    };
+    match rest.find("\n---\n") {
+        Some(end) => &rest[end + "\n---\n".len()..],
+        None => body,
+    }
+}
+
+/// Build the optional `AND f.path LIKE <placeholder>` scope clause for the
+/// conflict queries, plus the pattern to bind when it is present. `_`, `%`
+/// and `\` inside the prefix are escaped so a directory whose name contains
+/// them matches literally instead of as a wildcard.
+fn scope_filter(scope_prefix: Option<&str>, placeholder: &str) -> (String, Option<String>) {
+    match scope_prefix {
+        Some(prefix) => (
+            format!("AND f.path LIKE {placeholder} ESCAPE '\\'"),
+            Some(prefix_like_pattern(prefix)),
+        ),
+        None => (String::new(), None),
+    }
+}
+
+/// `LIKE` pattern matching every path at or under `prefix` (mount-relative).
+fn prefix_like_pattern(prefix: &str) -> String {
+    let mut s = String::with_capacity(prefix.len() + 8);
+    for c in prefix.chars() {
+        match c {
+            '_' | '%' | '\\' => {
+                s.push('\\');
+                s.push(c);
+            }
+            other => s.push(other),
+        }
+    }
+    s.push('%');
+    s
 }
 
 /// Build a `LIKE` pattern matching `token` as a substring, backslash-escaping
@@ -1838,16 +2051,393 @@ mod tests {
         assert_eq!(hits[0].path, "old.md");
     }
 
-    #[test]
-    fn detect_conflicts_finds_similar_files() {
+    /// A corpus where one row is a strong duplicate of the probe text and
+    /// another only shares a single term with it.
+    fn conflict_corpus() -> BM25Store {
         let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
-        s.upsert("user-pref.md", 100, 50, "用户偏好 rust 系统编程", None)
+        s.upsert(
+            "notes/design.md",
+            100,
+            400,
+            "内核内存管理设计文档 cgroup 层级 与 页表 回收 策略",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "notes/todo.md",
+            100,
+            200,
+            "待办事项 列表 修复 构建 脚本 打包 rpm spec",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "notes/rust.md",
+            100,
+            300,
+            "rust 所有权 与 借用 检查器 的 生命周期 笔记",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/interest/python.md",
+            100,
+            60,
+            "用户偏好 使用 python 编写 数据 处理 脚本",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/lesson/build.md",
+            100,
+            60,
+            "构建 失败 时 先 检查 cargo lock 版本",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/working-context/index.md",
+            100,
+            60,
+            "当前 在 调试 index worker 的 增量 扫描",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "notes/meetings.md",
+            100,
+            500,
+            "会议 记录 讨论 了 快照 与 回滚 的 需求 边界",
+            None,
+        )
+        .unwrap();
+        // Near-duplicate of the probe: the same statement repeated, which is
+        // what a fact re-extracted from several sessions looks like. Strong
+        // match — bm25 ≈ -4.0.
+        s.upsert(
+            "facts/interest/rust.md",
+            100,
+            200,
+            &"用户偏好 rust 系统编程 ".repeat(6),
+            None,
+        )
+        .unwrap();
+        // Marginal match: every probe term appears once, buried in a long
+        // unrelated body — bm25 ≈ -1.0, i.e. far weaker than the duplicate
+        // above but still a MATCH hit.
+        s.upsert(
+            "notes/misc.md",
+            100,
+            900,
+            "会议 记录 讨论 了 快照 与 回滚 的 需求 边界 内核 内存 管理 设计 文档 cgroup 层级 \
+             与 页表 回收 策略 待办事项 列表 修复 构建 脚本 打包 rpm spec 所有权 与 借用 检查器 \
+             的 生命周期 笔记 数据 处理 脚本 cargo lock 版本 index worker 的 增量 扫描 顺带 \
+             提到 用户偏好 rust 系统编程 这 一 句 只 出现 一 次 而且 埋 在 很 长 的 正文 里面",
+            None,
+        )
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn detect_conflicts_flags_the_strongest_match() {
+        // Regression: FTS5's `bm25()` is negative and *more negative is a
+        // better match*, but the threshold used to be applied as
+        // `score >= threshold`. The comparison read the scale backwards, so
+        // on this corpus the old code returned the marginal `notes/misc.md`
+        // (bm25 ≈ -1.0) and dropped the actual duplicate (bm25 ≈ -4.0):
+        // consolidation superseded a memory that merely mentioned the same
+        // terms and kept the row it existed to replace.
+        let s = conflict_corpus();
+        let conflicts = s
+            .detect_conflicts("用户偏好 rust 系统编程", -2.0, None)
+            .unwrap();
+        let paths: Vec<&str> = conflicts.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["facts/interest/rust.md"],
+            "the duplicate must be flagged and the marginal row must not"
+        );
+        assert!(
+            conflicts[0].1 <= -2.0,
+            "flagged score {:?} must be at least as strong as the threshold",
+            conflicts[0].1
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_threshold_is_a_strictness_dial() {
+        // The other side of the direction fix: moving the threshold *down*
+        // (more negative) must narrow the result set, not widen it. At the
+        // lenient end the marginal row joins the duplicate; at the default
+        // -2.0 it stays out, so a memory that only mentions the same terms is
+        // never superseded.
+        let s = conflict_corpus();
+        let paths_at = |threshold: f64| -> Vec<String> {
+            s.detect_conflicts("用户偏好 rust 系统编程", threshold, None)
+                .unwrap()
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect()
+        };
+        assert_eq!(
+            paths_at(-0.5),
+            vec!["facts/interest/rust.md", "notes/misc.md"],
+            "a lenient threshold flags the marginal match too"
+        );
+        assert_eq!(paths_at(-2.0), vec!["facts/interest/rust.md"]);
+        assert!(
+            paths_at(-50.0).is_empty(),
+            "a threshold below every bm25 score flags nothing the near-duplicate test does not"
+        );
+    }
+
+    // ── corpus-independent near-duplicate test ─────────────────
+    //
+    // FTS5's `bm25()` derives its IDF factor from the whole index, so on a
+    // small corpus every score collapses towards zero and `threshold` stops
+    // meaning anything. The fixtures below are the shape consolidation
+    // actually sees: a fact file as the indexer stores it (frontmatter and
+    // all) and the probe `FactWriter` builds from the fact it is about to
+    // write.
+
+    const SPARSE_TITLE: &str = "用户偏好 rust 系统编程";
+    const SPARSE_CONTENT: &str =
+        "用户在多次会话中提到偏好使用 rust 编写系统编程相关的工具 尤其是内核态与输入输出密集场景";
+
+    /// `FactWriter::write`'s probe text: title + the first 100 chars of the
+    /// content.
+    fn sparse_probe() -> String {
+        format!(
+            "{SPARSE_TITLE} {}",
+            SPARSE_CONTENT.chars().take(100).collect::<String>()
+        )
+    }
+
+    /// A fact file as `ConsolidatedFact::to_markdown` writes it and the
+    /// indexer stores it — every fact's frontmatter shares the same skeleton.
+    fn fact_file(id: &str, title: &str, content: &str) -> String {
+        format!(
+            "---\nid: {id}\nsession_id: 01J8ZK0FQ4Y3M9VX2C7TGNB5WR\ncategory: interest\n\
+             title: {title}\nsource_tool: mem_write\ncreated_at: 2026-09-25T03:00:00Z\n\
+             confidence: 0.9\n---\n\n{content}\n"
+        )
+    }
+
+    #[test]
+    fn detect_conflicts_flags_a_duplicate_when_bm25_has_no_signal() {
+        // P1 review finding. A fresh namespace holds the earlier copy of the
+        // fact and the note it came from, so every probe term occurs in
+        // (nearly) every indexed row: IDF collapses, `bm25()` returns a few
+        // millionths below zero, and `score <= -2.0` can never fire. That is
+        // exactly the first repeat — the case dedup exists for.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        let old = fact_file("01J8ZK0FQ4Y3M9VX2C7TGNB5W0", SPARSE_TITLE, SPARSE_CONTENT);
+        s.upsert(
+            "facts/interest/01J8ZK0FQ4Y3M9VX2C7TGNB5W0.md",
+            100,
+            old.len() as u64,
+            &old,
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "notes/prefs.md",
+            100,
+            400,
+            &format!("会议记录里顺带提到 {SPARSE_CONTENT} 然后继续讨论别的议程"),
+            None,
+        )
+        .unwrap();
+
+        let conflicts = s
+            .detect_conflicts(&sparse_probe(), -2.0, Some("facts/"))
+            .unwrap();
+        let paths: Vec<&str> = conflicts.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["facts/interest/01J8ZK0FQ4Y3M9VX2C7TGNB5W0.md"],
+            "the earlier copy of the same fact must be flagged on a corpus this small"
+        );
+        // Which test fired matters: the bm25 rule cannot have, and the score
+        // is what proves the corpus carries no ranking signal at all.
+        assert!(
+            conflicts[0].1 > -2.0 && conflicts[0].1.abs() < 1e-3,
+            "expected a collapsed bm25 score, got {:?}",
+            conflicts[0].1
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_coverage_guard_keeps_a_richer_fact() {
+        // The guard's direction is the safety property: an older fact that
+        // says *more* than the new one must survive, otherwise consolidation
+        // replaces it with a shorter restatement and the extra clause is
+        // hidden from every search path. Same collapsed-IDF corpus as above,
+        // so nothing but the coverage test can decide either row.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        let richer = fact_file(
+            "01J8ZK0FQ4Y3M9VX2C7TGNB5W1",
+            SPARSE_TITLE,
+            &format!("{SPARSE_CONTENT} 另外还负责 cgroup 层级与页表回收的排查"),
+        );
+        s.upsert(
+            "facts/interest/01J8ZK0FQ4Y3M9VX2C7TGNB5W1.md",
+            100,
+            richer.len() as u64,
+            &richer,
+            None,
+        )
+        .unwrap();
+        let same = fact_file("01J8ZK0FQ4Y3M9VX2C7TGNB5W2", SPARSE_TITLE, SPARSE_CONTENT);
+        s.upsert(
+            "facts/interest/01J8ZK0FQ4Y3M9VX2C7TGNB5W2.md",
+            100,
+            same.len() as u64,
+            &same,
+            None,
+        )
+        .unwrap();
+
+        let conflicts = s
+            .detect_conflicts(&sparse_probe(), -2.0, Some("facts/"))
+            .unwrap();
+        let paths: Vec<&str> = conflicts.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["facts/interest/01J8ZK0FQ4Y3M9VX2C7TGNB5W2.md"],
+            "only the fact the new one fully restates may be superseded"
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_like_guard_survives_a_raised_threshold() {
+        // The LIKE branch scores by term frequency, so with the default
+        // negative threshold it flags every substring match and the guard is
+        // redundant. Raise the threshold above its scale and the guard is
+        // what still identifies the duplicate — and still refuses the row
+        // that merely contains it.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "facts/lesson/dup.md",
+            100,
+            60,
+            "花名登记为小云团队的内核调试专家",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/lesson/richer.md",
+            100,
+            120,
+            "花名登记为小云团队的内核调试专家 另外还负责 cgroup 层级与页表回收的排查工作",
+            None,
+        )
+        .unwrap();
+
+        // "花名" is 2 chars, so this query takes the LIKE fallback.
+        let conflicts = s
+            .detect_conflicts("花名 登记为小云团队的内核调试专家", 1000.0, Some("facts/"))
+            .unwrap();
+        let paths: Vec<&str> = conflicts.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["facts/lesson/dup.md"]);
+    }
+
+    #[test]
+    fn subsumed_by_probe_is_directional_and_ignores_frontmatter() {
+        let probe = sparse_probe();
+        let same = fact_file("01J8ZK0FQ4Y3M9VX2C7TGNB5W0", SPARSE_TITLE, SPARSE_CONTENT);
+        // The frontmatter skeleton every fact shares must not count as
+        // content, or two unrelated facts would look alike.
+        assert!(subsumed_by_probe(&same, &probe));
+        assert!(
+            subsumed_by_probe(SPARSE_CONTENT, &probe),
+            "the same text without frontmatter measures the same"
+        );
+
+        let richer = format!("{SPARSE_CONTENT} 另外还负责 cgroup 层级与页表回收的排查");
+        assert!(
+            !subsumed_by_probe(&richer, &probe),
+            "a fact that says more than the new one is not a duplicate of it"
+        );
+        assert!(
+            !subsumed_by_probe("用户偏好 rust", &probe),
+            "a handful of characters is inside almost any probe on the topic"
+        );
+        assert!(
+            !subsumed_by_probe(
+                "用户偏好使用 python 处理数据 但也承认 rust 系统编程 有性能优势",
+                &probe
+            ),
+            "a different fact on the same topic stays"
+        );
+        assert!(
+            !subsumed_by_probe(
+                &format!("会议记录里顺带提到 {SPARSE_CONTENT} 然后继续讨论别的议程"),
+                &probe
+            ),
+            "the memory file a fact was derived from is never subsumed by it"
+        );
+        assert!(
+            !subsumed_by_probe(&same, ""),
+            "an empty probe matches nothing"
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_scope_prefix_limits_to_facts() {
+        // Regression: conflict detection feeds `supersede()`, which hides the
+        // row from every search path. Scoped to `facts/` it can only replace
+        // another fact; unscoped it also reaches user memory files, which is
+        // how a consolidated fact used to hide the note it was derived from.
+        let mut s = conflict_corpus();
+        s.upsert(
+            "notes/prefs.md",
+            100,
+            200,
+            &"用户偏好 rust 系统编程 ".repeat(6),
+            None,
+        )
+        .unwrap();
+
+        let scoped = s
+            .detect_conflicts("用户偏好 rust 系统编程", -2.0, Some("facts/"))
+            .unwrap();
+        let scoped_paths: Vec<&str> = scoped.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(scoped_paths, vec!["facts/interest/rust.md"]);
+
+        let unscoped = s
+            .detect_conflicts("用户偏好 rust 系统编程", -2.0, None)
+            .unwrap();
+        let unscoped_paths: Vec<&str> = unscoped.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            unscoped_paths.contains(&"notes/prefs.md"),
+            "unscoped scan still sees the whole corpus: {unscoped_paths:?}"
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_scope_prefix_applies_to_like_fallback() {
+        // The short-CJK LIKE fallback must honour the same scope, otherwise
+        // the fix only holds for queries the trigram tokenizer can serve.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("facts/lesson/dup.md", 100, 50, "花名登记为小云", None)
+            .unwrap();
+        s.upsert("notes/roster.md", 100, 50, "花名登记为小云", None)
             .unwrap();
 
-        // Search for similar content (shares key terms).
-        let conflicts = s.detect_conflicts("用户偏好 rust", -2.0).unwrap();
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].0, "user-pref.md");
+        let scoped = s.detect_conflicts("花名", -2.0, Some("facts/")).unwrap();
+        let paths: Vec<&str> = scoped.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["facts/lesson/dup.md"]);
+
+        let unscoped = s.detect_conflicts("花名", -2.0, None).unwrap();
+        assert_eq!(unscoped.len(), 2);
+    }
+
+    #[test]
+    fn prefix_like_pattern_escapes_wildcards() {
+        assert_eq!(prefix_like_pattern("facts/"), "facts/%");
+        assert_eq!(prefix_like_pattern("a_b%c\\"), "a\\_b\\%c\\\\%");
     }
 
     #[test]
@@ -1857,7 +2447,9 @@ mod tests {
             .unwrap();
 
         // Unrelated query should not match.
-        let conflicts = s.detect_conflicts("rust ownership rules", -2.0).unwrap();
+        let conflicts = s
+            .detect_conflicts("rust ownership rules", -2.0, None)
+            .unwrap();
         assert!(conflicts.is_empty());
     }
 
@@ -1871,7 +2463,7 @@ mod tests {
         s.upsert("dup.md", 100, 50, "花名登记为小云", None).unwrap();
         s.upsert("other.md", 100, 50, "完全无关的内容", None)
             .unwrap();
-        let conflicts = s.detect_conflicts("花名", -2.0).unwrap();
+        let conflicts = s.detect_conflicts("花名", -2.0, None).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0, "dup.md");
     }
