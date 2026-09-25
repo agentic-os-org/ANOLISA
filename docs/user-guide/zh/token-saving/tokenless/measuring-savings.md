@@ -57,6 +57,8 @@ Breakdown by Operation:
 
 输出中的 `Character Savings` 和 `Chars` 是上文说明的、基于字节的兼容字段名。
 
+`Breakdown by Operation` 各行按记录数降序排列，记录数相同时按操作名排序。因此同一批记录每次渲染的顺序都一致，与 `--json` 中已排序的 `by_operation` 键保持一致。
+
 机器读取使用：
 
 ```bash

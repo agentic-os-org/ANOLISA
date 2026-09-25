@@ -54,6 +54,10 @@ fn format_num(n: usize) -> String {
 /// that tokenless saved — not just the tool-response portion. `retrieve`
 /// carries whole-table retrieve aggregates (the `records` slice may be
 /// limited) for the attribution block; `None` omits the retrieve lines.
+///
+/// The operation breakdown lists the busiest operation first and breaks equal
+/// record counts on the operation name, so the same records always render in
+/// the same order.
 pub fn format_summary(
     records: &[StatsRecord],
     title: Option<&str>,
@@ -113,7 +117,18 @@ pub fn format_summary(
     output.push('\n');
 
     let mut ops: Vec<_> = by_op.iter().collect();
-    ops.sort_by_key(|b| std::cmp::Reverse(b.1.total_records));
+    // The record count alone is not a total order: `by_op` is a `HashMap`, so
+    // operations with an equal count were rendered in per-map iteration order
+    // and swapped places between runs over the same records. Break the tie on
+    // the operation name, which also matches the sorted `by_operation` keys
+    // `format_summary_json` emits for the same data.
+    ops.sort_by(|left, right| {
+        right
+            .1
+            .total_records
+            .cmp(&left.1.total_records)
+            .then_with(|| left.0.cmp(right.0))
+    });
 
     for (op, s) in ops {
         output.push_str(&format!("  {}: {} records\n", op, s.total_records));
@@ -943,5 +958,76 @@ mod tests {
     fn test_format_list_empty() {
         let output = format_list(&[], 10);
         assert!(output.contains("No records found"));
+    }
+
+    /// The operation names in a summary's breakdown section, in render order.
+    fn breakdown_operations(summary: &str) -> Vec<&str> {
+        let section = summary
+            .split_once("Breakdown by Operation:\n")
+            .expect("summary renders a breakdown section")
+            .1;
+        section
+            .lines()
+            .skip_while(|line| !line.starts_with('-'))
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| {
+                let (operation, tail) = line.strip_prefix("  ")?.split_once(": ")?;
+                // Per-operation detail rows are indented one more level, so a
+                // header never contains whitespace of its own.
+                if operation.contains(char::is_whitespace) || !tail.ends_with(" records") {
+                    return None;
+                }
+                Some(operation)
+            })
+            .collect()
+    }
+
+    fn operation_record(id: i64, operation: OperationType) -> StatsRecord {
+        let mut record = test_record();
+        record.id = id;
+        record.operation = operation;
+        record
+    }
+
+    #[test]
+    fn summary_breakdown_ranks_equal_counts_by_operation_name() {
+        let records = vec![
+            operation_record(1, OperationType::CompressToon),
+            operation_record(2, OperationType::RewriteCommand),
+            operation_record(3, OperationType::CompressToon),
+            operation_record(4, OperationType::RewriteCommand),
+        ];
+
+        let expected = vec!["compress-toon", "rewrite-command"];
+        assert_eq!(
+            breakdown_operations(&format_summary(&records, None, None, None)),
+            expected
+        );
+        // The same records must render identically every time: before the
+        // tie-break, HashMap iteration order reshuffled the tied rows.
+        for _ in 0..128 {
+            assert_eq!(
+                breakdown_operations(&format_summary(&records, None, None, None)),
+                expected,
+                "breakdown order changed between renders of the same records"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_breakdown_keeps_the_busiest_operation_first() {
+        let records = vec![
+            operation_record(1, OperationType::CompressSchema),
+            operation_record(2, OperationType::CompressResponse),
+            operation_record(3, OperationType::CompressToon),
+            operation_record(4, OperationType::CompressResponse),
+            operation_record(5, OperationType::CompressResponse),
+        ];
+
+        assert_eq!(
+            breakdown_operations(&format_summary(&records, None, None, None)),
+            vec!["compress-response", "compress-schema", "compress-toon"]
+        );
     }
 }
