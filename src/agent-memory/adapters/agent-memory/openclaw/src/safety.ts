@@ -6,8 +6,14 @@
  */
 
 const INJECTION_PATTERNS: RegExp[] = [
-  // "ignore all previous instructions" & variants
-  /\b(ignore|disregard|override|bypass)\s+(all|previous|prior|above|any)\s+(instructions?|rules?|constraints?|guidelines?)\b/i,
+  // "ignore all previous instructions" & variants. One *or more* modifiers, in
+  // any order, with optional "of"/"the" connectives: the canonical phrasing
+  // stacks two ("all previous") and real payloads also spell it "all of the
+  // previous". A modifier from the set must sit between the verb and the noun —
+  // "of"/"the" alone do not count — so ordinary prose ("ignore the instructions
+  // in the README") stays out of the filter. Mirrors the Rust pattern in
+  // src/safety.rs; keep the two in lock-step.
+  /\b(ignore|disregard|override|bypass)\s+(?:(?:all|previous|prior|above|any|of|the)[\s,]+)*(?:all|previous|prior|above|any)(?:[\s,]+(?:of|the))*[\s,]+(instructions?|rules?|constraints?|guidelines?)\b/i,
   // "<system>" / "<assistant>" / "<instruction>" XML-style
   /<\s*(system|assistant|developer|tool|function|relevant-memories)\b/i,
   // SYSTEM: / SYSTEM PROMPT: style
