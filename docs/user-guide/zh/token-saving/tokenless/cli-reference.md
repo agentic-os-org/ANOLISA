@@ -110,6 +110,8 @@ jq -n \
 - Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
+- 只是形似 JSON 的内容（NDJSON 流、拼接在一起的两个文档、`[INFO] … [ok]` 日志）按其真实分类
+  透传。JSON 域负责解析，因此解析被拒只是路由结论，而不是操作失败。
 - 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
   Routine Progress Reduction。
 - 成功 CSV/TSV 在宿主支持任意文本替换时使用 `TabularCompressor`，可选择保留全部单元格的

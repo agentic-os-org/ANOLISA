@@ -15,6 +15,38 @@ fn detects_json() {
 }
 
 #[test]
+fn json_exclusion_switches_off_only_the_bracket_sniff() {
+    // A real document keeps its class under `detect` and loses it here.
+    let json = r#"[{"id": 1, "state": "open"}, {"id": 2, "state": "closed"}]"#;
+    assert_eq!(detect(json), ContentType::Json);
+    assert_eq!(detect_excluding_json(json), ContentType::PlainText);
+
+    // Shapes the sniff claims but the JSON domain's parse rejects.
+    let ndjson = "{\"id\": 1, \"state\": \"open\"}\n{\"id\": 2, \"state\": \"closed\"}\n";
+    assert_eq!(detect(ndjson), ContentType::Json);
+    assert_eq!(detect_excluding_json(ndjson), ContentType::PlainText);
+    let concatenated = r#"{"id": 1, "state": "open"}{"id": 2, "state": "closed"}"#;
+    assert_eq!(detect(concatenated), ContentType::Json);
+    assert_eq!(detect_excluding_json(concatenated), ContentType::PlainText);
+    let bracketed_log = "[2026-09-25 10:00:00] INFO worker 1 handled req-1 status=200 [ok]\n\
+                         [2026-09-25 10:00:01] INFO worker 2 handled req-2 status=500 [failed]";
+    assert_eq!(detect(bracketed_log), ContentType::Json);
+    assert_eq!(detect_excluding_json(bracketed_log), ContentType::PlainText);
+
+    // Classes that never consulted the sniff are unchanged.
+    let cargo = "   \u{1b}[1m\u{1b}[32mCompiling\u{1b}[0m serde v1.0.229\n\
+                 warning: unused variable: `seam`\n\
+                     Finished `release` profile [optimized] target(s) in 42.18s";
+    assert_eq!(detect_excluding_json(cargo), ContentType::BuildLog);
+    let grep = "src/main.rs:10:fn main() {\n\
+                src/lib.rs:42:    let value = compute();\n\
+                tests/it.rs:7:fn it_works() {\n\
+                src/main.rs:11:    run();";
+    assert_eq!(detect_excluding_json(grep), ContentType::SearchResults);
+    assert_eq!(detect_excluding_json("   \n\t  "), ContentType::Unknown);
+}
+
+#[test]
 fn detects_search_results() {
     let grep = "src/main.rs:10:fn main() {\n\
                 src/lib.rs:42:    let value = compute();\n\

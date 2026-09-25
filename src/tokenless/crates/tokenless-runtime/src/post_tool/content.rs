@@ -34,6 +34,22 @@ pub const MAX_SCAN_LINES: usize = 200;
 /// while content that *starts as* a traceback is [`ContentType::StackTrace`].
 #[must_use]
 pub fn detect(content: &str) -> ContentType {
+    classify(content, true)
+}
+
+/// Classifies content with the JSON bracket sniff switched off.
+///
+/// [`ContentType::Json`] rests on a bracket sniff that the JSON domain then
+/// confirms by parsing. When that parse rejects the content — NDJSON, two
+/// concatenated documents, or an `[INFO] … [ok]` log — the caller
+/// re-classifies with this so the reported domain describes the text that was
+/// actually handled. Every other check is identical to [`detect`].
+#[must_use]
+pub fn detect_excluding_json(content: &str) -> ContentType {
+    classify(content, false)
+}
+
+fn classify(content: &str, json_sniff: bool) -> ContentType {
     let scan = scan_prefix(content);
     if scan.trim().is_empty() {
         return ContentType::Unknown;
@@ -50,7 +66,7 @@ pub fn detect(content: &str) -> ContentType {
     // Bracket sniff on the content's head and bounded tail: the JSON
     // compressor is the authority — it parses, and non-record JSON passes
     // through there.
-    if json::is_json_like(content) {
+    if json_sniff && json::is_json_like(content) {
         return ContentType::Json;
     }
     if html::is_html_document(scan) {
