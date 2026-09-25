@@ -69,7 +69,7 @@ The summary reads at most the latest 10,000 records by default. Limit the query 
 tokenless stats summary --limit 1000
 ```
 
-`--limit` must be a positive integer. `--limit 0` is rejected at parse time with a non-zero exit, matching `stats diff --limit`.
+`--limit` must be a positive integer. `--limit 0` is rejected at parse time with a non-zero exit, matching `stats list --limit` and `stats diff --limit`.
 
 ## Saving-rate field definitions
 
@@ -98,6 +98,8 @@ List recent records:
 tokenless stats list
 tokenless stats list --limit 50
 ```
+
+`--limit` must be a positive integer; `--limit 0` is rejected at parse time instead of printing an empty list.
 
 `[ID:<n>]` in the output is the record ID. Show the complete text before and after one operation:
 
