@@ -95,6 +95,76 @@ pub(crate) enum ConnectionState {
     },
 }
 
+impl ConnectionState {
+    /// Estimate payload bytes retained specifically for request/response
+    /// correlation. Container overhead is excluded, so the value remains a
+    /// stable diagnostic rather than allocator-specific heap accounting.
+    fn buffered_bytes(&self) -> usize {
+        fn request_bytes(request: &ParsedRequest) -> usize {
+            request
+                .reassembled_body
+                .as_ref()
+                .map_or(request.body_len, Vec::len)
+        }
+
+        match self {
+            Self::Idle => 0,
+            Self::RequestPending { request } => request_bytes(request),
+            Self::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
+            Self::ResponsePending { request, assembly } => request
+                .as_ref()
+                .map_or(0, request_bytes)
+                .saturating_add(assembly.buffered_bytes()),
+            Self::SseActive {
+                request,
+                response_headers,
+                sse_events,
+                compressed_buffer,
+                ..
+            } => {
+                request.as_ref().map_or(0, request_bytes)
+                    + response_headers.body_len
+                    + sse_events
+                        .iter()
+                        .map(|event| event.data().len())
+                        .sum::<usize>()
+                    + compressed_buffer.as_ref().map_or(0, Vec::len)
+            }
+        }
+    }
+}
+
+/// Snapshot of memory and lifecycle state retained by HTTP correlation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionMetrics {
+    /// Estimated payload bytes retained across all connection caches.
+    pub connection_cache_bytes: usize,
+    /// In-flight non-idle connections awaiting correlation or completion.
+    pub pending_connection_count: usize,
+    /// Estimated payload bytes retained by in-flight connections.
+    pub pending_connection_bytes: usize,
+    /// Cumulative LRU, TTL, and oversized-body evictions.
+    pub eviction_count: u64,
+}
+
+impl ConnectionMetrics {
+    /// Combine independently retained HTTP/1 and HTTP/2 correlation state.
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self {
+            connection_cache_bytes: self
+                .connection_cache_bytes
+                .saturating_add(other.connection_cache_bytes),
+            pending_connection_count: self
+                .pending_connection_count
+                .saturating_add(other.pending_connection_count),
+            pending_connection_bytes: self
+                .pending_connection_bytes
+                .saturating_add(other.pending_connection_bytes),
+            eviction_count: self.eviction_count.saturating_add(other.eviction_count),
+        }
+    }
+}
+
 /// HTTP Connection Aggregator
 #[derive(Debug)]
 pub struct HttpConnectionAggregator {
@@ -119,6 +189,8 @@ pub struct HttpConnectionAggregator {
     max_body_bytes: usize,
     /// Idle timeout before a connection state is forcibly dropped.
     idle_timeout: Duration,
+    /// Cumulative automatic eviction count for diagnostics.
+    eviction_count: u64,
 }
 
 /// Returns true if oversized-SSE-event continuation buffering should run for
@@ -175,6 +247,7 @@ impl HttpConnectionAggregator {
             idle_snapshotted: LruCache::new(cap),
             max_body_bytes: max_body_bytes.max(1024),
             idle_timeout,
+            eviction_count: 0,
         }
     }
 
@@ -189,6 +262,7 @@ impl HttpConnectionAggregator {
         self.touch(&key);
         if let Some((evicted_key, evicted_state)) = self.connections.push(key, state) {
             if evicted_key != key {
+                self.eviction_count = self.eviction_count.saturating_add(1);
                 log::warn!(
                     "[HttpAggregator] LRU evicted conn={:?} state={} | capacity={}",
                     evicted_key,
@@ -253,6 +327,7 @@ impl HttpConnectionAggregator {
             }
         }
         if evicted_idle > 0 {
+            self.eviction_count = self.eviction_count.saturating_add(evicted_idle as u64);
             log::info!(
                 "[HttpAggregator] evicted {} idle connections (timeout={}s)",
                 evicted_idle,
@@ -281,6 +356,7 @@ impl HttpConnectionAggregator {
             self.idle_snapshotted.pop(key);
         }
         if !oversized.is_empty() {
+            self.eviction_count = self.eviction_count.saturating_add(oversized.len() as u64);
             log::warn!(
                 "[HttpAggregator] evicted {} oversized connections (max_body={}B)",
                 oversized.len(),
@@ -1075,6 +1151,33 @@ impl HttpConnectionAggregator {
     /// Get active connection count
     pub fn active_connections(&self) -> usize {
         self.connections.len()
+    }
+
+    /// Return current connection-cache gauges and cumulative evictions.
+    pub(crate) fn metrics(&self) -> ConnectionMetrics {
+        let pending_connection_count = self
+            .connections
+            .iter()
+            .filter(|(_, state)| !matches!(state, ConnectionState::Idle))
+            .count();
+        let pending_connection_bytes: usize = self
+            .connections
+            .iter()
+            .filter_map(|(_, state)| {
+                (!matches!(state, ConnectionState::Idle)).then_some(state.buffered_bytes())
+            })
+            .sum();
+        let continuation_bytes = self
+            .sse_continuation_buffers
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>();
+        ConnectionMetrics {
+            connection_cache_bytes: pending_connection_bytes.saturating_add(continuation_bytes),
+            pending_connection_count,
+            pending_connection_bytes,
+            eviction_count: self.eviction_count,
+        }
     }
 
     /// Check if connection has pending request
@@ -2887,6 +2990,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         agg.evict_idle_and_oversized();
         assert!(agg.connections.peek(&conn_id).is_none());
+        assert_eq!(agg.metrics().eviction_count, 1);
     }
 
     #[test]
@@ -2980,5 +3084,104 @@ mod tests {
         assert!(agg.last_activity.peek(&conn_id).is_none());
         assert!(agg.sse_continuation_buffers.peek(&conn_id).is_none());
         assert!(agg.last_appended_src_ptr.peek(&conn_id).is_none());
+        let metrics = agg.metrics();
+        assert_eq!(metrics.pending_connection_count, 0);
+        assert_eq!(metrics.pending_connection_bytes, 0);
+        assert_eq!(metrics.eviction_count, 1);
+    }
+
+    #[test]
+    fn test_connection_metrics_report_retained_payload_bytes() {
+        let mut agg = HttpConnectionAggregator::with_capacity(2);
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7200,
+        };
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr),
+            reassembled_body: None,
+        };
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(1024),
+                body_buffer: vec![b'x'; 640],
+            },
+        );
+        agg.sse_continuation_buffers.push(conn_id, vec![b'y'; 128]);
+
+        assert_eq!(
+            agg.metrics(),
+            ConnectionMetrics {
+                connection_cache_bytes: 768,
+                pending_connection_count: 1,
+                pending_connection_bytes: 640,
+                eviction_count: 0,
+            }
+        );
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::ResponsePending {
+                request: None,
+                assembly: PendingResponse::Headers(create_mock_ssl_event_with_buf(
+                    conn_id.pid,
+                    conn_id.ssl_ptr,
+                    vec![b'z'; 512],
+                    0,
+                )),
+            },
+        );
+        assert_eq!(agg.metrics().pending_connection_bytes, 512);
+    }
+
+    #[test]
+    fn test_connection_metrics_count_lru_eviction() {
+        let mut agg = HttpConnectionAggregator::with_capacity(1);
+        for ssl_ptr in [0x7300, 0x7301] {
+            let request = ParsedRequest {
+                method: "POST".to_string(),
+                path: "/v1/messages".to_string(),
+                version: 11,
+                headers: HashMap::new(),
+                body_offset: 0,
+                body_len: 0,
+                source_event: create_mock_ssl_event(1234, ssl_ptr),
+                reassembled_body: None,
+            };
+            agg.process_request(request);
+        }
+
+        let metrics = agg.metrics();
+        assert_eq!(metrics.pending_connection_count, 1);
+        assert_eq!(metrics.eviction_count, 1);
+    }
+
+    #[test]
+    fn test_connection_metrics_merge_saturates_counters() {
+        let combined = ConnectionMetrics {
+            connection_cache_bytes: usize::MAX,
+            pending_connection_count: usize::MAX,
+            pending_connection_bytes: usize::MAX,
+            eviction_count: u64::MAX,
+        }
+        .saturating_add(ConnectionMetrics {
+            connection_cache_bytes: 1,
+            pending_connection_count: 1,
+            pending_connection_bytes: 1,
+            eviction_count: 1,
+        });
+
+        assert_eq!(combined.connection_cache_bytes, usize::MAX);
+        assert_eq!(combined.pending_connection_count, usize::MAX);
+        assert_eq!(combined.pending_connection_bytes, usize::MAX);
+        assert_eq!(combined.eviction_count, u64::MAX);
     }
 }

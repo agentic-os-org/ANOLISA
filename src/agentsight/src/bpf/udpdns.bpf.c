@@ -98,8 +98,10 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
 
     // Reserve ring buffer event
     struct udpdns_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     // Clamp read size to payload buffer capacity
     // Use >= (not >) so read_len never equals DNS_PAYLOAD_MAX (256),

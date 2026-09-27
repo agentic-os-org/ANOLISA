@@ -436,6 +436,13 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 | `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时（秒） |
 | `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
 
+### 运行时指标导出
+
+设置 `AGENTSIGHT_METRICS_FILE` 可将 Prometheus 运行时指标写入文件。
+`AGENTSIGHT_METRICS_INTERVAL_SECS` 控制两次更新之间的最短间隔，单位为正整数秒
+（默认 `1` 秒）。退出时会额外写入最终快照，不受此间隔限制。未启用指标文件时，
+间隔设置不会生效。
+
 ### 最小内存配置示例
 
 如需在资源受限环境下运行，可关闭非必要功能并缩小 ring buffer：

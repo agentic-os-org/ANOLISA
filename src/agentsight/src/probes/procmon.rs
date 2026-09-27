@@ -135,14 +135,14 @@ pub struct ProcMon {
 }
 
 /// Maps procmon reuses from the shared bundle. procmon keeps full audit
-/// coverage, so it only shares the ring buffer (no process / cgroup filter).
-const SHARED_MAPS: &[MapKind] = &[MapKind::Rb];
+/// coverage, so it omits the process and cgroup filters.
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::InternalMetrics];
 
 impl ProcMon {
-    /// Create a new ProcMon that reuses the shared ring buffer.
+    /// Create a new ProcMon that reuses the shared ring buffer and counters.
     ///
     /// # Arguments
-    /// * `shared` - Bundle of shared BPF maps (only the ring buffer is used)
+    /// * `shared` - Bundle providing the ring buffer and internal counters
     pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         // Open + load skeleton
         let mut builder = ProcmonSkelBuilder::default();
@@ -154,7 +154,7 @@ impl ProcMon {
         // Tell BPF which namespace to report event pids in.
         open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
-        // Reuse the shared ring buffer.
+        // Reuse the shared ring buffer and its producer counters.
         shared
             .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
             .context("failed to reuse shared maps for procmon")?;

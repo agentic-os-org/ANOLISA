@@ -119,6 +119,14 @@ impl Framing {
 }
 
 impl PendingResponse {
+    /// Bytes retained while response framing is incomplete.
+    pub(super) fn buffered_bytes(&self) -> usize {
+        match self {
+            Self::Headers(event) => event.buf.len(),
+            Self::Body { response, .. } => response.source_event.buf.len(),
+        }
+    }
+
     /// Select message framing without decoding the response body.
     pub(super) fn body(response: ParsedResponse, method: Option<&str>) -> Result<Self> {
         let framing = Framing::new(&response, method)?;

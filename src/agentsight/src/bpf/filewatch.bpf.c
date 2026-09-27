@@ -33,8 +33,10 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
 
     // Reserve space in ring buffer
     struct filewatch_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     // Read filename from user-space
     const char *filename_ptr = (const char *)ctx->args[1];

@@ -455,6 +455,14 @@ Configure buffer caps to prevent unbounded memory growth:
 | `connection_idle_timeout_secs` | 60 | HTTP connection idle timeout (seconds) |
 | `ring_buffer_mb` | 32 | eBPF Ring Buffer size (must be power of 2) |
 
+### Runtime Metrics Export
+
+Set `AGENTSIGHT_METRICS_FILE` to write Prometheus runtime metrics to a file.
+`AGENTSIGHT_METRICS_INTERVAL_SECS` sets the minimum time between updates in
+positive whole seconds (default: `1`). A final snapshot is written on shutdown
+regardless of this interval. The interval setting has no effect when the metrics
+file is not enabled.
+
 ### Minimal Memory Configuration
 
 For resource-constrained environments, disable non-essential features and reduce ring buffer:

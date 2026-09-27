@@ -4,8 +4,7 @@
 //! by their stream_id and correlating request (client->server) with response (server->client)
 //! to form complete HTTP/2 request/response pairs.
 
-use crate::aggregator::http::ConnectionId;
-use crate::aggregator::http::event_has_meaningful_output;
+use crate::aggregator::http::{ConnectionId, ConnectionMetrics, event_has_meaningful_output};
 use crate::aggregator::result::AggregatedResult;
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us};
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
@@ -147,6 +146,56 @@ impl Http2StreamState {
             Http2StreamState::RequestComplete { .. } => "RequestComplete",
             Http2StreamState::ReceivingResponse { .. } => "ReceivingResponse",
             Http2StreamState::Complete(_) => "Complete",
+        }
+    }
+
+    /// Estimate frame payload bytes retained for stream correlation.
+    fn buffered_bytes(&self) -> usize {
+        fn frame_bytes(frame: &ParsedHttp2Frame) -> usize {
+            frame.payload_len
+        }
+
+        fn frames_bytes(frames: &[ParsedHttp2Frame]) -> usize {
+            frames
+                .iter()
+                .map(frame_bytes)
+                .fold(0usize, usize::saturating_add)
+        }
+
+        fn stream_bytes(stream: &Http2Stream) -> usize {
+            stream
+                .request_headers
+                .as_ref()
+                .map_or(0, frame_bytes)
+                .saturating_add(frames_bytes(&stream.request_data_frames))
+                .saturating_add(stream.response_headers.as_ref().map_or(0, frame_bytes))
+                .saturating_add(frames_bytes(&stream.response_data_frames))
+        }
+
+        match self {
+            Self::WaitingRequestData {
+                request_headers,
+                request_data_frames,
+            }
+            | Self::RequestComplete {
+                request_headers,
+                request_data_frames,
+            } => request_headers
+                .as_ref()
+                .map_or(0, frame_bytes)
+                .saturating_add(frames_bytes(request_data_frames)),
+            Self::ReceivingResponse {
+                request_headers,
+                request_data_frames,
+                response_headers,
+                response_data_frames,
+            } => request_headers
+                .as_ref()
+                .map_or(0, frame_bytes)
+                .saturating_add(frames_bytes(request_data_frames))
+                .saturating_add(response_headers.as_ref().map_or(0, frame_bytes))
+                .saturating_add(frames_bytes(response_data_frames)),
+            Self::Complete(stream) => stream_bytes(stream),
         }
     }
 }
@@ -598,6 +647,21 @@ struct DecodedHeadersPair {
     response: Option<Vec<(String, String)>>,
 }
 
+impl DecodedHeadersPair {
+    fn buffered_bytes(&self) -> usize {
+        fn headers_bytes(headers: &[(String, String)]) -> usize {
+            headers.iter().fold(0usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            })
+        }
+
+        self.request
+            .as_deref()
+            .map_or(0, headers_bytes)
+            .saturating_add(self.response.as_deref().map_or(0, headers_bytes))
+    }
+}
+
 /// HTTP/2 Stream Aggregator
 ///
 /// Aggregates HTTP/2 frames by stream_id within a connection,
@@ -615,6 +679,8 @@ pub struct Http2StreamAggregator {
     continuation_buffers: HashMap<StreamId, ContinuationBuffer>,
     /// Decoded headers waiting to be attached to streams on completion
     decoded_headers_store: HashMap<StreamId, DecodedHeadersPair>,
+    /// Cumulative active-stream evictions from the bounded LRU.
+    eviction_count: u64,
 }
 
 impl Default for Http2StreamAggregator {
@@ -632,6 +698,7 @@ impl Http2StreamAggregator {
             hpack_states: LruCache::new(NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap()),
             continuation_buffers: HashMap::new(),
             decoded_headers_store: HashMap::new(),
+            eviction_count: 0,
         }
     }
 
@@ -643,6 +710,7 @@ impl Http2StreamAggregator {
             hpack_states: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
             continuation_buffers: HashMap::new(),
             decoded_headers_store: HashMap::new(),
+            eviction_count: 0,
         }
     }
 
@@ -868,6 +936,7 @@ impl Http2StreamAggregator {
         if let Some((evicted_id, _)) = self.streams.push(stream_id, state) {
             self.continuation_buffers.remove(&evicted_id);
             self.decoded_headers_store.remove(&evicted_id);
+            self.eviction_count = self.eviction_count.saturating_add(1);
         }
     }
 
@@ -1091,6 +1160,34 @@ impl Http2StreamAggregator {
     /// Get count of active streams
     pub fn active_stream_count(&self) -> usize {
         self.streams.len()
+    }
+
+    /// Return HTTP/2 stream-correlation gauges and cumulative LRU evictions.
+    pub(crate) fn metrics(&self) -> ConnectionMetrics {
+        let pending_connection_bytes = self
+            .streams
+            .iter()
+            .map(|(_, state)| state.buffered_bytes())
+            .fold(0usize, usize::saturating_add);
+        let continuation_bytes = self
+            .continuation_buffers
+            .values()
+            .map(|buffer| buffer.data.len())
+            .fold(0usize, usize::saturating_add);
+        let decoded_header_bytes = self
+            .decoded_headers_store
+            .values()
+            .map(DecodedHeadersPair::buffered_bytes)
+            .fold(0usize, usize::saturating_add);
+
+        ConnectionMetrics {
+            connection_cache_bytes: pending_connection_bytes
+                .saturating_add(continuation_bytes)
+                .saturating_add(decoded_header_bytes),
+            pending_connection_count: self.streams.len(),
+            pending_connection_bytes,
+            eviction_count: self.eviction_count,
+        }
     }
 
     /// Clear all streams
@@ -1591,6 +1688,88 @@ mod tests {
         let stream = &completed[0];
         assert_eq!(stream.request_data_frames.len(), 1);
         assert_eq!(stream.response_data_frames.len(), 0);
+    }
+
+    #[test]
+    fn test_metrics_include_http2_stream_payload_and_lru_evictions() {
+        let mut aggregator = Http2StreamAggregator::with_capacity(1);
+        let first = create_test_frame(
+            1,
+            0,
+            0,
+            b"one".to_vec(),
+            create_test_event(1234, 0x1000, 1, 1000),
+        );
+        aggregator.process_frames(vec![first]);
+
+        assert_eq!(
+            aggregator.metrics(),
+            ConnectionMetrics {
+                connection_cache_bytes: 3,
+                pending_connection_count: 1,
+                pending_connection_bytes: 3,
+                eviction_count: 0,
+            }
+        );
+
+        let second = create_test_frame(
+            3,
+            0,
+            0,
+            b"second".to_vec(),
+            create_test_event(1234, 0x1000, 1, 2000),
+        );
+        aggregator.process_frames(vec![second]);
+
+        assert_eq!(
+            aggregator.metrics(),
+            ConnectionMetrics {
+                connection_cache_bytes: 6,
+                pending_connection_count: 1,
+                pending_connection_bytes: 6,
+                eviction_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_metrics_include_continuation_buffer_and_cleanup_evicted_stream() {
+        let mut aggregator = Http2StreamAggregator::with_capacity(1);
+        let first = create_test_frame(
+            1,
+            1,
+            0,
+            b"first".to_vec(),
+            create_test_event(1234, 0x1000, 1, 1000),
+        );
+        aggregator.process_frames(vec![first]);
+
+        let metrics = aggregator.metrics();
+        assert_eq!(metrics.pending_connection_bytes, 5);
+        assert_eq!(metrics.connection_cache_bytes, 10);
+
+        let second = create_test_frame(
+            3,
+            1,
+            0,
+            b"next".to_vec(),
+            create_test_event(1234, 0x1000, 1, 2000),
+        );
+        aggregator.process_frames(vec![second]);
+
+        let metrics = aggregator.metrics();
+        assert_eq!(metrics.pending_connection_bytes, 4);
+        assert_eq!(metrics.connection_cache_bytes, 8);
+        assert_eq!(metrics.eviction_count, 1);
+        assert!(
+            !aggregator.continuation_buffers.contains_key(&StreamId::new(
+                ConnectionId {
+                    pid: 1234,
+                    ssl_ptr: 0x1000,
+                },
+                1,
+            ))
+        );
     }
 
     // --- HPACK stateful decode tests ---

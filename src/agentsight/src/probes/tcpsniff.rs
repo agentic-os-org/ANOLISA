@@ -46,7 +46,7 @@ pub struct TcpSniff {
 
 /// Maps tcpsniff reuses from the shared bundle. Filtering is by destination
 /// IP/port only, so it shares the ring buffer alone (no process / cgroup filter).
-const SHARED_MAPS: &[MapKind] = &[MapKind::Rb];
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::InternalMetrics];
 
 impl TcpSniff {
     /// Build and load the BPF skeleton, selecting the correct tcp_recvmsg
@@ -71,7 +71,7 @@ impl TcpSniff {
         // Tell BPF which namespace to report event pids in.
         open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
-        // Reuse the shared ring buffer.
+        // Reuse the shared ring buffer and its producer counters.
         shared
             .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
             .context("failed to reuse shared maps for tcpsniff")?;
@@ -116,7 +116,7 @@ impl TcpSniff {
         Ok((open_object, skel))
     }
 
-    /// Create a new TcpSniff that reuses the shared ring buffer map.
+    /// Reuse the shared ring buffer and internal counters.
     /// Automatically detects the tcp_recvmsg signature for the running kernel.
     /// Does NOT require traced_processes — filtering is by destination IP/port only.
     pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {

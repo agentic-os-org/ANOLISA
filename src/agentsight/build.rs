@@ -66,6 +66,7 @@ fn generate_header(out: &mut PathBuf, name: &str) {
 fn generate_ebpf_artifacts(out: &mut PathBuf) {
     let ring_define = ring_buffer_clang_define();
     println!("cargo:rerun-if-env-changed=AGENTSIGHT_RING_BUFFER_MB");
+    println!("cargo:rerun-if-changed=src/bpf/common.h");
 
     generate_skeleton(out, "sslsniff", &ring_define);
     generate_header(out, "sslsniff");

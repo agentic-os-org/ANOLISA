@@ -204,8 +204,10 @@ static __always_inline bool is_http_payload(const char *buf, u32 len)
 #define TCP_EMIT_ONE(TYPE, TIER, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_) \
     do {                                                                              \
         struct TYPE *_d = bpf_ringbuf_reserve(&rb, sizeof(struct TYPE), 0);           \
-        if (!_d)                                                                      \
+        if (!_d) {                                                                    \
+            record_ring_buffer_drop();                                                \
             break;                                                                    \
+        }                                                                             \
         _d->source = EVENT_SOURCE_SSL;                                                \
         _d->timestamp_ns = (ts_);                                                     \
         _d->delta_ns = (delta_);                                                      \

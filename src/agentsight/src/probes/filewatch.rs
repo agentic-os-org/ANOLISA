@@ -96,13 +96,18 @@ pub struct FileWatch {
 
 /// Maps filewatch reuses from the shared bundle: ring buffer, process filter,
 /// and (when cgroup filtering is enabled) the cgroup filter.
-const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses, MapKind::CgroupFilter];
+const SHARED_MAPS: &[MapKind] = &[
+    MapKind::Rb,
+    MapKind::InternalMetrics,
+    MapKind::TracedProcesses,
+    MapKind::CgroupFilter,
+];
 
 impl FileWatch {
     /// Create a new FileWatch that reuses the shared maps bundle.
     ///
-    /// Reuses the ring buffer and process filter; the cgroup filter is reused
-    /// only when present in the bundle (i.e. when cgroup filtering is enabled).
+    /// Reuses the ring buffer, internal counters, and process filter; the
+    /// cgroup filter is reused only when cgroup filtering is enabled.
     pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         let mut builder = FilewatchSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());

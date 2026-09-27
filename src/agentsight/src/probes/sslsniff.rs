@@ -308,7 +308,11 @@ pub struct SslSniff {
 }
 
 /// Maps sslsniff reuses from the shared bundle: ring buffer + process filter.
-const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses];
+const SHARED_MAPS: &[MapKind] = &[
+    MapKind::Rb,
+    MapKind::InternalMetrics,
+    MapKind::TracedProcesses,
+];
 
 impl SslSniff {
     /// Create a new SslSniff with its own (unshared) maps.
@@ -316,7 +320,7 @@ impl SslSniff {
         Self::build(None)
     }
 
-    /// Create a new SslSniff that reuses the shared ring buffer and process filter.
+    /// Reuse the shared ring buffer, internal counters, and process filter.
     pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         Self::build(Some(shared))
     }

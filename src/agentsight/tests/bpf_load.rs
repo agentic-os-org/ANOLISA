@@ -20,10 +20,15 @@ use agentsight::{
 fn make_shared_maps() -> (ProcTrace, SharedMaps) {
     config::set_verbose(true);
     let pt = ProcTrace::new().expect("proctrace open+load");
-    let shared = SharedMaps::new(pt.rb_handle().expect("rb handle")).with_traced_processes(
-        pt.traced_processes_handle()
-            .expect("traced_processes handle"),
-    );
+    let shared = SharedMaps::new(pt.rb_handle().expect("rb handle"))
+        .with_internal_metrics(
+            pt.internal_metrics_handle()
+                .expect("internal_metrics handle"),
+        )
+        .with_traced_processes(
+            pt.traced_processes_handle()
+                .expect("traced_processes handle"),
+        );
     (pt, shared)
 }
 

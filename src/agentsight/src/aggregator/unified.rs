@@ -3,7 +3,7 @@
 //! This module provides a unified interface for aggregating parsed messages.
 //! It combines HTTP Connection Aggregator and Process Event Aggregator.
 
-use super::http::{ConnectionId, ConnectionState, HttpConnectionAggregator};
+use super::http::{ConnectionId, ConnectionMetrics, ConnectionState, HttpConnectionAggregator};
 use super::http2::Http2StreamAggregator;
 use super::proctrace::ProcessEventAggregator;
 use super::result::AggregatedResult;
@@ -167,6 +167,11 @@ impl Aggregator {
     /// Get mutable reference to HTTP aggregator
     pub fn http_mut(&mut self) -> &mut HttpConnectionAggregator {
         &mut self.http
+    }
+
+    /// Return combined HTTP/1 connection and HTTP/2 stream correlation metrics.
+    pub(crate) fn connection_metrics(&self) -> ConnectionMetrics {
+        self.http.metrics().saturating_add(self.http2.metrics())
     }
 
     /// Get reference to process aggregator

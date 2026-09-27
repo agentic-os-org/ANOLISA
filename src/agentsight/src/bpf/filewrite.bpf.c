@@ -127,8 +127,10 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
 
     // Reserve space in ring buffer
     struct filewrite_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     // Fill metadata
     event->source = EVENT_SOURCE_FILEWRITE;

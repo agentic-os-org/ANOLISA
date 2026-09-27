@@ -279,7 +279,14 @@ required custom rules to the new file, then reload the service.
 | `AGENTSIGHT_TOKENIZER_PATH` | Directory holding local tokenizer models |
 | `AGENTSIGHT_ENFORCER_SOCKET` | Enforcer socket path (default `/run/agentsight/enforcer.sock`) |
 | `AGENTSIGHT_CHROME_TRACE` | Writes a Chrome trace file for pipeline profiling |
+| `AGENTSIGHT_METRICS_FILE` | Enables atomic Prometheus runtime snapshots at the given file path; unset or empty disables export |
+| `AGENTSIGHT_METRICS_INTERVAL_SECS` | Minimum interval between runtime metrics snapshots in positive whole seconds (default `1`); only used when `AGENTSIGHT_METRICS_FILE` is set |
 | `RUST_LOG` | Log level, e.g. `RUST_LOG=debug` |
+
+Runtime metrics are updated no more often than the configured interval. AgentSight
+also writes a final snapshot on shutdown, even if the interval has not elapsed.
+An invalid interval, including `0`, causes startup to fail when metrics export
+is enabled.
 
 ## Verify a change
 
