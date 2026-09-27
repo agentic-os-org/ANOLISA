@@ -129,7 +129,7 @@ def inventory(text: str) -> set[str]:
 
 
 def check_inventory() -> None:
-    """Require runnable tests in each contract, execution and journal target."""
+    """Require runnable tests for configuration, contracts, execution and journals."""
     for package, target in (
         ("aw-contracts", "canonical"),
         ("aw-contracts", "schemas"),
@@ -137,6 +137,7 @@ def check_inventory() -> None:
         ("aw-contracts", "orchestration"),
         ("aw-core", "execution"),
         ("aw-core", "journal"),
+        ("aw-config", "configuration"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -147,10 +148,11 @@ def check_inventory() -> None:
 
 
 def structure(metadata: dict, root: Path) -> None:
-    """Keep the two reviewed crate boundaries and Rust source sizes explicit."""
+    """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},
+        "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
     }
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
@@ -158,7 +160,7 @@ def structure(metadata: dict, root: Path) -> None:
     if members.keys() != allowed.keys():
         raise ValueError("AW workspace members changed; review the crate boundaries")
     for name, package in members.items():
-        directory = root if name == "aw-contracts" else root / "crates/aw-core"
+        directory = root if name == "aw-contracts" else root / "crates" / name
         if Path(package["manifest_path"]).resolve() != (directory / "Cargo.toml").resolve():
             raise ValueError(f"{name}: workspace crate moved outside its reviewed location")
         source_roots = [directory / kind for kind in ("src", "tests", "examples")]

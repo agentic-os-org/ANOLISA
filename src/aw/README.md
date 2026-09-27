@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-AW provides versioned capability contracts, offline validation and embeddable Core orchestration. `aw-contracts` checks payload shapes and record relationships; `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
+AW provides unified configuration, versioned capability contracts and embeddable Core orchestration. `aw-config` validates configuration structure and references; `aw-contracts` checks payload shapes and record relationships; `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
 
 The interfaces are experimental. Tests use synthetic records and do not certify runtime integration.
 
@@ -17,8 +17,8 @@ python3 src/aw/scripts/check.py
 
 The entry runs CI behavior tests, formatting, Clippy, all locked workspace tests,
 the Python/JavaScript digest vectors and rustdoc. Missing tools, empty or fully
-ignored contract, plan, Core execution or journal test targets, invalid vectors and command failures return
-nonzero. Each command has a timeout and its child process group is cleaned up on
+ignored configuration, contract, plan, Core execution or journal test targets,
+invalid vectors and command failures return nonzero. Each command has a timeout and its child process group is cleaned up on
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
@@ -49,12 +49,17 @@ events remain reserved; there is no automatic retry or recovery.
 See [Core execution and storage](docs/design/core-execution.md) for ownership,
 cancellation, failure and embedding contracts. The tests use synthetic Hosts;
 this crate does not connect a production Provider or establish native adoption.
-The shared check enforces the two-crate dependency boundary and a 700-line Rust
+The shared check enforces the three-crate dependency boundary and a 700-line Rust
 file limit (600-line warning); the existing contract validator remains capped at
 711 lines. These checks supplement review, not runtime acceptance.
 
 ## Source reference
 
+- [User guide and availability](../../docs/user-guide/en/user-entrypoint/aw.md),
+  [configuration reference](../../docs/developer-guide/en/aw/configuration.md),
+  [starter configuration](crates/aw-config/examples/aw.minimal.yaml),
+  [full example](crates/aw-config/examples/aw.yaml) and
+  [configuration API](crates/aw-config/src/lib.rs)
 - [Registered schemas](schemas/) and [synthetic payload examples](tests/fixtures/contracts.json)
 - [Public API](src/lib.rs), [record validation](src/validation.rs) and [plan validation](src/orchestration.rs)
 - [Encoding tests](tests/canonical.rs), [schema tests](tests/schemas.rs),
@@ -62,4 +67,14 @@ file limit (600-line warning); the existing contract validator remains capped at
 
 The Registry includes 21 schema resources. The eight v1 resources in `crates/aw-contracts/schemas/` are reference copies and are not registered. Callers must use matching schema IDs and digests; no automatic version conversion is provided.
 
-Parse incoming bytes with `canonical::parse` before schema validation. Shape checks alone do not validate record relationships or grant authorization. Follow the public API documentation for plan-level checks; callers remain responsible for authenticating evidence and enforcing actions.
+Parse incoming wire records with `canonical::parse` before schema validation. Shape checks alone do not validate record relationships or grant authorization. Follow the public API documentation for plan-level checks; callers remain responsible for authenticating evidence and enforcing actions.
+
+User configuration uses the separate `aw-config` crate and its bundled
+`aw/v1alpha1` schema. It accepts one `AWConfiguration` object with
+`apiVersion`, `kind`, `metadata` and `spec`; Provider instances are named objects
+under `spec.providers`. The schema recognizes QwenPaw, Qoder CLI, OpenClaw,
+Hermes and all 16 event names, without claiming adapters are implemented.
+Configuration has no runtime `status`. Provider discovery, operation/private
+config validation and native capability admission remain subsequent work.
+See the [configuration design](docs/design/configuration.md) for the separation
+from the existing wire contracts.
