@@ -98,6 +98,14 @@ The current crates are:
   [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
+- `asc-model-client`: shared, loopback-only HTTP client for local model
+  inference backends (Ollama); injected by scanner crates.
+- `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
+  a rule engine, model-backed classification and multi-turn intent detection;
+  served by the daemon through `action.prompt_scan`. It supports `fast`,
+  `standard`, and `strict` single-turn text scans, plus `multi_turn` with the
+  conversation triple in `history`/`text`/`assistantResponse`; an optional
+  `model` field overrides the L2 backend.
 
 The crate relationships, acceptance types, executable pass/fail matrix,
 compatibility report, direct-consumer evidence, and rollback boundary are recorded
@@ -106,7 +114,8 @@ in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_
 The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
 maps Prompt Scan and Code Scan migration work onto the repository architecture, including module
 locations, dependency order, interface boundaries, and acceptance requirements.
-It describes planned work; this workspace does not yet expose scan methods.
+It describes planned work; the daemon currently exposes the
+`action.code_scan` and `action.prompt_scan` methods.
 
 ## Daemon service boundary
 
@@ -314,7 +323,9 @@ invocation automatically finalizes; handlers and capabilities do not own sinks.
 `asc-event-sink::telemetry::TelemetryWriter` appends only to an existing uploader-owned
 file. Audit JSONL/SQLite and telemetry attempts remain synchronous and independent.
 This change includes only the code-scan identity, telemetry projection and fixtures.
-Other scan capabilities will add their identities and projections in their own commits.
+The prompt-scan capability registers through the same lifecycle with its own identity;
+its telemetry flows through the generic fields, and a verdict-specific projection
+remains future work.
 
 See the [implementation, compatibility and acceptance record](../docs/design/RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)
 for the exact scope, executable checks, deferred work, and rollback procedure.

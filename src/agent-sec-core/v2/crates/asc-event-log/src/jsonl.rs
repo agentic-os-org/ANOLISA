@@ -424,7 +424,7 @@ impl JsonlEventWriter {
             })
             .collect();
 
-        backups.sort_by(|left, right| left.1.cmp(&right.1));
+        backups.sort_by_key(|(_, modified)| *modified);
 
         while backups.len() > self.backup_count {
             let (oldest, _) = backups.remove(0);

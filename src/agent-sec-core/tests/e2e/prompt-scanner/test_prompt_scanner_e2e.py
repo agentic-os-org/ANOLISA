@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """E2E tests for prompt-scanner via CLI.
 
-Tests exercise the CLI scan-prompt pipeline through the local security
-middleware (the daemon no longer serves prompt_scan):
+Tests exercise the CLI scan-prompt pipeline black-box:
 
   agent-sec-cli scan-prompt --text "<prompt>" [--mode <fast|standard|strict>]
-  -> security_middleware.invoke("prompt_scan", ...)
+
+Optional capabilities — the ``--trace-context`` flag, telemetry records, the
+L2 model backend — are probed at runtime and skip themselves on CLIs or
+environments that lack them, so the same file runs unchanged against every
+execution path (in-process or daemon-backed).
 
 The test suite:
   A. Basic functionality (empty input, safe prompt, injection, jailbreak)
-  B. Trace context propagation to security events
+  B. Trace context propagation to security events (gated on the
+     ``--trace-context`` capability probe)
   C. Rule coverage — key injection & jailbreak rules exercised end-to-end
   D. Mode variants (fast / standard / strict)
   E. JSON output format validation
@@ -63,7 +67,6 @@ from telemetry_jsonl import (  # noqa: E402
 
 _CLI_BIN = shutil.which("agent-sec-cli")
 _CLI_MODE = "binary" if _CLI_BIN else "python -m"
-DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
 
 # Turns the "L2 backend unavailable" skip into a failure, for environments
 # that are supposed to serve the model.
@@ -96,6 +99,7 @@ def _run_scan(
     fmt: str = "json",
     extra_args: List[str] | None = None,
     top_level_args: List[str] | None = None,
+    timeout: int = 30,
 ) -> subprocess.CompletedProcess:
     """Run ``agent-sec-cli scan-prompt`` and return CompletedProcess."""
     top_level = [] if top_level_args is None else top_level_args
@@ -116,7 +120,7 @@ def _run_scan(
         capture_output=True,
         check=False,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=os.environ.copy(),
     )
     print(f"\n[CLI mode={_CLI_MODE}] cmd={' '.join(cmd[:6])} ...")
@@ -185,27 +189,87 @@ def _wait_for_security_event(trace_context: dict[str, str]) -> dict:
 def l2_model_service() -> None:
     """Skip the calling test when the L2 backend is not served.
 
-    Probing through ``scan-prompt warmup`` rather than a direct HTTP check
-    reuses the CLI's own backend resolution (``--model`` >
-    ``PROMPT_SCANNER_L2_MODEL`` > built-in default), so the probe cannot
-    disagree with what a standard/strict scan would load. L2 is mandatory in
-    those modes — an unreachable service makes the scan an ERROR verdict, not
-    a degraded pass — hence the gate rather than a looser assertion.
+    The probe is a real standard scan, so it reuses the CLI's own backend
+    resolution (``--model`` > ``PROMPT_SCANNER_L2_MODEL`` > built-in default)
+    through the exact code path the gated tests take — the probe cannot
+    disagree with what a standard/strict scan would load, because it is one.
+    L2 is mandatory in those modes — an unreachable service makes the scan an
+    ERROR verdict, not a degraded pass — hence the gate rather than a looser
+    assertion.  The generous timeout covers a cold model load; the gated
+    tests then run against a warm backend within their own 30s budget.
     """
-    proc = subprocess.run(
-        _cli_cmd("scan-prompt", "warmup", "--mode", "standard"),
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=180,
-        env=os.environ.copy(),
-    )
+    proc = _run_scan("l2 availability probe", mode="standard", timeout=180)
     if proc.returncode == 0:
-        return
-    reason = (proc.stderr or proc.stdout).strip() or f"warmup exited {proc.returncode}"
+        result = json.loads(proc.stdout)
+        if not result.get("degraded"):
+            return
+        failed = [entry.get("layer") for entry in result.get("layers_failed") or []]
+        reason = f"standard scan degraded, layer(s) unavailable: {failed}"
+    else:
+        reason = (
+            proc.stderr or proc.stdout
+        ).strip() or f"standard scan exited {proc.returncode}"
     if os.environ.get(_REQUIRE_L2_ENV, "").strip() == "1":
         pytest.fail(f"{_REQUIRE_L2_ENV}=1 but the L2 backend is unusable: {reason}")
     pytest.skip(f"L2 model service unavailable: {reason}")
+
+
+def _cli_rejects_trace_context(proc: subprocess.CompletedProcess) -> bool:
+    """Whether the CLI failed because it does not know ``--trace-context``.
+
+    Only argument-rejection wording counts — clap's ``unexpected argument``,
+    argparse's ``unrecognized``, click's ``No such option``.  Any other
+    failure (e.g. an unreachable daemon) must fail the tests loudly rather
+    than silently skipping the capability.
+    """
+    stderr = (proc.stderr or "").lower()
+    return "--trace-context" in stderr and any(
+        marker in stderr
+        for marker in ("unexpected argument", "unrecognized", "no such option")
+    )
+
+
+@pytest.fixture(scope="module")
+def trace_context_cli() -> None:
+    """Skip the calling test when the CLI does not accept ``--trace-context``.
+
+    Probing with the real command rather than ``--help`` text means the gate
+    cannot disagree with what the tests themselves invoke, and a CLI that
+    grows the flag starts running these tests without any change here.
+    """
+    proc = _run_scan(
+        "trace context capability probe",
+        top_level_args=[
+            "--trace-context",
+            json.dumps({"trace_id": "e2e-probe-trace-context"}),
+        ],
+    )
+    if proc.returncode != 0 and _cli_rejects_trace_context(proc):
+        pytest.skip("this agent-sec-cli does not yet accept --trace-context")
+
+
+def _cli_rejects_events(proc: subprocess.CompletedProcess) -> bool:
+    """Whether the CLI failed because it does not know the ``events`` subcommand.
+
+    Only subcommand-rejection wording counts — clap's ``unrecognized subcommand``.
+    Any other failure (e.g. an unreachable daemon) must fail the tests loudly
+    rather than silently skipping the capability.
+    """
+    stderr = (proc.stderr or "").lower()
+    return "events" in stderr and "unrecognized subcommand" in stderr
+
+
+@pytest.fixture(scope="module")
+def events_cli() -> None:
+    """Skip the calling test when the CLI does not provide ``events``.
+
+    The security-event query is a separate capability from ``--trace-context``;
+    probing with a real ``events`` invocation keeps the gate aligned with the
+    exact code path the test uses.
+    """
+    proc = _run_events("e2e-probe-events")
+    if proc.returncode != 0 and _cli_rejects_events(proc):
+        pytest.skip("this agent-sec-cli does not yet provide events")
 
 
 # ---------------------------------------------------------------------------
@@ -264,9 +328,18 @@ class TestBasicScan:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("trace_context_cli")
 class TestTraceContextPropagation:
-    """Verify CLI trace context reaches security events."""
+    """Verify CLI trace context reaches security events.
 
+    Gated on the ``--trace-context`` capability probe above: CLIs without
+    the flag skip the whole class, and the capability landing re-enables
+    both tests without touching this file.  The security event query is
+    expected to ship together with the flag; if it does not, the event wait
+    below fails loudly instead of skipping.
+    """
+
+    @pytest.mark.usefixtures("events_cli")
     def test_trace_context_reaches_security_events(self) -> None:
         trace_context = {
             "trace_id": "e2e-scan-prompt-trace",

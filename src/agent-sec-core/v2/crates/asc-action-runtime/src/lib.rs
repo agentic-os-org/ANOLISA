@@ -8,7 +8,7 @@ pub mod testing;
 pub use asc_telemetry::TelemetryStatus;
 pub use finalizer::Finalizer;
 pub use ports::{
-    AuditProjector, CapabilityExecutor, Diagnostic, DiagnosticSink, ExecutionControl, Invocation,
-    InvokeError, SecurityEventSink, TelemetrySink,
+    AuditProjector, CapabilityExecutor, CapabilityWarmup, Diagnostic, DiagnosticSink,
+    ExecutionControl, Invocation, InvokeError, SecurityEventSink, TelemetrySink, WarmupStatus,
 };
 pub use runtime::ActionRuntime;

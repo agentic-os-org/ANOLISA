@@ -22,6 +22,10 @@ def test_handlers_and_core_cannot_depend_on_concrete_scanners_or_output_writers(
             "rusqlite",
         }
     for source in (V2 / "crates/asc-daemon-handler/src").glob("*.rs"):
+        # test_helpers.rs is a test-only fixture module declared as
+        # `#[cfg(test)] mod test_helpers;` in lib.rs; it is not production code.
+        if source.name == "test_helpers.rs":
+            continue
         production = source.read_text().split("#[cfg(test)]")[0]
         assert "Finalizer" not in production
         assert "ActionRuntime" not in production

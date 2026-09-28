@@ -8,6 +8,8 @@ members = [
     "crates/asc-action-runtime",
     "crates/asc-action-types",
     "crates/asc-capability-code-scan",
+    "crates/asc-capability-prompt-scan",
+    "crates/asc-model-client",
     "crates/asc-daemon-client",
     "crates/asc-daemon-core",
     "crates/asc-daemon-handler",
@@ -48,6 +50,7 @@ asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
 asc-agentsight-client = { path = "crates/asc-agentsight-client" }
 asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
+asc-capability-prompt-scan = { path = "crates/asc-capability-prompt-scan" }
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 tracing = "0.1"
@@ -64,6 +67,7 @@ asc-daemon-service = { path = "crates/asc-daemon-service" }
 asc-event-log = { path = "crates/asc-event-log" }
 asc-event-sink = { path = "crates/asc-event-sink" }
 asc-foundation-types = { path = "crates/asc-foundation-types" }
+asc-model-client = { path = "crates/asc-model-client" }
 asc-observability = { path = "crates/asc-observability" }
 asc-pap = { path = "crates/asc-pap" }
 asc-pap-repository-memory = { path = "crates/asc-pap-repository-memory" }
@@ -78,22 +82,27 @@ asc-security-events = { path = "crates/asc-security-events" }
 asc-telemetry = { path = "crates/asc-telemetry" }
 asc-security-summary = { path = "crates/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
 fancy-regex = "0.16"
+log = "0.4"
 nix = { version = "0.31", default-features = false, features = ["user"] }
+regex = "1.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustix = { version = "1.1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+serde_yaml = "0.9"
 serial_test = "3"
 socket2 = "0.6"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-normalization = "0.1"
 unicode-properties = "0.1"
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 uuid = { version = "1", features = ["v4"] }
 yaml-rust2 = "0.10"
 

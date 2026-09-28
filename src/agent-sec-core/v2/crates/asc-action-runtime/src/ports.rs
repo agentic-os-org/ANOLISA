@@ -43,6 +43,31 @@ pub trait Invocation<R>: Send + Sync {
     ) -> Result<ActionOutcome, InvokeError>;
 }
 
+/// Outcome of a capability readiness probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarmupStatus {
+    /// Every layer of the probed configuration can be prepared.
+    Ready,
+    /// A caller mistake (unknown mode or unsupported model); the message is
+    /// safe to return to the caller verbatim.
+    InvalidParameter(String),
+    /// A backing service is unreachable or not ready; the message names the
+    /// concrete cause for diagnosis.
+    Unavailable(String),
+}
+
+/// Application-facing readiness probe for a capability's backing services.
+///
+/// A probe, not a scan: it participates in no audit lifecycle and emits no
+/// security event, mirroring the legacy `scan-prompt warmup` subcommand,
+/// which recorded no event either.
+pub trait CapabilityWarmup: Send + Sync {
+    /// Typed probe input.
+    type Request;
+    /// Checks that the layers of one configuration can be prepared.
+    fn warmup(&self, request: &Self::Request) -> WarmupStatus;
+}
+
 /// Controlled unhandled execution failure; never contains a panic payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("capability execution failed")]

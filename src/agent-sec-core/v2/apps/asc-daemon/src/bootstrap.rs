@@ -13,6 +13,12 @@ const DEFAULT_MAX_REJECTION_CONNECTIONS: usize = 8;
 const DEFAULT_REJECTION_ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+// Must cover the prompt scanner's L2 model call: the model service's own
+// budget defaults to 30s (`AGENT_SEC_MODEL_SERVICE_TIMEOUT`), so the
+// prompt-scan family needs a dispatch budget that outlives the slowest
+// configured scan. Scoped by method prefix (which also covers the warmup
+// probe) so the interactive default stays tight for every other method.
+const DEFAULT_PROMPT_SCAN_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -41,7 +47,7 @@ impl BootstrapConfig {
 }
 
 /// Returns the explicit transport limits used by the runnable daemon bootstrap.
-pub const fn default_service_config() -> ServiceConfig {
+pub fn default_service_config() -> ServiceConfig {
     ServiceConfig {
         max_request_frame_bytes: asc_daemon_protocol::MAX_REQUEST_FRAME_BYTES,
         max_response_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
@@ -50,6 +56,10 @@ pub const fn default_service_config() -> ServiceConfig {
         rejection_encode_timeout: DEFAULT_REJECTION_ENCODE_TIMEOUT,
         request_read_timeout: DEFAULT_REQUEST_READ_TIMEOUT,
         dispatch_timeout: DEFAULT_DISPATCH_TIMEOUT,
+        method_dispatch_timeouts: vec![(
+            asc_daemon_protocol::method::ACTION_PROMPT_SCAN.to_owned(),
+            DEFAULT_PROMPT_SCAN_DISPATCH_TIMEOUT,
+        )],
         response_write_timeout: DEFAULT_RESPONSE_WRITE_TIMEOUT,
         drain_timeout: DEFAULT_DRAIN_TIMEOUT,
         accept_error_backoff: DEFAULT_ACCEPT_ERROR_BACKOFF,
