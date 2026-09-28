@@ -138,6 +138,8 @@ def check_inventory() -> None:
         ("aw-core", "execution"),
         ("aw-core", "journal"),
         ("aw-config", "configuration"),
+        ("aw-provider", "protocol"),
+        ("aw-provider", "admission"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -153,6 +155,7 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
+        "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
     }
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
@@ -171,14 +174,15 @@ def structure(metadata: dict, root: Path) -> None:
         for dependency in package["dependencies"]:
             if dependency["name"] not in allowed[name]:
                 raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
-            if dependency["name"] == "aw-contracts":
+            local = {"aw-contracts": root, "aw-config": root / "crates/aw-config"}
+            if dependency["name"] in local:
                 path = dependency.get("path")
                 if (
                     not path
                     or dependency.get("source") is not None
-                    or Path(path).resolve() != root.resolve()
+                    or Path(path).resolve() != local[dependency["name"]].resolve()
                 ):
-                    raise ValueError("aw-core must use this workspace's aw-contracts")
+                    raise ValueError(f"{name}: local dependency must use this workspace")
             elif dependency.get("path") is not None or dependency.get("source", "").startswith(
                 "git+"
             ):

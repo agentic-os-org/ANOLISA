@@ -115,7 +115,7 @@ class GateTests(unittest.TestCase):
             "valid", "empty", "ignored", "missing", "core-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
-            "contract-empty-configuration",
+            "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
         ):
             with self.subTest(mode=mode), patch.dict(
                 os.environ,
@@ -149,6 +149,11 @@ class GateTests(unittest.TestCase):
                 self.root / "crates/aw-config",
                 ["jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"],
             ),
+            (
+                "aw-provider",
+                self.root / "crates/aw-provider",
+                ["aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -161,8 +166,11 @@ class GateTests(unittest.TestCase):
                     "dependencies": [
                         {
                             "name": dependency,
-                            "path": str(self.root) if dependency == "aw-contracts" else None,
-                            "source": None if dependency == "aw-contracts" else "registry+fixture",
+                            "path": (
+                                str(self.root) if dependency == "aw-contracts" else
+                                str(self.root / "crates/aw-config") if dependency == "aw-config" else None
+                            ),
+                            "source": None if dependency in {"aw-contracts", "aw-config"} else "registry+fixture",
                         }
                         for dependency in dependencies
                     ],
@@ -170,7 +178,7 @@ class GateTests(unittest.TestCase):
             )
         metadata = {"packages": packages, "workspace_members": [p["id"] for p in packages]}
         gate.structure(metadata, self.root)
-        for package, dependency in ((0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts")):
+        for package, dependency in ((0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"), (3, "aw-core")):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})
             with self.assertRaises(ValueError):
@@ -184,6 +192,10 @@ class GateTests(unittest.TestCase):
             "source": "registry+fixture",
         }
         with chdir(self.root), self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
+        invalid = json.loads(json.dumps(metadata))
+        invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
+        with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
         with self.assertRaises(ValueError):
             gate.structure({**metadata, "workspace_members": ["aw-contracts"]}, self.root)
