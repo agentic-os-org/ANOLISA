@@ -378,3 +378,6 @@ Harness 已覆盖步骤 1–4；只有在 Linux 环境继续执行正式 campaig
 - 每项优化手段都能关联到量化收益和副作用；
 - 回归测试全部通过，新增代码的 diff coverage 不低于 85%；
 - 报告明确环境、原始产物、失败运行、限制和复现方式。
+
+`reproduce_campaign.sh` 会在 quick 或 formal 测试前停止正在运行的
+`agentsight.service`，结束后不会自动重启；如需恢复，请在测试结束后手动启动该服务。

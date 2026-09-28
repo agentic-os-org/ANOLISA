@@ -420,3 +420,7 @@ only after the Linux campaign also satisfies all of the following:
 - every optimization maps to a quantified gain and side-effect check;
 - all regressions pass and new-code diff coverage is at least 85%;
 - the report records environment, raw artifacts, failed runs, limitations, and reproduction details.
+
+`reproduce_campaign.sh` stops an active `agentsight.service` before quick or
+formal runs and does not restart it; restart the service manually after the
+campaign if needed.
