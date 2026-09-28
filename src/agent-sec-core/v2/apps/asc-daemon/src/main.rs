@@ -79,7 +79,7 @@ async fn run(
     cli: Cli,
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
-) -> (ExitCode, Option<Arc<ConfiguredSecurityEventSinks>>) {
+) -> (ExitCode, Option<sinks::DurableSinks>) {
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
@@ -92,7 +92,7 @@ async fn run(
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
-    let (finalizer, event_sinks) = match event_finalizer(telemetry) {
+    let (finalizer, durable_sinks) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
             telemetry.report(&format!(
@@ -122,11 +122,16 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = Arc::new(DaemonDispatcher::new(
-        pap,
-        policy_for_handler,
-        asc_daemon::scan_application(finalizer),
-    ));
+    let dispatcher = Arc::new(
+        DaemonDispatcher::new(
+            pap,
+            policy_for_handler,
+            asc_daemon::scan_application(finalizer),
+        )
+        .with_observability(asc_daemon_core::ObservabilityService::new(Arc::new(
+            sinks::ObservabilitySinkAdapter(Arc::clone(&durable_sinks.observability)),
+        ))),
+    );
     telemetry
         .report("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
@@ -166,13 +171,17 @@ async fn run(
         telemetry.report("asc-daemon: reconciliation drain failed or timed out");
         ExitCode::FAILURE
     };
-    (exit_code, Some(event_sinks))
+    (exit_code, Some(durable_sinks))
 }
 
 fn event_finalizer(
     telemetry: &asc_observability::TelemetryRuntime,
-) -> Result<(Finalizer, Arc<ConfiguredSecurityEventSinks>), asc_event_sink::SinkError> {
+) -> Result<(Finalizer, sinks::DurableSinks), asc_event_sink::SinkError> {
     let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
+    let observability_sinks = Arc::new(asc_event_sink::ConfiguredObservabilitySinks::new(
+        jsonl_path.with_file_name("observability.jsonl"),
+        sqlite_path.with_file_name("observability.db"),
+    ));
     let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
     sinks.warm_sqlite()?;
     if let Err(error) = sinks.warm_jsonl() {
@@ -190,7 +199,10 @@ fn event_finalizer(
             )),
             Arc::new(sinks::LifecycleDiagnostics(telemetry.reporter())),
         ),
-        sinks,
+        sinks::DurableSinks {
+            security: sinks,
+            observability: observability_sinks,
+        },
     ))
 }
 

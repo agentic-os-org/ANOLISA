@@ -16,6 +16,7 @@ pub struct DaemonDispatcher {
     pap: PapHandler,
     code_scan: CodeScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
+    observability: Option<asc_daemon_core::ObservabilityService>,
 }
 
 impl DaemonDispatcher {
@@ -32,7 +33,15 @@ impl DaemonDispatcher {
             pap: PapHandler::new(application),
             code_scan: CodeScanHandler::new(actions),
             principal_policy,
+            observability: None,
         }
+    }
+
+    /// Installs the explicitly configured observability ingestion application.
+    #[must_use]
+    pub fn with_observability(mut self, service: asc_daemon_core::ObservabilityService) -> Self {
+        self.observability = Some(service);
+        self
     }
 
     /// Handles one decoded request using transport-authenticated peer identity.
@@ -92,6 +101,12 @@ impl DaemonDispatcher {
             );
         }
         match method_id {
+            MethodId::ObservabilityRecord => crate::observability::handle(
+                request_id,
+                control,
+                self.observability.as_ref(),
+                request.params,
+            ),
             MethodId::Pap(method) => {
                 self.pap
                     .handle(request_id, &principal, method, request.params)

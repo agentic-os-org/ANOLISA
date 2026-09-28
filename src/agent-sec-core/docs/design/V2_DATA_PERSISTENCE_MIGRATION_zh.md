@@ -379,8 +379,9 @@ writer/reader`），因为两条流的表契约、故障策略和迁移机制都
 ### 10.1 无 `atexit`
 
 v1 靠 `atexit` 注册 writer 的 `close`，进程退出时自动跑维护。Rust 没有等价物，因此
-`asc-event-sink` 暴露显式的 `shutdown_sinks()`。**composition root 必须调它**，否则
-裁剪与 checkpoint 永远不会发生（§11.2）。
+host 必须显式关闭 writer。进程全局安全事件 sinks 通过 `shutdown_sinks()` 关闭；
+daemon 持有的 configured sinks 由 composition root 在 drain 后调用 `close()`。
+可观测采集仅使用 `ConfiguredObservabilitySinks`，不再提供全局 accessor/record API。
 
 ### 10.2 `format_summary_at` 的存在理由
 
@@ -534,7 +535,7 @@ pytest 默认串行，所以 v1 用 `autouse` fixture 改 `AGENT_SEC_DATA_DIR` �
 
 ### 13.2 必须串行的用例
 
-只有 `asc-event-sink` 有进程级全局状态（四个 `OnceLock` sink slot），它的 15 个有状态
+`asc-event-sink` 的安全事件路径保留进程级全局状态（三个 `RwLock` slot），其有状态
 用例统一取 `test_support::serial()`（进程内 `Mutex`）。**没有任何地方需要
 `--test-threads=1`**。清单见 `TEST_MIGRATION.md` §Serial cases。
 

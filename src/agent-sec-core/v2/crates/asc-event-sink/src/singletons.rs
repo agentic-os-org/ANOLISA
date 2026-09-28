@@ -1,7 +1,6 @@
-//! Lazily built, resettable process-wide sinks.
+//! Lazily built, resettable process-wide security-event sinks.
 //!
-//! Migrated from the module-level globals of v1 `security_events/__init__.py` and
-//! `observability/__init__.py`. Each slot is a `RwLock<Option<Arc<T>>>` rather
+//! Migrated from the module-level globals of v1 `security_events/__init__.py`. Each slot is a `RwLock<Option<Arc<T>>>` rather
 //! than a `OnceLock`: v1's globals are plain module variables that
 //! `tests/unit-test/conftest.py` sets back to `None` to force a rebuild, and a
 //! `OnceLock` cannot express that. Construction stays lazy — nothing here touches
@@ -9,8 +8,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use asc_event_log::{ObservabilityWriter, SecurityEventWriter};
-use asc_persistence_sqlite::observability::ObservabilitySqliteWriter;
+use asc_event_log::SecurityEventWriter;
 use asc_persistence_sqlite::security_events::{SqliteEventReader, SqliteEventWriter};
 
 use crate::error::SinkError;
@@ -76,8 +74,6 @@ impl<T> Slot<T> {
 static SECURITY_JSONL: Slot<SecurityEventWriter> = Slot::new();
 static SECURITY_SQLITE: Slot<SqliteEventWriter> = Slot::new();
 static SECURITY_READER: Slot<SqliteEventReader> = Slot::new();
-static OBSERVABILITY_JSONL: Slot<ObservabilityWriter> = Slot::new();
-static OBSERVABILITY_SQLITE: Slot<ObservabilitySqliteWriter> = Slot::new();
 
 /// Returns the process-wide security-event `JSONL` writer.
 ///
@@ -113,40 +109,12 @@ pub fn reader() -> Result<Arc<SqliteEventReader>, SinkError> {
     SECURITY_READER.get_or_init(|| Ok(SqliteEventReader::at_default_path()?))
 }
 
-/// Returns the process-wide observability `JSONL` writer.
-///
-/// v1: `observability.get_writer()`.
-///
-/// # Errors
-///
-/// Returns [`SinkError`] when the log path cannot be resolved.
-pub fn observability_writer() -> Result<Arc<ObservabilityWriter>, SinkError> {
-    OBSERVABILITY_JSONL.get_or_init(|| Ok(ObservabilityWriter::with_default_path()?))
-}
-
-/// Returns the process-wide observability `SQLite` writer.
-///
-/// v1: `observability.get_sqlite_writer()`.
-///
-/// # Errors
-///
-/// Returns [`SinkError`] when the database path cannot be resolved.
-pub fn observability_sqlite_writer() -> Result<Arc<ObservabilitySqliteWriter>, SinkError> {
-    OBSERVABILITY_SQLITE.get_or_init(|| Ok(ObservabilitySqliteWriter::at_default_path()?))
-}
-
 /// Returns the security-event `SQLite` writer only if it was already built.
 ///
 /// Shutdown must not be the thing that creates a database.
 #[must_use]
 pub fn initialized_sqlite_writer() -> Option<Arc<SqliteEventWriter>> {
     SECURITY_SQLITE.peek()
-}
-
-/// Returns the observability `SQLite` writer only if it was already built.
-#[must_use]
-pub fn initialized_observability_sqlite_writer() -> Option<Arc<ObservabilitySqliteWriter>> {
-    OBSERVABILITY_SQLITE.peek()
 }
 
 /// Clears every slot so the next accessor rebuilds it.
@@ -158,8 +126,6 @@ pub fn reset_sinks_for_test() {
     SECURITY_JSONL.clear();
     SECURITY_SQLITE.clear();
     SECURITY_READER.clear();
-    OBSERVABILITY_JSONL.clear();
-    OBSERVABILITY_SQLITE.clear();
 }
 
 /// Installs a security-event `JSONL` writer, replacing any current one.
@@ -185,22 +151,6 @@ pub fn install_reader_for_test(value: SqliteEventReader) -> Arc<SqliteEventReade
     SECURITY_READER.install(value)
 }
 
-/// Installs an observability `JSONL` writer, replacing any current one.
-#[cfg(any(test, feature = "testing"))]
-pub fn install_observability_writer_for_test(
-    value: ObservabilityWriter,
-) -> Arc<ObservabilityWriter> {
-    OBSERVABILITY_JSONL.install(value)
-}
-
-/// Installs an observability `SQLite` writer, replacing any current one.
-#[cfg(any(test, feature = "testing"))]
-pub fn install_observability_sqlite_writer_for_test(
-    value: ObservabilitySqliteWriter,
-) -> Arc<ObservabilitySqliteWriter> {
-    OBSERVABILITY_SQLITE.install(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +162,6 @@ mod tests {
         reset_sinks_for_test();
 
         assert!(initialized_sqlite_writer().is_none());
-        assert!(initialized_observability_sqlite_writer().is_none());
     }
 
     #[test]

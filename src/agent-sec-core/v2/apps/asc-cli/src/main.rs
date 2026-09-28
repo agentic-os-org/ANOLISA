@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     runtime.shutdown(std::time::Duration::from_millis(50));
     match result {
         Ok(code) => ExitCode::from(code),
-        Err(error @ RunError::Input(InputError::EmptyCode)) => {
+        Err(error @ RunError::Input(InputError::EmptyCode | InputError::Observability(_))) => {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
@@ -98,7 +98,10 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if cli.is_scan_code() {
+    if cli.is_observability_record() {
+        asc_cli::output::render_observability_record(&response, &mut io::stderr())
+            .map_err(RunError::Output)
+    } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
             .map_err(RunError::Output)
     } else if matches!(

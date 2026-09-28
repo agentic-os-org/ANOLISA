@@ -1,9 +1,8 @@
 //! Closed daemon method inventory and access metadata.
 //!
-//! Two method families exist: PAP administration, which requires a Policy
-//! administrator, and Action capabilities, which any authenticated local peer
-//! may call. Keeping both in one closed inventory means an unregistered method
-//! is rejected before authorization rather than defaulting into a family.
+//! PAP administration requires a Policy administrator. Action capabilities and
+//! observability ingestion accept any authenticated local peer. The closed
+//! inventory rejects unregistered methods before authorization.
 
 /// Create one Policy identity from an authored template.
 pub const POLICY_TEMPLATES_CREATE: &str = "policy.templates.create";
@@ -35,6 +34,9 @@ pub const POLICY_BINDINGS_GET: &str = "policy.bindings.get";
 pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
 /// Request deletion of one current Binding.
 pub const POLICY_BINDINGS_DELETE: &str = "policy.bindings.delete";
+
+/// Append one observability record using `OTel` attribution.
+pub const OBS_RECORD: &str = "obs.record";
 
 /// Scan one Bash or Python snippet for pre-execution security issues.
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
@@ -131,6 +133,8 @@ pub enum MethodId {
     Pap(PapMethod),
     /// Action capability method.
     Action(ActionMethod),
+    /// Single-record observability ingestion.
+    ObservabilityRecord,
 }
 
 /// Server-owned access policy for a method.
@@ -161,7 +165,7 @@ impl MethodId {
             Self::Pap(_) => Metadata {
                 access: AccessPolicy::PolicyAdministrator,
             },
-            Self::Action(_) => Metadata {
+            Self::Action(_) | Self::ObservabilityRecord => Metadata {
                 access: AccessPolicy::LocalUser,
             },
         }
@@ -186,6 +190,7 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         POLICY_BINDINGS_GET => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Get))),
         POLICY_BINDINGS_LIST => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::List))),
         POLICY_BINDINGS_DELETE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Delete))),
+        OBS_RECORD => Some(MethodId::ObservabilityRecord),
         ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
         _ => None,
     }

@@ -10,6 +10,7 @@
 
 mod action;
 mod dispatcher;
+mod observability;
 mod pap;
 mod rejection;
 

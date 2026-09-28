@@ -1,25 +1,21 @@
-//! Process-wide dual-write sinks for security and observability events.
+//! Dual-write assembly for security and observability events.
 //!
-//! Migrated from v1 `security_events/__init__.py` and
-//! `observability/__init__.py`. This is the assembly layer: it owns the lazily
-//! built process-wide sinks and the two dual-write entry points, and contains no
-//! persistence logic of its own.
-//!
-//! The two entry points differ on purpose, and the difference is v1's:
+//! Daemons own explicitly configured sinks. Legacy process-global access remains
+//! for security events only; observability uses [`ConfiguredObservabilitySinks`].
+//! This layer reuses the existing writers and owns no persistence implementation.
 //!
 //! | Entry point | `JSONL` path | `SQLite` path | Reported to caller |
 //! |---|---|---|---|
 //! | [`log_event`] | swallows | swallows | never |
-//! | [`record_observability`] | raises | raises | always |
+//! | [`ConfiguredObservabilitySinks::record`] | raises | raises | always |
 //!
-//! [`shutdown::shutdown_sinks`] documents the one place v2 cannot match v1: there
-//! is no `atexit`, so the host owns shutdown.
+//! Hosts close configured sinks directly. [`shutdown_sinks`] closes only the
+//! process-global security-event sink.
 
 #![forbid(unsafe_code)]
 
 pub mod configured;
 pub mod error;
-pub mod observability;
 pub mod security_events;
 pub mod shutdown;
 pub mod singletons;
@@ -27,19 +23,14 @@ pub mod telemetry;
 #[cfg(test)]
 mod test_support;
 
-pub use configured::ConfiguredSecurityEventSinks;
+pub use configured::{ConfiguredObservabilitySinks, ConfiguredSecurityEventSinks};
 pub use error::SinkError;
-pub use observability::record_observability;
 pub use security_events::log_event;
 pub use shutdown::{shutdown_sinks, shutdown_sinks_at};
-pub use singletons::{
-    initialized_observability_sqlite_writer, initialized_sqlite_writer,
-    observability_sqlite_writer, observability_writer, reader, sqlite_writer, writer,
-};
+pub use singletons::{initialized_sqlite_writer, reader, sqlite_writer, writer};
 
 #[cfg(feature = "testing")]
 pub use singletons::{
-    install_observability_sqlite_writer_for_test, install_observability_writer_for_test,
     install_reader_for_test, install_sqlite_writer_for_test, install_writer_for_test,
     reset_sinks_for_test,
 };
@@ -70,6 +61,5 @@ mod tests {
         reset_sinks_for_test();
 
         assert!(crate::initialized_sqlite_writer().is_none());
-        assert!(crate::initialized_observability_sqlite_writer().is_none());
     }
 }

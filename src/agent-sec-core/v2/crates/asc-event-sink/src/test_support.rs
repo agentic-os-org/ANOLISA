@@ -1,8 +1,7 @@
 //! Shared helpers for this crate's unit tests.
 //!
-//! Every test in this crate touches process-wide state, so they must not run
-//! concurrently with each other even though the suite stays on the default
-//! parallel harness. [`serial`] is that gate.
+//! Tests touching process-wide security-event state use [`serial`]. Configured
+//! sink tests own isolated paths and need no process-wide gate.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 

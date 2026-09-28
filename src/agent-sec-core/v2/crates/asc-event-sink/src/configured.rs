@@ -1,4 +1,4 @@
-//! Explicit-path security-event sinks for daemon composition roots.
+//! Explicit-path security-event and observability sinks for daemon composition roots.
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -123,6 +123,50 @@ impl ConfiguredSecurityEventSinks {
     }
 }
 
+/// Explicit-path foreground observability sinks, independent of process globals.
+#[derive(Debug)]
+pub struct ConfiguredObservabilitySinks {
+    sqlite_path: PathBuf,
+    jsonl: asc_event_log::ObservabilityWriter,
+    sqlite: Slot<asc_persistence_sqlite::observability::ObservabilitySqliteWriter>,
+}
+
+impl ConfiguredObservabilitySinks {
+    /// Configures paths without opening either stream.
+    #[must_use]
+    pub fn new(jsonl_path: PathBuf, sqlite_path: PathBuf) -> Self {
+        Self {
+            sqlite_path,
+            jsonl: asc_event_log::ObservabilityWriter::new(jsonl_path),
+            sqlite: Slot::new(),
+        }
+    }
+
+    /// Appends JSONL, then commits `SQLite`. A `SQLite` failure does not undo JSONL.
+    ///
+    /// # Errors
+    /// Surfaces either destination's failure; JSONL failure skips `SQLite` entirely.
+    pub fn record(&self, record: &asc_observability::ObservabilityRecord) -> Result<(), SinkError> {
+        self.jsonl.write(record)?;
+        let sqlite = self.sqlite.get_or_try_init(|| {
+            Ok(
+                asc_persistence_sqlite::observability::ObservabilitySqliteWriter::new(
+                    &self.sqlite_path,
+                )?,
+            )
+        })?;
+        sqlite.write_or_raise(record)?;
+        Ok(())
+    }
+
+    /// Runs retention maintenance and closes `SQLite` if a record initialized it.
+    pub fn close(&self) {
+        if let Some(writer) = self.sqlite.peek() {
+            writer.close();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -182,5 +226,77 @@ mod tests {
         sinks.warm_jsonl().expect("warm independent jsonl");
         assert!(sinks.warm_sqlite().is_err());
         assert!(jsonl.exists());
+    }
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::ConfiguredObservabilitySinks;
+    use crate::SinkError;
+    use crate::test_support::{record, temp_dir};
+    use asc_persistence_sqlite::observability::ObservabilityReader;
+    use std::fs;
+
+    #[test]
+    fn both_paths_receive_the_record() {
+        let dir = temp_dir();
+        let log = dir.path().join("observability.jsonl");
+        let db = dir.path().join("observability.db");
+
+        let sinks = ConfiguredObservabilitySinks::new(log.clone(), db.clone());
+
+        assert!(!log.exists());
+        assert!(!db.exists());
+        sinks.close();
+        assert!(
+            !db.exists(),
+            "closing unused sinks must not initialize storage"
+        );
+        sinks.record(&record()).expect("both paths");
+
+        assert_eq!(fs::read_to_string(&log).expect("log").lines().count(), 1);
+        assert_eq!(ObservabilityReader::new(&db).expect("reader").count(), 1);
+        sinks.close();
+        assert!(dir.path().join("observability.db.maintenance").exists());
+    }
+
+    #[test]
+    fn a_broken_jsonl_path_surfaces_and_skips_the_sqlite_insert() {
+        let dir = temp_dir();
+        let log = dir.path().join("observability.jsonl");
+        fs::create_dir(&log).expect("occupy the log path");
+        let db = dir.path().join("observability.db");
+
+        let sinks = ConfiguredObservabilitySinks::new(log.clone(), db.clone());
+
+        let error = sinks
+            .record(&record())
+            .expect_err("the JSONL path must raise");
+        assert!(matches!(error, SinkError::EventLog(_)));
+
+        assert!(
+            !db.exists(),
+            "the first statement raises, so v1 never reaches the SQLite write"
+        );
+    }
+
+    #[test]
+    fn a_broken_database_surfaces_after_the_jsonl_append() {
+        let dir = temp_dir();
+        let log = dir.path().join("observability.jsonl");
+        let db = dir.path().join("observability.db");
+        fs::create_dir(&db).expect("occupy the database path");
+
+        let sinks = ConfiguredObservabilitySinks::new(log.clone(), db.clone());
+
+        let error = sinks
+            .record(&record())
+            .expect_err("the SQLite path must raise");
+        assert!(matches!(error, SinkError::Kernel(_)));
+        assert_eq!(
+            fs::read_to_string(&log).expect("log").lines().count(),
+            1,
+            "the JSONL append already happened before the failure"
+        );
     }
 }
