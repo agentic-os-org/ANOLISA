@@ -236,13 +236,20 @@ impl GenAISqliteStore {
     }
 
     /// Applies age retention followed by capacity enforcement for every table
-    /// in the GenAI physical database.
+    /// in the GenAI physical database, using the configured store limit.
+    #[cfg(test)]
     pub(crate) fn maintain(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.maintain_with_limit_mb(self.storage_policy.max_db_size_mb)
+    }
+
+    /// Same as [`maintain`] with an explicit size limit in MiB, used when the
+    /// global storage budget reduces this store's effective capacity.
+    pub(crate) fn maintain_with_limit_mb(
+        &self,
+        max_db_size_mb: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let deleted_by_age = self.purge_expired()?;
-        let limit_bytes = self
-            .storage_policy
-            .max_db_size_mb
-            .saturating_mul(1024 * 1024);
+        let limit_bytes = max_db_size_mb.saturating_mul(1024 * 1024);
         if (deleted_by_age > 0 || limit_bytes > 0)
             && self.checkpoint_outcome()? == CheckpointOutcome::Busy
         {

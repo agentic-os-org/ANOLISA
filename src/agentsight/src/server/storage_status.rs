@@ -1,6 +1,9 @@
-//! HTTP handler for read-only SQLite lifecycle status.
+//! HTTP handlers for SQLite lifecycle status and the storage settings panel.
 
-use actix_web::{HttpResponse, Responder, get, web};
+use std::path::Path;
+
+use actix_web::{HttpResponse, Responder, get, post, web};
+use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use crate::config::StorageConfig;
@@ -17,5 +20,149 @@ pub async fn get_storage_status(
         &state.storage_path,
         &config,
         manager.as_ref().map(|manager| manager.get_ref()),
+        state.storage_budget.cap_mb(),
     ))
+}
+
+/// Request body for updating the combined SQLite storage limit.
+#[derive(Debug, Deserialize)]
+pub struct StorageConfigRequest {
+    /// Combined size limit in MiB; zero disables the global budget.
+    pub max_total_size_mb: u64,
+}
+
+/// Echo of the persisted storage setting.
+#[derive(Debug, Serialize)]
+struct StorageConfigResponse {
+    max_total_size_mb: u64,
+}
+
+/// Persists the combined storage limit into the runtime configuration file.
+///
+/// Maintenance jobs re-read the value before every run, so the new limit
+/// takes effect without restarting trace or serve processes.
+#[post("/storage/config")]
+pub async fn post_storage_config(
+    state: web::Data<AppState>,
+    body: web::Json<StorageConfigRequest>,
+) -> impl Responder {
+    if body.max_total_size_mb.checked_mul(1024 * 1024).is_none() {
+        return HttpResponse::BadRequest().body("max_total_size_mb is too large");
+    }
+    let Some(config_path) = state.config_path.as_deref() else {
+        return HttpResponse::ServiceUnavailable()
+            .body("configuration file unavailable: server started without --config");
+    };
+    if let Err(error) = write_total_size_limit(config_path, body.max_total_size_mb) {
+        log::warn!("Failed to persist storage limit to {config_path:?}: {error}");
+        return HttpResponse::InternalServerError()
+            .body(format!("failed to persist configuration: {error}"));
+    }
+    HttpResponse::Ok().json(StorageConfigResponse {
+        max_total_size_mb: body.max_total_size_mb,
+    })
+}
+
+/// Merges `storage.max_total_size_mb` into the config file atomically,
+/// preserving every other user-managed section.
+fn write_total_size_limit(config_path: &Path, max_total_size_mb: u64) -> Result<(), String> {
+    let mut root: serde_json::Value = match std::fs::read_to_string(config_path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|error| format!("existing config is not valid JSON: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({ "schema_version": crate::config::CURRENT_SCHEMA_VERSION })
+        }
+        Err(error) => return Err(format!("cannot read config file: {error}")),
+    };
+    let storage = root
+        .as_object_mut()
+        .ok_or_else(|| "config root must be a JSON object".to_string())?
+        .entry("storage")
+        .or_insert_with(|| serde_json::json!({}));
+    storage
+        .as_object_mut()
+        .ok_or_else(|| "storage section must be a JSON object".to_string())?
+        .insert(
+            "max_total_size_mb".to_string(),
+            serde_json::Value::from(max_total_size_mb),
+        );
+
+    // Write beside the target then rename so concurrent readers (config
+    // watcher, maintenance jobs) never observe a truncated file.
+    let mut tmp = config_path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp_path = Path::new(&tmp);
+    let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    std::fs::write(tmp_path, pretty)
+        .map_err(|error| format!("cannot write config file: {error}"))?;
+    std::fs::rename(tmp_path, config_path)
+        .map_err(|error| format!("cannot replace config file: {error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_config_path(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "agentsight-storage-config-{tag}-{}-{nonce}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn merge_preserves_other_sections_and_survives_reload() {
+        let path = unique_config_path("merge");
+        std::fs::write(
+            &path,
+            r#"{"schema_version": 4, "features": {"audit": true}, "storage": {"primary": {"retention_days": 7}}}"#,
+        )
+        .unwrap();
+
+        write_total_size_limit(&path, 1234).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["storage"]["max_total_size_mb"], 1234);
+        assert_eq!(value["storage"]["primary"]["retention_days"], 7);
+        assert_eq!(value["features"]["audit"], true);
+        assert_eq!(value["schema_version"], 4);
+
+        // The budget probe must observe the persisted value.
+        let storage = StorageConfig {
+            max_total_size_mb: 1,
+            ..StorageConfig::default()
+        };
+        let budget = crate::storage_budget::StorageBudget::new(Some(path.clone()), &storage);
+        assert_eq!(budget.cap_mb(), 1234);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn merge_creates_missing_file_with_schema_version() {
+        let path = unique_config_path("create");
+        write_total_size_limit(&path, 900).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["storage"]["max_total_size_mb"], 900);
+        assert_eq!(
+            value["schema_version"],
+            crate::config::CURRENT_SCHEMA_VERSION
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn merge_rejects_non_json_config() {
+        let path = unique_config_path("invalid");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(write_total_size_limit(&path, 100).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
 }

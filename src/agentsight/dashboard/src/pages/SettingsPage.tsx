@@ -1,12 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { LlmConfigForm } from '../components/OptimizationSettings';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { LlmConfigForm, LlmConfigFormHandle } from '../components/OptimizationSettings';
 import { useI18n } from '../i18n';
-import {
-  fetchStorageStatus,
-  StorageSizeState,
-  StorageStatusResponse,
-  StorageStoreStatus,
-} from '../utils/apiClient';
+import { fetchStorageStatus, saveStorageLimit } from '../utils/apiClient';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -20,33 +15,28 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
 }
 
-function formatUnixMs(unixMs: number | null, locale: string): string {
-  return unixMs === null ? '—' : new Date(unixMs).toLocaleString(locale);
+/** Save trigger exposed to the settings page's unified save button. */
+export interface StorageCardHandle {
+  /** Persists the current limit input; resolves to false on failure. */
+  save: () => Promise<boolean>;
 }
 
-function stateClass(state: StorageSizeState): string {
-  switch (state) {
-    case 'cleanup_due':
-      return 'bg-red-50 text-red-700 border-red-200';
-    case 'reusable_capacity':
-      return 'bg-amber-50 text-amber-700 border-amber-200';
-    case 'within_policy':
-      return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-    default:
-      return 'bg-gray-50 text-gray-600 border-gray-200';
-  }
-}
-
-const StorageCard: React.FC = () => {
-  const { locale, t } = useI18n();
-  const [status, setStatus] = useState<StorageStatusResponse | null>(null);
+/** Storage settings card: one combined size limit for all SQLite databases. */
+const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
+  const { t } = useI18n();
+  const [limitMb, setLimitMb] = useState<number | null>(null);
+  const [input, setInput] = useState('');
+  const [totalBytes, setTotalBytes] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setStatus(await fetchStorageStatus());
+      const status = await fetchStorageStatus();
+      setLimitMb(status.max_total_size_mb);
+      setInput(String(status.max_total_size_mb));
+      setTotalBytes(status.total_physical_bytes);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -59,64 +49,26 @@ const StorageCard: React.FC = () => {
     void load();
   }, [load]);
 
-  const storeLabel = (store: StorageStoreStatus) => {
-    switch (store.id) {
-      case 'primary': return t('comp.settings.storage.store.primary');
-      case 'genai': return t('comp.settings.storage.store.genai');
-      case 'interruptions': return t('comp.settings.storage.store.interruptions');
-      case 'trajectories': return t('comp.settings.storage.store.trajectories');
-      case 'optimization': return t('comp.settings.storage.store.optimization');
-      case 'reuse': return t('comp.settings.storage.store.reuse');
-      case 'causal': return t('comp.settings.storage.store.causal');
-      case 'security_audit': return t('comp.settings.storage.store.security_audit');
-      case 'enforcement': return t('comp.settings.storage.store.enforcement');
-      case 'tokenless': return t('comp.settings.storage.store.tokenless');
+  const save = useCallback(async (): Promise<boolean> => {
+    const value = Number(input);
+    if (!Number.isInteger(value) || value < 0) {
+      setError(t('comp.settings.storage.invalid'));
+      return false;
     }
-  };
-  const statusLabel = (store: StorageStoreStatus) => {
-    switch (store.size_state) {
-      case 'within_policy': return t('comp.settings.storage.state.within_policy');
-      case 'cleanup_due': return t('comp.settings.storage.state.cleanup_due');
-      case 'reusable_capacity': return t('comp.settings.storage.state.reusable_capacity');
-      case 'disabled': return t('comp.settings.storage.state.disabled');
-      default: return t('comp.settings.storage.state.unknown');
+    try {
+      await saveStorageLimit(value);
+      setLimitMb(value);
+      setError(null);
+      const status = await fetchStorageStatus();
+      setTotalBytes(status.total_physical_bytes);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     }
-  };
-  const coverageLabel = (store: StorageStoreStatus) => {
-    switch (store.coverage) {
-      case 'full': return t('comp.settings.storage.coverage.full');
-      case 'partial': return t('comp.settings.storage.coverage.partial');
-      case 'row_bounded': return t('comp.settings.storage.coverage.row_bounded');
-      case 'unmanaged': return t('comp.settings.storage.coverage.unmanaged');
-      case 'external': return t('comp.settings.storage.coverage.external');
-    }
-  };
-  const availabilityLabel = (store: StorageStoreStatus) => {
-    switch (store.availability) {
-      case 'present': return t('comp.settings.storage.availability.present');
-      case 'missing': return t('comp.settings.storage.availability.missing');
-      case 'error': return t('comp.settings.storage.availability.error');
-      default: return t('comp.settings.storage.availability.external');
-    }
-  };
-  const intervalLabel = (store: StorageStoreStatus) => {
-    if (store.policy.check_interval_unit === 'external') {
-      return t('comp.settings.storage.external');
-    }
-    if (store.policy.check_interval_unit === 'none' || store.policy.check_interval === 0) {
-      return t('comp.settings.storage.disabled');
-    }
-    return t('comp.settings.storage.seconds', { count: store.policy.check_interval });
-  };
-  const maintenanceResultLabel = (store: StorageStoreStatus) => {
-    switch (store.maintenance.last_result) {
-      case 'success': return t('comp.settings.storage.maintenance.result.success');
-      case 'error': return t('comp.settings.storage.maintenance.result.error');
-      case 'lock_busy': return t('comp.settings.storage.maintenance.result.lock_busy');
-      case 'panicked': return t('comp.settings.storage.maintenance.result.panicked');
-      case null: return '—';
-    }
-  };
+  }, [input, t]);
+
+  React.useImperativeHandle(ref, () => ({ save }));
 
   return (
     <section className="bg-white rounded-xl border border-gray-200 shadow-sm">
@@ -127,7 +79,7 @@ const StorageCard: React.FC = () => {
 
       {loading ? (
         <div className="px-6 py-10 text-sm text-gray-500">{t('comp.settings.storage.loading')}</div>
-      ) : error ? (
+      ) : error && limitMb === null ? (
         <div className="px-6 py-6">
           <p className="text-sm text-red-600">{t('comp.settings.storage.loadFailed', { error })}</p>
           <button
@@ -139,142 +91,65 @@ const StorageCard: React.FC = () => {
           </button>
         </div>
       ) : (
-        <div className="divide-y divide-gray-100">
-          {status?.stores.map((store) => (
-            <div key={store.id} className="px-6 py-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-900">{storeLabel(store)}</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {coverageLabel(store)}
-                  </p>
-                </div>
-                <span className={`text-xs px-2 py-1 rounded-full border ${stateClass(store.size_state)}`}>
-                  {statusLabel(store)}
-                </span>
-              </div>
-
-              <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.physical')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.size ? formatBytes(store.size.physical_bytes) : availabilityLabel(store)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.logical')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.size ? formatBytes(store.size.logical_bytes) : '—'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.retention')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.policy.retention_days > 0
-                      ? t('comp.settings.storage.days', { count: store.policy.retention_days })
-                      : t('comp.settings.storage.disabled')}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.limit')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.policy.size_limit_bytes > 0
-                      ? formatBytes(store.policy.size_limit_bytes)
-                      : t('comp.settings.storage.disabled')}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.interval')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">{intervalLabel(store)}</dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.owner')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">{store.policy.enforced_by}</dd>
-                </div>
-              </dl>
-
-              <dl className="mt-4 pt-3 border-t border-gray-100 grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.schedule')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.maintenance.scheduled
-                      ? t('comp.settings.storage.maintenance.scheduled')
-                      : t('comp.settings.storage.maintenance.unscheduled')}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.worker')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.maintenance.worker_running
-                      ? t('comp.settings.storage.maintenance.workerRunning')
-                      : t('comp.settings.storage.maintenance.workerStopped')}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.heartbeat')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {formatUnixMs(store.maintenance.worker_heartbeat_unix_ms, locale)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastResult')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">{maintenanceResultLabel(store)}</dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastAttempt')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {formatUnixMs(store.maintenance.last_attempt_unix_ms, locale)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.lastSuccess')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {formatUnixMs(store.maintenance.last_success_unix_ms, locale)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.failures')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {store.maintenance.consecutive_failures.toLocaleString(locale)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-gray-500">{t('comp.settings.storage.maintenance.nextRun')}</dt>
-                  <dd className="mt-1 font-medium text-gray-800">
-                    {formatUnixMs(store.maintenance.next_run_unix_ms, locale)}
-                  </dd>
-                </div>
-              </dl>
-
-              {store.maintenance.last_result === 'lock_busy' && (
-                <p className="mt-3 text-xs text-amber-700">
-                  {t('comp.settings.storage.maintenance.lockBusyNote')}
-                </p>
-              )}
-              {store.id === 'causal' && (
-                <p className="mt-3 text-xs text-gray-500">
-                  {t('comp.settings.storage.note.causal')}
-                </p>
-              )}
-              {store.coverage === 'partial' && store.id !== 'causal' && (
-                <p className="mt-3 text-xs text-gray-500">
-                  {t('comp.settings.storage.note.protected')}
-                </p>
-              )}
-            </div>
-          ))}
-          <p className="px-6 py-4 text-xs text-gray-500 bg-gray-50 rounded-b-xl">
-            {t('comp.settings.storage.note')}
+        <div className="px-6 py-5 space-y-4">
+          <p className="text-sm text-gray-700">
+            {t('comp.settings.storage.currentUsage', {
+              used: totalBytes === null ? '—' : formatBytes(totalBytes),
+              limit:
+                limitMb === null || limitMb === 0
+                  ? t('comp.settings.storage.unlimited')
+                  : formatBytes(limitMb * 1024 * 1024),
+            })}
           </p>
+
+          <div className="flex items-center gap-3">
+            <label htmlFor="storage-limit-mb" className="text-sm text-gray-700 whitespace-nowrap">
+              {t('comp.settings.storage.limitLabel')}
+            </label>
+            <input
+              id="storage-limit-mb"
+              type="number"
+              min="0"
+              step="100"
+              value={input}
+              onChange={(event) => {
+                setInput(event.target.value);
+                setError(null);
+              }}
+              className="w-32 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            />
+            <span className="text-sm text-gray-500">MB</span>
+          </div>
+
+          {error && limitMb !== null && <p className="text-sm text-red-600">{error}</p>}
+          <p className="text-xs text-gray-500">{t('comp.settings.storage.hint')}</p>
         </div>
       )}
     </section>
   );
-};
+});
+
+StorageCard.displayName = 'StorageCard';
 
 /** Standalone settings page hosting global dashboard configuration sections. */
 export const SettingsPage: React.FC = () => {
   const { t } = useI18n();
+  const storageRef = useRef<StorageCardHandle>(null);
+  const llmRef = useRef<LlmConfigFormHandle>(null);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<'idle' | 'saved' | 'failed'>('idle');
+
+  const saveAll = async () => {
+    setSaving(true);
+    setResult('idle');
+    const [storageOk, llmOk] = await Promise.all([
+      storageRef.current?.save() ?? Promise.resolve(true),
+      llmRef.current?.save() ?? Promise.resolve(true),
+    ]);
+    setResult(storageOk && llmOk ? 'saved' : 'failed');
+    setSaving(false);
+  };
+
   return (
     <div className="max-w-3xl mx-auto px-6 py-8">
       <div className="mb-6">
@@ -283,8 +158,25 @@ export const SettingsPage: React.FC = () => {
       </div>
 
       <div className="space-y-6">
-        <StorageCard />
-        <LlmConfigForm />
+        <StorageCard ref={storageRef} />
+        <LlmConfigForm ref={llmRef} />
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void saveAll()}
+            className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            {saving ? t('comp.settings.saving') : t('comp.settings.save')}
+          </button>
+          {result === 'saved' && (
+            <span className="text-sm text-emerald-600">{t('comp.settings.saved')}</span>
+          )}
+          {result === 'failed' && (
+            <span className="text-sm text-red-600">{t('comp.settings.saveFailed')}</span>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -320,14 +320,24 @@ impl Storage {
     ///
     /// Returns an error when retention, checkpoint, measurement, or pruning fails.
     pub fn maintain(&self) -> Result<()> {
+        self.maintain_with_limit_bytes(self.max_db_size_bytes)
+    }
+
+    /// Same as [`maintain`] with an explicit size limit in bytes, used when
+    /// the global storage budget reduces this store's effective capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when retention, checkpoint, measurement, or pruning fails.
+    pub fn maintain_with_limit_bytes(&self, limit_bytes: u64) -> Result<()> {
         let deleted_by_age = self.purge_expired()?;
-        if (deleted_by_age > 0 || self.max_db_size_bytes > 0)
+        if (deleted_by_age > 0 || limit_bytes > 0)
             && self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy
         {
             log::warn!("Primary WAL checkpoint remained busy before size maintenance");
             return Ok(());
         }
-        self.purge_oversized()
+        self.purge_oversized_with(limit_bytes)
     }
 
     /// Purge oldest records when the database exceeds the size limit.
@@ -335,10 +345,14 @@ impl Storage {
     /// The lifecycle crate controls measurement and convergence while each
     /// business store retains ownership of its deletion query.
     pub fn purge_oversized(&self) -> Result<()> {
+        self.purge_oversized_with(self.max_db_size_bytes)
+    }
+
+    fn purge_oversized_with(&self, limit_bytes: u64) -> Result<()> {
         let policy = SizePolicy {
-            limit_bytes: self.max_db_size_bytes,
-            trigger_bytes: self.max_db_size_bytes,
-            target_bytes: self.max_db_size_bytes.saturating_mul(9) / 10,
+            limit_bytes,
+            trigger_bytes: limit_bytes,
+            target_bytes: limit_bytes.saturating_mul(9) / 10,
             trigger_basis: SizeBasis::Physical,
             target_basis: SizeBasis::Logical,
             max_rounds: 20,
@@ -378,7 +392,7 @@ impl Storage {
                 "Size-based purge stopped with {:?}: database remains {} bytes (limit {})",
                 report.status,
                 report.after.logical_bytes,
-                self.max_db_size_bytes
+                limit_bytes
             ),
             MaintenanceStatus::TargetReached => log::info!(
                 "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",

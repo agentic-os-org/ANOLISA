@@ -70,6 +70,7 @@ impl ServeCommand {
                 agentsight::container::warn_if_data_dir_not_persistent(dir);
             }
 
+            let config_path = std::path::PathBuf::from(&self.config);
             actix_web::rt::System::new().block_on(async move {
                 if let Err(e) = run_server(
                     &host,
@@ -78,6 +79,7 @@ impl ServeCommand {
                     auth_config,
                     storage_config,
                     judge_enabled,
+                    Some(config_path),
                 )
                 .await
                 {
