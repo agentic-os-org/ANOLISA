@@ -4,7 +4,8 @@
 
 AW 提供统一配置、版本化能力合同和可嵌入的 Core 编排。`aw-config` 校验配置结构和引用；`aw-provider` 离线检查外部 Provider 消息与能力准入；`aw-contracts` 检查数据结构及记录间关系；`aw-core` 通过调用方提供的 Host 执行固定计划，并持久记录执行事实。AW 没有独立服务进程，原生 Agent 控制和最终工具执行仍由接入方负责。
 
-当前接口仍处于实验阶段。测试使用合成记录，实际运行时接入需要另行验证。
+当前接口仍处于实验阶段。合同测试使用合成记录，命令传输测试使用本地子进程；
+两者均不证明 Agent 已完成接入。
 
 ## 校验配置
 
@@ -28,6 +29,12 @@ cargo run --locked -p aw-config --example validate -- crates/aw-config/examples/
 
 所有权、取消、失败和接入约束见 [Core 执行与存储](docs/design/core-execution_zh.md)。
 Core 测试使用合成 Host；Agent 原生接入和效果采用需要单独进行运行时验收。
+
+## 命令执行
+
+`aw-exec` 在 Linux 上执行单条命令，提供绝对截止时间、字节上限、取消及所属进程组清理。
+原生 stdout、stderr 和退出状态保留给调用方解释。该库提供进程传输能力；Provider 协议接线、
+daemon 和 Agent 适配另行交付。API、所有权与验证边界见[有界命令执行](docs/design/bounded-execution_zh.md)。
 
 ## 源码参考
 

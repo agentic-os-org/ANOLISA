@@ -4,7 +4,8 @@
 
 AW provides unified configuration, versioned capability contracts and embeddable Core orchestration. `aw-config` validates configuration structure and references; `aw-provider` checks external Provider messages and capability admission offline; `aw-contracts` checks payload shapes and record relationships; `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
 
-The interfaces are experimental. Tests use synthetic records and do not certify runtime integration.
+The interfaces are experimental. Contract tests use synthetic records; command
+transport tests use local child processes. Neither certifies Agent integration.
 
 ## Validate a configuration
 
@@ -31,6 +32,15 @@ events remain reserved; there is no automatic retry or recovery.
 See [Core execution and storage](docs/design/core-execution.md) for ownership,
 cancellation, failure and embedding contracts. Core tests use synthetic Hosts;
 native Agent integration and effect adoption require separate runtime validation.
+
+## Command execution
+
+`aw-exec` runs individual commands on Linux with an absolute deadline, byte limits,
+cancellation and owned process-group cleanup. Native stdout, stderr and exit status
+remain for the caller to interpret. This library provides process transport;
+Provider protocol wiring, daemon and Agent adapters remain separate work.
+See [bounded command execution](docs/design/bounded-execution.md) for its API,
+ownership and validation boundaries.
 
 ## Source reference
 

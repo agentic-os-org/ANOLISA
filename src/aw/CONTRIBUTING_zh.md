@@ -14,13 +14,13 @@ python3 src/aw/scripts/check.py
 ```
 
 入口依次运行 CI 行为测试、格式检查、Clippy、完整的 locked workspace 测试、
-Python/JavaScript 摘要向量和 rustdoc。缺少工具，配置、Provider 协议/准入、合同、计划、Core 执行或 Journal 测试目标为空或全部
+Python/JavaScript 摘要向量和 rustdoc。缺少工具，配置、Provider 协议/准入、合同、计划、Core 执行、命令执行或 Journal 测试目标为空或全部
 ignored、向量错误及命令失败均返回非零。每条命令都有超时限制，失败或中断时
 回收其子进程组。日志标明失败命令，可在 `src/aw` 单独运行对应命令定位问题。
 
 这些检查可由普通用户运行，无需启动 Agent 或登录服务。Cargo 会下载尚未缓存的
-依赖，Schema 校验只读取随包资源。检查入口要求 Linux；库本身仍可移植，但本门禁
-不认证其他操作系统或最低支持版本。
+依赖，Schema 校验只读取随包资源。检查入口、命令执行及 FileJournal 要求 Linux；
+本门禁不认证其他操作系统或最低支持版本。
 
 [AW CI](../../.github/workflows/aw-ci.yml) 响应分支 push、pull request、merge group
 和手动触发，校验候选提交；PR 校验合成的 merge 结果。无关变化明确返回 no-op；
@@ -39,8 +39,9 @@ Ubuntu 24.04。两者均使用 Python 3.12.3、Node.js 24.15.0 和固定 Rust �
 | `aw-config` | 期望配置解析与静态校验 |
 | `aw-provider` | 外部 Provider 协议和能力准入；依赖 `aw-config` |
 | `aw-core` | 通过可信运行时端口执行计划；依赖 `aw-contracts` |
+| `aw-exec` | Linux 有界命令传输与所属进程组清理；独立于 Provider 协议 |
 
-框架接入与进程执行由这些库之外的组件负责。
+框架接入由这些库之外的组件负责；进程执行属于 `aw-exec`。
 依赖及源码布局检查位于 [scripts/check.py](scripts/check.py)，
 回归测试位于 [tests/test_ci_checks.py](tests/test_ci_checks.py)。
 调整 crate 边界时需要同步更新检查和测试。

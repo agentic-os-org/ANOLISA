@@ -101,6 +101,8 @@ class GateTests(unittest.TestCase):
             "mode = os.environ['FIXTURE_INVENTORY']\n"
             "if mode == 'core-empty':\n"
             "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
+            "if mode == 'executor-empty':\n"
+            "    mode = 'empty' if 'aw-exec' in sys.argv else 'valid'\n"
             "if mode.startswith('contract-empty-'):\n"
             "    target = mode.removeprefix('contract-empty-')\n"
             "    mode = 'empty' if target in sys.argv else 'valid'\n"
@@ -112,7 +114,7 @@ class GateTests(unittest.TestCase):
         )
         cargo.chmod(0o755)
         for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty",
+            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
             "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
@@ -154,6 +156,7 @@ class GateTests(unittest.TestCase):
                 self.root / "crates/aw-provider",
                 ["aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"],
             ),
+            ("aw-exec", self.root / "crates/aw-exec", ["libc", "thiserror"]),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -178,7 +181,10 @@ class GateTests(unittest.TestCase):
             )
         metadata = {"packages": packages, "workspace_members": [p["id"] for p in packages]}
         gate.structure(metadata, self.root)
-        for package, dependency in ((0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"), (3, "aw-core")):
+        for package, dependency in (
+            (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
+            (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
+        ):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})
             with self.assertRaises(ValueError):

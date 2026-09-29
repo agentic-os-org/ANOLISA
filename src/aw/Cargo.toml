@@ -1,11 +1,18 @@
 [workspace]
-members = [".", "crates/aw-core", "crates/aw-config", "crates/aw-provider"]
+members = [
+    ".",
+    "crates/aw-config",
+    "crates/aw-core",
+    "crates/aw-exec",
+    "crates/aw-provider",
+]
 resolver = "2"
 
 [workspace.dependencies]
 aw-config = { path = "crates/aw-config" }
 aw-contracts = { path = "." }
 jsonschema = { version = "0.53", default-features = false }
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
