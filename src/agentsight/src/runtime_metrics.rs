@@ -576,6 +576,32 @@ mod tests {
     }
 
     #[test]
+    fn received_events_and_metric_descriptions_appear_in_prometheus_output() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            describe_metrics();
+            with_observability_enabled(|| record_event_received("ssl"));
+            metrics::gauge!("agentsight_event_channel_bytes").set(128.0);
+            metrics::histogram!("agentsight_stage_duration_seconds", "stage" => "parser")
+                .record(0.01);
+        });
+        handle.run_upkeep();
+
+        let snapshot = handle.render();
+        assert!(snapshot.contains("agentsight_events_received_total{source=\"ssl\"} 1"));
+        assert!(snapshot.contains(
+            "# HELP agentsight_events_received_total Events received by the AgentSight userspace pipeline"
+        ));
+        assert!(snapshot.contains(
+            "# HELP agentsight_event_channel_bytes Estimated bytes currently reserved by the event channel"
+        ));
+        assert!(snapshot.contains(
+            "# HELP agentsight_stage_duration_seconds Wall-clock duration of AgentSight processing stages"
+        ));
+    }
+
+    #[test]
     fn pipeline_stages_emit_metrics() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -608,6 +634,9 @@ mod tests {
                     1_000_000_000,
                 )));
                 assert!(aggregator.process_result(request).is_empty());
+                let connections = aggregator.connection_metrics();
+                assert_eq!(connections.pending_connection_count, 1);
+                assert!(connections.pending_connection_bytes > 0);
 
                 let response = parser.parse_event(Event::Ssl(ssl_event(
                     http_message("HTTP/1.1 200 OK", &response_body),

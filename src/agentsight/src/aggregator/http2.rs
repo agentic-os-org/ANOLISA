@@ -1772,6 +1772,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_metrics_count_retained_http2_payloads_and_decoded_headers() {
+        let stream_id = StreamId::new(
+            ConnectionId {
+                pid: 1234,
+                ssl_ptr: 0x1000,
+            },
+            1,
+        );
+        let request_event = create_test_event(1234, 0x1000, 1, 1000);
+        let response_event = create_test_event(1234, 0x1000, 0, 2000);
+        let request_headers = create_test_frame(1, 1, 0, b"rh".to_vec(), Rc::clone(&request_event));
+        let request_data = create_test_frame(1, 0, 0, b"body".to_vec(), request_event);
+        let response_headers =
+            create_test_frame(1, 1, 0, b"status".to_vec(), Rc::clone(&response_event));
+        let response_data = create_test_frame(1, 0, 0, b"chunk".to_vec(), response_event);
+
+        let mut aggregator = Http2StreamAggregator::with_capacity(2);
+        aggregator.streams.put(
+            stream_id,
+            Http2StreamState::RequestComplete {
+                request_headers: Some(request_headers.clone()),
+                request_data_frames: vec![request_data.clone()],
+            },
+        );
+        assert_eq!(aggregator.metrics().pending_connection_bytes, 6);
+
+        aggregator.streams.put(
+            stream_id,
+            Http2StreamState::ReceivingResponse {
+                request_headers: Some(request_headers.clone()),
+                request_data_frames: vec![request_data.clone()],
+                response_headers: Some(response_headers.clone()),
+                response_data_frames: vec![response_data.clone()],
+            },
+        );
+        aggregator.decoded_headers_store.insert(
+            stream_id,
+            DecodedHeadersPair {
+                request: Some(vec![("x".into(), "abc".into())]),
+                response: Some(vec![("y".into(), "ok".into())]),
+            },
+        );
+        assert_eq!(
+            aggregator.metrics(),
+            ConnectionMetrics {
+                connection_cache_bytes: 24,
+                pending_connection_count: 1,
+                pending_connection_bytes: 17,
+                eviction_count: 0,
+            }
+        );
+
+        let mut complete = Http2Stream::new(stream_id, 1000);
+        complete.request_headers = Some(request_headers);
+        complete.request_data_frames.push(request_data);
+        complete.response_headers = Some(response_headers);
+        complete.response_data_frames.push(response_data);
+        assert_eq!(Http2StreamState::Complete(complete).buffered_bytes(), 17);
+    }
+
     // --- HPACK stateful decode tests ---
 
     #[test]
