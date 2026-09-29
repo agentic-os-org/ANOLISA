@@ -476,6 +476,13 @@ impl Uploader {
     /// Execute one upload round. No-op (returns `Ok`) when the opt-out marker
     /// is present. Offsets advance only for components whose POST succeeded.
     pub fn run_once(&self) -> Result<(), UploaderError> {
+        self.run_once_with_post(|url, body| self.post(url, body))
+    }
+
+    fn run_once_with_post(
+        &self,
+        mut post: impl FnMut(&str, &str) -> Result<(), UploaderError>,
+    ) -> Result<(), UploaderError> {
         if !self.collection_enabled() {
             return Ok(());
         }
@@ -502,16 +509,11 @@ impl Uploader {
             self.common_dimensions(&region, identity.as_ref(), &product_type, &telemetry_id);
 
         let mut offsets = self.load_offsets();
-        let mut dirty = false;
         let mut last_err: Option<UploaderError> = None;
 
         for component in self.discover_components() {
-            // Abort between components when SIGTERM arrives so the loop exits
-            // promptly instead of blocking on every component's HTTP round.
-            #[cfg(unix)]
-            if TERM.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
+            // Finish the current round after SIGTERM. If the signal arrives
+            // while sleeping, `run_loop` starts one final round before exit.
             let stored = offsets.get(&component).cloned();
             let collected = match self.collect_component(&component, stored.as_ref()) {
                 Ok(Some(v)) => v,
@@ -532,18 +534,13 @@ impl Uploader {
                 &self.config.topic,
                 &self.config.source,
             )?;
-            match self.post(&url, &body) {
-                Ok(()) => {
-                    offsets.insert(component, new_offset);
-                    dirty = true;
-                }
+            match post(&url, &body) {
+                Ok(()) => {}
                 Err(UploaderError::Http { code: 404, .. }) => {
                     // Logstore does not exist (or WebTracking not enabled);
                     // advance the offset so we don't retry this component
                     // forever, and continue with the remaining components.
                     eprintln!("[anolisa] telemetry: logstore `{component}` not found, skipping");
-                    offsets.insert(component, new_offset);
-                    dirty = true;
                 }
                 Err(UploaderError::Http { code, .. }) if (400..500).contains(&code) => {
                     // Client error: the request itself is invalid (e.g., malformed
@@ -554,17 +551,14 @@ impl Uploader {
                     eprintln!(
                         "[anolisa] telemetry: logstore `{component}` rejected request with HTTP {code}, skipping"
                     );
-                    offsets.insert(component, new_offset);
-                    dirty = true;
                 }
                 Err(e) => {
                     // Do not advance offset; retry next round.
                     last_err = Some(e);
+                    continue;
                 }
             }
-        }
-
-        if dirty {
+            offsets.insert(component, new_offset);
             self.save_offsets(&offsets)?;
         }
 
@@ -705,8 +699,7 @@ fn inode_of(_meta: &fs::Metadata) -> u64 {
 
 // ── Signal handling (unix) ───────────────────────────────────────────
 
-/// Set by the SIGTERM handler so [`Uploader::run_once`] can abort mid-round
-/// instead of blocking until every component has been uploaded.
+/// Set by the SIGTERM handler so the upload loop can finish one round and exit.
 #[cfg(unix)]
 static TERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -779,11 +772,17 @@ mod unix_runtime {
                     break; // disable took effect
                 }
                 if TERM.load(Ordering::SeqCst) {
-                    // Final flush already happened above; exit.
+                    // TERM arrived during the upload round. The round has now
+                    // completed, so all records visible to it were flushed.
                     break;
                 }
 
                 if !self.sleep_interruptible() {
+                    // TERM arrived while sleeping. Run one final round so data
+                    // written since the previous poll is not left buffered.
+                    if let Err(e) = self.run_once() {
+                        eprintln!("[anolisa] telemetry final flush failed: {e}");
+                    }
                     break;
                 }
             }
@@ -1075,6 +1074,130 @@ mod tests {
         // Opt-out marker present → no-op, no offsets file written.
         fs::write(&up.config.disable_marker_path, "").unwrap();
         up.run_once().unwrap();
+        assert!(!up.config.offsets_path.exists());
+    }
+
+    #[test]
+    fn test_run_once_checkpoints_before_next_upload() {
+        for code in [200, 404, 400] {
+            let dir = TempDir::new().unwrap();
+            let up = test_uploader(&dir);
+            write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+            write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
+            let (_, cosh_offset) = up.collect_component("cosh", None).unwrap().unwrap();
+            let expected = Offsets::from([("cosh".to_string(), cosh_offset)]);
+
+            let mut calls = 0;
+            let result = up.run_once_with_post(|url, _| {
+                calls += 1;
+                if calls == 1 {
+                    assert!(url.ends_with("/logstores/cosh/track"));
+                    assert!(!up.config.offsets_path.exists());
+                    if code == 200 {
+                        Ok(())
+                    } else {
+                        Err(UploaderError::Http {
+                            code,
+                            url: url.to_string(),
+                        })
+                    }
+                } else {
+                    assert!(url.ends_with("/logstores/skillfs/track"));
+                    assert_eq!(up.load_offsets(), expected, "HTTP {code}");
+                    Err(UploaderError::Network {
+                        reason: "simulated stalled request".to_string(),
+                    })
+                }
+            });
+            assert!(matches!(result, Err(UploaderError::Network { .. })));
+            assert_eq!(calls, 2);
+            assert_eq!(up.load_offsets(), expected);
+
+            let restarted = test_uploader(&dir);
+            let mut retries = 0;
+            restarted
+                .run_once_with_post(|url, _| {
+                    retries += 1;
+                    assert!(url.ends_with("/logstores/skillfs/track"));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(retries, 1);
+            let mut completed = expected;
+            let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
+            completed.insert("skillfs".to_string(), skillfs_offset);
+            assert_eq!(restarted.load_offsets(), completed);
+        }
+    }
+
+    #[test]
+    fn test_run_once_preserves_retryable_offsets_and_continues() {
+        for code in [None, Some(503)] {
+            let dir = TempDir::new().unwrap();
+            let up = test_uploader(&dir);
+            let path = up.jsonl_path("cosh");
+            write_lines(&path, "{\"a\":1}\n");
+            let (_, stored) = up.collect_component("cosh", None).unwrap().unwrap();
+            up.save_offsets(&Offsets::from([("cosh".to_string(), stored.clone())]))
+                .unwrap();
+            write_lines(&path, "{\"a\":1}\n{\"b\":2}\n");
+            write_lines(&up.jsonl_path("skillfs"), "{\"c\":3}\n");
+
+            let mut calls = 0;
+            let result = up.run_once_with_post(|url, body| {
+                calls += 1;
+                if url.ends_with("/logstores/cosh/track") {
+                    let body: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(body["__logs__"].as_array().unwrap().len(), 1);
+                    assert_eq!(body["__logs__"][0]["b"], "2");
+                    match code {
+                        Some(code) => Err(UploaderError::Http {
+                            code,
+                            url: url.to_string(),
+                        }),
+                        None => Err(UploaderError::Network {
+                            reason: "simulated timeout".to_string(),
+                        }),
+                    }
+                } else {
+                    assert!(url.ends_with("/logstores/skillfs/track"));
+                    Ok(())
+                }
+            });
+            match code {
+                Some(_) => assert!(matches!(result, Err(UploaderError::Http { code: 503, .. }))),
+                None => assert!(matches!(result, Err(UploaderError::Network { .. }))),
+            }
+            assert_eq!(calls, 2);
+            let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
+            assert_eq!(
+                up.load_offsets(),
+                Offsets::from([
+                    ("cosh".to_string(), stored),
+                    ("skillfs".to_string(), skillfs_offset),
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_once_stops_on_checkpoint_failure() {
+        let dir = TempDir::new().unwrap();
+        let mut up = test_uploader(&dir);
+        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+        write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
+        let blocked = dir.path().join("not-a-directory");
+        fs::write(&blocked, "").unwrap();
+        up.config.offsets_path = blocked.join("offsets.json");
+
+        let mut calls = 0;
+        let result = up.run_once_with_post(|url, _| {
+            calls += 1;
+            assert!(url.ends_with("/logstores/cosh/track"));
+            Ok(())
+        });
+        assert!(matches!(result, Err(UploaderError::Io(_))));
+        assert_eq!(calls, 1);
         assert!(!up.config.offsets_path.exists());
     }
 
