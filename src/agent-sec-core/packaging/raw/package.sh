@@ -73,7 +73,6 @@ stage_payload() {
         "$stage/.anolisa" \
         "$stage/bin" \
         "$stage/lib/anolisa/sec-core/python3.11/runtime" \
-        "$stage/lib/anolisa/sec-core/python3.11/site-packages" \
         "$stage/adapters/sec-core/openclaw" \
         "$stage/adapters/sec-core/hermes" \
         "$stage/adapters/sec-core/codex" \
@@ -86,19 +85,15 @@ stage_payload() {
 
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     install -p -m 0755 "$BUILD_DIR/linux-sandbox" "$stage/bin/linux-sandbox"
-    install -p -m 0755 "$ROOT/packaging/raw/assets/bin/agent-sec-cli" \
-        "$stage/bin/agent-sec-cli"
-    install -p -m 0755 "$ROOT/packaging/raw/assets/bin/agent-sec-daemon" \
-        "$stage/bin/agent-sec-daemon"
+    install -p -m 0755 "$BUILD_DIR/v2/bin/agent-sec-cli" "$stage/bin/agent-sec-cli"
+    install -p -m 0755 "$BUILD_DIR/v2/bin/agent-sec-daemon" "$stage/bin/agent-sec-daemon"
     install -p -m 0755 "$ROOT/packaging/raw/assets/bin/agent-sec-python" \
         "$stage/bin/agent-sec-python"
     install -p -m 0644 \
-        "$ROOT/packaging/systemd/agent-sec-core.service.in" \
+        "$ROOT/packaging/systemd/agent-sec-core-v2.service.in" \
         "$stage/share/anolisa/sec-core/agent-sec-core.service.in"
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
 
-    copy_tree "$BUILD_DIR/site-packages" \
-        "$stage/lib/anolisa/sec-core/python3.11/site-packages"
     validate_bundled_python "$BUILD_DIR/python-runtime"
     copy_tree_dereferenced "$BUILD_DIR/python-runtime" \
         "$stage/lib/anolisa/sec-core/python3.11/runtime"
@@ -116,10 +111,6 @@ stage_payload() {
 
     python3 "$ROOT/packaging/raw/adapt_payload.py" "$stage"
 
-    find "$stage/lib/anolisa/sec-core/python3.11" \
-        -type d -name __pycache__ -prune -exec rm -rf {} +
-    find "$stage/lib/anolisa/sec-core/python3.11" \
-        -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
     validate_bundled_python \
         "$stage/lib/anolisa/sec-core/python3.11/runtime"
     if [ -n "$(find "$stage/lib/anolisa/sec-core/python3.11/runtime" \
@@ -154,6 +145,10 @@ TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 [ "$TARGET_OS" = "linux" ] || die "raw packages support Linux only"
 [ "$TARGET_ARCH" = "x86_64" ] || die "raw packages currently support x86_64 only"
 [ -f "$CONTRACT" ] || die "raw contract not found: $CONTRACT"
+[ -x "$BUILD_DIR/v2/bin/agent-sec-cli" ] || \
+    die "missing V2 build output $BUILD_DIR/v2/bin/agent-sec-cli"
+[ -x "$BUILD_DIR/v2/bin/agent-sec-daemon" ] || \
+    die "missing V2 build output $BUILD_DIR/v2/bin/agent-sec-daemon"
 [ -x "$BUILD_DIR/linux-sandbox" ] || die "missing build output $BUILD_DIR/linux-sandbox"
 
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" "$ROOT" "$CONTRACT")"

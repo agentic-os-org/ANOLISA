@@ -137,12 +137,15 @@ def verify_versions(source_root: Path, contract_path: Path) -> str:
         )
     verify_contract_metadata(contract, contract_path)
 
-    project = read_toml(source_root / "agent-sec-cli" / "pyproject.toml").get("project")
-    if not isinstance(project, dict) or not isinstance(project.get("version"), str):
-        raise SystemExit("ERROR: agent-sec-cli/pyproject.toml has no project version")
+    workspace = read_toml(source_root / "v2" / "Cargo.toml").get("workspace")
+    workspace_package = workspace.get("package") if isinstance(workspace, dict) else None
+    if not isinstance(workspace_package, dict) or not isinstance(
+        workspace_package.get("version"), str
+    ):
+        raise SystemExit("ERROR: v2/Cargo.toml has no workspace package version")
 
     versions = {
-        "agent-sec-cli/pyproject.toml": project["version"],
+        "v2/Cargo.toml": workspace_package["version"],
         "openclaw-plugin/openclaw.plugin.json": read_json_version(
             source_root / "openclaw-plugin" / "openclaw.plugin.json"
         ),
@@ -276,7 +279,16 @@ def verify_raw_hook_manifests(payload_root: Path) -> None:
 
 
 def verify_raw_payload(payload_root: Path) -> None:
-    """Verify raw-only contract and adapter launcher invariants."""
+    """Verify the V2 core boundary and adapter launcher invariants."""
+    for binary in ("agent-sec-cli", "agent-sec-daemon"):
+        path = payload_root / "bin" / binary
+        if not path.is_file() or not path.stat().st_mode & 0o100:
+            raise SystemExit(f"ERROR: raw payload is missing V2 executable: {path}")
+    if (payload_root / "lib/anolisa/sec-core/python3.11/site-packages").exists():
+        raise SystemExit("ERROR: raw payload contains the V1 CLI Python runtime")
+    unit = payload_root / "share/anolisa/sec-core/agent-sec-core.service.in"
+    if "WantedBy=multi-user.target" not in unit.read_text(encoding="utf-8"):
+        raise SystemExit("ERROR: raw payload does not contain the V2 system service")
     verify_raw_contract(payload_root)
     verify_raw_hook_manifests(payload_root)
 

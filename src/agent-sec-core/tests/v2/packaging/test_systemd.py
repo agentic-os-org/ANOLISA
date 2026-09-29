@@ -83,4 +83,4 @@ def test_shared_manifest_staging(tmp_path):
         == (ROOT / ".anolisa/component.toml").read_bytes()
     )
     component = tomllib.loads(installed.read_text())["component"]
-    assert component["services"][0]["scope"] == "user"
+    assert component["services"][0]["scope"] == "system"

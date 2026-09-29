@@ -249,13 +249,13 @@ Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
 %setup -q
 
 %build
-make build-all
+make build-all COMPONENT_CONTRACT=.anolisa/component.v1.toml
 make download-deps
 make stage-cli
 
 %install
 rm -rf $RPM_BUILD_ROOT
-make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
+make install-all-for-rpmbuild COMPONENT_CONTRACT=.anolisa/component.v1.toml DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
 * Fri Sep 04 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.12.0-1

@@ -107,13 +107,18 @@ target = "{libdir}/sec-core/python3.11/runtime/LICENSES.sha256"
 mode = "0644"
 
 [[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/site-packages/"
+target = "{libdir}/sec-core/python3.11/site-packages/"
+mode = "0644"
+
+[[component.layout.files]]
 source = "share/anolisa/skills/"
 target = "{datadir}/skills/"
 mode = "0644"
 
 [[component.layout.files]]
 source = "share/anolisa/sec-core/agent-sec-core.service.in"
-target = "{unitdir}/agent-sec-core.service"
+target = "{userunitdir}/agent-sec-core.service"
 mode = "0644"
 render = "anolisa-paths-v1"
 
@@ -124,7 +129,7 @@ mode = "0644"
 
 [[component.services]]
 unit = "agent-sec-core.service"
-scope = "system"
+scope = "user"
 enable = false
 start = false
 
