@@ -188,7 +188,10 @@ jobs:
           cat "$daemon_log" >&2
           exit 1
       - name: Run V2 E2E tests
-        run: uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
+        run: |
+          PII_HOOK_ASSET_ROOT="$HOME/.local/lib/anolisa/sec-core" \
+          PII_COSH_HOOK_DIR="$HOME/.copilot-shell/extensions/agent-sec-core/hooks" \
+            uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
       - name: Show V2 daemon log after E2E failure
         if: failure()
         run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
@@ -344,7 +347,10 @@ jobs:
           cat "$daemon_log" >&2
           exit 1
       - name: Run V2 E2E tests
-        run: uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
+        run: |
+          PII_HOOK_ASSET_ROOT=/usr/local/lib/anolisa/sec-core \
+          PII_COSH_HOOK_DIR=/usr/share/anolisa/extensions/agent-sec-core/hooks \
+            uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
       - name: Show V2 daemon log after E2E failure
         if: failure()
         run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
