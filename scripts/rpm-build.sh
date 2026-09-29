@@ -384,10 +384,17 @@ build_agent_sec_core_v2() {
         v2/ | tar -xf - -C "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+
+    # Source1 is produced by the same helper used by package-vendor in CI.
+    local vendor_tarball="${pkg_name}-${version}-vendor.tar.gz"
+    local vendor_staging="${tmp_dir}/vendor"
+    log "Step 3/4: Creating vendor tarball ${vendor_tarball}..."
+    bash "${SEC_DIR}/scripts/package-v2-rpm-vendor.sh" "$pkg_dir" "$vendor_staging"
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball}" -C "$vendor_staging" .
     rm -rf "$tmp_dir"
 
-    # Step 3: rpmbuild (--nodeps: BuildRequires are handled by yum-builddep in CI)
-    log "Step 3/3: Running rpmbuild..."
+    # Step 4: rpmbuild (--nodeps: BuildRequires are handled by yum-builddep in CI)
+    log "Step 4/4: Running rpmbuild..."
     "$RPMBUILD" -ba --nodeps \
         --define "_topdir ${BUILD_DIR}" \
         "$spec_file"

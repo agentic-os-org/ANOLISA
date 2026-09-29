@@ -7,6 +7,8 @@ on:
       - 'release/agent-sec-core/**'
     paths:
       - 'src/agent-sec-core/**'
+      - '.github/actions/package-source/**'
+      - '.github/actions/package-vendor/**'
       - '.github/workflows/sec-core-rpmbuild.yaml'
   workflow_dispatch:       # 手动触发不受 paths 限制
 
@@ -246,58 +248,93 @@ jobs:
           path: scripts/rpmbuild/RPMS/**/*.rpm
           retention-days: 7
 
-  # Runs in parallel with build-rpm (no `needs`): the V2 Rust CLI/daemon RPM
-  # plus its dedicated e2e suite. Either job failing fails the PR.
+  # Build and test V2 from the same local Source0/Source1 archives. The source
+  # checkout supplies the packaging inputs and test harness, never the RPM build.
   build-rpm-v2:
-    name: Build agent-sec-core V2 RPM
+    name: Test agent-sec-core V2 RPM from packaged sources
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:
-      - name: Configure mirrors and install dependencies
+      # Alinux4 does not include tar, which actions/checkout needs to extract
+      # the repository when Git is unavailable in the base image.
+      - name: Configure mirrors and install build and test prerequisites
         run: |
           sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git rpm-build systemd-rpm-macros gcc make clang llvm \
-                         openssl-devel libseccomp-devel bubblewrap \
-                         python3-pip
+          # The spec guards %systemd_* at parse time, so dnf builddep cannot read
+          # it until systemd-rpm-macros is installed.
+          dnf install -y rpm-build rpmdevtools dnf-plugins-core systemd-rpm-macros \
+                         tar gzip findutils sed git make bubblewrap python3 python3-pip
 
       - uses: actions/checkout@v4
 
-      # V2 daemon/CLI are pinned to 1.93.1; linux-sandbox also builds on it.
-      # The V1 job stays on 1.93.0.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.93.1'
+      - name: Resolve V2 version
+        id: version
+        run: |
+          value=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$value"
+          echo "value=$value" >> "$GITHUB_OUTPUT"
 
-      - uses: astral-sh/setup-uv@v8.0.0
+      - name: Package Source0
+        uses: ./.github/actions/package-source
         with:
-          python-version: '3.11.6'
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          upload-artifact: 'false'
 
-      - uses: actions/setup-node@v4
+      - name: Package Source1
+        uses: ./.github/actions/package-vendor
         with:
-          node-version: '22.23.2'
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          upload-artifact: 'false'
 
-      - name: Build V2 RPM
-        run: ./scripts/rpm-build.sh agent-sec-core-v2
+      - name: Build RPM from packaged sources
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          # package-source exports BUILD_DIR for package-vendor. Do not let that
+          # staging path override the Makefile's RPM build output directory.
+          unset BUILD_DIR
+          rpmdev-setuptree
+          source0="/tmp/archives/agent-sec-core-${VERSION}.tar.gz"
+          source1="/tmp/archives/agent-sec-core-${VERSION}-vendor.tar.gz"
+          test -f "$source0"
+          test -f "$source1"
+          cp "$source0" "$source1" "$HOME/rpmbuild/SOURCES/"
+          # Read the spec from Source0 so rpmbuild uses only packaged inputs.
+          tar -xzOf "$source0" "agent-sec-core-${VERSION}/agent-sec-core.spec.v2.in" \
+            | sed "s/@VERSION@/${VERSION}/g" > "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          dnf builddep -y --spec "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
+            "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          mkdir -p /tmp/rpms
+          find "$HOME/rpmbuild/RPMS" -name '*.rpm' -exec cp {} /tmp/rpms/ \;
+          test -n "$(find /tmp/rpms -name '*.rpm' -print -quit)"
 
       - name: List RPM contents
         run: |
-          echo "=== RPM files built ==="
-          find scripts/rpmbuild/RPMS -name '*.rpm' | sort
-          echo ""
-          for rpm in scripts/rpmbuild/RPMS/**/*.rpm; do
-            echo "========================================"
-            echo ">>> $rpm"
-            echo "========================================"
+          echo "=== Offline-built RPM files ==="
+          find /tmp/rpms -name '*.rpm' -print | sort
+          for rpm in /tmp/rpms/*.rpm; do
             rpm -qlvp "$rpm"
-            echo ""
           done
 
       - name: Test RPM installation
         run: |
-          dnf makecache
-          dnf install -y scripts/rpmbuild/RPMS/**/*.rpm
+          dnf install -y /tmp/rpms/*.rpm
           echo "=== Verify CLI (Rust) ==="
           agent-sec-cli --help
           echo "=== Verify daemon (Rust) ==="
@@ -426,6 +463,15 @@ jobs:
           fi
           make -C src/agent-sec-core test-e2e-rpm-v2
 
+      - name: Upload V2 RPM artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-v2-rpms-${{ github.run_number }}-${{ github.sha }}
+          path: /tmp/rpms/*.rpm
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Show V2 daemon log after E2E failure
         if: failure()
         run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
@@ -438,11 +484,6 @@ jobs:
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
           fi
-
-      - name: Upload V2 RPM artifacts
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-sec-core-v2-rpms-${{ github.run_number }}-${{ github.sha }}
-          path: scripts/rpmbuild/RPMS/**/*.rpm
-          retention-days: 7
+          # Cleanup is best-effort so an earlier test failure remains visible.
+          :
+# End of workflow

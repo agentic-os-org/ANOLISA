@@ -22,6 +22,10 @@ inputs:
     description: 'Number of days to retain the uploaded artifact'
     required: false
     default: '14'
+  upload-artifact:
+    description: 'Whether to upload the completed archive as a GitHub Actions artifact'
+    required: false
+    default: 'true'
   skill-sign-private-key:
     description: 'ASCII-armored GPG private key for signing (skills only). Pass secrets.SKILL_SIGN_PRIVATE_KEY from the caller workflow.'
     required: false
@@ -137,6 +141,13 @@ runs:
 
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+          # Source0 must contain source and lockfiles only. Source1 supplies
+          # every generated Cargo/npm dependency needed by the offline V2 RPM.
+          find "/tmp/build/${ARCHIVE_NAME}" -type d \( \
+            -name '.venv' -o -name 'node_modules' -o -name 'target' -o \
+            -name 'dist' -o -name '__pycache__' -o -name '.pytest_cache' -o \
+            -name '.ruff_cache' \
+          \) -prune -exec rm -rf {} +
           # Replace example keys in trusted-keys with the real GPG public key
           # so the packaged archive ships the production key.
           if [ -n "$GPG_PUBLIC_KEY" ]; then
@@ -375,6 +386,7 @@ runs:
     # Step 8: Upload artifact
     # -----------------------------------------------------------------
     - name: Upload artifact
+      if: inputs.upload-artifact == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.component }}-${{ inputs.version }}${{ inputs.artifact-suffix }}

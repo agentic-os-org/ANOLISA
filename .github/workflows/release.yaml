@@ -80,6 +80,28 @@ jobs:
           echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
 
+      - name: Verify agent-sec-core V2 version matches tag
+        if: steps.parse.outputs.component == 'agent-sec-core'
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          workspace_version=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$workspace_version"
+          test "$workspace_version" = "$TAG_VERSION" || {
+            echo "sec-core tag version $TAG_VERSION differs from V2 workspace version $workspace_version" >&2
+            exit 1
+          }
+
       - name: Plan precompiled packages
         id: plan-prebuilt
         env:
