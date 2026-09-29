@@ -45,6 +45,7 @@ jobs:
           session    sufficient   pam_permit.so
           EOF
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -213,6 +214,7 @@ jobs:
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
