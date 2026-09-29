@@ -59,6 +59,26 @@ def test_v2_stages_root_system_unit(tmp_path):
     assert all("install-systemd-user" not in line for line in targets)
 
 
+def test_source_build_stages_v2_unit_with_source_binary_path(tmp_path):
+    subprocess.run(
+        [
+            "make",
+            "install-systemd-system-source",
+            f"DESTDIR={tmp_path}",
+            "BINDIR=/usr/local/bin",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    unit = tmp_path / "etc/systemd/system/agent-sec-core.service"
+    content = unit.read_text()
+    assert 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' in content
+    assert "{bindir}" not in content
+    assert not (tmp_path / "usr/lib/systemd/user").exists()
+
+
 def test_shared_manifest_staging(tmp_path):
     subprocess.run(
         [

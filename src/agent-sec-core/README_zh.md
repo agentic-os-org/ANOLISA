@@ -38,9 +38,9 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
 | **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
 
-后台守护进程 `agent-sec-daemon`（以 `agent-sec-core.service` systemd **user** unit
-形式发布）提供健康检查、SkillFS 通知和安全查询 RPC。Prompt Scanner 通过 Rust 扩展
-在进程内执行；daemon 不会预加载 Prompt Scanner 模型，也不提供扫描 RPC。
+V2 源码构建会将 `agent-sec-daemon` 作为 host-level
+`agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留本文档中的
+CLI 与集成 capability surface。
 
 ## V2 Policy CLI
 
@@ -204,12 +204,13 @@ sudo anolisa --install-mode system adopt sec-core
 ```
 
 安装文件前，源码构建入口会检查 Node.js 20 或更高版本、bubblewrap、GnuPG 和
-`jq`。user mode 会一次性列出缺少的系统 runtime package 和安装命令，然后退出；
-安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
+`jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
+集成资源仍安装到用户目录。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
+然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
 `--ignore-deps` 跳过检查。
 
-源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
-组件。请使用已安装的集成脚本，不要继续执行 `anolisa adapter enable`。具体入口见
+源码构建不会在 ANOLISA 状态中注册组件。请使用已安装的集成脚本，不要继续执行
+`anolisa adapter enable`。具体入口见
 [源码集成入口](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#源码集成入口)。
 
 通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。

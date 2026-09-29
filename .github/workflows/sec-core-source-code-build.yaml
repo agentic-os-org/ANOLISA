@@ -90,6 +90,19 @@ jobs:
           agent-sec-cli --help
       - name: Verify daemon
         run: agent-sec-daemon --help
+      - name: Verify V2 source runtime
+        run: |
+          test -x /usr/local/bin/agent-sec-cli
+          test -x /usr/local/bin/agent-sec-daemon
+          test -f /etc/systemd/system/agent-sec-core.service
+          grep -Fx 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' /etc/systemd/system/agent-sec-core.service
+          test ! -e "$HOME/.local/lib/anolisa/sec-core/venv"
+          test ! -e "$HOME/.local/bin/agent-sec-cli"
+          test ! -e "$HOME/.local/bin/agent-sec-daemon"
+          test ! -e /usr/lib/systemd/user/agent-sec-core.service
+          if [[ -d /run/systemd/system ]]; then
+            sudo systemctl is-active --quiet agent-sec-core.service
+          fi
       - name: Verify sandbox
         run: linux-sandbox --help
       - name: Verify runtime dependencies
@@ -129,10 +142,63 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
           test -x ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
-          echo "=== CLI venv ==="
-          ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
-      - name: Run E2E tests
-        run: make -C src/agent-sec-core test-e2e-source-build
+          echo "=== V2 source runtime ==="
+          test -x /usr/local/bin/agent-sec-cli
+          test -x /usr/local/bin/agent-sec-daemon
+          test ! -e ~/.local/lib/anolisa/sec-core/venv
+      - name: Start V2 daemon for source E2E
+        run: |
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
+          data_dir="${runtime_dir}/data"
+          daemon_log="${RUNNER_TEMP}/agent-sec-daemon.log"
+          daemon_pid="${RUNNER_TEMP}/agent-sec-daemon.pid"
+          socket="${runtime_dir}/daemon.sock"
+          mkdir -p "$data_dir"
+          chmod 0700 "$runtime_dir" "$data_dir"
+          AGENT_SEC_DATA_DIR="$data_dir" agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
+          echo $! >"$daemon_pid"
+          echo "AGENT_SEC_DATA_DIR=$data_dir" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
+              echo "agent-sec-daemon exited before accepting connections" >&2
+              cat "$daemon_log" >&2
+              exit 1
+            fi
+            if python3 - "$socket" <<'PY'
+          import socket
+          import sys
+          try:
+              connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              connection.settimeout(0.1)
+              connection.connect(sys.argv[1])
+              connection.close()
+          except OSError:
+              raise SystemExit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.05
+          done
+          echo "agent-sec-daemon did not accept connections" >&2
+          cat "$daemon_log" >&2
+          exit 1
+      - name: Run V2 E2E tests
+        run: uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
+      - name: Show V2 daemon log after E2E failure
+        if: failure()
+        run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
+      - name: Stop V2 daemon after E2E tests
+        if: always()
+        run: |
+          if test -f "$AGENT_SEC_DAEMON_PID"; then
+            pid="$(cat "$AGENT_SEC_DAEMON_PID")"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          fi
       - name: Restore system Node.js
         if: always()
         run: |
@@ -188,7 +254,7 @@ jobs:
         run: |
           agent-sec-cli --version
           agent-sec-cli --help
-          agent-sec-cli scan-pii --help >/dev/null
+          agent-sec-cli scan-code --help >/dev/null
           agent-sec-daemon --help
           linux-sandbox --help
       - name: Verify runtime dependencies
@@ -224,23 +290,70 @@ jobs:
           test -f /usr/local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
           echo "=== Skills ==="
           test -d /usr/share/anolisa/skills
-          echo "=== CLI venv ==="
-          test -x /usr/local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
+          echo "=== V2 system service ==="
+          test -f /etc/systemd/system/agent-sec-core.service
+          grep -Fx 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' /etc/systemd/system/agent-sec-core.service
+          test ! -e /usr/local/lib/anolisa/sec-core/venv
+          test ! -e /usr/lib/systemd/user/agent-sec-core.service
       - name: Verify system install as regular user
         run: |
-          python_path="$(readlink -f /usr/local/lib/anolisa/sec-core/venv/bin/python)"
-          echo "venv python: ${python_path}"
-          case "${python_path}" in
-            /root/*)
-              echo "ERROR: venv Python points to root-private path: ${python_path}" >&2
-              exit 1
-              ;;
-          esac
-          namei -l /usr/local/lib/anolisa/sec-core/venv/bin/python
           sudo useradd -m -s /bin/bash secprobe || true
           sudo -u secprobe env PATH=/usr/local/bin:/usr/bin:/bin node --version
           sudo -u secprobe /usr/local/bin/agent-sec-cli --version
-          sudo -u secprobe /usr/local/bin/agent-sec-cli scan-pii --help >/dev/null
+          sudo -u secprobe /usr/local/bin/agent-sec-cli scan-code --help >/dev/null
+      - name: Start V2 daemon for source E2E
+        run: |
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
+          data_dir="${runtime_dir}/data"
+          daemon_log="${RUNNER_TEMP}/agent-sec-daemon.log"
+          daemon_pid="${RUNNER_TEMP}/agent-sec-daemon.pid"
+          socket="${runtime_dir}/daemon.sock"
+          mkdir -p "$data_dir"
+          chmod 0700 "$runtime_dir" "$data_dir"
+          AGENT_SEC_DATA_DIR="$data_dir" agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
+          echo $! >"$daemon_pid"
+          echo "AGENT_SEC_DATA_DIR=$data_dir" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
+              echo "agent-sec-daemon exited before accepting connections" >&2
+              cat "$daemon_log" >&2
+              exit 1
+            fi
+            if python3 - "$socket" <<'PY'
+          import socket
+          import sys
+          try:
+              connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              connection.settimeout(0.1)
+              connection.connect(sys.argv[1])
+              connection.close()
+          except OSError:
+              raise SystemExit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.05
+          done
+          echo "agent-sec-daemon did not accept connections" >&2
+          cat "$daemon_log" >&2
+          exit 1
+      - name: Run V2 E2E tests
+        run: uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
+      - name: Show V2 daemon log after E2E failure
+        if: failure()
+        run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
+      - name: Stop V2 daemon after E2E tests
+        if: always()
+        run: |
+          if test -f "$AGENT_SEC_DAEMON_PID"; then
+            pid="$(cat "$AGENT_SEC_DAEMON_PID")"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          fi
       - name: Restore system Node.js
         if: always()
         run: |
