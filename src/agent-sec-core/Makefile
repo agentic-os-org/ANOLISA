@@ -135,19 +135,15 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@#   skill-ledger, skill-signing              -> skill ledger and signing
 	@#   linux-sandbox                            -> privileged container (same as V1)
 
-VENV_PYTHON ?= $(HOME)/.local/lib/anolisa/sec-core/venv/bin/python
+.PHONY: test-e2e-source-build-v2
+test-e2e-source-build-v2: ## Run V2 E2E tests against source-build-installed binaries
+	@echo "🧪 Running V2 E2E tests on source build..."
+	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
+	@command -v agent-sec-daemon >/dev/null 2>&1 || { echo "ERROR: agent-sec-daemon not found on PATH"; exit 1; }
+	$(MAKE) test-e2e-rpm-v2
 
 .PHONY: test-e2e-source-build
-test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec-cli
-	@echo "🧪 Running E2E tests on source build..."
-	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
-	@$(VENV_PYTHON) -m pytest --version >/dev/null 2>&1 || uv pip install --python $(VENV_PYTHON) --quiet pytest
-	$(VENV_PYTHON) -m pytest tests/e2e/ \
-		--import-mode=importlib \
-		--ignore=tests/e2e/linux-sandbox \
-		-k 'not test_error_event_writes_to_sqlite' \
-		-v --tb=short
-	@# linux-sandbox e2e skipped: requires privileged container
+test-e2e-source-build: test-e2e-source-build-v2 ## Run V2 E2E tests against source-build-installed binaries
 
 .PHONY: test-python-coverage
 test-python-coverage: ## Run Python tests with coverage report
@@ -344,6 +340,9 @@ build-all-v2-offline: OFFLINE_BUILD := 1
 build-all-v2-offline: $(call component_build_targets,build-cli-v2) ## Build V2 components from vendored dependencies only
 	@echo "📦 Offline V2 artifacts collected to $(BUILD_DIR)/"
 
+.PHONY: build-all-source-v2
+build-all-source-v2: build-all-v2 ## Build the V2 artifacts for source installation
+
 .PHONY: export-requirements
 export-requirements: ## Re-export agent-sec-cli/requirements.txt from uv.lock
 	cd agent-sec-cli && uv export --frozen --no-dev --no-emit-project -o requirements.txt
@@ -471,6 +470,7 @@ SYSTEMD_SERVICE_BINDIR ?= /usr/bin
 SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
 SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
 SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
+SOURCE_SYSTEMD_SYSTEM_UNIT_DIR ?= /etc/systemd/system
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -483,7 +483,8 @@ install-tool: ## Install sign-skill.sh to LIBEXECDIR
 	install -p -m 0755 $(BUILD_DIR)/tools/sign-skill.sh $(DESTDIR)$(LIBEXECDIR)/
 
 .PHONY: install
-install: install-all ## Install all components (alias for install-all)
+install: INSTALL_PROFILE := system
+install: install-all-source-v2 ## Install all V2 source-build artifacts
 
 .PHONY: install-cli
 install-cli: ## Install agent-sec-cli wheel (for dev/debug)
@@ -510,6 +511,14 @@ install-cli-v2: ## RPM: Install V2 Rust CLI and daemon binaries
 		$(DESTDIR)/usr/bin/agent-sec-cli
 	install -p -m 0755 $(V2_BIN_BUILD_DIR)/agent-sec-daemon \
 		$(DESTDIR)/usr/bin/agent-sec-daemon
+
+.PHONY: install-cli-v2-source
+install-cli-v2-source: ## Install V2 Rust CLI and daemon binaries to BINDIR
+	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -p -m 0755 $(V2_BIN_BUILD_DIR)/agent-sec-cli \
+		$(DESTDIR)$(BINDIR)/agent-sec-cli
+	install -p -m 0755 $(V2_BIN_BUILD_DIR)/agent-sec-daemon \
+		$(DESTDIR)$(BINDIR)/agent-sec-daemon
 
 .PHONY: install-cli-venv
 install-cli-venv: ## Create venv, install deps from uv.lock, install wheel, symlink
@@ -604,6 +613,30 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 .PHONY: install-all
 install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install all (user source build)
 
+.PHONY: remove-legacy-source-v1-runtime
+remove-legacy-source-v1-runtime: ## Remove the V1 source-build CLI links and venv
+	@for name in agent-sec-cli agent-sec-daemon; do \
+		path="$(DESTDIR)$(BINDIR)/$$name"; \
+		if [ -L "$$path" ] && [ "$$(readlink "$$path")" = "$(VENV_DIR)/bin/$$name" ]; then \
+			rm -f "$$path"; \
+		fi; \
+	done
+	rm -rf $(DESTDIR)$(VENV_DIR)
+
+.PHONY: install-source-v2-host
+install-source-v2-host: remove-legacy-source-v1-runtime install-cli-v2-source install-sandbox install-systemd-system-source ## Install V2 host runtime for source builds
+
+.PHONY: install-source-v2-cosh-extension
+install-source-v2-cosh-extension: ## Install the cosh extension for a V2 source build
+	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
+	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
+
+.PHONY: install-source-v2-assets
+install-source-v2-assets: install-source-v2-cosh-extension install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install source-build integration assets
+
+.PHONY: install-all-source-v2
+install-all-source-v2: install-source-v2-host install-source-v2-assets ## Install all V2 source-build artifacts
+
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
@@ -628,11 +661,18 @@ install-systemd-system: ## Stage V2 system unit
 		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 
+.PHONY: install-systemd-system-source
+install-systemd-system-source: ## Install V2 system unit for source builds
+	install -d -m 0755 $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)
+	sed -e 's|{bindir}|$(BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
+		> $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	chmod 0644 $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+
 # =============================================================================
 # UNINSTALL
 # =============================================================================
-# Mirrors install-all (source build). RPM uninstall is handled by the package
-# manager via the .spec %files manifests, not by `make uninstall`.
+# Mirrors install-all-source-v2 (source build). RPM uninstall is handled by the
+# package manager via the .spec %files manifests, not by `make uninstall`.
 
 .PHONY: uninstall-cli-venv
 uninstall-cli-venv: ## Remove venv and agent-sec-cli symlink
@@ -687,7 +727,34 @@ uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-qwen-code-extension uninstall-skills ## Uninstall everything install-all installed
+uninstall: INSTALL_PROFILE := system
+uninstall: uninstall-all-source-v2 ## Uninstall all V2 source-build artifacts
+
+.PHONY: uninstall-source-v2-host
+uninstall-source-v2-host: uninstall-cli-v2-source uninstall-source-v2-sandbox uninstall-systemd-system-source ## Remove V2 source-build host runtime
+
+.PHONY: uninstall-source-v2-sandbox
+uninstall-source-v2-sandbox: ## Remove the V2 source-build sandbox binary
+	rm -f $(DESTDIR)$(BINDIR)/linux-sandbox
+
+.PHONY: uninstall-cli-v2-source
+uninstall-cli-v2-source: ## Remove V2 source-build CLI and daemon binaries
+	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
+	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon
+
+.PHONY: uninstall-systemd-system-source
+uninstall-systemd-system-source: ## Remove V2 source-build system unit
+	rm -f $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+
+.PHONY: uninstall-source-v2-cosh-extension
+uninstall-source-v2-cosh-extension: ## Remove the V2 source-build cosh extension
+	rm -rf $(DESTDIR)$(EXTENSIONDIR)
+
+.PHONY: uninstall-source-v2-assets
+uninstall-source-v2-assets: uninstall-source-v2-cosh-extension uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-qwen-code-extension uninstall-skills ## Remove source-build integration assets
+
+.PHONY: uninstall-all-source-v2
+uninstall-all-source-v2: uninstall-source-v2-host uninstall-source-v2-assets ## Remove all V2 source-build artifacts
 
 .PHONY: help
 help: ## Show this help message

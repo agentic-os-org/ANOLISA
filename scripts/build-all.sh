@@ -379,10 +379,10 @@ load_sec_core_make_paths() {
     local dir="$PROJECT_ROOT/src/agent-sec-core"
     [[ -f "$dir/Makefile" ]] || return 0
 
-    SEC_CORE_BIN_DIR="$(makefile_var "$dir" "$INSTALL_MODE" BINDIR)" || \
-        die "Failed to read BINDIR from sec-core Makefile"
+    SEC_CORE_BIN_DIR="$(makefile_var "$dir" system BINDIR)" || \
+        die "Failed to read V2 sec-core BINDIR from sec-core Makefile"
     SEC_CORE_LIB_DIR="$(makefile_var "$dir" "$INSTALL_MODE" LIBDIR)" || \
-        die "Failed to read LIBDIR from sec-core Makefile"
+        die "Failed to read sec-core integration LIBDIR from sec-core Makefile"
 }
 
 ensure_user_mode() {
@@ -425,6 +425,44 @@ system_service_dir() {
 
 systemd_is_available() {
     cmd_exists systemctl && [[ -d /run/systemd/system ]]
+}
+
+refresh_sec_core_system_service() {
+    local service="agent-sec-core.service"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: sudo systemctl daemon-reload"
+        echo "DRY-RUN: sudo systemctl enable $service"
+        echo "DRY-RUN: sudo systemctl restart $service"
+        return 0
+    fi
+
+    if ! systemd_is_available; then
+        info "systemd is not active; installed ${service} but did not enable or start it"
+        info "On a systemd host, run: sudo systemctl enable --now ${service}"
+        return 0
+    fi
+
+    as_root systemctl daemon-reload
+    as_root systemctl enable "$service"
+    as_root systemctl restart "$service"
+}
+
+stop_sec_core_system_service() {
+    local service="agent-sec-core.service"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: sudo systemctl disable --now $service"
+        echo "DRY-RUN: sudo systemctl daemon-reload"
+        return 0
+    fi
+
+    if ! systemd_is_available; then
+        return 0
+    fi
+
+    as_root systemctl disable --now "$service" 2>/dev/null || true
+    as_root systemctl daemon-reload
 }
 
 refresh_systemd_service() {
@@ -913,6 +951,23 @@ install_build_tools() {
     # shellcheck disable=SC2086
     sudo $PKG_INSTALL "${missing[@]}"
     ok "Build tools installed"
+}
+
+install_python() {
+    step "Python 3 (for agent-sec-core hooks)"
+
+    if cmd_exists python3; then
+        ok "Python $(python3 --version) already installed, skipping"
+        return 0
+    fi
+
+    if [[ "$PKG_BASE" == "deb" ]]; then
+        sudo apt-get update -y
+    fi
+    info "Installing python3 via $PKG_BASE ..."
+    sudo $PKG_INSTALL python3
+    cmd_exists python3 || die "Failed to install python3 required by agent-sec-core hooks"
+    ok "Python $(python3 --version) installed"
 }
 
 install_rust() {
@@ -1564,6 +1619,9 @@ do_install_deps() {
         if want_component cosh || want_component sec-core || want_component cosh-ng || want_component sight; then
             echo "DRY-RUN: check/install build tools if needed"
         fi
+        if want_component sec-core; then
+            echo "DRY-RUN: check/install python3 for agent-sec-core hooks"
+        fi
         if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
         fi
@@ -1602,17 +1660,16 @@ do_install_deps() {
         install_build_tools
     fi
 
+    if want_component sec-core; then
+        install_python
+    fi
+
     if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
         install_rust
     fi
 
     if want_component tokenless; then
         install_just
-    fi
-
-    if want_component sec-core; then
-        _configure_uv_mirror
-        install_uv
     fi
 
     if want_component sight; then
@@ -1687,7 +1744,7 @@ build_sec_core() {
     if $DRY_RUN; then
         echo "DRY-RUN: rm -rf $component_root"
         echo "DRY-RUN: mkdir -p $component_root"
-        echo "DRY-RUN: (cd $dir && make build-all BUILD_DIR=$build_dir)"
+        echo "DRY-RUN: (cd $dir && make build-all-source-v2 BUILD_DIR=$build_dir)"
         ok "agent-sec-core build plan generated"
         return 0
     fi
@@ -1695,22 +1752,23 @@ build_sec_core() {
     rm -rf "$component_root"
     mkdir -p "$component_root"
 
-    info "make build-all (sandbox + CLI + sec-core assets) ..."
+    info "make build-all-source-v2 (Rust CLI/daemon + sandbox + sec-core assets) ..."
     run_logged_timeout "${AGENT_SEC_BUILD_TIMEOUT:-1200}" \
-        "make build-all (agent-sec-core)" \
-        make build-all BUILD_DIR="$build_dir"
+        "make build-all-source-v2 (agent-sec-core)" \
+        make build-all-source-v2 BUILD_DIR="$build_dir"
 
     if [[ -d "$build_dir/share" ]]; then
         rm -rf "$component_root/share"
         cp -a "$build_dir/share" "$component_root/share"
     fi
 
-    local bin="$build_dir/linux-sandbox"
-    if [[ -f "$bin" ]]; then
-        ok "agent-sec-core built successfully"
-    else
-        warn "Expected artifact $bin not found"
-    fi
+    local bin
+    for bin in "$build_dir/linux-sandbox" \
+        "$build_dir/v2/bin/agent-sec-cli" \
+        "$build_dir/v2/bin/agent-sec-daemon"; do
+        [[ -f "$bin" ]] || die "Expected V2 sec-core artifact not found: $bin"
+    done
+    ok "agent-sec-core V2 artifacts built successfully"
 }
 
 build_cosh_ng() {
@@ -1916,9 +1974,6 @@ do_build() {
         if want_component cosh || want_component sec-core || want_component sight; then
             echo "DRY-RUN: configure npm registry for this build"
         fi
-        if want_component sec-core; then
-            echo "DRY-RUN: configure uv mirrors for this build"
-        fi
         if want_component tokenless; then
             echo "DRY-RUN: configure git mirror for this build"
         fi
@@ -1930,9 +1985,6 @@ do_build() {
         fi
         if want_component cosh || want_component sec-core || want_component sight; then
             _configure_npm_mirror
-        fi
-        if want_component sec-core; then
-            _configure_uv_mirror
         fi
         if want_component tokenless; then
             _configure_git_mirror "$PROJECT_ROOT"
@@ -2470,41 +2522,44 @@ install_sec_core() {
 
     if $DRY_RUN; then
         if [[ "$INSTALL_MODE" == "system" ]]; then
-            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=system"
+            echo "DRY-RUN: sudo make -C $dir install-all-source-v2 BUILD_DIR=$build_dir INSTALL_PROFILE=system"
         else
-            echo "DRY-RUN: make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=user"
+            echo "DRY-RUN: make -C $dir remove-legacy-source-v1-runtime INSTALL_PROFILE=user"
+            echo "DRY-RUN: make -C $dir install-source-v2-assets BUILD_DIR=$build_dir INSTALL_PROFILE=user"
+            echo "DRY-RUN: sudo make -C $dir install-source-v2-host BUILD_DIR=$build_dir INSTALL_PROFILE=system"
         fi
-        ok "agent-sec-core install plan generated for $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
+        refresh_sec_core_system_service
+        ok "agent-sec-core V2 install plan generated for $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
         return 0
     fi
 
     [[ -d "$build_dir" ]] || die "Build directory not found: $build_dir"
     [[ -f "$build_dir/linux-sandbox" ]] || die "Built linux-sandbox not found: $build_dir/linux-sandbox"
+    [[ -f "$build_dir/v2/bin/agent-sec-cli" ]] || die "Built V2 agent-sec-cli not found"
+    [[ -f "$build_dir/v2/bin/agent-sec-daemon" ]] || die "Built V2 agent-sec-daemon not found"
     [[ -d "$build_dir/cosh-extension" ]] || die "Built cosh extension not found: $build_dir/cosh-extension"
     [[ -d "$build_dir/openclaw-plugin" ]] || die "Built OpenClaw plugin not found: $build_dir/openclaw-plugin"
     [[ -d "$build_dir/hermes-plugin" ]] || die "Built hermes-plugin not found: $build_dir/hermes-plugin"
     [[ -d "$build_dir/skills" ]] || die "Built sec-core skills not found: $build_dir/skills"
-    find "$build_dir/wheels" -maxdepth 1 -name 'agent_sec_cli-*.whl' -type f | grep -q . || \
-        die "Built agent-sec-cli wheel not found under $build_dir/wheels"
-    cmd_exists uv || die "uv not found; install dependencies first or run without --ignore-deps"
-
-    _configure_uv_mirror
-
     if [[ "$INSTALL_MODE" == "system" ]]; then
-        run_logged "make install (agent-sec-core)" \
-            as_root env PATH="$PATH" \
-                UV_PYTHON_INSTALL_MIRROR="${UV_PYTHON_INSTALL_MIRROR:-}" \
-                make -C "$dir" install \
+        run_logged "make install-all-source-v2 (agent-sec-core)" \
+            as_root make -C "$dir" install-all-source-v2 \
                 BUILD_DIR="$build_dir" INSTALL_PROFILE=system
     else
-        run_logged "make install (agent-sec-core)" \
-            make -C "$dir" install \
+        run_logged "remove legacy V1 source runtime (agent-sec-core)" \
+            make -C "$dir" remove-legacy-source-v1-runtime INSTALL_PROFILE=user
+        run_logged "make install-source-v2-assets (agent-sec-core)" \
+            make -C "$dir" install-source-v2-assets \
                 BUILD_DIR="$build_dir" INSTALL_PROFILE=user
+        run_logged "make install-source-v2-host (agent-sec-core)" \
+            as_root make -C "$dir" install-source-v2-host \
+                BUILD_DIR="$build_dir" INSTALL_PROFILE=system
     fi
 
-    ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
+    refresh_sec_core_system_service
+    ok "agent-sec-core V2 binaries installed to $SEC_CORE_BIN_DIR"
     if [[ "$INSTALL_MODE" != "system" ]]; then
-        info "Make sure $SEC_CORE_BIN_DIR is in PATH before starting integrations."
+        info "Source-build integrations remain in user paths under $SEC_CORE_LIB_DIR."
     fi
 }
 
@@ -2665,22 +2720,30 @@ uninstall_sec_core() {
 
     if $DRY_RUN; then
         if [[ "$INSTALL_MODE" == "system" ]]; then
-            echo "DRY-RUN: sudo make -C $dir uninstall INSTALL_PROFILE=system"
+            echo "DRY-RUN: sudo make -C $dir uninstall-all-source-v2 INSTALL_PROFILE=system"
         else
-            echo "DRY-RUN: make -C $dir uninstall INSTALL_PROFILE=user"
+            echo "DRY-RUN: make -C $dir uninstall-source-v2-assets INSTALL_PROFILE=user"
+            echo "DRY-RUN: sudo make -C $dir uninstall-source-v2-host INSTALL_PROFILE=system"
         fi
-        ok "agent-sec-core uninstall plan generated (mode=${INSTALL_MODE})"
+        stop_sec_core_system_service
+        ok "agent-sec-core V2 uninstall plan generated (mode=${INSTALL_MODE})"
         return 0
     fi
 
+    stop_sec_core_system_service
     if [[ "$INSTALL_MODE" == "system" ]]; then
-        run_logged "make uninstall (agent-sec-core)" \
-            as_root make -C "$dir" uninstall INSTALL_PROFILE=system || true
+        run_logged "make uninstall-all-source-v2 (agent-sec-core)" \
+            as_root make -C "$dir" uninstall-all-source-v2 INSTALL_PROFILE=system || true
     else
-        run_logged "make uninstall (agent-sec-core)" \
-            make -C "$dir" uninstall INSTALL_PROFILE=user || true
+        run_logged "make uninstall-source-v2-assets (agent-sec-core)" \
+            make -C "$dir" uninstall-source-v2-assets INSTALL_PROFILE=user || true
+        run_logged "make uninstall-source-v2-host (agent-sec-core)" \
+            as_root make -C "$dir" uninstall-source-v2-host INSTALL_PROFILE=system || true
     fi
-    ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
+    if systemd_is_available; then
+        as_root systemctl daemon-reload || warn "systemctl daemon-reload failed after sec-core uninstall"
+    fi
+    ok "agent-sec-core V2 install removed (mode=${INSTALL_MODE})"
 }
 
 uninstall_cosh_ng() {
@@ -2957,8 +3020,8 @@ $(echo -e "${BOLD}Examples:${NC}")
     $0 --component cosh-ng                         # Build + install cosh-ng without replacing cosh
     $0 --system --component cosh-ng                # Install cosh-ng binaries to /usr/local/bin
     $0 --no-install                                # Build target/ staging only
-    $0 --component sec-core                          # Build + install sec-core to user paths
-    $0 --system --component sec-core                 # Build + install sec-core to FHS system paths
+    $0 --component sec-core                          # Build + install V2 sec-core host runtime plus user integrations
+    $0 --system --component sec-core                 # Build + install all V2 sec-core artifacts to FHS system paths
     $0 --ignore-deps --component sec-core            # Build + install sec-core without dependency setup or verification
     $0 --uninstall                                 # Uninstall all default components
     $0 --uninstall --component cosh                # Uninstall copilot-shell only

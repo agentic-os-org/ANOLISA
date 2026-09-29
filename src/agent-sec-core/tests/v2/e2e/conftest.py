@@ -145,6 +145,13 @@ def _terminate(process: subprocess.Popen) -> str:
     return stderr or ""
 
 
+@pytest.fixture(autouse=True)
+def daemon_data_dir(tmp_path, monkeypatch):
+    data_dir = tmp_path / "daemon-data"
+    data_dir.mkdir(mode=0o700)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data_dir))
+
+
 @pytest.fixture
 def cli():
     """Returns a runner for ``agent-sec-cli`` with no implicit ``--socket``."""

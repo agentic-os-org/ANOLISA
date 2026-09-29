@@ -21,7 +21,7 @@ AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。�
 
 - 源码和 RPM 安装支持 Linux x86_64、aarch64
 - ANOLISA raw 包仅支持 Linux x86_64 和 system mode
-- Python 3.11.6（固定版本）
+- V2 源码构建需要 Rust toolchain（构建脚本会在需要时完成准备）
 - ANOLISA CLI 0.2.17 或更高版本
 - 安装需要 root 权限（system mode）
 
@@ -59,13 +59,13 @@ sudo anolisa --install-mode system adopt sec-core
 ```
 
 安装文件前，源码构建入口会检查 Node.js 20 或更高版本、bubblewrap、GnuPG 和
-`jq`。user mode 会一次性列出缺少的系统 runtime package 和安装命令，然后退出；
-安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
+`jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
+集成资源仍安装到用户目录。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
+然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
 `--ignore-deps` 跳过检查。
 
-源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
-`sec-core`。这种安装方式不能继续执行 `anolisa adapter enable`，请使用下文的
-源码集成脚本。
+源码构建不会在 ANOLISA 状态中注册 `sec-core`。这种安装方式不能继续执行
+`anolisa adapter enable`，请使用下文的源码集成脚本。
 
 ## 快速开始
 

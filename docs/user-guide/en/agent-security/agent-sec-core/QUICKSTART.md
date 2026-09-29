@@ -21,7 +21,7 @@ AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on 
 
 - Linux x86_64 or aarch64 for source and RPM installations
 - Linux x86_64 with system mode for the ANOLISA raw package
-- Python 3.11.6 (pinned)
+- Rust toolchain for V2 source builds (the build script provisions it when needed)
 - ANOLISA CLI 0.2.17 or later
 - Root privileges for system-mode install
 
@@ -61,14 +61,15 @@ Developers building from source should use the repository-level entry point:
 ```
 
 Before installing files, the source-build entry point checks Node.js 20 or
-newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
-runtime packages with one install command and exits; install them and rerun the
-same command. `--ignore-deps` bypasses this verification for pre-provisioned
-hosts.
+newer, bubblewrap, GnuPG, and `jq`. It uses `sudo` to install the Rust CLI,
+sandbox, and host-level daemon; default-mode integration resources remain in
+user paths. User mode reports all missing system runtime packages with one
+install command and exits; install them and rerun the same command.
+`--ignore-deps` bypasses this verification for pre-provisioned hosts.
 
-The source build installs the runtime and integration resources in user paths,
-but it does not register `sec-core` in ANOLISA state. Do not follow it with
-`anolisa adapter enable`; use the source integration scripts documented below.
+The source build does not register `sec-core` in ANOLISA state. Do not follow
+it with `anolisa adapter enable`; use the source integration scripts documented
+below.
 
 ## Quick Start
 

@@ -40,10 +40,9 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
 | **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
 
-The background daemon (`agent-sec-daemon`, shipped as the `agent-sec-core.service`
-systemd **user** unit) provides health, SkillFS notification, and security-query
-RPCs. Prompt scanning runs in-process through the Rust extension; the daemon does
-not preload Prompt Scanner models or serve scan RPCs.
+The V2 source build installs `agent-sec-daemon` as the host-level
+`agent-sec-core.service` systemd unit. The V2 migration retains the documented
+CLI and integration capability surface through Rust implementations.
 
 ## V2 Policy CLI
 
@@ -213,14 +212,14 @@ Developers building from source should use the repository-level entry point:
 ```
 
 Before installing files, the source-build entry point checks Node.js 20 or
-newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
-runtime packages with one install command and exits; install them and rerun the
-same command. `--ignore-deps` bypasses this verification for pre-provisioned
-hosts.
+newer, bubblewrap, GnuPG, and `jq`. It installs the Rust CLI, sandbox, and
+host-level daemon with `sudo`, while default-mode integration resources remain
+in user paths. User mode reports all missing system runtime packages with one
+install command and exits; install them and rerun the same command.
+`--ignore-deps` bypasses this verification for pre-provisioned hosts.
 
-The source build installs runtime and integration resources in user paths but
-does not register the component in ANOLISA state. Use the installed integration
-scripts instead of `anolisa adapter enable`; see
+The source build does not register the component in ANOLISA state. Use the
+installed integration scripts instead of `anolisa adapter enable`; see
 [Source-build Integration](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.
