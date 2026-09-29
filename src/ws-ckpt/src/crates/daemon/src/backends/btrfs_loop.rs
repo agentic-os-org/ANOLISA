@@ -65,9 +65,6 @@ impl BtrfsLoopBackend {
         let orig_gid = orig_meta.gid();
 
         let backup_path = backup_path_for(original_path);
-        // Recover orphan `.pre-init-bak` from an interrupted prior init before
-        // proceeding with Step 3 (rename). See btrfs_common::recover_orphan_backup.
-        recover_orphan_backup(original_path, subvol_path).await?;
 
         tokio::fs::rename(original_path, &backup_path)
             .await
@@ -166,6 +163,8 @@ impl StorageBackend for BtrfsLoopBackend {
         original_path: &str,
         ws_id: &str,
     ) -> anyhow::Result<WorkspaceInfo> {
+        recover_orphan_backup(original_path, &self.mount_path.join(ws_id)).await?;
+
         // Resolve symlink to real path to avoid copying the symlink itself
         let resolved = resolve_symlink_path(original_path).await?;
         let resolved_str = resolved.to_string_lossy().to_string();
@@ -190,6 +189,7 @@ impl StorageBackend for BtrfsLoopBackend {
                 &subvol_path,
                 &snap_dir,
                 backup_owned,
+                &self.mount_path,
             )
             .await;
             return Err(e);
@@ -238,8 +238,13 @@ impl StorageBackend for BtrfsLoopBackend {
             }
         }
 
-        // Clean up old subvolume (non-fatal)
-        if let Err(e) = btrfs_common::delete_subvolume(&tmp_path).await {
+        // Clean up old subvolume (non-fatal). Space-aware: on a nearly-full
+        // backend the async cleaner may stall (ENOSPC) and leave a DELETED
+        // zombie pinning all space, so the guarded path pushes it synchronously
+        // and warns loudly with recovery guidance when it cannot (#3053).
+        if let Err(e) =
+            btrfs_common::delete_subvolume_space_aware(&tmp_path, &self.mount_path).await
+        {
             warn!("failed to delete old subvolume (non-fatal): {}", e);
         }
 
@@ -248,12 +253,22 @@ impl StorageBackend for BtrfsLoopBackend {
 
     async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
-        btrfs_common::delete_subvolume(&snap_path).await
+        btrfs_common::delete_subvolume_space_aware(&snap_path, &self.mount_path).await
     }
 
     async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()> {
         let subvol_path = self.mount_path.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
+
+        // Record subvolume root permissions before rsync
+        let subvol_meta = tokio::fs::metadata(&subvol_path).await.with_context(|| {
+            format!(
+                "cannot recover: subvolume {:?} is missing or unreadable; no data was restored. \
+                 If it was deleted, use `ws-ckpt unregister -w {:?} --force` to remove only \
+                 the registration while retaining backups and snapshots",
+                subvol_path, original_path
+            )
+        })?;
 
         // 1. Remove symlink; refuse if a non-symlink directory occupies the path
         match tokio::fs::symlink_metadata(original_path).await {
@@ -275,10 +290,6 @@ impl StorageBackend for BtrfsLoopBackend {
         // 2. Rsync subvolume contents back to original path (restore as normal directory)
         let src = format!("{}/", subvol_path.to_string_lossy()); // trailing / is important
 
-        // Record subvolume root permissions before rsync
-        let subvol_meta = tokio::fs::metadata(&subvol_path)
-            .await
-            .context("failed to read subvolume metadata")?;
         let sv_uid = subvol_meta.uid();
         let sv_gid = subvol_meta.gid();
         let sv_mode = subvol_meta.mode();
@@ -314,39 +325,23 @@ impl StorageBackend for BtrfsLoopBackend {
             info!("restored workspace contents to {}", original_path);
         }
 
-        // 3. Delete all snapshot subvolumes by scanning the filesystem directory
-        if let Ok(mut entries) = tokio::fs::read_dir(&snap_base).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Err(e) = btrfs_common::delete_subvolume(&path).await {
-                        warn!("failed to delete snapshot subvolume {:?}: {:#}", path, e);
-                    }
-                }
-            }
-        }
+        // 3. Delete snapshots before the workspace subvolume so a partial
+        //    teardown remains retryable.
+        btrfs_common::delete_recovery_subvolumes(
+            &snap_base,
+            &subvol_path,
+            &self.mount_path,
+            original_path,
+        )
+        .await?;
 
-        // 4. Delete workspace subvolume
-        if let Err(e) = btrfs_common::delete_subvolume(&subvol_path).await {
-            warn!("failed to delete workspace subvolume {}: {:#}", ws_id, e);
-        }
-
-        // 5. Remove snapshots/{ws_id} directory
+        // 4. Remove snapshots/{ws_id} directory
         if let Err(e) = tokio::fs::remove_dir_all(&snap_base).await {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
-        // 6. Clean orphan `.pre-init-bak` if it still exists (prior interrupted
-        //    init). Safe to remove at this point — subvol is gone, original_path
-        //    has been restored as a normal directory in steps above.
-        let backup_path = backup_path_for(original_path);
-        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
-            if let Err(e) = tokio::fs::remove_dir_all(&backup_path).await {
-                warn!("failed to clean orphan backup {:?}: {:#}", backup_path, e);
-            } else {
-                info!("cleaned orphan backup {:?} during recover", backup_path);
-            }
-        }
+        // The backup can contain files absent from an interrupted migration.
+        // Leave it intact; the manager archives it and reports the new location.
 
         Ok(())
     }
@@ -363,7 +358,8 @@ impl StorageBackend for BtrfsLoopBackend {
             Some(id) => btrfs_common::diff_between_snapshots(&snap_from, &snap_base.join(id)).await,
             None => {
                 let live = self.data_root().join(ws_id);
-                btrfs_common::diff_against_live(&snap_from, &live, &snap_base).await
+                btrfs_common::diff_against_live(&snap_from, &live, &snap_base, &self.mount_path)
+                    .await
             }
         }
     }
@@ -372,22 +368,11 @@ impl StorageBackend for BtrfsLoopBackend {
         &self,
         ws_id: &str,
         snapshot_ids: &[String],
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<(String, SnapshotDeleteOutcome)>> {
+        // Whole batch shares ONE risk assessment and, at High risk, ONE
+        // bounded cleaner wait (#3053 review P1-c).
         let snap_dir = self.snapshots_dir.join(ws_id);
-        let mut removed = Vec::new();
-        for snap_id in snapshot_ids {
-            let snap_path = snap_dir.join(snap_id);
-            match btrfs_common::delete_subvolume(&snap_path).await {
-                Ok(()) => {
-                    removed.push(snap_id.clone());
-                    info!("cleanup: removed snapshot {}", snap_id);
-                }
-                Err(e) => {
-                    warn!("cleanup: failed to delete snapshot {}: {:#}", snap_id, e);
-                }
-            }
-        }
-        Ok(removed)
+        Ok(btrfs_common::cleanup_snapshots_batch(&snap_dir, &self.mount_path, snapshot_ids).await)
     }
 
     async fn fork(&self, ws_id: &str, snapshot_id: &str, new_ws_id: &str) -> anyhow::Result<()> {
@@ -451,6 +436,10 @@ impl StorageBackend for BtrfsLoopBackend {
                     self.mount_path.display()
                 )
             })
+    }
+
+    async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+        btrfs_common::list_deleted_subvolumes(&self.mount_path).await
     }
 
     async fn bootstrap(&self, config: &DaemonConfig) -> anyhow::Result<()> {
@@ -526,8 +515,26 @@ impl StorageBackend for BtrfsLoopBackend {
             info!("Mounted {} at {}", loop_device, mount_path_str);
         }
 
+        // Zombie sweep (#3053): a previous run may have deleted subvolumes the
+        // kernel cleaner could not reclaim under ENOSPC. The daemon reuses this
+        // mount across restarts by design (#2809), so no mount cycle ever kicks
+        // the cleaner on its own — push it explicitly before anything else
+        // (including img size reconcile) makes decisions based on used space.
+        // KickThenWait: the loop image is ws-ckpt's own filesystem, so every
+        // dead-list entry is ours and the sweep may block on a bounded sync
+        // wait for the drain.
+        let sweep_outcome = btrfs_common::sweep_zombie_subvolumes(
+            &self.mount_path,
+            btrfs_common::ZombieSweepPolicy::KickThenWait {
+                wait_timeout: btrfs_common::BOOTSTRAP_ZOMBIE_SWEEP_TIMEOUT,
+            },
+        )
+        .await;
+
         if img_existed_before {
-            if let Err(e) = reconcile_img_size(&img_path_str, &mount_path_str, config).await {
+            if let Err(e) =
+                reconcile_img_size(&img_path_str, &mount_path_str, config, sweep_outcome).await
+            {
                 warn!(
                     "Failed to reconcile btrfs image size: {:#}. Continuing with current size.",
                     e
@@ -1040,6 +1047,7 @@ async fn reconcile_img_size(
     img_path: &str,
     mount_path_str: &str,
     config: &DaemonConfig,
+    sweep_outcome: btrfs_common::ZombieSweepOutcome,
 ) -> anyhow::Result<()> {
     let current = tokio::fs::metadata(img_path)
         .await
@@ -1086,6 +1094,24 @@ async fn reconcile_img_size(
             grew_to = Some(target);
         }
         std::cmp::Ordering::Greater => {
+            if sweep_outcome != btrfs_common::ZombieSweepOutcome::Clear {
+                warn!(
+                    "Cannot shrink btrfs image while deleted subvolumes may still pin space. \
+                     Keeping current ({} bytes).",
+                    current
+                );
+                return Ok(());
+            }
+            if btrfs_common::assess_space_risk(Path::new(mount_path_str)).await
+                == btrfs_common::SpaceRisk::High
+            {
+                warn!(
+                    "Cannot shrink btrfs image while filesystem usage is high or unverifiable. \
+                     Keeping current ({} bytes).",
+                    current
+                );
+                return Ok(());
+            }
             if let Some(pids) = check_mount_busy(mount_path_str).await {
                 warn!(
                     "Cannot shrink btrfs image: mount {} in use by PIDs [{}]. Keeping current ({} bytes).",
@@ -1341,9 +1367,9 @@ mod tests {
     use super::{
         compute_target_size, derive_img_dir, loop_node_mknod_args, normalize_free_loop_dev,
         parse_df_available, parse_df_total, parse_losetup_j, parse_sysfs_dev_numbers,
-        BtrfsLoopBackend,
+        reconcile_img_size, BtrfsLoopBackend,
     };
-    use ws_ckpt_common::SNAPSHOTS_DIR;
+    use ws_ckpt_common::{DaemonConfig, SNAPSHOTS_DIR};
 
     const GB: u64 = 1024 * 1024 * 1024;
 
@@ -1429,6 +1455,30 @@ mod tests {
     fn compute_target_saturates_on_huge_img_size() {
         let got = compute_target_size(u64::MAX / GB, 50.0, 100 * GB);
         assert_eq!(got, 50 * GB);
+    }
+
+    #[tokio::test]
+    async fn unresolved_zombies_preserve_expanded_image() {
+        let dir = tempdir().unwrap();
+        let image = dir.path().join("data.img");
+        let file = std::fs::File::create(&image).unwrap();
+        file.set_len(2 * GB).unwrap();
+        let config = DaemonConfig {
+            img_size: 1,
+            img_max_percent: 100.0,
+            ..DaemonConfig::default()
+        };
+
+        reconcile_img_size(
+            image.to_str().unwrap(),
+            "/not-a-btrfs-mount",
+            &config,
+            crate::backends::btrfs_common::ZombieSweepOutcome::Unresolved,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::metadata(image).unwrap().len(), 2 * GB);
     }
 
     #[test]

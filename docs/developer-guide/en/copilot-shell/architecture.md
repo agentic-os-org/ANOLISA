@@ -6,7 +6,7 @@ organized as an npm monorepo.
 ## Repository Structure
 
 ```
-src/copilot-shell/
+deprecated/copilot-shell/
 ├── packages/
 │   ├── cli/          # CLI entry point and TUI layer
 │   ├── core/         # Core engine (models, tools, session management)

@@ -30,6 +30,30 @@ const PROVIDERS: Provider[] = [
       { id: 'deepseek-r1', name: 'DeepSeek R1 (reasoning)', nameKey: 'opt.llm.model.deepseekR1Reasoning' },
     ],
   },
+  // Token Plan keys (sk-sp-…) and endpoint are isolated from the
+  // pay-as-you-go DashScope ones and must not be mixed (401 / surprise billing).
+  // Model list is the union of the current personal and team plan catalogs;
+  // stale ids 403 with AccessDenied.Unpurchased, so prune models once they
+  // leave both plans.
+  {
+    id: 'token-plan',
+    nameKey: 'opt.llm.provider.tokenPlan',
+    icon: '🎟️',
+    base_url: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    models: [
+      { id: 'qwen3.8-max', name: 'Qwen3.8 Max' },
+      { id: 'qwen3.8-flash', name: 'Qwen3.8 Flash' },
+      { id: 'qwen3.7-max', name: 'Qwen3.7 Max' },
+      { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus' },
+      { id: 'qwen3.6-flash', name: 'Qwen3.6 Flash' },
+      { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+      { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (reasoning)', nameKey: 'opt.llm.model.glm52Reasoning' },
+      { id: 'MiniMax-M2.5', name: 'MiniMax M2.5' },
+    ],
+  },
   {
     id: 'openai',
     nameKey: 'opt.llm.provider.openai',
@@ -117,6 +141,7 @@ export const LlmConfigForm: React.FC = () => {
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [customModel, setCustomModel] = useState('');
+  const [semanticSearchTimeoutSecs, setSemanticSearchTimeoutSecs] = useState('5');
   const [isKnownModel, setIsKnownModel] = useState(true);
   const [showKey, setShowKey] = useState(false);
 
@@ -130,6 +155,7 @@ export const LlmConfigForm: React.FC = () => {
         setConfig(data);
         setBaseUrl(data.base_url);
         setModel(data.model);
+        setSemanticSearchTimeoutSecs(String(data.search_timeout_secs ?? 5));
 
         // Auto-detect provider
         const pid = detectProvider(data.base_url);
@@ -180,11 +206,23 @@ export const LlmConfigForm: React.FC = () => {
     setError(null);
 
     const effectiveModel = isKnownModel ? model : customModel;
+    const timeoutSecs = Number(semanticSearchTimeoutSecs);
+    if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
+      setError(t('opt.llm.semanticSearchTimeout.invalid'));
+      setSaving(false);
+      return;
+    }
 
     try {
-      const body: { api_key?: string; base_url?: string; model?: string } = {
+      const body: {
+        api_key?: string;
+        base_url?: string;
+        model?: string;
+        search_timeout_secs?: number;
+      } = {
         base_url: baseUrl,
         model: effectiveModel,
+        search_timeout_secs: timeoutSecs,
       };
       // Omit api_key when unchanged; keys containing masking dots are ignored by the backend.
       if (apiKey.trim()) {
@@ -283,6 +321,24 @@ export const LlmConfigForm: React.FC = () => {
             </div>
             <p className="text-xs text-gray-400 mt-1">
               {config?.api_key ? t('opt.llm.apiKey.keepUnchanged') : t('opt.llm.apiKey.hint')}
+            </p>
+          </div>
+
+          {/* Semantic search deadline */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('opt.llm.semanticSearchTimeout.label')}
+            </label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              className={inputCls}
+              value={semanticSearchTimeoutSecs}
+              onChange={(e) => setSemanticSearchTimeoutSecs(e.target.value)}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              {t('opt.llm.semanticSearchTimeout.hint')}
             </p>
           </div>
 

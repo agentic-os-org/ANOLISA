@@ -69,7 +69,13 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
         test-agentscope-integration test-hooks test-claude-code-detect \
-        test-hook-parity
+        test-hook-parity test-rtk-integration test-benchmark-rtk-probe
+
+# Declared separately from the list above on purpose: that one is extended by
+# other components' targets as well, and a shared line is a merge conflict
+# waiting to happen.
+.PHONY: test-install-methods test-install-script test-install-docs \
+        test-npm-postinstall test-npm-postinstall-strict
 
 # Default target
 all: build
@@ -81,7 +87,7 @@ build-tokenless:
 	@echo "==> Building tokenless + rtk..."
 	just setup-rtk
 	cargo build --release
-	cargo build --release --manifest-path third_party/rtk/Cargo.toml
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
@@ -239,25 +245,67 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-hook-parity \
+test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup
+      test-npm-package test-toon-cleanup test-benchmark-rtk-probe
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
 	cargo test --workspace -- --test-threads=1
 
-test-hooks:
-	@echo "==> Testing copilot-shell hooks..."
+# Declared separately from the .PHONY list at the top of this file on purpose:
+# that list is extended by other components' targets as well, and a shared line
+# is a merge conflict waiting to happen.
+.PHONY: test-hook-scripts
+
+# The two suites below are the only members of `test-hooks` that CI can run:
+# tests/run-all-tests.sh drives the release binary installed on PATH on purpose
+# (see the note above its test 5.0b), so `test-hooks` as a whole needs an
+# installed tokenless and stays a developer-machine target. No workflow calls
+# it -- grepping .github/ for test-hooks and for the two file names returns
+# nothing -- so two contracts only ever ran on developer machines: run-hook.sh
+# must resolve a hook from its own adapter tree before the FHS and
+# home-directory fallbacks, and tool_ready_hook.sh must keep its hard bypass so
+# the dormant legacy four-phase flow (which runs any readable env-fix script)
+# stays unreachable. Both suites are plain bash over a mktemp sandbox with
+# generated fixtures -- no cargo build output, node, jq, rtk, python3 or
+# network, verified by running them under a PATH that holds only bash and
+# coreutils -- so they cost well under a second. They ride on
+# `test-integration` for the same reason test-claude-code-detect and
+# test-toon-cleanup do: that is the hook-contract target the Test tokenless job
+# already calls, so the pair reaches CI with no workflow edit and no new setup.
+test-hook-scripts:
+	@echo "==> Testing tokenless hook scripts (no external dependencies)..."
 	bash tests/test-run-hook-install-scope.sh
 	bash tests/test-tool-ready-readable-fixer.sh
+
+test-hooks: test-hook-scripts
+	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
 
 test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh
 
-test-integration:
+# Protocol v2 golden parity belongs to the integration contract, and this is the
+# only tokenless test target a CI job calls (`make test-hook-parity` has no
+# workflow caller). The prerequisite also builds target/debug/tokenless first:
+# without that binary tests/test_hook_parity.py skips itself (skipUnless), so the
+# goldens would go unenforced while the job still reported green. make runs the
+# prerequisite once even though the aggregate `test` target lists both names.
+#
+# The shell suites ride along for the same reason: they are members of the
+# `make test` aggregate that no workflow ever called (grepping .github/ for the
+# targets and for the script names behind them returns nothing), so detect.sh's
+# first-run plugin re-list retry, the stale-toon ownership rules in
+# install-helpers/uninstall and the hook-script pair above only ran on developer
+# machines. All of them are plain bash over a mktemp sandbox with stub binaries
+# (the two older ones also recurse into make) -- no cargo, node or jq, and no
+# rtk build -- so they cost about a second and are safe to run ahead of the
+# Python contract below. They cannot
+# go on `test-rtk-integration` instead: that target's own recipe is what fetches
+# and builds the vendored rtk, and this one runs earlier in the CI job.
+test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_codex_response_diagnostics.py
@@ -272,6 +320,28 @@ test-integration:
 	python3 tests/test_resolve_agent_id.py
 	python3 tests/test_release_regression_probe.py
 	python3 tests/test_qwenpaw_plugin.py
+	python3 tests/test_cosh_ng_compat.py
+
+# The L1 runner records an `rtk_version` in benchmark_identity.json through a
+# best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
+# resolved through PATH, the probe runs under a timeout(1) deadline whose child
+# is reaped, and only a successful probe records a version (everything else
+# collapses to "unavailable"). tests/test-benchmark-rtk-version-probe.sh guards
+# exactly that contract with stub binaries, but no target ever ran it, so a
+# probe regression reached CI unnoticed: the benchmark job would either stall on
+# a hung rtk or silently publish an "unavailable" identity. The suite needs no
+# rtk build and finishes in a few seconds, so it runs ahead of the pinned build
+# below and fails fast. `test-rtk-integration` is the only RTK target a CI job
+# calls ("Test bundled RTK integration"), which is what puts this in CI.
+test-benchmark-rtk-probe:
+	@echo "==> Testing benchmark RTK version probe..."
+	bash tests/test-benchmark-rtk-version-probe.sh
+
+test-rtk-integration: test-benchmark-rtk-probe
+	bash scripts/setup-rtk.sh
+	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
+	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
+		python3 tests/test_rtk_integration.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
@@ -280,7 +350,43 @@ test-hook-parity:
 	cargo build -p tokenless-cli
 	python3 tests/test_hook_parity.py
 
-test-adapters: build-openclaw-plugin build-dsh-plugin
+# The npm channel's packaging contract suite is a member of the `test`
+# aggregate that no workflow calls. The raw channel's sibling suite is invoked
+# directly by the Tokenless prebuilt workflow, but grepping every file under
+# .github/ for `test-npm-package` and for test-package-npm-prebuilt.sh returns
+# nothing, so tests/test-package-npm-prebuilt.sh only ever ran on developer
+# machines. (The one other uncovered member, test-hooks, stays out: its
+# run-all-tests.sh deliberately drives an installed release binary on PATH, and
+# no CI job installs tokenless.)
+#
+# The npm suite is the sole automated guard on npm/scripts/package-npm.js --
+# the script that produces the tarballs `make npm-publish` pushes -- covering
+# arch validation of the prebuilt binaries, the GLIBC 2.17 baseline warning,
+# the --target selector aliases, exclusion of legacy agentscope build output,
+# materialization of the claude-code and qwencode run-hook.sh dispatchers
+# (`npm pack` silently drops symlinks, which would publish a plugin with no
+# hooks), the rule that platform packages declare no `bin` (a collision makes
+# npm remove every conflicting .bin link), the root package's
+# optionalDependencies, and the dsh bundle contract. A regression in any of
+# those ships broken installs behind a green build.
+#
+# It rides on this target because it needs node/npm and python3, and "Test
+# adapter installers" is the first target the Test tokenless job calls after
+# actions/setup-node -- test-integration runs earlier, while node is still
+# unset. The pairing is also substantive rather than merely convenient: the
+# packer rebuilds and bundles exactly the openclaw and dsh artifacts this
+# target already builds, and the suite asserts they survive `npm pack` intact.
+# It is deliberately not attached to `npm-package` instead: that target is the
+# real packaging entry point whose npm/dist output the job's smoke test
+# installs, and this suite fabricates its own prebuilt binaries and packs all
+# four platforms, so running it there would leave fabricated tarballs beside
+# the real ones. The suite backs up and restores any existing
+# target/npm-prebuilt, needs no cargo build, and finishes in about 20 seconds.
+#
+# Under `make -j` the suite must not run beside the two plugin builds whose
+# directories it rewrites through its own recursive make; test-npm-package
+# declares them as prerequisites for exactly that reason.
+test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	@echo "==> Testing OpenClaw adapter installer..."
 	bash tests/test-openclaw-adapter-install.sh
 	@echo "==> Testing openclaw Protocol v2 lifecycle..."
@@ -302,7 +408,7 @@ python-wheel:
 	@echo "==> Building Tokenless Python wheel..."
 	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
 		just setup-rtk; \
-		cargo build --release --manifest-path third_party/rtk/Cargo.toml; \
+		cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml; \
 	fi
 	@test -x "$(PYTHON_RTK_BINARY)" || { \
 		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
@@ -347,11 +453,57 @@ stage-raw:
 test-raw-package:
 	@bash tests/test-package-raw.sh
 
-test-npm-package:
+# tests/test-package-npm-prebuilt.sh drives npm/scripts/package-npm.js, whose
+# buildAdapters() recursively runs `make build-openclaw-plugin build-dsh-plugin`.
+# Both are phony and always rebuild, and the openclaw step rewrites
+# adapters/tokenless/openclaw/{node_modules,dist} (`npm ci`, then `npm run clean`
+# + `tsc`). Left as a bare recipe, this target is free to run beside a sibling
+# prerequisite that builds the same plugin, so one build's `tsc` reads
+# node_modules/typescript/lib/*.d.ts while the other's `npm ci` is deleting it
+# (TS6053 + TS2318, `make -j4 test-adapters` exits 2). Declaring the two builds
+# as prerequisites serializes them: make builds them once, then runs the suite
+# alone, and the recursive make just rebuilds the same artifacts. This ordering
+# also protects the `test` aggregate, where the suite and test-adapters share a
+# single deduplicated instance. Keep it if the suite is attached elsewhere.
+test-npm-package: build-openclaw-plugin build-dsh-plugin
 	@bash tests/test-package-npm-prebuilt.sh
 
 test-toon-cleanup:
 	@bash tests/test-toon-cleanup.sh
+
+# Standalone curl installer/uninstaller behaviour plus the install-method docs
+# that describe it. Offline: curl, npm and cargo are stubbed by the test.
+# test-npm-postinstall runs the real npm/scripts/postinstall.js and skips when no
+# interpreter can run it.
+test-install-methods: test-npm-postinstall test-install-script test-install-docs
+
+# Joined to the `test` aggregate by a second, prerequisite-only rule instead of by
+# editing its own line: that line is extended by several components at once and is
+# a recurring merge conflict, while GNU make unions the prerequisites of rules
+# that carry no recipe.
+test: test-install-methods
+
+test-install-script:
+	@echo "==> Testing standalone install/uninstall scripts..."
+	@bash tests/test-install-script.sh
+
+test-install-docs:
+	@echo "==> Testing install-method documentation consistency..."
+	@bash tests/test-install-docs.sh
+
+# The npm package postinstall shares ~/.local/share/anolisa/adapters/tokenless
+# with the anolisa CLI, so it has to identify the current owner before replacing
+# the tree. Needs node; skips when no interpreter can run the script.
+test-npm-postinstall:
+	@echo "==> Testing npm postinstall adapter ownership..."
+	@bash tests/test-npm-postinstall.sh
+
+# Strict variant: an interpreter that cannot run postinstall.js is a failure, not
+# a skip. This is the one npm-package depends on, because that target already
+# needs a working node.
+test-npm-postinstall-strict:
+	@echo "==> Testing npm postinstall adapter ownership (a usable node is required)..."
+	@TOKENLESS_REQUIRE_NODE=1 bash tests/test-npm-postinstall.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -567,7 +719,14 @@ prepare-npm-native-binaries: build-tokenless
 		"$(NATIVE_NPM_INPUT_DIR)/"
 
 # Build and package the current host.
-npm-package: prepare-npm-native-binaries
+# The package this target produces ships scripts/postinstall.js, and in CI
+# `make npm-package` is the step of the tokenless job that runs after
+# actions/setup-node — the one place a supported Node is guaranteed. Gating
+# packaging on the install-method suite is what keeps the postinstall ownership
+# test executing in CI, in strict mode, so an interpreter that cannot load the
+# script fails the build instead of reporting a skip.
+npm-package: prepare-npm-native-binaries \
+	test-install-script test-install-docs test-npm-postinstall-strict
 	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
 	node npm/scripts/package-npm.js
 
@@ -615,6 +774,9 @@ help:
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
+	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
+	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
+	@echo "  test-hook-scripts  Test the dependency-free hook bash suites (run in CI)"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"

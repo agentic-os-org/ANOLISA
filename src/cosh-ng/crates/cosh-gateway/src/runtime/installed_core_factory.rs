@@ -55,6 +55,7 @@ const ALLOWED_ENVIRONMENT: &[&str] = &[
     "OPENAI_ORGANIZATION",
     "OPENAI_PROJECT",
     "DASHSCOPE_API_KEY",
+    "COSH_SYSOM_ENDPOINT",
 ];
 
 /// Canonical Core launch inputs pinned before daemon socket admission.

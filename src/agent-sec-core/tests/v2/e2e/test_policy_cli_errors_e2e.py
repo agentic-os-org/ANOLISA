@@ -5,7 +5,7 @@ The CLI exit-code contract is exercised end to end:
 * a daemon error envelope goes to stderr with exit code 1;
 * a transport failure (no daemon listening) exits 1 with a diagnostic on
   stderr and nothing on stdout;
-* a usage error (bad or missing arguments) exits 2 without touching a daemon;
+* a usage error (invalid arguments) exits 2 without touching a daemon;
 * an unauthorized caller receives the daemon's ``permission_denied`` envelope.
 """
 
@@ -23,8 +23,6 @@ def test_transport_failure_when_daemon_absent(cli, tmp_path):
 
 def test_usage_errors_exit_two_without_a_daemon(cli):
     usage_cases = [
-        # Missing required --socket.
-        ("policy", "list"),
         # --socket must be absolute.
         ("--socket", "relative.sock", "policy", "list"),
         # Repeated --socket at different levels is ambiguous.

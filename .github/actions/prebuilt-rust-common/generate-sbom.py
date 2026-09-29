@@ -491,6 +491,7 @@ def main() -> int:
         ("linux", "x86_64"): "x86_64-unknown-linux-gnu",
         ("linux", "aarch64"): "aarch64-unknown-linux-gnu",
         ("macos", "aarch64"): "aarch64-apple-darwin",
+        ("macos", "x86_64"): "x86_64-apple-darwin",
     }.get((args.target_os, args.target_arch))
     if expected_target is None or args.target != expected_target:
         die("target triple does not match the requested OS and architecture")

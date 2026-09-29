@@ -96,6 +96,7 @@ fn request_case_name(value: &local::WsCkptRequest) -> &'static str {
         local::WsCkptRequest::GuardedRollbackEvidenceV2 { .. } => {
             "request/guarded_rollback_evidence_v2"
         }
+        local::WsCkptRequest::Unregister { .. } => "request/unregister",
     }
 }
 
@@ -157,6 +158,8 @@ fn response_case_name(value: &local::WsCkptResponse) -> &'static str {
         local::WsCkptResponse::GuardedRollbackV2Rejected { .. } => {
             "response/guarded_rollback_v2_rejected"
         }
+        local::WsCkptResponse::RecoverWithWarning { .. } => "response/recover_with_warning",
+        local::WsCkptResponse::UnregisterOk { .. } => "response/unregister_ok",
     }
 }
 
@@ -262,6 +265,9 @@ fn request_cases() -> Vec<(&'static str, local::WsCkptRequest)> {
             ws_id: "ws-abcdef".into(),
             operation_id: "ckp_2".into(),
             operation_digest: [0x44; 32],
+        },
+        local::WsCkptRequest::Unregister {
+            workspace: "/ws".into(),
         },
     ];
     samples
@@ -490,6 +496,14 @@ fn response_cases() -> Vec<(&'static str, local::WsCkptResponse)> {
         local::WsCkptResponse::GuardedRollbackV2Rejected {
             code: local::GuardedRollbackRejectionCodeV2::DiffMismatch,
             message: "live diff changed".into(),
+        },
+        local::WsCkptResponse::RecoverWithWarning {
+            workspace: "/ws".into(),
+            warning: "backup retained".into(),
+        },
+        local::WsCkptResponse::UnregisterOk {
+            workspace: "/ws".into(),
+            retained_paths: vec!["/snapshots/ws-id".into()],
         },
     ];
     samples

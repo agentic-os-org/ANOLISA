@@ -34,13 +34,22 @@ pub const GLOBAL_ACTIVE_DOMAIN_ID: u32 = u32::MAX;
 pub const DEFAULT_PIN_ROOT: &str = "/sys/fs/bpf/actplane/v1";
 pub const PIN_ROOT_ENV: &str = "ACTPLANE_BPF_PIN_ROOT";
 
-// ---- prebuilt eBPF object, 8-byte aligned for aya's ELF parser ----
+// ---- prebuilt eBPF objects, 8-byte aligned for aya's ELF parser ----
+// Two variants: full (7.1.x with bpf_d_path) and inode-only (5.10/6.6 without).
 #[repr(align(8))]
 struct Aligned<T: ?Sized>(T);
-static OBJECT: &Aligned<[u8]> =
+static OBJECT_FULL: &Aligned<[u8]> =
     &Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/process.bpf.o")));
+static OBJECT_INODE_ONLY: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/process-inode-only.bpf.o"
+)));
 fn object_bytes() -> &'static [u8] {
-    &OBJECT.0
+    if kernel_supports_bpf_d_path_in_lsm() {
+        &OBJECT_FULL.0
+    } else {
+        &OBJECT_INODE_ONLY.0
+    }
 }
 
 // ===================== ABI mirrors (must match bpf/taint.h) =====================
@@ -69,14 +78,19 @@ const FEAT_FILE_FLOW: u32 = 1 << 6;
 const FEAT_BLOCK_EXEC: u32 = 1 << 7;
 const FEAT_BLOCK_FILE: u32 = 1 << 8;
 const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
+// Pin-name identity for the singleton engine. The version digit is bumped
+// whenever a patch-stack change alters pinned-engine behavior (e.g. the
+// drain-trigger event moved to sys_enter_membarrier): an old pin then fails
+// the marker check loudly instead of being silently reused with mismatched
+// links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v1_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v2_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v2_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v3_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v2_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v1_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v2_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -186,6 +200,34 @@ struct CapPolicyMask {
     hi: u64,
 }
 
+// Mirrors bpf/taint_engine.bpf.h `struct file_id`.
+// Used as HASH key — _pad MUST be explicitly zeroed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileId {
+    pub ino: u64,
+    pub dev: u32,
+    pub _pad: u32,
+}
+
+/// Inode guard flag: block unlink.
+pub const INODE_GUARD_UNLINK: u32 = 1;
+/// Inode guard flag: block rename.
+pub const INODE_GUARD_RENAME: u32 = 2;
+/// Inode guard flag: block write.
+pub const INODE_GUARD_WRITE: u32 = 4;
+
+/// Value stored in te_inode_guard map: flags + owning domain_id.
+/// Must match BPF `struct inode_guard_val` layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InodeGuardVal {
+    pub flags: u32,
+    pub domain_id: u32,
+}
+
+unsafe impl aya::Pod for FileId {}
+unsafe impl aya::Pod for InodeGuardVal {}
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
@@ -503,6 +545,28 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
+/// Declare to the BPF drain gate that THIS pid is about to submit to `cap_req`.
+/// The gate (`cap_pending_submitter`) makes the drain hook refuse to run in any
+/// other pid's context, so a foreign syscall on the trigger tracepoint cannot
+/// consume the submitter's records in a foreign capability context
+/// (#3021 follow-up 3).
+fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let slot: u32 = 0;
+    let pid: i32 = std::process::id() as i32;
+    let rc = unsafe {
+        libbpf_sys::bpf_map_update_elem(
+            fd,
+            &slot as *const u32 as *const std::ffi::c_void,
+            &pid as *const i32 as *const std::ffi::c_void,
+            BPF_ANY,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn open_append_lock() -> io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
@@ -531,6 +595,7 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
     for name in [
         "rb",
         "cap_req",
+        "cap_pending_submitter",
         "cap_task",
         "cap_state",
         "cap_policy",
@@ -539,6 +604,7 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
         "ts_proc_domains",
         "ts_root",
         "te_protected_pids",
+        "te_inode_guard",
     ] {
         if !paths.map(name).try_exists()? {
             return Ok(false);
@@ -546,8 +612,8 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
     }
     let marker = reserve.profile_marker();
     if !paths.map(marker).try_exists()? {
-        return Err(err(format!(
-            "ActPlane pinned metadata mismatch at {}: expected {marker}; remove the pin root before changing ActPlane revision, profile, or schema",
+        return Err(stale_layout_err(format!(
+            "ActPlane pinned metadata mismatch at {}: expected {marker}",
             paths.root.display()
         )));
     }
@@ -577,9 +643,39 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
     Ok(true)
 }
 
+/// Remove a stale pin root — incomplete (e.g. an install aborted mid-way)
+/// or left by an incompatible ActPlane revision — so the reinstall does not
+/// fail with `BPF_OBJ_PIN` EEXIST. A missing root (fresh install) is a no-op.
+fn remove_stale_pin_root(paths: &PinnedEnginePaths) -> io::Result<()> {
+    if !paths.root.try_exists()? {
+        return Ok(());
+    }
+    // Defense in depth against a mis-set ACTPLANE_BPF_PIN_ROOT: never remove
+    // a populated directory that does not look like a pin root; an empty
+    // directory is always safe to clear.
+    let pin_layout = paths.maps_dir().try_exists()? || paths.links_dir().try_exists()?;
+    let empty = paths.root.read_dir()?.next().is_none();
+    if !pin_layout && !empty {
+        return Err(err(format!(
+            "refusing to remove {}: not an ActPlane pin root layout",
+            paths.root.display()
+        )));
+    }
+    log::warn!(
+        "ActPlane: removing stale pin root at {} before reinstall",
+        paths.root.display()
+    );
+    std::fs::remove_dir_all(&paths.root).map_err(|e| {
+        err(format!(
+            "remove stale ActPlane pin root at {}: {e}",
+            paths.root.display()
+        ))
+    })
+}
+
 fn pinned_profile_mismatch(paths: &PinnedEnginePaths, link: &str) -> io::Error {
-    err(format!(
-        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}; remove the pin root before changing profiles",
+    stale_layout_err(format!(
+        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}",
         paths.root.display()
     ))
 }
@@ -1140,7 +1236,7 @@ const TRACEPOINTS: &[TracepointSpec] = &[
     TracepointSpec {
         name: "cap_drain_tick",
         category: "syscalls",
-        event: "sys_enter_getpid",
+        event: "sys_enter_membarrier",
         need: TracepointNeed::Core,
     },
 ];
@@ -1450,6 +1546,14 @@ pub fn bpf_lsm_active() -> bool {
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::Other, msg.into())
+}
+
+/// Error kind marking a stale pinned-engine layout (marker/profile/schema
+/// mismatch with the current build): callers may delete the pin root and
+/// reinstall. Genuine I/O failures keep their original kind and must not be
+/// reinterpreted as staleness.
+fn stale_layout_err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
 fn validate_config(cfg: &CConfig) -> io::Result<()> {
@@ -1791,18 +1895,58 @@ fn empty_config_blob() -> Vec<u8> {
     }
 }
 
+/// Parse a dotted kernel release string (e.g. "7.1.10-...") and return
+/// `(major, minor)`.  Returns `None` when the format is unexpected.
+fn parse_kernel_major_minor(release: &str) -> Option<(u32, u32)> {
+    let mut parts = release.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    // The minor may be followed by a patch component, so split on '-' as well.
+    let minor_str = parts.next()?;
+    let minor: u32 = minor_str
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Returns `true` when the running kernel is expected to support `bpf_d_path`
+/// inside LSM hooks (Alibaba Cloud Linux kernel >= 7.1).
+fn kernel_supports_bpf_d_path_in_lsm() -> bool {
+    let mut buf: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut buf) } != 0 {
+        return false;
+    }
+    let release = unsafe { std::ffi::CStr::from_ptr(buf.release.as_ptr()) };
+    let Ok(release) = release.to_str() else {
+        return false;
+    };
+    match parse_kernel_major_minor(release) {
+        Some((major, minor)) => major > 7 || (major == 7 && minor >= 1),
+        None => false,
+    }
+}
+
 impl PinnedEngine {
     pub fn open_or_install_singleton() -> io::Result<Self> {
         let paths = PinnedEnginePaths::from_env();
         let reserve = HookReserve::pinned_profile()?;
         validate_pinned_runtime(reserve, bpf_lsm_active())?;
         let policy_features = reserve.policy_features;
-        if pinned_engine_present(&paths, reserve)? {
+        let present = match pinned_engine_present(&paths, reserve) {
+            Ok(present) => present,
+            // Stale layout from an incompatible ActPlane revision: fall
+            // through and rebuild instead of failing the process start.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => false,
+            Err(e) => return Err(e),
+        };
+        if present {
             return Ok(Self {
                 paths,
                 policy_features,
             });
         }
+        remove_stale_pin_root(&paths)?;
 
         match Loader::load_with_pinned_layout(&empty_config_blob(), reserve, paths.clone()) {
             Ok(installer) => {
@@ -1867,9 +2011,59 @@ impl PinnedEngine {
         Ok(())
     }
 
+    /// Add an inode to the guard map. Files matching `(ino, dev)` will be
+    /// blocked from unlink/rename/write according to `flags`, but only for
+    /// processes in the specified `domain_id`.
+    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32, domain_id: u32) -> io::Result<()> {
+        let key = FileId { ino, dev, _pad: 0 };
+        let val = InodeGuardVal { flags, domain_id };
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
+        guard
+            .insert(key, val, 0)
+            .map_err(|e| err(format!("guard inode {ino}:{dev}: {e}")))?;
+        Ok(())
+    }
+
+    /// Remove an inode from the guard map.
+    pub fn unguard_inode(&self, ino: u64, dev: u32) -> io::Result<()> {
+        let key = FileId { ino, dev, _pad: 0 };
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
+        ignore_missing_remove(guard.remove(&key), "unguard inode")
+    }
+
+    /// Remove all entries from the inode guard map.
+    pub fn clear_inode_guards(&self) -> io::Result<()> {
+        let mut guard: HashMap<_, FileId, InodeGuardVal> =
+            pinned_hash_map(&self.paths, "te_inode_guard")?;
+        let keys: Vec<FileId> = guard
+            .keys()
+            .map(|k| k.map_err(|e| err(format!("list inode guards: {e}"))))
+            .collect::<io::Result<_>>()?;
+        for key in keys {
+            ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the current kernel supports `bpf_d_path` in LSM hooks
+    /// (Alibaba Cloud Linux kernel >= 7.1). When `false`, inode guard mode is
+    /// the only option for file-delete-guard.
+    pub fn bpf_d_path_in_lsm_available(&self) -> bool {
+        kernel_supports_bpf_d_path_in_lsm()
+    }
+
+    /// Whether the engine should operate in inode guard mode (vs path mode).
+    /// Returns `true` when `bpf_d_path` is unavailable in LSM hooks.
+    pub fn inode_guard_mode(&self) -> bool {
+        !self.bpf_d_path_in_lsm_available()
+    }
+
     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
         Ok(ReloadHandle {
             cap_req_fd: dup_pinned_map_fd(&self.paths, "cap_req")?,
+            cap_pending_fd: dup_pinned_map_fd(&self.paths, "cap_pending_submitter")?,
             cap_task_fd: dup_pinned_map_fd(&self.paths, "cap_task")?,
             cap_state_fd: dup_pinned_map_fd(&self.paths, "cap_state")?,
             cap_policy_fd: dup_pinned_map_fd(&self.paths, "cap_policy")?,
@@ -2011,11 +2205,47 @@ impl PinnedEngine {
         let data = pinned_map_data(&self.paths, "rb")?;
         let mut ring =
             RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
+        let fix_fd = ring.as_raw_fd();
+
+        // Fix: advance consumer to producer pos via raw mmap, then reopen ring.
+        // This bypasses stale BPF_RINGBUF_BUSY_BIT headers at the old consumer offset.
+        unsafe {
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let cp = libc::mmap(
+                std::ptr::null_mut(),
+                pg,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fix_fd,
+                0,
+            );
+            if cp != libc::MAP_FAILED {
+                let pp = libc::mmap(
+                    std::ptr::null_mut(),
+                    pg,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    fix_fd,
+                    pg as libc::off_t,
+                );
+                if pp != libc::MAP_FAILED {
+                    let prod = (*(pp as *const std::sync::atomic::AtomicUsize))
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    (*(cp as *const std::sync::atomic::AtomicUsize))
+                        .store(prod, std::sync::atomic::Ordering::SeqCst);
+                    libc::munmap(pp, pg);
+                }
+                libc::munmap(cp, pg);
+            }
+        }
+        // Reopen ring so Aya reads the updated consumer position from mmap.
+        drop(ring);
+        let data = pinned_map_data(&self.paths, "rb")?;
+        let mut ring =
+            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("rb reopen: {e}")))?;
         let fd = ring.as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
-            // Aya initializes a reopened ring's producer cache at zero, even when
-            // the pinned map's shared consumer offset is already nonzero.
             if !ring_readable(fd, 100)? {
                 continue;
             }
@@ -2302,6 +2532,7 @@ impl Loader {
         let dup = dup_cloexec_fd(raw)?;
         Ok(ReloadHandle {
             cap_req_fd: dup,
+            cap_pending_fd: dup_array_map_fd(&self.bpf, "cap_pending_submitter")?,
             cap_task_fd: dup_hash_map_fd(&self.bpf, "cap_task")?,
             cap_state_fd: dup_hash_map_fd(&self.bpf, "cap_state")?,
             cap_policy_fd: dup_hash_map_fd(&self.bpf, "cap_policy")?,
@@ -2460,8 +2691,10 @@ impl Loader {
     ///
     /// The BPF side admits the request only if `caller_pid` maps to a state with
     /// the needed authority masks, and then applies a monotonic delta to
-    /// `cap_state`. The caller normally sets `caller_pid` to its own pid; this
-    /// method triggers a `getpid` syscall so the BPF drain hook runs.
+    /// `cap_state`. The caller normally sets `caller_pid` to its own pid. The
+    /// submission first declares the drain intent so the BPF gate only lets
+    /// OUR pid drain, then self-triggers the drain hook with a
+    /// `membarrier(QUERY)`.
     pub fn submit_delta(&self, req: DeltaRequest) -> io::Result<()> {
         let map = self
             .bpf
@@ -2471,9 +2704,19 @@ impl Loader {
             Map::Unsupported(data) => data,
             _ => return Err(err("cap_req is not a user ringbuf map")),
         };
-        let fd = map_data.fd().as_fd().as_raw_fd();
+        let ring_fd = map_data.fd().as_fd().as_raw_fd();
+        let pending = self
+            .bpf
+            .map("cap_pending_submitter")
+            .ok_or_else(|| err("cap_pending_submitter missing"))?;
+        let pending_data = match pending {
+            Map::Array(data) => data,
+            Map::Unsupported(data) => data,
+            _ => return Err(err("cap_pending_submitter is not an array map")),
+        };
+        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd())?;
         unsafe {
-            let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
+            let rb = libbpf_sys::user_ring_buffer__new(ring_fd, std::ptr::null());
             if rb.is_null() {
                 return Err(io::Error::last_os_error());
             }
@@ -2493,7 +2736,24 @@ impl Loader {
             );
             libbpf_sys::user_ring_buffer__submit(rb, sample);
             libbpf_sys::user_ring_buffer__free(rb);
-            libc::syscall(libc::SYS_getpid);
+            // Self-trigger the drain in OUR pid context. The BPF-side gate
+            // double-checks that we are the declared submitter, so even a
+            // foreign membarrier(QUERY) storm between submit and this trigger
+            // cannot consume the record in a foreign capability context
+            // (#3021 follow-up 3). QUERY has no side effects.
+            //
+            // The trigger must not fail silently: if the syscall is blocked
+            // (seccomp EPERM) or absent (ENOSYS), the record would sit in the
+            // ringbuf until a later successful trigger drains it — after the
+            // caller already rolled the submission back. Fail loudly here so
+            // the rollback path reports the real cause.
+            let rc = libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
+            if rc < 0 {
+                return Err(err(format!(
+                    "drain self-trigger failed: membarrier(MEMBARRIER_CMD_QUERY): {}",
+                    io::Error::last_os_error()
+                )));
+            }
         }
         Ok(())
     }
@@ -2502,6 +2762,47 @@ impl Loader {
     pub fn run(&mut self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
         let mut ring = RingBuf::try_from(self.bpf.map_mut("rb").ok_or_else(|| err("rb missing"))?)
             .map_err(|e| err(format!("rb: {e}")))?;
+        let fix_fd = ring.as_raw_fd();
+
+        // Fix: advance consumer to producer pos via raw mmap, then reopen ring.
+        // This bypasses stale BPF_RINGBUF_BUSY_BIT headers at the old consumer offset.
+        unsafe {
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let cp = libc::mmap(
+                std::ptr::null_mut(),
+                pg,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fix_fd,
+                0,
+            );
+            if cp != libc::MAP_FAILED {
+                let pp = libc::mmap(
+                    std::ptr::null_mut(),
+                    pg,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    fix_fd,
+                    pg as libc::off_t,
+                );
+                if pp != libc::MAP_FAILED {
+                    let prod = (*(pp as *const std::sync::atomic::AtomicUsize))
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    (*(cp as *const std::sync::atomic::AtomicUsize))
+                        .store(prod, std::sync::atomic::Ordering::SeqCst);
+                    libc::munmap(pp, pg);
+                }
+                libc::munmap(cp, pg);
+            }
+        }
+        // Reopen ring so Aya reads the updated consumer position from mmap.
+        drop(ring);
+        let mut ring = RingBuf::try_from(
+            self.bpf
+                .map_mut("rb")
+                .ok_or_else(|| err("rb missing on reopen"))?,
+        )
+        .map_err(|e| err(format!("rb reopen: {e}")))?;
         let fd = ring.as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
@@ -2603,12 +2904,6 @@ fn populate_policy_mask_map(bpf: &mut Ebpf, cfg: &CConfig) -> io::Result<()> {
 const CAP_REQ_APPEND_UPDATE: i32 = -4;
 const CAP_REQ_APPEND_RULE: i32 = -5;
 
-// RELOAD protocol tags (capability.bpf.h): only check feature support,
-// bypass the cap_check_fields authority gate entirely.
-const CAP_REQ_RELOAD_UPDATE: i32 = -1;
-const CAP_REQ_RELOAD_RULE: i32 = -2;
-const CAP_REQ_RELOAD_COUNTS: i32 = -3;
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct AppendUpdate {
@@ -2631,37 +2926,13 @@ struct AppendRule {
     entry: CRule,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadUpdate {
-    tag: i32,
-    index: u32,
-    entry: CUpdate,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadRule {
-    tag: i32,
-    index: u32,
-    entry: CRule,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapReloadCounts {
-    tag: i32,
-    n_rules: u32,
-    n_updates: u32,
-    _pad: u32,
-}
-
 /// A handle for appending runtime policy deltas into a running eBPF engine.
 ///
 /// Holds only the `cap_req` user ring buffer fd (via a dup'd `OwnedFd`).
 /// `Send + Sync` — safe to share across threads and the async MCP server.
 pub struct ReloadHandle {
     cap_req_fd: std::os::fd::OwnedFd,
+    cap_pending_fd: std::os::fd::OwnedFd,
     cap_task_fd: std::os::fd::OwnedFd,
     cap_state_fd: std::os::fd::OwnedFd,
     cap_policy_fd: std::os::fd::OwnedFd,
@@ -2696,6 +2967,7 @@ impl ReloadHandle {
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
+        declare_drain_intent_fd(self.cap_pending_fd.as_raw_fd())?;
         let fd = self.cap_req_fd.as_raw_fd();
         unsafe {
             let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
@@ -2711,7 +2983,23 @@ impl ReloadHandle {
             std::ptr::copy_nonoverlapping(data.as_ptr(), sample as *mut u8, data.len());
             libbpf_sys::user_ring_buffer__submit(rb, sample);
             libbpf_sys::user_ring_buffer__free(rb);
-            libc::syscall(libc::SYS_getpid);
+            // Self-trigger the drain in OUR pid context; the BPF-side
+            // submitter gate makes foreign triggers harmless regardless of
+            // which syscall they ride (#3021 follow-up 3). QUERY has no side
+            // effects.
+            //
+            // The trigger must not fail silently: if the syscall is blocked
+            // (seccomp EPERM) or absent (ENOSYS), the record would sit in the
+            // ringbuf until a later successful trigger drains it — after the
+            // caller already rolled the submission back. Fail loudly here so
+            // the rollback path reports the real cause.
+            let rc = libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
+            if rc < 0 {
+                return Err(err(format!(
+                    "drain self-trigger failed: membarrier(MEMBARRIER_CMD_QUERY): {}",
+                    io::Error::last_os_error()
+                )));
+            }
         }
         Ok(())
     }
@@ -3057,80 +3345,6 @@ impl ReloadHandle {
                 "{e}; rolled back partial runtime policy delta"
             )));
         }
-
-        Ok(())
-    }
-
-    /// Applies a policy delta using the RELOAD protocol instead of APPEND.
-    ///
-    /// The RELOAD path (tags -1/-2/-3) only checks feature support and does not
-    /// require the submitter to hold capability authority in cap_state. This is
-    /// the correct path for an external trusted enforcer injecting policies into
-    /// a freshly seeded domain.
-    ///
-    /// Protocol: RELOAD_COUNTS(0,0) → RELOAD_UPDATE(i) × n → RELOAD_RULE(i) × n → RELOAD_COUNTS(n_rules, n_updates)
-    pub fn reload_policy_delta(&self, target_id: u32, delta_blob: &[u8]) -> io::Result<()> {
-        if target_id == 0 {
-            return Err(err("target_id must be set"));
-        }
-        if delta_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "delta config size mismatch: got {}, expected {}",
-                delta_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        let cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(delta_blob.as_ptr() as *const CConfig) });
-        validate_config(&cfg)?;
-        validate_supported_features(&cfg, self.policy_features, "runtime policy delta (reload)")?;
-
-        let _guard = self
-            .append_lock
-            .lock()
-            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
-        let _file_guard = self.lock_append_file()?;
-
-        // Step 1: quiesce — RELOAD_COUNTS(0, 0)
-        self.submit(&CapReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: 0,
-            n_updates: 0,
-            _pad: 0,
-        })?;
-
-        // Step 2: RELOAD_UPDATE(i) for each active update
-        for i in 0..cfg.n_updates {
-            let mut entry = cfg.updates[i as usize];
-            // RELOAD path does not override domain_id like APPEND does,
-            // so we must set it explicitly.
-            entry.domain_id = target_id;
-            self.submit(&CapReloadUpdate {
-                tag: CAP_REQ_RELOAD_UPDATE,
-                index: i,
-                entry,
-            })?;
-        }
-
-        // Step 3: RELOAD_RULE(i) for each active rule
-        for i in 0..cfg.n_rules {
-            let mut entry = cfg.rules[i as usize];
-            // RELOAD path does not override domain_id like APPEND does.
-            entry.domain_id = target_id;
-            self.submit(&CapReloadRule {
-                tag: CAP_REQ_RELOAD_RULE,
-                index: i,
-                entry,
-            })?;
-        }
-
-        // Step 4: activate — RELOAD_COUNTS(n_rules, n_updates)
-        self.submit(&CapReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: cfg.n_rules,
-            n_updates: cfg.n_updates,
-            _pad: 0,
-        })?;
 
         Ok(())
     }
@@ -3483,7 +3697,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v1"));
+        assert!(marker.contains("file_v2"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -3519,7 +3733,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v1"));
+        assert!(marker.contains("agent_file_guard_v2"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -3569,7 +3783,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v2"));
+        assert!(marker.contains("credential_exfiltration_v3"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4348,6 +4562,423 @@ os.execv({hit:?}, [{hit:?}])
             _lock: lock,
             old_hook_profile,
         }
+    }
+
+    /// Drain-context race regression (#3021 follow-up 3).
+    ///
+    /// The cap_req drain hook rides `sys_enter_membarrier` behind the
+    /// submitter gate (`cap_pending_submitter`): only the pid that declared a
+    /// pending submission may drain. This test submits deltas while foreign
+    /// processes hammer BOTH the old trigger syscall (getpid) and the new one
+    /// (membarrier QUERY via ctypes) — before the fix, a getpid storm dropped
+    /// ~95% of submitted deltas, and an open-window membarrier storm could
+    /// steal ~100% (both reproduced on kernel 6.6).
+    ///
+    /// Run with:
+    ///     sudo cargo test -p ebpf-ifc-engine --lib drain -- \
+    ///         --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
+    fn drain_trigger_survives_getpid_storm() {
+        // Empty config + default reserve: only Core tracepoints are attached,
+        // which keeps this test loadable even where heavyweight programs such
+        // as trace_openat_exit hit verifier limits.
+        let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
+        let my_pid = std::process::id() as i32;
+        let domain: u32 = 0x5eed;
+        loader
+            .bind_state(
+                my_pid,
+                domain,
+                CapState {
+                    parent: 0,
+                    scope_id: 0,
+                    labels: 0,
+                    authority_mask: u64::MAX,
+                    target_mask: u64::MAX,
+                    restrict_mask: 0,
+                    gate_mask: u64::MAX,
+                    label_mask: u64::MAX,
+                },
+            )
+            .expect("bind_state");
+
+        let cap_stat = |slot: u32| -> u64 {
+            let m: Array<_, u64> =
+                Array::try_from(loader.bpf.map("cap_stats").expect("cap_stats map"))
+                    .expect("open cap_stats");
+            m.get(&slot, 0).expect("read cap_stats slot")
+        };
+        let accept0 = cap_stat(0);
+        let drop0 = cap_stat(3);
+
+        // Kill+reap every spinner on every exit path (including assert
+        // panics) so a failed run never leaks CPU-bound loops on the
+        // privileged test host.
+        struct Spinners(Vec<std::process::Child>);
+        impl Drop for Spinners {
+            fn drop(&mut self) {
+                for child in self.0.iter_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut spinners = Spinners(
+            (0..2)
+                .map(|_| {
+                    std::process::Command::new("python3")
+                        .arg("-c")
+                        .arg("import os\nwhile True: os.getpid()")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("spawn getpid spinner")
+                })
+                .chain((0..2).map(|_| {
+                    std::process::Command::new("python3")
+                        .arg("-c")
+                        .arg(concat!(
+                            "import ctypes\n",
+                            "libc = ctypes.CDLL(None, use_errno=True)\n",
+                            "while True: libc.syscall(324, 0, 0, 0)\n",
+                        ))
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("spawn membarrier spinner")
+                }))
+                .collect(),
+        );
+
+        const N: u32 = 1000;
+        let req = DeltaRequest {
+            caller_pid: my_pid,
+            target_id: domain,
+            new_scope_id: 0,
+            required_mask: 0,
+            add_restrict_mask: 1,
+            add_label_mask: 0,
+            add_gate_mask: 0,
+        };
+        for _ in 0..N {
+            loader.submit_delta(req).expect("submit_delta");
+        }
+
+        let _ = &mut spinners.0; // keep guard alive until here
+                                 // Let any in-flight drain settle before reading the counters.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let drops = cap_stat(3) - drop0;
+        let accepts = cap_stat(0) - accept0;
+        assert_eq!(
+            drops, 0,
+            "foreign getpid/membarrier drained cap_req and dropped deltas; \
+             only the declared submitter may drain"
+        );
+        assert_eq!(
+            accepts, N as u64,
+            "every self-triggered drain should admit its own delta"
+        );
+    }
+
+    /// The drain gate itself (#3021 follow-up 3): while OUR pid is the declared
+    /// pending submitter, a foreign membarrier(QUERY) storm must not even enter
+    /// the drain body (DRAIN stat frozen), and our own trigger must still drain
+    /// (DRAIN advances). Without the BPF-side gate the same storm drove DRAIN up
+    /// by millions within seconds (reproduced on kernel 6.6).
+    #[test]
+    #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
+    fn drain_gate_ignores_foreign_triggers() {
+        let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
+        let my_pid = std::process::id() as i32;
+        loader
+            .bind_state(
+                my_pid,
+                0x5eed,
+                CapState {
+                    parent: 0,
+                    scope_id: 0,
+                    labels: 0,
+                    authority_mask: u64::MAX,
+                    target_mask: u64::MAX,
+                    restrict_mask: 0,
+                    gate_mask: u64::MAX,
+                    label_mask: u64::MAX,
+                },
+            )
+            .expect("bind_state");
+
+        let cap_stat = |slot: u32| -> u64 {
+            let m: Array<_, u64> =
+                Array::try_from(loader.bpf.map("cap_stats").expect("cap_stats map"))
+                    .expect("open cap_stats");
+            m.get(&slot, 0).expect("read cap_stats slot")
+        };
+
+        // Declare ourselves as the pending submitter (production submits do
+        // this right before publishing to cap_req).
+        let pending = loader
+            .bpf
+            .map("cap_pending_submitter")
+            .expect("cap_pending_submitter map");
+        let pending_data = match pending {
+            Map::Array(data) => data,
+            Map::Unsupported(data) => data,
+            _ => panic!("cap_pending_submitter is not an array map"),
+        };
+        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd()).expect("declare intent");
+
+        struct Spinners(Vec<std::process::Child>);
+        impl Drop for Spinners {
+            fn drop(&mut self) {
+                for child in self.0.iter_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut spinners = Spinners(
+            (0..2)
+                .map(|_| {
+                    std::process::Command::new("python3")
+                        .arg("-c")
+                        .arg(concat!(
+                            "import ctypes, time\n",
+                            "libc = ctypes.CDLL(None, use_errno=True)\n",
+                            "t0 = time.time()\n",
+                            "while time.time() - t0 < 1.0: libc.syscall(324, 0, 0, 0)\n",
+                        ))
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("spawn membarrier spinner")
+                })
+                .collect(),
+        );
+
+        let drain0 = cap_stat(2);
+        for s in spinners.0.iter_mut() {
+            s.wait().expect("spinner exit");
+        }
+        let foreign_drains = cap_stat(2) - drain0;
+        assert_eq!(
+            foreign_drains, 0,
+            "foreign membarrier(QUERY) must not enter the drain body while a \
+             different pid holds the pending-submitter declaration"
+        );
+
+        // Our own trigger still drains (empty ringbuf, but the hook body runs).
+        let drain1 = cap_stat(2);
+        unsafe { libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0) };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            cap_stat(2) > drain1,
+            "the declared submitter's own trigger must still drain"
+        );
+    }
+
+    /// The drain-trigger event moved to `sys_enter_membarrier` (#3264), so a
+    /// pre-existing pin from an older binary must NOT be silently reused: its
+    /// `cap_drain_tick` link still listens on `sys_enter_getpid` while the new
+    /// binary self-triggers with membarrier, and every submission would miss.
+    /// The profile-marker version bump makes `pinned_engine_present` reject
+    /// the stale pin with a mismatch error (marked stale-layout so the caller
+    /// self-heals by rebuilding) instead.
+    ///
+    /// Plain fs-existence checks only — no root, no live BPF.
+    #[test]
+    fn pinned_engine_present_rejects_pre_membarrier_marker() {
+        let root = std::env::temp_dir().join(format!("actplane-pin-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = PinnedEnginePaths::new(&root);
+        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+
+        // Map names required by pinned_engine_present (mirrors its list).
+        for name in [
+            "rb",
+            "cap_req",
+            "cap_pending_submitter",
+            "cap_task",
+            "cap_state",
+            "cap_policy",
+            "ts_counts",
+            "ts_proc",
+            "ts_proc_domains",
+            "ts_root",
+            "te_protected_pids",
+            "te_inode_guard",
+        ] {
+            std::fs::write(paths.map(name), b"").expect("map pin");
+        }
+
+        // What an older binary pinned: the pre-bump marker name.
+        const PRE_MEMBARRIER_MARKER: &str =
+            "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
+        std::fs::write(paths.map(PRE_MEMBARRIER_MARKER), b"").expect("old marker pin");
+
+        let err = pinned_engine_present(&paths, HookReserve::default())
+            .expect_err("stale pin must be rejected");
+        assert!(
+            err.to_string().contains("pinned metadata mismatch"),
+            "expected mismatch error, got: {err}"
+        );
+
+        // The current marker must not collide with the old pin name, and with
+        // the current marker but no links the engine counts as absent (the
+        // caller reinstalls) — the guard has no false positive.
+        std::fs::remove_file(paths.map(PRE_MEMBARRIER_MARKER)).expect("remove old marker");
+        let current = HookReserve::default().profile_marker();
+        assert_ne!(current, PRE_MEMBARRIER_MARKER);
+        std::fs::write(paths.map(current), b"").expect("current marker pin");
+        assert!(!pinned_engine_present(&paths, HookReserve::default()).expect("present"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Upgrade residue (an older or aborted install) leaves maps pinned under
+    /// the root; the self-heal must remove the whole root so the reinstall
+    /// does not hit `BPF_OBJ_PIN` EEXIST (#3445).
+    #[test]
+    fn remove_stale_pin_root_deletes_existing_root() {
+        let root = std::env::temp_dir().join(format!("actplane-pin-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = PinnedEnginePaths::new(&root);
+        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+        std::fs::write(paths.map("ts_proc_domains"), b"").expect("stale map pin");
+
+        remove_stale_pin_root(&paths).expect("remove stale root");
+        assert!(!paths.root.exists(), "stale root must be gone");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Fresh installs have no root at all; the self-heal must stay a no-op
+    /// rather than fail or create the directory.
+    #[test]
+    fn remove_stale_pin_root_noop_when_absent() {
+        let root =
+            std::env::temp_dir().join(format!("actplane-pin-stale-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = PinnedEnginePaths::new(&root);
+
+        remove_stale_pin_root(&paths).expect("absent root is a no-op");
+        assert!(!paths.root.exists(), "no-op must not create the root");
+    }
+
+    /// A populated directory that is not a pin root layout (no `maps/` or
+    /// `links/` child) must be refused: a mis-set `ACTPLANE_BPF_PIN_ROOT`
+    /// points the self-heal at an unrelated directory, and deleting it would
+    /// destroy data instead of converging the engine.
+    #[test]
+    fn remove_stale_pin_root_refuses_non_pin_layout() {
+        let root =
+            std::env::temp_dir().join(format!("actplane-pin-stale-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("foreign dir");
+        std::fs::write(root.join("payload.txt"), b"").expect("foreign payload");
+        let paths = PinnedEnginePaths::new(&root);
+
+        let err = remove_stale_pin_root(&paths).expect_err("foreign dir must be refused");
+        assert!(
+            err.to_string().contains("refusing to remove"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            root.join("payload.txt").exists(),
+            "foreign payload must survive"
+        );
+
+        // An empty directory is harmless to clear.
+        std::fs::remove_file(root.join("payload.txt")).expect("clear payload");
+        remove_stale_pin_root(&paths).expect("empty dir is safe to clear");
+        assert!(!root.exists(), "empty dir must be gone");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A marker/profile mismatch must be distinguishable from genuine I/O
+    /// failures: the self-heal rebuilds only on `InvalidData`. Reverting the
+    /// error kind makes this fail even though the message stays similar.
+    #[test]
+    fn pinned_engine_present_mismatch_is_marked_stale_layout() {
+        let root = std::env::temp_dir().join(format!("actplane-pin-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = PinnedEnginePaths::new(&root);
+        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+        for name in [
+            "rb",
+            "cap_req",
+            "cap_pending_submitter",
+            "cap_task",
+            "cap_state",
+            "cap_policy",
+            "ts_counts",
+            "ts_proc",
+            "ts_proc_domains",
+            "ts_root",
+            "te_protected_pids",
+            "te_inode_guard",
+        ] {
+            std::fs::write(paths.map(name), b"").expect("map pin");
+        }
+        // Any name that is not the current marker forces the mismatch branch.
+        std::fs::write(paths.map("agentsight_profile_obsolete_v0"), b"").expect("old marker");
+
+        let err = pinned_engine_present(&paths, HookReserve::default())
+            .expect_err("mismatched marker must be rejected");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "mismatch must be marked as a stale layout, got: {err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pin whose BPF object predates the drain gate has no
+    /// `cap_pending_submitter` map even though the marker names match: the
+    /// presence check must treat the engine as absent (trigger reinstall)
+    /// instead of accepting a pin that `reload_handle()` would then reject on
+    /// every start — the failure mode an attested build without the gated
+    /// object would install (#3264 review).
+    #[test]
+    fn pinned_engine_present_requires_gate_map() {
+        let root = std::env::temp_dir().join(format!("actplane-pin-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = PinnedEnginePaths::new(&root);
+        std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+
+        for name in [
+            "rb",
+            "cap_req",
+            "cap_task",
+            "cap_state",
+            "cap_policy",
+            "ts_counts",
+            "ts_proc",
+            "ts_proc_domains",
+            "ts_root",
+            "te_protected_pids",
+            "te_inode_guard",
+        ] {
+            std::fs::write(paths.map(name), b"").expect("map pin");
+        }
+        let current = HookReserve::default().profile_marker();
+        std::fs::write(paths.map(current), b"").expect("marker pin");
+
+        assert!(
+            !pinned_engine_present(&paths, HookReserve::default()).expect("present"),
+            "missing cap_pending_submitter must count the engine as absent"
+        );
+
+        std::fs::write(paths.map("cap_pending_submitter"), b"").expect("gate map pin");
+        assert!(
+            !pinned_engine_present(&paths, HookReserve::default()).expect("present"),
+            "map check passed; still absent because no links exist"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

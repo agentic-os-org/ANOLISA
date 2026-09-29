@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.skill_ledger.activation_policy import (
-    ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_ACTIVATION_POLICY,
     validate_activation_policy,
 )
@@ -115,7 +114,7 @@ def resolve_activation(
 
     Runtime exposure has one behavior branch: activate a trusted ``pass`` or
     ``warn`` snapshot unless a user decision explicitly allows or blocks a
-    version. Legacy policy strings are normalized before they are reported.
+    version. Retired policy strings are rejected.
     """
     policy = validate_activation_policy(policy)
 
@@ -162,19 +161,6 @@ def resolve_activation(
         "activationPath": str(activation_json_path(root.canonical_dir)),
         "activationXattr": activation_xattr,
     }
-
-
-@canonical_skill_operation
-def find_latest_pass_snapshot(
-    skill_dir: SkillRootInput,
-    backend: SigningBackend,
-) -> tuple[str, str] | None:
-    """Compatibility shim for the ``pass_only`` activation policy."""
-    return find_latest_activation_snapshot(
-        skill_dir,
-        backend,
-        policy=ACTIVATION_POLICY_PASS_ONLY,
-    )
 
 
 @canonical_skill_operation

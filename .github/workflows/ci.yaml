@@ -122,7 +122,7 @@ jobs:
           BLAZE=false
 
           # Path-based detection
-          if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
+          if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
             COPILOT_SHELL=true
           fi
           if echo "$CHANGED" | grep -q "^src/agent-sec-core/"; then
@@ -140,7 +140,7 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
             AGENT_MEMORY=true
           fi
-          if echo "$CHANGED" | grep -q "^src/anolisa/"; then
+          if echo "$CHANGED" | grep -q "^distribution/anolisa/"; then
             ANOLISA=true
           fi
           if echo "$CHANGED" | grep -q "^src/skillfs/"; then
@@ -257,33 +257,33 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - name: Install dependencies
-        run: cd src/copilot-shell && npm ci
+        run: cd deprecated/copilot-shell && npm ci
 
       - name: Check formatting
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm run format
           git diff --exit-code
 
       - name: Lint
-        run: cd src/copilot-shell && npm run lint:ci
+        run: cd deprecated/copilot-shell && npm run lint:ci
 
       - name: Build
-        run: cd src/copilot-shell && npm run build
+        run: cd deprecated/copilot-shell && npm run build
 
       - name: Type check
-        run: cd src/copilot-shell && npm run typecheck
+        run: cd deprecated/copilot-shell && npm run typecheck
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-dist-nodejs20
           path: |
-            src/copilot-shell/packages/*/dist/**/*
-            src/copilot-shell/package-lock.json
+            deprecated/copilot-shell/packages/*/dist/**/*
+            deprecated/copilot-shell/package-lock.json
           retention-days: 1
 
   # =========================================================================
@@ -301,7 +301,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
@@ -310,13 +310,13 @@ jobs:
 
       - name: Install and build
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm ci
           npm run build
 
       - name: Run cli tests
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/cli
 
   test-copilot-shell-core:
@@ -331,7 +331,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/copilot-shell/package-lock.json
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
@@ -340,13 +340,13 @@ jobs:
 
       - name: Install and build
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           npm ci
           npm run build
 
       - name: Run core tests
         run: |
-          cd src/copilot-shell
+          cd deprecated/copilot-shell
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/core
 
   # =========================================================================
@@ -486,6 +486,7 @@ jobs:
         run: |
           cd src/agent-sec-core/v2
           cargo test --workspace --locked
+          cargo doc --workspace --no-deps --locked
 
       - name: Run Rust tests with coverage
         run: |
@@ -527,7 +528,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.23.2'
 
       - name: Run openclaw-plugin tests with coverage
         run: |
@@ -696,6 +697,10 @@ jobs:
         working-directory: src/agentsight/dashboard
         run: npm run test:i18n
 
+      - name: Run dashboard navigation regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:navigation
+
       - name: Install eBPF build dependencies
         run: |
           sudo apt-get update
@@ -711,6 +716,12 @@ jobs:
         run: |
           cd src/agentsight
           python3 scripts/check-arch-boundaries.py
+
+      - name: Check SQLite entry points
+        run: |
+          cd src/agentsight
+          python3 scripts/check-sqlite-entrypoints.py --self-test
+          python3 scripts/check-sqlite-entrypoints.py
 
       - name: Lint
         run: |
@@ -914,6 +925,11 @@ jobs:
       - name: Install RTK Rust toolchain
         run: rustup toolchain install 1.91.0 --profile minimal
 
+      - name: Test bundled RTK integration
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: make -C src/tokenless test-rtk-integration
+
       - name: Build and test Tokenless Python packages
         env:
           RUSTUP_TOOLCHAIN: '1.91.0'
@@ -925,8 +941,18 @@ jobs:
         with:
           node-version: '20'
 
+      # Adapter lifecycle tests (install / detect / uninstall for openclaw,
+      # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
+      # which no CI job ever called: a broken adapter installer only showed
+      # up on a developer machine. They need node (the openclaw plugin build
+      # plus two `node --test` suites) and python3 (installer probes), both
+      # already set up above.
+      - name: Test adapter installers
+        run: |
+          make -C src/tokenless test-adapters
+
       - name: npm packaging smoke test (native Linux)
-        # rtk v0.43.0 declares rust-version = "1.91", above the 1.89.0 pin
+        # rtk v0.49.0 declares rust-version = "1.91", above the 1.89.0 pin
         # used by the workspace MSRV checks earlier in this job. Packaging
         # runs on its own 1.91 toolchain while the MSRV pin stays intact.
         env:
@@ -991,6 +1017,14 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run OpenClaw script tests
+        working-directory: src/ws-ckpt
+        run: make test-openclaw-scripts
+
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
@@ -999,10 +1033,6 @@ jobs:
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
       # ── Plugin tests + coverage gates ───────────────────────────────────
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: OpenClaw plugin coverage gate (≥90%)
         working-directory: src/ws-ckpt/src/plugins/openclaw
         run: |
@@ -1070,6 +1100,17 @@ jobs:
           cd src/agent-memory
           cargo test --locked
 
+      - name: Setup Node.js (agent-memory plugin tests)
+        uses: actions/setup-node@v4
+        with:
+          # Match the packaging suite's OpenClaw runtime requirement.
+          node-version: '22.23.2'
+
+      - name: Test OpenClaw plugin (TypeScript unit suite)
+        run: |
+          cd src/agent-memory
+          make test-openclaw-plugin
+
   # =========================================================================
   # Step 9: Test anolisa (Rust workspace)
   # =========================================================================
@@ -1091,7 +1132,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src/anolisa
+          workspaces: distribution/anolisa
 
       - uses: actions/setup-node@v4
         with:
@@ -1099,41 +1140,41 @@ jobs:
 
       - name: Validate npm packaging
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           node npm/tests/platforms.test.js
           node npm/scripts/package-npm.js --validate
 
       - name: Validate nightly E2E harness
         run: |
-          bash -n src/anolisa/tests/nightly/raw-lifecycle.sh
-          src/anolisa/tests/nightly/raw-lifecycle.sh --list
+          bash -n distribution/anolisa/tests/nightly/raw-lifecycle.sh
+          distribution/anolisa/tests/nightly/raw-lifecycle.sh --list
           REPO_CONFIG=$(mktemp)
           trap 'rm -f "$REPO_CONFIG"' EXIT
-          cp src/anolisa/manifests/repo.toml "$REPO_CONFIG"
+          cp distribution/anolisa/manifests/repo.toml "$REPO_CONFIG"
           ANOLISA_E2E_REPO_CONFIG_PATH="$REPO_CONFIG" \
             ANOLISA_RAW_REPO_URL="https://mirror.example.com/raw/v1/" \
-            src/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
+            distribution/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
           grep -Fx 'base_url = "https://mirror.example.com/raw/v1/"' \
             "$REPO_CONFIG"
 
       - name: Check formatting
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo fmt --all --check
 
       - name: Lint
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run documentation tests
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           cargo test --workspace --doc --locked
 
       - name: Run tests with coverage
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           mkdir -p coverage
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --all-targets --locked --no-report
@@ -1147,7 +1188,7 @@ jobs:
       - name: Publish coverage summary
         id: coverage
         run: |
-          cd src/anolisa
+          cd distribution/anolisa
           LINE_COVERAGE=$(node -e '
             const report = require("./coverage/coverage.json");
             process.stdout.write(String(report.data[0].totals.lines.percent));
@@ -1165,7 +1206,7 @@ jobs:
             printf '| Lines | **%.2f%%** |\n' "$LINE_COVERAGE"
             printf '| Functions | %.2f%% |\n' "$FUNCTION_COVERAGE"
             echo ""
-            echo "Coverage is reported for the full \`src/anolisa\` Rust workspace."
+            echo "Coverage is reported for the full \`distribution/anolisa\` Rust workspace."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage reports
@@ -1174,8 +1215,8 @@ jobs:
         with:
           name: anolisa-coverage
           path: |
-            src/anolisa/coverage/coverage.json
-            src/anolisa/coverage/lcov.info
+            distribution/anolisa/coverage/coverage.json
+            distribution/anolisa/coverage/lcov.info
           if-no-files-found: warn
           retention-days: 14
 
@@ -1253,15 +1294,22 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep zsh
 
       - name: Run process and PTY integration tests
         env:
+          # ZLE must decode the Unicode fixtures independently of runner locale.
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
           # Libtest still schedules 16 workers, while the harness gate bounds
           # live PTY sessions to avoid oversubscribing loaded CI runners.
           COSH_RAW_CLI_TEST_PARALLELISM: '8'
         run: |
           cd src/cosh-ng
+          bash --version
+          zsh --version
+          locale
+          test "$(locale charmap)" = UTF-8
           scripts/run-test-gates.sh integration
 
   test-cosh-ng-fast:

@@ -1,0 +1,16 @@
+version: 1
+policy: |
+  rule old:
+    kill exec "git"
+    because "old"
+rules:
+  new:
+    ifc: |
+      rule new:
+        kill exec "git"
+        because "new"
+domains:
+  session:
+    bind:
+      - rule: new
+        mode: locked

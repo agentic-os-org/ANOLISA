@@ -1,0 +1,7 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule migrate-checked:
+    block write file "**/prod.db" if AGENT unless after exec "**/migrate-check" since write "migrations/**"
+    because "migration-check must see the current migrations"

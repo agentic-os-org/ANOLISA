@@ -2,10 +2,11 @@
 
 | 属性 | 值 |
 | --- | --- |
-| 状态 | **[PROPOSAL]**，尚未构成迁移 contract freeze |
+| 状态 | 整体为 **[PROPOSAL]**；§5.4、§7.4.1、§13.1–13.2 记录已实现的共享基础设施切片，其余目标不因此自动完成 |
 | 设计日期 | 2026-08-21 |
 | 目标 tracing 决策日期 | 2026-08-25 |
-| 当前实现核对提交 | `fe58ed4b23b8` |
+| 原提案核对提交 | `fe58ed4b23b8` |
+| 共享基础设施实现基线 | `d940a663066499d875f951d37b8da5df3e3cd9ea`，2026-09-16 工作区验收见 §13.1 |
 | 适用范围 | V1 middleware 行为到 V2 asc-action-runtime/CapabilityExecutor 的迁移，以及 SecurityEvent、诊断日志、trace 和 telemetry |
 
 ## 1. 结论
@@ -130,6 +131,9 @@ Rust 应先构造 immutable `FinalizedInvocation`，再做三个有边界的 pro
 
 ### 4.1 ActionId 与 typed request
 
+**实现范围：** 当前 V2 `ActionId` 包含 `CodeScan` 和 `PiiScan`。下面八个 action 的 enum
+是迁移完成后的目标示意，不是当前支持清单；其余 action 须随各自能力实现再加入代码。
+
 八个 action 使用封闭的 `ActionId`，每个 action 定义自己的 request/output 类型。adapter
 完成 transport/binding envelope 校验后，把固定 `ActionId`、context 和有大小限制的 raw
 action params 交给 core ingress；action module 的 decoder 再生成 typed request：
@@ -171,8 +175,6 @@ enum SecurityRequest {
 ```rust
 struct ExecutionContext {
     operation_id: OperationId,
-    process_invocation_id: Option<String>,
-    agent: AgentContext,
     caller: CallerAttribution,
     principal: Principal,
     accepted_at: SystemTime,
@@ -180,32 +182,26 @@ struct ExecutionContext {
     cancellation: CancellationToken,
 }
 
-struct AgentContext {
-    agent_name: Option<String>,
-    session_id: Option<String>,
-    run_id: Option<String>,
-    call_id: Option<String>,
-    tool_call_id: Option<String>,
-}
 ```
 
 语义要求：
 
 - `operation_id` 每次逻辑调用唯一，由 adapter 接受后或 core ingress 生成；
-- `process_invocation_id` 承接当前 Python `invocation_id`，不与 operation ID 混用；
+- 不再要求生成/承接独立的 process invocation ID；纯请求/日志关联使用 SDK TraceId/SpanId，
+  旧显式关联标签仅在兼容投影中处理；
 - `caller` 仅作 attribution，不能作授权；
 - `principal` 来自可信 adapter，例如 daemon peer UID 或本地进程 identity；
-- Agent 业务字段显式传递，不依赖 ambient global；缺失时保持 absent，不生成伪造的
-  session/run/call/tool-call identity；
+- Agent 关联字段保存在同一 OTel Context 的 Baggage 中，在执行边界显式绑定/传播，普通业务
+  函数不重复传 AgentContext；缺失时保持 absent，不生成伪造的 session/run/call/tool-call identity；
 - OTel `Context/SpanContext` 不作为普通业务字段塞入 `ExecutionContext`，也不由 core
   手工构造字符串 ID；adapter 在边界提取/创建并激活标准上下文，instrumented future 在
   async 调用链中传播；
 - deadline 与 cancellation 分开，timeout 不自动证明 backend 已停止。
 
-V1 等价窗口需要的 opaque `trace_id` 只能放在隔离的、migration-only
-`V1CompatibilityProjectionInput` 中，供 SecurityEventV1/diagnostic V1 projector 使用；
-它不得进入 backend request、OTel span attributes 或 V2 event，并在 V2 cutover 后删除。
-这样可以通过当前 oracle，而不让 legacy trace 成为目标 `ExecutionContext` 的长期字段。
+V1 等价窗口需要的 caller opaque `trace_id` 放在同一 OTel Context 的有界兼容 extension 中，
+供 SecurityEventV1/diagnostic V1 projector 使用；不进入 backend request 或 OTel span attributes。
+历史查询与显式标签检索能力必须保留，兼容投影只能在相应接口明确退役后移除。
+具体归一化、传播及 ID 简化记录见第 7.3 节链接的实现设计；这些是目标机制更新，不改写 V1 事实。
 
 ### 4.3 ActionSpec
 
@@ -307,7 +303,12 @@ Running  -> Completed | ProductFailed | CoreFailed | CallerDetached
 ```
 
 `CallerDetached` 只描述调用方不再等待，不能直接作为 backend 的最终执行结果。如果 work
-可能继续，supervisor 仍拥有它，并在真正完成后进入 `Finalizing`。
+可能继续且 daemon 仍在运行，supervisor 仍拥有它，并在真正完成后进入 `Finalizing`。
+
+SIGTERM/SIGINT 不是 `CallerDetached`：按 V1 兼容的 bounded drain，daemon 停止接收后只在
+配置的 drain deadline 内等待；deadline 后仍未完成的 task 可以被 abort，因而不保证产生
+最终 SecurityEvent。该进程退出边界由
+[`DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md`](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md) 定义。
 
 ### 5.2 唯一 finalizer
 
@@ -334,12 +335,103 @@ route 失败是否产生 SecurityEvent 继续保持当前规则：未知 action 
 ### 5.3 invocation ownership
 
 daemon 中 accepted invocation 应由 supervisor 拥有，而不是由 socket handler future 的生存期
-隐式拥有。这样客户端 EOF、response timeout 或 task cancellation 不会让正在执行的 backend
-和最终 audit 无主。
+隐式拥有。这样**daemon 仍在运行期间**的客户端 EOF、response timeout 或 task cancellation
+不会让正在执行的 backend 和最终 audit 无主。该保证不跨越 V1 兼容的 bounded shutdown：drain
+截止后，尚未完成的 task 可以被 abort，最终 audit 是 best-effort 而非持久化交付保证。
 
 是否允许调用方 timeout 后 operation 继续、是否提供 status recovery、以及哪些 action 可以
 协作取消，必须由 `ActionSpec`/daemon `MethodSpec` 逐 action 冻结。没有 operation status 的
 V1 client 不得自动重放执行状态不明的有副作用 action。
+
+### 5.4 已实现的共享生命周期
+
+`asc-action-runtime` 的 lifecycle 与 Finalizer 是所有扫描 capability 共用的基础设施，
+由 runtime 隐式完成终态处理，具体 capability 和 handler 不拥有 sink。
+当前 code-scan 与 PII scan 均已接入。PII 的共享请求类型、应用入口、安全参数拒绝及
+标量遥测复用本节机制，具体迁移与验收见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+下述共享基础设施的原始验收记录保留其当时的 code-scan 范围，不代替 PII 的直接消费者验收。
+其它扫描能力在各自提交中添加 identity、Executor、投影与注册，复用本节的装配与执行路径。
+
+以下为 **[TARGET V2][PARTIAL_MIGRATION]** 的实际实现，不表示 §5.1 的完整目标状态机、
+Supervisor 或 OTel 已完成。
+
+#### 工作包与验收边界
+
+- 基线：与 `oss/main` 对齐的 `main`，`d940a663066499d875f951d37b8da5df3e3cd9ea`。
+- V1 关系：`PARTIAL_MIGRATION`，迁移共享生命周期和 scan telemetry 行为。
+- 验收：公共生命周期 fixture 等价 + code-scan 直接消费者 + 真实进程持久化切片。
+- 权威合同：[Middleware](SECURITY_MIDDLEWARE_CONTRACT_zh.md)、
+  [Daemon 部署](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md)、
+  [Telemetry 字段与门控](telemetry-security-event-sync.md)。
+- 本切片不声明完整 SMC-012/OTel、Prompt/PII 算法、observability 查询、RPM/systemd、
+  uploader 交付或断电恢复已验收。`ActionOutcome` 仍是现有五字段模型；CLI stdout 由 wire
+  result 渲染，不新增 V1 `stdout` 字段。PAP 仍使用 process-local Repository。
+
+#### 装配与调用
+
+```mermaid
+flowchart TD
+    Startup[asc-daemon startup] --> Sinks[Audit + Telemetry + Diagnostic sinks]
+    Sinks --> Finalizer[Shared Finalizer]
+    Finalizer --> Registration[actions.rs: capability runtime registration]
+    Registration --> Service[daemon-core ActionService]
+    Handler[RPC handler] --> Service
+    Service --> Runtime[ActionRuntime.invoke]
+    Runtime --> Executor[CapabilityExecutor]
+    Executor --> Finalize[Common terminal finalization]
+    Finalize --> Audit[SecurityEvent JSONL + SQLite]
+    Finalize --> Telemetry[Allowlisted telemetry JSONL]
+```
+
+| 位置 | 所有权与职责 |
+| --- | --- |
+| `v2/apps/asc-daemon/src/main.rs`、`sinks.rs` | system-owned 路径、具体 sink、共享 Finalizer；安装不输出 panic payload 的进程 hook |
+| `v2/apps/asc-daemon/src/actions.rs` | 唯一生产 capability inventory；把 Executor、AuditProjector 和共享 Finalizer 组成 runtime |
+| `v2/crates/asc-daemon-core/src/action.rs` | 接收内核来源的 PeerCredentials 并生成 caller attribution；scan handler/core 不接收角色，code scan 不按角色或 UID allowlist 限制调用；调用共享 runtime |
+| `v2/crates/asc-daemon-handler/src/action.rs` | DTO decode、控制信息适配、application 调用、wire projection；不构造 runtime/finalizer/sink |
+| `v2/crates/asc-action-runtime/src/{runtime,finalizer,ports}.rs` | timing、execution、terminalization、独立输出尝试和受控错误 |
+| `v2/crates/asc-telemetry/` | scan 共同字段、严格 allowlist、部署门控配置；不依赖具体 scanner |
+| `v2/crates/asc-event-sink/src/{configured,telemetry}.rs` | audit 双写和独立 telemetry writer |
+
+新增 capability 必须提供 Executor 与安全 AuditProjector，在 composition root 注册后通过
+core application operation 调用。handler 和 capability 不直接依赖具体 writer。
+`DaemonDispatcher::new` 必须显式接收 Action application，不再默认安装 no-op finalizer。
+handler 直接持有 `Arc<ActionService>`；service 独占已注册的 `Invocation`，不增加重复的
+application trait。JSONL writer 构造不访问文件系统，直接由 sink 持有；实际 I/O 仍在
+warm/write 时执行，失败后可继续尝试，SQLite 保留独立的延迟初始化。
+测试通过 `asc-action-runtime/testing` 显式选择丢弃输出；生产 constructor 没有该默认行为。
+
+code scan 的访问条件是调用方能连接 UDS；共享 dispatcher 的 `AccessPolicy::LocalUser`
+分支直接允许调用。内核 peer UID/PID 用于可信审计归属，不构成额外扫描权限门槛。
+PAP 的 `PolicyAdministrator` 检查独立保留，不能把 PAP 管理权限套用到扫描能力。
+
+#### 生命周期与同步边界
+
+1. `invoke` 记录安全的 started diagnostic，并开始 monotonic timing。
+2. 调用 executor；`warn/deny` 是业务 verdict，不自动转为执行失败。
+3. 调用 capability AuditProjector。投影失败时使用无原始输入/输出的最小审计详情，
+   保留原执行结果，并输出 `audit_projection_failed`。
+4. 由 Finalizer 构造唯一终态 SecurityEvent，尝试 JSONL、SQLite，再独立尝试 telemetry。
+5. 输出 completed diagnostic（`duration_ms` 含执行与输出尝试），返回原结果。
+
+扫描自身的 `details.result.elapsed_ms` 原样保留，telemetry 的 `seccore.elapsed_ms` 仍取该值，
+不替换为 whole-invocation duration。诊断使用 stderr/journald 的安全结构化记录，本切片
+没有宣称迁移 V1 完整的 `cli.jsonl` / `daemon.jsonl` 诊断 stream。
+
+执行发生 unwind 时，runtime 发出一条最小 Failed audit 和失败 telemetry，然后返回受控
+`InvokeError`；handler 映射为 `internal` / `capability execution failed`。不记录原始 panic
+payload；进程 panic hook 仅在 stderr 输出固定错误标签和可用的源码 file:line:column，
+缺少 location 时保留固定标签。OOM、abort、SIGKILL 和进程退出不在 unwind recovery 保证内。audit projector/sink、
+telemetry gate/projector/sink、diagnostic callback 各自隔离 unwind；不得改写业务 outcome。
+
+所有输出在请求的 `spawn_blocking` worker 中同步尝试，没有后台队列。正常 response 产生前
+已经完成尝试；`audit_attempted` 不表示 insert 成功，底层 best-effort drop diagnostic 保持独立。
+JSONL 和 SQLite 不是跨介质事务，任一失败不抑制另一介质或 telemetry。
+
+transport deadline/断连结束 caller 等待不等于杀死 blocking work；进程仍运行时，该 invocation
+完成后仍执行一次 finalization。`ExecutionControl.cancelled` 仍是入口快照，当前 regex scanner
+未实现中途取消，本切片不伪称新增了 cooperative cancellation。graceful drain 内完成的请求
+正常 finalization；超过现有 drain/runtime shutdown 上限的工作可能被进程退出中断。
 
 ## 6. CapabilityExecutor 与 audit projector
 
@@ -422,10 +514,13 @@ trace_id, span_id, pid, uid, session_id, run_id, call_id, tool_call_id, details
 诊断日志使用固定结构化字段：
 
 ```text
-operation_id, request_id, action, caller, execution_class,
+operation_id, request_span_id, action, caller, execution_class,
 queue_ms, duration_ms, execution_status, decision, error_code,
 trace_id, span_id
 ```
+
+`request_span_id` 是已有请求 span 的 SDK 身份引用，用于在未导出 trace 时聚合子日志；
+不是另行生成的 request ID。公开协议仍需要的 `requestId` 通过兼容字段投影保留。
 
 V2 的 `trace_id/span_id` 只能从当前 OTel `SpanContext` 注入；日志代码不得自行生成、
 解析或覆盖。Agent/security 语义使用固定 namespace 的 span/log attributes，不能与标准
@@ -448,13 +543,24 @@ health counter，例如 `security_event_write_failed_total`、`telemetry_write_f
 
 ### 7.3 Rust tracing
 
+具体落地方案见
+[V2 原生 OpenTelemetry 上下文与 tracing 实现设计](V2_OTEL_IMPLEMENTATION_DESIGN_zh.md)。
+该实现提案细化 OTel Context + Agent Baggage、无上游请求的 root span、Rust context activation、
+PAP 首期 span 范围，以及 V1 用户能力等价门禁。仅用于关联的 invocation/诊断 request ID 可由
+SDK trace/span 替代，不要求复刻 V1 内部机制；公开字段、显式旧标签和查询能力按兼容记录迁移。
+新增 carrier、字段界限和配置仍需在实施时进入相关行为契约与可执行 fixtures；
+基础设施完成不等于 V1 用户能力迁移完成，当前也尚未实现这些目标。
+该 tracing 工作包只约定下游适配：caller 继续提供 metadata，入口归入统一 OTel Context；
+observability 消费者读取当前 Context，并按接口校验必需字段。输入适配、只读投影和采样隔离
+见实现设计第 9.4 节；本地 Agent 链路重组及其记录/存储/查询实现属于独立工作包。
+
 **[TARGET V2]** 使用 `tracing` 产生 structured span/event，并通过 OpenTelemetry bridge
 统一技术 tracing：
 
 - daemon 路径至少形成 `daemon.request -> security.invoke -> security.capability` 的父子
   关系；合法上游 carrier 作为 daemon request 的 parent，无上游时 daemon request 为 root；
 - queue、backend、event persistence 可以继续细分 child span；
-- span 只记录第 7.2 节的安全字段；
+- span 属性遵守第 7.2 节的安全规则，各模块可按操作语义定义有界字段；
 - request-bearing function 不得直接使用会记录参数 `Debug` representation 的默认
   [`#[instrument]`](https://docs.rs/tracing/latest/tracing/attr.instrument.html)；使用 `skip_all`
   后显式列字段；
@@ -462,8 +568,8 @@ health counter，例如 `security_event_write_failed_total`、`telemetry_write_f
   [`Span::enter()`](https://docs.rs/tracing/latest/tracing/struct.Span.html#method.enter) guard；
 - asc-daemon 进程只建立一个 OTel SDK/provider 生命周期；未配置 exporter 时也必须创建
   有效 root TraceId/SpanId，不能退化回自定义 UUID trace；
-- ingress 收到合法 `traceparent/tracestate` 时提取 parent context；缺失或不合法时创建
-  新 root trace，并只记录 bounded diagnostic reason；
+- ingress 收到合法 `traceparent` 时接续 parent，非法 `tracestate` 只清除 state；
+  parent 缺失或不合法时创建新 root，并只记录 bounded diagnostic reason；
 - 跨进程 transport 边界（例如 CLI client -> daemon UDS）使用 propagator 注入新的
   `traceparent/tracestate`，不单独传 raw `trace_id`；daemon -> in-process core 通过
   active context 传播，不重复序列化 carrier；
@@ -499,6 +605,34 @@ Telemetry 继续从已经 sanitized 的 `SecurityEventV1` 与 `SafeInvocationMet
 
 Telemetry projector 与 event projector 可以共享 enum 和字段定义，但不得共享开放式
 `serde_json::Value` 容器。新增 backend output 字段不会自动进入 telemetry。
+
+### 7.4.1 已实现的 telemetry sink
+
+共享 Finalizer 按固定 allowlist 从 finalized outcome 投影 telemetry，与审计投影/写入独立。
+当前五字段 `ActionOutcome` 仍包含 capability result Map；只有明确选择的标量可进入封闭的
+`TelemetryRecord`。这记录当前实现边界，不表示上方目标 typed observation 模型已经落地。
+
+- 默认目标 `/var/log/anolisa/sls/ops/agent-sec-core.jsonl`，支持既有
+  `AGENT_SEC_TELEMETRY_LOG_PATH`；生产 sentinel 固定为 `/etc/anolisa/.telemetry_disabled`。
+- 在构造 telemetry record 前检查 sentinel 和已有 regular-file 目标；writer 在 append 前
+  再检查 sentinel。sentinel 存在（含 dangling symlink）或非 ENOENT 检查失败均停写。
+- telemetry 文件的创建、权限、轮转和清理由 telemetry infrastructure 管理；sink 仅向已有文件追加。
+- V2 有意收紧 V1 的 symlink 行为：目标检查使用 `symlink_metadata`，每次 open 加
+  `O_NOFOLLOW`，拒绝最终路径分量为 symlink（包括 dangling symlink 或检查后替换）。
+  此约束不扩展为祖先目录的 ownership/mode 或 symlink 校验。
+- 不创建目录、目标、lock 文件或备份，不轮转，不排队重试；线程锁和目标 fd flock 均非阻塞。
+  每次 fresh open；处理 interrupted/short write；关闭 fd 释放锁。非 regular-file 目标拒绝。
+- 固定 component、action/category/result/timestamp；scan 只额外投影四种 verdict 和合法
+  非负 `elapsed_ms`；执行失败可带合法 `error_type` 和整数 `exit_code`。
+- code/prompt/PII、evidence、path、原始 error、correlation、未知扩展字段不进入 telemetry。
+- Projector 从相同 finalized outcome 取 allowlisted 字段，不依赖 audit projector 或落库成功。
+  这是 V2 的失败隔离增强；正常投影输出与 V1 scan mapper 等价。
+- 共享 Finalizer 在调用任何 sink 前读取一次当前请求 Context；构造 SecurityEvent 时注入
+  session/run/call/tool-call 和 opaque 兼容 trace 标签，构造 TelemetryRecord 时使用同一快照的
+  白名单 Agent product。invocation 仅显式传递可信 CallerIdentity，无 correlation 参数；sink 只写入完整记录。
+  缺失字段保持空值，不把 SDK TraceId 或 daemon request ID 当作现有 event 的 opaque trace_id。
+- `written` 只表示完整 append；`skipped` 表示 policy/目标/锁导致跳过；`failed` 表示写入失败。
+  这些状态不改变 capability 结果，也不意味着 fsync 或远端上传完成。
 
 ## 8. Event sink 与持久化
 
@@ -551,8 +685,9 @@ Tokio [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocki
 - 已开始的 blocking work 只能通过 backend 自己的 cooperative cancellation、外部进程终止
   或等待完成处理；
 - response timeout 后不能声称副作用未发生；
-- supervisor 必须保留 operation ownership 和最终 audit；
-- shutdown 要区分停止接收、等待 cooperative task、处理不可中断 work 和最终超时。
+- daemon 仍在运行时 supervisor 必须保留 operation ownership 和最终 audit；
+- shutdown 要区分停止接收、等待 cooperative task、处理不可中断 work 和最终超时；V1 兼容的
+  bounded drain 截止后允许 abort，不能承诺该边界外仍有最终 audit。
 
 这也是不建议直接把通用 Tower timeout 包在整个 core lifecycle 外的原因：Tower
 [`Service`](https://docs.rs/tower/latest/tower/trait.Service.html) 的 response future 被丢弃不
@@ -586,8 +721,9 @@ daemon handler：
 6. 把 core compatibility result 投影为 V1 `data/stdout/stderr/exit_code`；
 7. 不写第二条 action SecurityEvent。
 
-daemon `request_id`、core `operation_id`、process invocation ID 和 SecurityEvent `event_id` 必须
-有明确关系，但不应因为字段名称相近而复用同一语义。
+请求和日志的技术关联统一使用 SDK TraceId/SpanId，不强制保留独立 process invocation ID。
+当前公开 daemon `requestId` 按协议兼容迁移；具有业务生命周期职责的 core `operation_id` 与
+SecurityEvent `event_id` 保留自身身份，不因采用 OTel 而取消。字段替代须记录实际消费者及关联验收。
 
 query handler 必须把客户端 filter 与服务端 `QueryScope` 求交；CLI/TUI 不得绕过该 adapter
 直读 SQLite、Compiler 或 PCP。
@@ -599,17 +735,17 @@ module/crate 边界必须落在仓库迁移总计划定义的目标 workspace �
 ```text
 apps/asc-daemon/                         # process/composition root
 apps/asc-cli/                            # daemon client
-crates/daemon/asc-daemon-protocol/       # versioned wire contracts
-crates/daemon/asc-daemon-service/        # protocol-independent UDS transport
-crates/daemon/asc-daemon-handler/        # inbound protocol/application adapter
-crates/daemon/asc-daemon-core/           # application use cases
-crates/action/asc-action-types/          # ActionId/request/result
-crates/action/asc-evidence-types/        # Evidence/Attribute contracts
-crates/action/asc-action-runtime/        # supervisor/lifecycle/finalizer/ports
-crates/action/capabilities/asc-capability-*/
-crates/data/asc-security-events/         # event domain and Repository port
-crates/data/asc-observability/           # trajectory/read model/effect evidence
-crates/data/persistence/asc-persistence-sqlite/
+crates/asc-daemon-protocol/       # versioned wire contracts
+crates/asc-daemon-service/        # protocol-independent UDS transport
+crates/asc-daemon-handler/        # inbound protocol/application adapter
+crates/asc-daemon-core/           # application use cases
+crates/asc-action-types/          # ActionId/request/result
+crates/asc-evidence-types/        # Evidence/Attribute contracts
+crates/asc-action-runtime/        # supervisor/lifecycle/finalizer/ports
+crates/asc-capability-*/
+crates/asc-security-events/         # event domain and Repository port
+crates/asc-observability/           # trajectory/read model/effect evidence
+crates/asc-persistence-sqlite/
 ```
 
 ActionRuntime 依赖 executor port，不依赖具体 capability；capability 不依赖 daemon-core 或
@@ -685,6 +821,68 @@ daemon handler 只接已冻结的 ActionSpec/MethodSpec，并验证 timeout、di
 | RSCE-017 | sampling、无 exporter、Collector/export failure 不改变 ActionResult，且每次已路由 invocation 的 SecurityEvent 仍按契约尝试落盘 |
 | RSCE-018 | V1 legacy 与 V2 OTel SecurityEvent 由 schema version 明确区分，混合历史数据可查询且不会误解释 trace ID |
 | RSCE-019 | TraceId/SpanId 不参与 authorization、principal、idempotency、deduplication 或 replay decision |
+
+### 13.1 共享生命周期验收
+
+| Gate | 证据与断言 |
+| --- | --- |
+| SMC-004/005，共享终态 | `asc-action-runtime/tests/lifecycle.rs`：使用 CodeScan Executor 替身验证共享 Finalizer；pass/warn/deny/error 各一次 audit + telemetry |
+| SMC-012 的共同字段子集 | `tests/v2/fixtures/scan-lifecycle-v1.json`：8 个由 V1 `post_action` 和真实 telemetry mapper 生成的 frozen cases；runtime tests 附加 Context 后比较完整 outcome/audit/telemetry goldens，不初始化 SDK |
+| SMC-006/014 的受控错误子集 | runtime unwind → 一条最小失败记录及受控 error；无 panic payload 进入 audit/telemetry/result |
+| SMC-007 | audit、telemetry、diagnostic callback 独立失败；原 outcome 不变；投影失败不跳过其它输出 |
+| 生命周期所有权 | `tests/v2/test_action_architecture.py`：handler/core 无具体 scanner/writer 依赖；handler 不装配 runtime/finalizer；capability 无具体 sink 依赖 |
+| Telemetry privacy/gates | `asc-telemetry/tests/projection.rs`、`asc-event-sink/tests/telemetry.rs`：非法标量、禁用/错误 sentinel、缺失目标、非阻塞锁、rotation 与并发 JSONL 完整性 |
+| DPROC-SCAN-001 | `tests/v2/e2e/test_scan_lifecycle_process.py`：真实 CLI/daemon；response 后独立 SQLite read 与 JSONL 匹配；telemetry 无敏感 marker |
+| DPROC-SCAN-002 | 同一进程测试：重启保留旧记录，继续 append 不重放 |
+| DPROC-SCAN-003 | 同一进程测试：运行中 JSONL 失败、SQLite busy、telemetry 锁/缺失目标/不可用目标独立注入；其它输出及业务结果保持 |
+| DPROC-SCAN-004 | `asc-daemon/tests/lifecycle_transport.rs`：受控慢 Executor + 真实 UDS；timeout、disconnect、graceful drain 后只 finalization 一次 |
+| SMC-011 / OTEL-CR-009，兼容关联接线 | `test_scan_lifecycle_process.py`：CLI → Context → Finalizer → SQLite/JSONL 五个关联字段；原生 Baggage、兼容输入覆盖、无输入清空、并发隔离；成功/失败均保留关联，telemetry 仅接收白名单 agent_name |
+
+lifecycle fixture 使用 code-scan identity 和预先安全投影的输入；不替代真实扫描算法或
+sanitizer 验收。异常审计的空 request + 固定错误类型是显式 V2 安全变化，不声明与 Python
+任意 exception 文本逐字等价。时间戳、ID、PID/UID、版本按 fixture 范围规范化。
+
+从组件目录运行：
+
+```bash
+cargo build --manifest-path v2/Cargo.toml --locked -p asc-cli -p asc-daemon
+cargo test --manifest-path v2/Cargo.toml --workspace --locked
+cargo clippy --manifest-path v2/Cargo.toml --workspace --all-targets --locked -- -D warnings
+cargo fmt --manifest-path v2/Cargo.toml --all -- --check
+cargo doc --manifest-path v2/Cargo.toml --workspace --no-deps --locked
+uv run --project agent-sec-cli pytest tests/v2/test_action_architecture.py tests/v2/e2e/test_scan_lifecycle_process.py -q
+```
+
+进程测试必须有本地 UDS 权限，`ASC_V2_BIN_DIR` 可指定显式构建输出目录；默认 `v2/target/debug`。
+完整 telemetry 验收必须在允许 L1 的测试环境执行，测试不得删除宿主禁用 sentinel。
+Rust conformance 测试直接读取已提交的 `tests/v2/fixtures/scan-lifecycle-v1.json`，
+不运行 V1 或生成脚本。该 golden 保留 V1 lifecycle/telemetry 投影的预期输出；
+仅在合同变更经审查后更新，不为消除测试失败而自动重写。
+
+#### 本次验证结果（2026-09-16，rebase 后）
+
+- 基于 `oss/main` 的 `d940a663066499d875f951d37b8da5df3e3cd9ea`，使用独立 Cargo target
+  目录重建，保留已合入的 system-service runtime lease、目录校验及 `0666` socket 装配。
+- Rust 1.93.1：workspace `cargo check --all-targets --locked --offline` 与
+  `cargo test --workspace --locked --offline` 通过，757 passed、0 failed、0 ignored。
+- `tests/v2` 全套：48 passed、2 skipped；为环境 socket 用例提供隔离的后台 daemon，使用
+  重建的 CLI/daemon、临时 SQLite/JSONL；包括包装渲染、架构、生命周期、持久化与重启测试。
+- 两项 skipped 分别要求 root 跨 UID 测试和 root/PID 1 systemd；此处不宣称实际
+  system-manager 或 RPM 安装验收完成。
+- workspace fmt、all-targets Clippy（`-D warnings`）、public API doc 构建与
+  `git diff --check` 通过。CodeScan 的 8 个 V1 golden cases 纳入 runtime 测试。
+
+### 13.2 当前切片的兼容与回滚
+
+- 内部 API：`CodeScanRequest` 移入 `asc-action-types`（capability 保留 re-export）；
+  Runtime `Invocation` 返回受控 Result；Finalizer 必须显式注入三种输出；Dispatcher 接收
+  Action application。所有现有直接消费者与测试同步调整。
+- 外部：现有 code-scan wire/CLI 正常与 domain-error 结果不变；增加 best-effort telemetry
+  副作用和安全诊断。未知或 decode 失败 request 不生成 action event；unsupported language
+  已进入 runtime，仍生成 Failed event 再映射 `invalid_argument`。本次不预留未实现 action identity。
+- 数据：SQLite schema 和既有 audit 正常结果结构不变，不引入 telemetry SQLite 表。
+- 回滚：停止新版 daemon，恢复上一版二进制并重启；保留 audit DB/JSONL 和已有 telemetry，
+  无需 SQL downgrade 或删除文件。回滚会停止新增 telemetry，恢复旧装配及其生命周期限制。
 
 ## 14. 需要在实现前决定的事项
 

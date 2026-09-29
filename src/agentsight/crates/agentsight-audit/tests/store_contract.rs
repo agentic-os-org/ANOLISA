@@ -2,15 +2,16 @@ use std::fs;
 
 use agentsight_audit::{
     AuditError as SecurityStoreError, AuditEventFilter as SecurityEventFilter,
-    AuditStore as SecurityStore, ContainmentAction, ContainmentActivationResult,
-    ContainmentClaimResult, ContainmentFailureStage, ContainmentLifecycle, RiskCase,
-    RiskCaseStatus, RiskSeverity,
+    AuditMaintenancePolicy, AuditStore as SecurityStore, ContainmentAction,
+    ContainmentActivationResult, ContainmentClaimResult, ContainmentFailureStage,
+    ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity,
 };
 use agentsight_enforcement_protocol::{
     DestinationClass, Effect, EventIdentity, FileAction, NetworkAction, NetworkDirection,
     PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition,
     TaintTransitionKind,
 };
+use agentsight_sqlite_lifecycle::MaintenanceStatus;
 use uuid::Uuid;
 
 fn containment_action(lifecycle_state: ContainmentLifecycle) -> ContainmentAction {
@@ -339,6 +340,104 @@ fn retention_keeps_shared_evidence_until_its_last_case_is_purged() {
             .expect("event query should work"),
         None
     );
+}
+
+#[test]
+fn maintenance_honors_disabled_and_enabled_retention() {
+    let path = security_db_path("maintenance-retention");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+    let event = fixture_file_action("~/.ssh/id_rsa", 1);
+    store.insert_event(&event).expect("event should insert");
+
+    let disabled = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 0,
+            max_db_size_mb: 0,
+        })
+        .expect("disabled maintenance should succeed");
+    assert_eq!(disabled.expired_rows, 0);
+    assert_eq!(disabled.size.status, MaintenanceStatus::Disabled);
+    assert!(store.event(event.event_id).unwrap().is_some());
+
+    let enabled = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 1,
+            max_db_size_mb: 0,
+        })
+        .expect("retention maintenance should succeed");
+    assert_eq!(enabled.expired_rows, 1);
+    assert!(store.event(event.event_id).unwrap().is_none());
+
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
+fn maintenance_stops_size_pruning_when_retention_checkpoint_is_busy() {
+    let path = security_db_path("maintenance-checkpoint-busy");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+    for index in 0..100 {
+        let event = fixture_file_action(&format!("/tmp/{}-{index}", "x".repeat(20_000)), 1);
+        store.insert_event(&event).expect("event should insert");
+    }
+    let retained = fixture_file_action("/tmp/current", 1_800_000_000_000_000_000);
+    store
+        .insert_event(&retained)
+        .expect("current event should insert");
+
+    let reader = rusqlite::Connection::open(&path).expect("reader should open");
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM security_events;")
+        .expect("reader should hold a snapshot");
+
+    let report = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 1,
+            max_db_size_mb: 1,
+        })
+        .expect("maintenance should stop safely");
+
+    assert_eq!(report.size.status, MaintenanceStatus::CheckpointBusy);
+    assert!(store.event(retained.event_id).unwrap().is_some());
+    drop(reader);
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
+fn maintenance_enforces_size_for_unreferenced_events() {
+    let path = security_db_path("maintenance-size");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+    let mut newest_id = None;
+    for index in 0..100 {
+        let mut event = fixture_file_action(&"x".repeat(20_000), index + 1);
+        event.identity.tool_call_id = Some(format!("tool-{index}"));
+        newest_id = Some(event.event_id);
+        store.insert_event(&event).expect("event should insert");
+    }
+
+    let report = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 0,
+            max_db_size_mb: 1,
+        })
+        .expect("size maintenance should succeed");
+
+    assert!(report.size.deleted_rows > 0);
+    assert!(matches!(
+        report.size.status,
+        MaintenanceStatus::TargetReached | MaintenanceStatus::MaxRounds
+    ));
+    assert!(
+        store
+            .event(newest_id.expect("fixture inserts at least one event"))
+            .unwrap()
+            .is_some(),
+        "oldest-first maintenance should retain the newest event"
+    );
+
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
 }
 
 #[test]

@@ -1,29 +1,8 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { LanguageSwitcher, useI18n } from '../i18n';
-import type { MessageKey } from '../i18n';
+import { NAV_ROUTES } from '../utils/navigation';
 import type { AppCapability } from '../utils/apiClient';
-
-type NavItem = {
-  path: string;
-  labelKey: MessageKey;
-  icon: string;
-  capability: AppCapability;
-};
-
-const navItems: NavItem[] = [
-  { path: '/health', labelKey: 'nav.agentHealth', icon: '🩺', capability: 'agent_health' },
-  { path: '/', labelKey: 'nav.agentObservability', icon: '📊', capability: 'agent_observability' },
-  { path: '/sessions', labelKey: 'nav.sessions', icon: '🗂️', capability: 'sessions' },
-  { path: '/savings', labelKey: 'nav.tokenSavings', icon: '⚡', capability: 'token_savings' },
-  { path: '/optimization', labelKey: 'nav.optimization', icon: '🔬', capability: 'optimization' },
-  { path: '/skills', labelKey: 'nav.skillMetrics', icon: '🧩', capability: 'skills' },
-  { path: '/security', labelKey: 'nav.securityObservability', icon: '🛡️', capability: 'security' },
-  { path: '/audit', labelKey: 'nav.systemAudit', icon: '📋', capability: 'system_audit' },
-  { path: '/enforcement', labelKey: 'nav.riskEnforcement', icon: '⛔', capability: 'enforcement' },
-  { path: '/atif', labelKey: 'nav.trajectoryViewer', icon: '🔍', capability: 'atif' },
-  { path: '/settings', labelKey: 'nav.settings', icon: '⚙️', capability: 'settings' },
-];
 
 interface NavBarProps {
   capabilities?: AppCapability[];
@@ -33,8 +12,8 @@ export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
   const location = useLocation();
   const { t } = useI18n();
   const visibleItems = Array.isArray(capabilities)
-    ? navItems.filter((item) => capabilities.includes(item.capability))
-    : navItems;
+    ? NAV_ROUTES.filter((item) => capabilities.includes(item.capability))
+    : NAV_ROUTES;
 
   return (
     <nav className="bg-white border-b border-gray-200 px-6 py-3">
@@ -48,10 +27,12 @@ export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
         {/* Navigation Links */}
         <div className="flex flex-1 flex-wrap items-center justify-end gap-1">
           {visibleItems.map((item) => {
-            const isActive = item.path === '/' 
-              ? location.pathname === '/' 
-              : location.pathname.startsWith(item.path);
-            
+            // Match on a `/` boundary so a route never claims a sibling path
+            // that shares its prefix, and so no entry needs the exact-root
+            // special case the bare `/` observability link used to require.
+            const isActive = location.pathname === item.path
+              || location.pathname.startsWith(`${item.path}/`);
+
             return (
               <NavLink
                 key={item.path}

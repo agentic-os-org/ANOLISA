@@ -179,7 +179,7 @@ def reconcile_payload(skill_dir: Path) -> dict[str, Any]:
 def write_isolated_config(root: Path, extra: dict[str, Any] | None = None) -> None:
     """Disable default skill discovery for deterministic daemon tests."""
     config_dir = root / "xdg_config" / "agent-sec" / "skill-ledger"
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     config: dict[str, Any] = {
         "enableDefaultSkillDirs": False,
         "managedSkillDirs": [],
@@ -788,13 +788,13 @@ def test_daemon_default_pass_warn_policy_handles_risky_snapshot(
     assert activation_after_risk["target"] == expected_target
 
 
-def test_daemon_legacy_latest_scanned_policy_is_pass_warn_only(
+def test_daemon_current_policy_handles_risky_updates(
     monkeypatch,
     tmp_path: Path,
 ):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
-    write_isolated_config(tmp_path, {"activationPolicy": "latest_scanned"})
+    write_isolated_config(tmp_path, {"activationPolicy": "pass_warn_only"})
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
     socket_path = daemon_socket_path(tmp_path)
 
@@ -940,17 +940,22 @@ def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
     assert activation_after_deny["target"] == ".skill-meta/versions/v000001.snapshot"
 
 
-def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: Path):
+def test_daemon_config_error_prevents_writes_and_recovers(
+    monkeypatch,
+    tmp_path: Path,
+):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
-    write_isolated_config(tmp_path, {"activationPolicy": "invalid"})
+    write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
     socket_path = daemon_socket_path(tmp_path)
+    key_dir = tmp_path / "xdg_data" / "agent-sec" / "skill-ledger"
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
         await server.start()
         try:
+            write_isolated_config(tmp_path, {"activationPolicy": "invalid"})
             client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
             response = await asyncio.to_thread(
                 client.call,
@@ -958,34 +963,34 @@ def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: 
                 notify_payload(skill_dir),
                 trace_context={},
             )
-            deadline = asyncio.get_running_loop().time() + 5.0
-            health = None
-            while asyncio.get_running_loop().time() < deadline:
-                candidate = await asyncio.to_thread(
-                    client.call,
-                    "daemon.health",
-                    trace_context={},
-                )
-                jobs = {job["name"]: job for job in candidate.data["jobs"]}
-                last_error = jobs["skill-ledger-activation"].get("last_error") or ""
-                if "activationPolicy" in last_error:
-                    health = candidate
-                    break
-                await asyncio.sleep(0.05)
-            if health is None:
-                raise AssertionError("timed out waiting for invalid policy job error")
+            assert response.ok is True
+            job = server.runtime.jobs.get(SKILL_LEDGER_ACTIVATION_JOB)
+            await wait_for(lambda: job.status().last_error)
+            error = job.status().last_error
+            assert "activationPolicy" in error
+            assert "pass_warn_only" in error
+            assert "config.json" in error
+            assert not key_dir.exists()
+            assert not (skill_dir / ".skill-meta").exists()
+
+            write_isolated_config(tmp_path)
+            response = await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                notify_payload(skill_dir),
+                trace_context={},
+            )
+            assert response.ok is True
+            await wait_for(
+                lambda: (skill_dir / ".skill-meta" / "activation.json").is_file()
+            )
+            await wait_for(lambda: not job.status().last_error)
+            assert (key_dir / "key.pub").is_file()
+            assert read_latest(skill_dir)["scanStatus"] == "pass"
         finally:
             await server.stop()
-        return response, health
 
-    response, health = asyncio.run(scenario())
-
-    assert response.ok is True
-    jobs = {job["name"]: job for job in health.data["jobs"]}
-    activation_job = jobs["skill-ledger-activation"]
-    assert activation_job["state"] == "error"
-    assert "activationPolicy" in activation_job["last_error"]
-    assert not (skill_dir / ".skill-meta" / "activation.json").exists()
+    asyncio.run(scenario())
 
 
 def test_daemon_startup_reconcile_ignores_default_discovery_dirs(
@@ -1106,7 +1111,7 @@ def test_daemon_startup_reconciles_managed_skill(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
     config_dir = tmp_path / "xdg_config" / "agent-sec" / "skill-ledger"
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(
         json.dumps(
             {

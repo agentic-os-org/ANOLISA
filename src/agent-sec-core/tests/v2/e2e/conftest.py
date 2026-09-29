@@ -1,8 +1,7 @@
 """Shared fixtures for the V2 policy-CLI end-to-end suite.
 
 These tests drive the real ``agent-sec-cli`` and ``agent-sec-daemon`` binaries over a
-Unix domain socket, so they only make sense against an RPM-installed
-environment where both binaries are on ``PATH``. A missing binary fails the run
+Unix domain socket, with either V2 build outputs or RPM-installed binaries on ``PATH``. A missing binary fails the run
 instead of skipping it: skipping would let a broken package slip through the
 gate silently.
 
@@ -14,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -70,12 +70,15 @@ class DaemonHandle:
         self.process = process
         self.socket_path = socket_path
 
-    def cli(self, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    def cli(
+        self, *args: str, timeout: float = 30.0, input_text: str | None = None
+    ) -> subprocess.CompletedProcess:
         """Invokes ``agent-sec-cli --socket <this daemon> <args>``."""
         return subprocess.run(
             [_require(CLI_BIN), "--socket", str(self.socket_path), *args],
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=timeout,
             check=False,
         )
@@ -90,11 +93,15 @@ class DaemonHandle:
         return json.loads(result.stdout)
 
 
-def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
-    """Starts a foreground daemon and waits for its socket to appear."""
+def _start_daemon(
+    socket_path: Path, admin_uids: list[int], pii_rules: Path | None = None
+) -> subprocess.Popen:
+    """Starts a foreground daemon and waits for a complete protocol response."""
     argv = [_require(DAEMON_BIN), "--socket", str(socket_path)]
     for uid in admin_uids:
         argv += ["--policy-admin-uid", str(uid)]
+    if pii_rules is not None:
+        argv += ["--pii-rules", str(pii_rules)]
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
@@ -104,7 +111,17 @@ def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
     deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
     while time.monotonic() < deadline:
         if socket_path.exists():
-            return process
+            try:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.settimeout(0.2)
+                    probe.connect(str(socket_path))
+                    probe.sendall(
+                        b'{"method":"policy.templates.list","params":{"limit":1,"offset":0}}\n'
+                    )
+                    if probe.recv(4096).endswith(b"\n"):
+                        return process
+            except (OSError, TimeoutError):
+                pass
         if process.poll() is not None:
             _, stderr = process.communicate()
             raise AssertionError(
@@ -149,11 +166,13 @@ def start_daemon(tmp_path: Path):
     started: list[subprocess.Popen] = []
 
     def _factory(
-        admin_uids: list[int] | None = None, name: str = "daemon.sock"
+        admin_uids: list[int] | None = None,
+        name: str = "daemon.sock",
+        pii_rules: Path | None = None,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids)
+        process = _start_daemon(socket_path, uids, pii_rules)
         started.append(process)
         return DaemonHandle(process, socket_path)
 
@@ -199,3 +218,20 @@ def unauthorized_daemon(tmp_path: Path):
         yield handle
     finally:
         _terminate(process)
+
+
+@pytest.fixture
+def pii_environment(tmp_path, monkeypatch):
+    data = tmp_path / "audit"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("AGENT_SEC_DAEMON_SOCKET", raising=False)
+    return data, home
+
+
+@pytest.fixture
+def pii_daemon(pii_environment, start_daemon):
+    # No policy-administrator grant is needed for PII scanning.
+    return start_daemon(admin_uids=[])

@@ -8,7 +8,7 @@ Use this page to start `cosh` and control a running session. Run `/help` to see 
 
 | Command | Use |
 |---|---|
-| `cosh` | Start Enhanced Assisted (`◇ `) with Agent and slash-command routing. |
+| `cosh` | Start Enhanced Assisted with Agent and slash-command routing. |
 | `COSH_SHELL_INTEGRATION=native cosh` | Start Native without Cosh hooks, observation, or insights. |
 | `cosh --shell zsh` | Select zsh explicitly. |
 | `cosh --isolated` | Skip user rcfiles. |
@@ -37,11 +37,13 @@ to use its existing isolation handling.
 ## Input and editing
 
 - Native integration sends every input byte to the foreground bash or zsh.
-- Enhanced Assisted (`◇ `) routes Shell syntax to the foreground Shell and can
+- Enhanced Assisted routes Shell syntax to the foreground Shell and can
   turn a natural-language request into an Agent request.
-- At an empty Enhanced prompt, `Shift+Tab` switches to Shell-only (`◌ `).
+- At an empty Enhanced prompt, `Shift+Tab` switches to Shell-only.
   Ordinary input, including a leading `/`, then goes to the Shell while
   post-command insights remain available. Press it again to restore Assisted.
+  With `shell.status_symbols` enabled (off by default), an optional `◇ `/`◌ `
+  status line marks the current mode above each prompt.
 - A leading `/` runs a Cosh control command only in Enhanced Assisted. In
   Native and Enhanced Shell-only it remains Shell input.
 - `Shift+Enter` inserts a newline when supported. Multiline paste remains one submission.
@@ -75,6 +77,27 @@ Run `/agent` when the configured runtime is cosh-core. The Agent Composer opens
 as a multiline editor without changing how later shell input is routed. Enter
 sends the request, `Shift+Enter` adds a line, and `Esc` cancels it and restores
 the shell prompt.
+
+Type `/` as the first token to browse public slash commands. Continue typing to
+filter by prefix (`/ho` suggests `/hooks`); Up/Down selects a candidate and
+scrolls through the six-row list. Tab replaces the command token and adds a
+space for arguments. When a single-line draft contains only the command token,
+Enter accepts and executes the selected candidate (the first candidate by
+default). Drafts with arguments or multiple lines are submitted as written.
+Esc cancels the Composer, including when the list is open.
+Slash commands use the same local command handlers and confirmation cards as
+at the shell prompt. A command submission ends the Composer: its interactive
+card takes over input, or the shell prompt returns when the command finishes.
+Unknown command names display a local error instead of starting an Agent turn.
+
+`/skill:<name>` still selects a Skill for an Agent request; `/skills` manages
+Skills. Existing absolute paths such as `/tmp` and `/etc`, and paths containing
+another slash such as `/tmp/file`, remain Agent text. Bare `/` opens the command
+menu; exact registered command names take precedence over same-named paths.
+Prefix a request with `??` to discuss a slash command literally,
+for example `?? /help explain this command`. Commands in later tokens do not
+activate the menu. Tabs and newlines inside bracketed paste remain text.
+Ordinary shell prompts retain their native path completion.
 
 The first token may select one Skill, and any later whitespace-separated token
 that starts with `@` requests a file or directory from the current workspace:

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agent_sec_cli.skill_ledger.config import load_config
-from agent_sec_cli.skill_ledger.scanner.names import canonicalize_scanner_name
+from agent_sec_cli.skill_ledger.scanner.names import validate_scanner_name
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class ScannerInfo:
     def from_dict(cls, d: dict[str, Any]) -> "ScannerInfo":
         """Construct from a raw config dict entry."""
         known = {"name", "type", "parser", "description", "enabled"}
-        canonical_name = canonicalize_scanner_name(str(d["name"]))
+        canonical_name = validate_scanner_name(str(d["name"]))
         return cls(
             name=canonical_name,
             type=d.get("type", "skill"),
@@ -121,7 +121,7 @@ class ScannerRegistry:
 
     def get_scanner(self, name: str) -> Optional[ScannerInfo]:
         """Return the scanner with *name*, or ``None``."""
-        return self._scanners.get(canonicalize_scanner_name(name))
+        return self._scanners.get(validate_scanner_name(name))
 
     def get_parser(self, name: str) -> Optional[ParserInfo]:
         """Return the parser with *name*, or ``None``."""
@@ -152,6 +152,6 @@ class ScannerRegistry:
         # implemented today.
         scanners = [s for s in scanners if s.type == "builtin"]
         if names is not None:
-            name_set = {canonicalize_scanner_name(name) for name in names}
+            name_set = {validate_scanner_name(name) for name in names}
             scanners = [s for s in scanners if s.name in name_set]
         return scanners

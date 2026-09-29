@@ -18,6 +18,7 @@ use cosh_gateway::daemon::{
     TaskSnapshotProviderPreview, TaskSnapshotProviderRequest, TaskSnapshotProviderSwitch,
     TaskSnapshotProviderSwitchResult,
 };
+use cosh_gateway::runtime::TrustedWorkspaceResolver;
 use cosh_gateway::storage::{ExecutionClaim, ExecutionRecord, LedgerCommand, SqliteTaskStore};
 use cosh_gateway_contracts::capability::{
     ApprovalRequest, BrokeredOperation, RuntimeExecutionFence, WorkspaceCheckpointCreateV1,
@@ -79,7 +80,7 @@ pub(crate) struct PreRuntimeCheckpointAdapter {
 
 pub(crate) struct TaskSnapshotAdapter {
     endpoint: CheckpointEndpoint,
-    workspace: WorkspaceRef,
+    workspaces: TrustedWorkspaceResolver,
 }
 
 impl CheckpointEndpoint {

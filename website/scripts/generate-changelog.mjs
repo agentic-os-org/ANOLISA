@@ -2,8 +2,16 @@ import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {exists, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
-const componentChangelogs = (await walkFiles(path.join(repoRoot, 'src'), (file) => path.basename(file) === 'CHANGELOG.md'))
-  .filter((file) => path.relative(path.join(repoRoot, 'src'), file).split(path.sep).length === 2);
+const componentChangelogs = [];
+for (const sourceRoot of ['src', 'distribution', 'deprecated']) {
+  const root = path.join(repoRoot, sourceRoot);
+  if (!(await exists(root))) continue;
+  componentChangelogs.push(
+    ...(await walkFiles(root, (file) => path.basename(file) === 'CHANGELOG.md'))
+      .filter((file) => path.relative(root, file).split(path.sep).length === 2),
+  );
+}
+componentChangelogs.sort();
 const sourceLocaleLink = /^\[(?:中文版|English)\]\(CHANGELOG(?:_zh)?\.md\)\r?\n(?:\r?\n)?/m;
 
 function displayName(source) {
@@ -26,7 +34,7 @@ async function document(source, language) {
     language,
     markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
-      return `${image}[${label}](https://github.com/alibaba/anolisa/blob/main/${resolved})`;
+      return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
     }),
   };
 }

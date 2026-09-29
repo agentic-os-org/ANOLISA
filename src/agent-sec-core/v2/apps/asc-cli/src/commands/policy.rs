@@ -101,3 +101,56 @@ impl PolicyInput {
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+    use super::*;
+    use crate::Cli;
+    use crate::commands::Command;
+
+    /// Returns the template path `argv` parsed into, or panics if it did not
+    /// resolve to a `policy create`.
+    fn parsed_file(argv: Vec<OsString>) -> PathBuf {
+        let cli = Cli::parse_from(argv).expect("argv parses");
+        let Command::Policy(PolicyCommand::Create(input)) = cli.command else {
+            panic!("argv did not resolve to `policy create`");
+        };
+        input.file
+    }
+
+    /// Builds `policy create` argv whose `--file` value is exactly `file`.
+    fn create_argv(file: OsString) -> Vec<OsString> {
+        let mut inline = OsString::from("--file=");
+        inline.push(file);
+        vec![
+            "agent-sec-cli".into(),
+            "policy".into(),
+            "create".into(),
+            "--name=p".into(),
+            inline,
+            "--socket=/run/asc.sock".into(),
+        ]
+    }
+
+    #[test]
+    fn non_utf8_template_paths_reach_the_open_call_byte_for_byte() {
+        // `template` opens `self.file` directly, so preserving these bytes
+        // through parsing is the whole of the guarantee. Asserting it here
+        // rather than end-to-end keeps the check running on macOS, whose
+        // filesystem refuses to create a file with this name at all.
+        let native = b"/work/policy-\xff.json";
+        let file = parsed_file(create_argv(OsString::from_vec(native.to_vec())));
+        assert_eq!(file.as_os_str().as_bytes(), native);
+    }
+
+    #[test]
+    fn option_looking_template_paths_are_values_not_options() {
+        // Inline syntax is the documented way to pass a value clap would
+        // otherwise reject as an unknown option.
+        let file = parsed_file(create_argv(OsString::from("--socket")));
+        assert_eq!(file, PathBuf::from("--socket"));
+    }
+}

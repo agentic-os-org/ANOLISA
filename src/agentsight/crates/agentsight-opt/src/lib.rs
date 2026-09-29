@@ -17,6 +17,7 @@ pub mod cost;
 pub mod llm;
 pub mod perf;
 pub mod pipeline;
+pub mod preference;
 pub mod summary;
 pub mod trace;
 pub mod types;

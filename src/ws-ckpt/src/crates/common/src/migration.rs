@@ -211,7 +211,11 @@ mod tests {
         async fn diff(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<Vec<DiffEntry>> {
             unimplemented!()
         }
-        async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, crate::backend::SnapshotDeleteOutcome)>> {
             unimplemented!()
         }
         async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
@@ -235,6 +239,7 @@ mod tests {
             head: None,
             governed_evidence: HashMap::new(),
             guarded_rollbacks: HashMap::new(),
+            recovered_orphans: Default::default(),
         }
     }
 

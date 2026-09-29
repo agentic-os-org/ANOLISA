@@ -74,6 +74,13 @@ impl LinuxUserNsMount {
         // running under userland (which would silently produce wrong
         // ownership / permissions on every home-dir syscall).
         if !UNSHARED.load(Ordering::Acquire) {
+            // Record the launching uid *before* the unshare below makes
+            // `geteuid()` report the mapped one, so the per-user session
+            // fallback name can still tell host users apart. `main` already
+            // did this; it is repeated here because `enter` is also reached
+            // from `MemoryService::new` in library consumers.
+            crate::host::capture_host_uid();
+
             let real_uid = geteuid().as_raw();
             let real_gid = getegid().as_raw();
 

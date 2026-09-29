@@ -127,7 +127,14 @@ impl Log for AgentsightLogger {
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
+        // `matches` (not just `enabled`) so a `RUST_LOG=level/regex` message
+        // filter is honored.
+        if !self
+            .filter
+            .lock()
+            .expect("log filter lock poisoned")
+            .matches(record)
+        {
             return;
         }
 
@@ -245,6 +252,42 @@ mod tests {
         // Call again — both are still poisoned (poison flag persists), so
         // both unwrap_or_else paths are exercised a second time
         logger.reconfigure(default_filter(true), open_log_writer(None));
+    }
+
+    /// `RUST_LOG=level/regex` must filter on the formatted message, not only
+    /// on record metadata.
+    #[test]
+    fn log_applies_message_regex_filter() {
+        let mut builder = env_filter::Builder::new();
+        builder
+            .try_parse("info/listening")
+            .expect("fixture filter should parse");
+        let filter = builder.build();
+
+        let dir = std::env::temp_dir().join(format!("agentsight-log-regex-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let path = dir.join("regex.log");
+
+        let logger = AgentsightLogger::new(filter, open_log_writer(path.to_str()));
+        for message in [
+            "agentsight-enforcer listening on socket",
+            "unrelated chatter",
+        ] {
+            logger.log(
+                &Record::builder()
+                    .args(format_args!("{message}"))
+                    .level(log::Level::Info)
+                    .target("test")
+                    .build(),
+            );
+        }
+        logger.flush();
+
+        let contents = std::fs::read_to_string(&path).expect("read log");
+        assert!(contents.contains("listening on socket"));
+        assert!(!contents.contains("unrelated chatter"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

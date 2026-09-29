@@ -1,0 +1,15 @@
+version: 1
+
+rules:
+  build-artifact-no-network:
+    ifc: |
+      source BUILD_ARTIFACT = file "/repo/target/**"
+      rule build-artifact-no-network:
+        kill connect endpoint "*" if BUILD_ARTIFACT
+        because "build artifacts are local unless explicitly released"
+
+domains:
+  build:
+    bind:
+      - rule: build-artifact-no-network
+        mode: locked

@@ -51,6 +51,8 @@ fn filling_state(current_field: usize, collected: &[(&str, &str)]) -> RuntimeAut
         field_capture_revision: 0,
         existing_providers: Vec::new(),
         editing_provider_name: None,
+        default_provider_id: false,
+        from_sysom_shortcut: false,
         error_message: None,
         backend: AuthBackend::CoreRegistry,
         sysom: SysomMenu::default(),
@@ -326,4 +328,31 @@ fn consecutive_esc_walks_the_form_back_to_the_picker() {
     assert_eq!(step_back(&mut auth), BackOutcome::Cancel);
     // Nothing was thrown away on the way out; re-answering the picker is what resets the form.
     assert_eq!(auth.collected_values.len(), 3);
+}
+
+#[test]
+fn editing_without_a_name_field_keeps_the_first_credential_editable() {
+    let mut auth = filling_state(1, &[]);
+    auth.providers[0].fields.remove(0);
+    auth.editing_provider_name = Some("qwen-prod".into());
+    auth.existing_providers = vec![saved_provider("qwen-prod")];
+
+    step_back(&mut auth);
+
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(auth.current_field_info().unwrap().name, "base_url");
+    step_back(&mut auth);
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+}
+
+#[test]
+fn editing_skips_identity_by_field_name_not_position() {
+    let mut auth = filling_state(2, &[]);
+    auth.providers[0].fields.swap(0, 1);
+    auth.editing_provider_name = Some("qwen-prod".into());
+
+    step_back(&mut auth);
+
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(auth.current_field_info().unwrap().name, "base_url");
 }

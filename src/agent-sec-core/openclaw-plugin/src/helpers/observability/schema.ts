@@ -1,4 +1,4 @@
-import type { PluginHookName } from "openclaw/plugin-sdk/plugin-runtime";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 export const OBSERVABILITY_HOOKS = [
   "llm_input",
@@ -8,7 +8,7 @@ export const OBSERVABILITY_HOOKS = [
   "agent_end",
   "before_tool_call",
   "after_tool_call",
-] as const satisfies readonly PluginHookName[];
+] as const satisfies readonly Parameters<OpenClawPluginApi["on"]>[0][];
 
 export type ObservabilityHookName = (typeof OBSERVABILITY_HOOKS)[number];
 

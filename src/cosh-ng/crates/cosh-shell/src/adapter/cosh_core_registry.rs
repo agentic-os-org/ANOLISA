@@ -11,6 +11,15 @@ pub(super) const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REGISTRY_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const AUTH_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(12);
 
+#[cfg(test)]
+type ReaderSpawnCheck = fn(u32) -> std::io::Result<()>;
+
+#[cfg(test)]
+thread_local! {
+    static READER_SPAWN_CHECK: std::cell::Cell<Option<ReaderSpawnCheck>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Distinguishes registry protocol failures from transport failures.
 pub(crate) enum RegistryQueryError {
@@ -147,23 +156,40 @@ impl CoshCoreAdapter {
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let reader_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) if !l.trim().is_empty() => {
-                        let _ = tx.send(Ok(l));
-                        return;
-                    }
-                    Ok(_) => continue,
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("read error: {e}")));
-                        return;
+        #[cfg(test)]
+        let spawn_check = READER_SPAWN_CHECK
+            .take()
+            .map_or(Ok(()), |check| check(child.id()));
+        #[cfg(not(test))]
+        let spawn_check: std::io::Result<()> = Ok(());
+        let reader_result = spawn_check.and_then(|()| {
+            std::thread::Builder::new().spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) if !l.trim().is_empty() => {
+                            let _ = tx.send(Ok(l));
+                            return;
+                        }
+                        Ok(_) => continue,
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("read error: {e}")));
+                            return;
+                        }
                     }
                 }
-            }
-            let _ = tx.send(Err("no response received (EOF)".to_string()));
+                let _ = tx.send(Err("no response received (EOF)".to_string()));
+            })
         });
+        let reader_handle = match reader_result {
+            Ok(handle) => handle,
+            Err(_) => {
+                super::terminate_and_reap_process(&mut child);
+                return Err(RegistryQueryError::Transport(
+                    "failed to start registry reader".into(),
+                ));
+            }
+        };
 
         let response_line = match rx.recv_timeout(registry_timeout(domain, action)) {
             Ok(Ok(line)) => line,
@@ -182,7 +208,14 @@ impl CoshCoreAdapter {
         };
 
         let _ = reader_handle.join();
-        let _ = child.wait();
+        if domain == "auth" && action == "configure" {
+            use wait_timeout::ChildExt;
+            if !matches!(child.wait_timeout(Duration::from_millis(250)), Ok(Some(_))) {
+                super::terminate_and_reap_process(&mut child);
+            }
+        } else {
+            let _ = child.wait();
+        }
 
         // Parse the response
         let resp: Value = serde_json::from_str(&response_line)
@@ -248,5 +281,91 @@ pub(super) fn registry_timeout(domain: &str, action: &str) -> Duration {
         REGISTRY_MUTATION_TIMEOUT
     } else {
         REGISTRY_READ_TIMEOUT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::libc;
+    use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
+
+    thread_local! {
+        static SPAWNED_PID: Cell<u32> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn completed_configure_keeps_its_reply_and_reaps_a_lingering_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("registry.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+read -r request
+printf '%s\n' "$$" > "$0.pid"
+printf '%s\n' '{"success":true,"data":{"saved":true}}'
+exec sleep 60
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy(), false);
+        let start = std::time::Instant::now();
+        let result = adapter.registry_query_classified("auth", "configure", Value::Null);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(result, Ok(serde_json::json!({"saved": true})));
+        let pid: i32 = std::fs::read_to_string(dir.path().join("registry.sh.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn reader_spawn_failure_reaps_child_before_returning_transport_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("registry.sh");
+        std::fs::write(&script, "#!/bin/sh\nread -r request\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy(), false);
+        READER_SPAWN_CHECK.set(Some(|pid| {
+            SPAWNED_PID.set(pid);
+            Err(std::io::Error::other("private fixture detail"))
+        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            adapter.registry_query_classified("auth", "configure", Value::Null)
+        }));
+        READER_SPAWN_CHECK.set(None);
+        let pid = SPAWNED_PID.get() as i32;
+        assert!(pid > 0, "failure must happen after the child is spawned");
+        let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        let reaped =
+            waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+        // Keep the RED run leak-free too, without hiding the missing production reap.
+        if waited == 0 {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+        }
+        assert!(
+            reaped,
+            "registry must reap the child before returning or unwinding"
+        );
+        assert_eq!(
+            result.expect("thread creation failure must not panic"),
+            Err(RegistryQueryError::Transport(
+                "failed to start registry reader".into()
+            ))
+        );
     }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/agentsight-enforcer",
     "crates/agentsight-opt",
     "crates/agentsight-opt-store",
+    "crates/agentsight-sqlite-lifecycle",
     "crates/agentsight-trajectory-collector",
     "crates/enforcement-protocol",
     "crates/ebpf-ifc-engine",
@@ -28,6 +29,7 @@ ctrlc = "3.4"
 dirs = "6"
 ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 env_filter = "1.0"
+fs2 = "0.4"
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
@@ -42,7 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 
 [features]
@@ -66,6 +68,7 @@ agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }
 agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
+agentsight-sqlite-lifecycle = { path = "crates/agentsight-sqlite-lifecycle" }
 agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }
 anyhow = { workspace = true }
 chrono = { workspace = true }

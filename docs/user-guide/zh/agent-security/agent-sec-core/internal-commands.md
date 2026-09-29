@@ -2,35 +2,18 @@
 
 [English](../../../en/agent-security/agent-sec-core/internal-commands.md)
 
-`agent-sec-cli` 有少数几个入口被有意从 `--help` 中隐去。「隐藏」本身不是一种状态：
-`hidden=True` 只控制帮助可见性，并不说明该命令是否已实现、是否受支持、是否被内部集成
-调用。下列四个入口承担三种不同角色，这一区别决定了你能否依赖它们：
+`--trace-context` 与 `log-sandbox` 是 hook 和插件使用的隐藏集成点，本文记录其审计与
+调试契约。`hidden=True` 只控制帮助可见性，不代表功能是否可用。
 
-- **在用的集成点。** `--trace-context` 与 `log-sandbox` 由 hook 与插件代你调用。之所以
-  在此文档化：AgentSecCore 自身的审计链路依赖它们——当你审计它们产生的事件，或排查某个
-  hook 为何如此表现时，需要它们的契约。
-- **兼容命令。** `skill-ledger init-keys` 早于 `skill-ledger init` 存在，为已按它编写的
-  调用方保留。它可用，但不是新自动化应当对接的入口。
-- **已预留但不可用。** `skill-ledger rotate-keys` 仅占住名字。调用它会按设计失败，且不做
-  任何改动。
+## 入口清单
 
-三者都不享有可见命令的稳定性预期：每个都与所服务的宿主绑定，宿主集成变化时可能随之变化。
+| 入口 | 角色 | 调用结果 |
+| --- | --- | --- |
+| `--trace-context JSON`（顶层选项） | 隐藏集成点 | 可用 |
+| `log-sandbox` | 隐藏集成点 | 可用 |
+| `skill-ledger rotate-keys` | 公开，尚未实现 | 明确报错，退出 `1` |
 
-## 隐藏入口清单
-
-| 入口 | 定义位置 | 角色 | 调用结果 |
-|------|---------|------|---------|
-| `--trace-context JSON`（顶层选项） | `agent-sec-cli/src/agent_sec_cli/cli.py` | 在用的集成点 | 可用 |
-| `log-sandbox` | `agent-sec-cli/src/agent_sec_cli/cli.py` | 在用的集成点 | 可用 |
-| `skill-ledger init-keys` | `agent-sec-cli/src/agent_sec_cli/skill_ledger/cli.py` | 兼容命令 | 可用 |
-| `skill-ledger rotate-keys` | `agent-sec-cli/src/agent_sec_cli/skill_ledger/cli.py` | 已预留，未实现 | 失败，退出码 `1` |
-
-由于处于隐藏状态，它们都不会出现在 `agent-sec-cli --help` 或
-`agent-sec-cli skill-ledger --help` 中。显式写出名字仍可查看各自的 `--help`，也仍可调用
-——结果见上表。
-
-第五个入口 `skill-ledger set-policy` 已被移除，见
-[已移除：`skill-ledger set-policy`](#已移除skill-ledger-set-policy)。
+两个隐藏集成点都可显式查看 `--help`。
 
 ## `log-sandbox`
 
@@ -129,36 +112,9 @@ agent-sec-cli --trace-context '{"trace_id":"t-1","session_id":"s-1"}' \
 保持原有语义。JSON 格式错误会显式失败：CLI 向 stderr 打印
 `Error: invalid trace context JSON` 并以 `1` 退出，不执行子命令。空值等同于未提供。
 
-## `skill-ledger init-keys`
-
-为 `skill-ledger init` 出现之前编写的调用方保留的兼容命令。它只生成 Ed25519 签名
-密钥对，不做别的事。
-
-| 调用方式 | 最接近的受支持命令 |
-|---------|------------------|
-| `skill-ledger init-keys` | `skill-ledger init --no-baseline` |
-| `skill-ledger init-keys --force` | `skill-ledger init --no-baseline --force-keys` |
-| `skill-ledger init-keys --passphrase` | `skill-ledger init --no-baseline --passphrase` |
-
-上述对应关系仅在全新 ledger 上成立。一旦已有密钥对，在不加 force 标志的情况下，
-两者行为相反：
-
-| | `init-keys` | `init --no-baseline` |
-|---|---|---|
-| 行为 | 拒绝执行，报 `KeyAlreadyExistsError` | 跳过密钥生成，继续往下跑 |
-| 状态体现 | 错误信息 | JSON 输出中 `keyCreated: false` |
-| 退出码 | `1` | `0` |
-
-因此把自动化从 `init-keys` 迁移过去，会把原本失败的执行变成成功。如果脚本靠非 0
-退出码来判定“密钥已存在”，请改为读取 `init` 输出里的 `keyCreated`，而不是看退出码。
-
-请优先使用 `skill-ledger init`（见
-[Skill Ledger 用户指南](skill-ledger.md)）——它一步完成建密钥并为已覆盖 Skill 建立
-baseline。两者在密钥存放位置与文件权限上完全一致；在全新 ledger 上，口令行为也一致。
-
 ## `skill-ledger rotate-keys`
 
-隐藏且已预留：名字占住了，但密钥轮换并未实现。调用它会失败，且不触碰任何密钥材料。
+普通 help 中可见，并注明尚未实现。调用它会失败，且不触碰任何密钥材料。
 
 | | 行为 |
 |---|------|
@@ -167,24 +123,7 @@ baseline。两者在密钥存放位置与文件权限上完全一致；在全新
 | 退出码 | `1` |
 | 密钥存储 | `key.enc`、`key.pub` 与 keyring 保持不变 |
 
-`rotate-keys --help` 仍以 `0` 退出并说明该命令未实现，因此探测命令是否存在的调用方确实
-能找到它。正因如此，失败才做成显式报错，而不是静默空转。
+`rotate-keys --help` 以 `0` 退出，并说明该命令尚未实现。
 
-当前没有受支持的密钥轮换入口，`--force-keys` 也不是。它是 `init` 的一个选项，而非轮换
-入口：它作为初始化 ledger 的一部分强制生成新密钥对，并不完成轮换密钥所隐含的其余工作。
-当你的意图是重新初始化时才用它，而不是当你的意图是轮换时。
-
-## 已移除：`skill-ledger set-policy`
-
-一个从未实现的隐藏占位命令，已被移除——而不是留着以 `0` 退出却什么都不做。此处记录它，
-仅为让已按它编写的调用方能识别新的失败形态：
-
-| | 行为 |
-|---|------|
-| stdout | 空 |
-| stderr | 用法错误，指出 `set-policy` 为无此命令 |
-| 退出码 | `2` |
-| ledger 状态 | 不产生任何创建 |
-
-`decide` 是记录单个 Skill 用户决策的唯一受支持命令，见
-[Skill Ledger 指南](skill-ledger.md)。
+`init --force-keys` 强制生成新密钥对，并归档旧公钥供历史签名校验；它不实现
+`rotate-keys` 所预留的完整轮转流程。

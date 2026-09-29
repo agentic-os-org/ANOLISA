@@ -2,11 +2,13 @@
 //!
 //! Handles table creation, record insertion, and querying for HTTP request/response records.
 
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, ConnectionOptions, checkpoint_truncate, open_connection,
+};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
-use super::connection::{create_connection, wal_checkpoint};
 use crate::analyzer::HttpRecord;
 
 /// SQLite-based HTTP record store
@@ -23,7 +25,7 @@ impl HttpStore {
 
     /// Create a new HttpStore with custom table name
     pub fn with_table(path: &Path, table_name: &str) -> Result<Self> {
-        let conn = create_connection(path)?;
+        let conn = open_connection(path, ConnectionOptions::default())?;
         let table_name = table_name.to_string();
 
         let create_table_sql = format!(
@@ -194,9 +196,12 @@ impl HttpStore {
         Ok(deleted)
     }
 
-    /// Execute WAL checkpoint to flush WAL data back to the main database file
+    /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> Result<()> {
-        wal_checkpoint(&self.conn)
+        match checkpoint_truncate(&self.conn)? {
+            CheckpointOutcome::Completed => Ok(()),
+            CheckpointOutcome::Busy => anyhow::bail!("WAL checkpoint remained busy"),
+        }
     }
 }
 

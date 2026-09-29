@@ -1631,7 +1631,7 @@ do_install_deps() {
 
 build_cosh() {
     step "Building copilot-shell"
-    local dir="$PROJECT_ROOT/src/copilot-shell"
+    local dir="$PROJECT_ROOT/deprecated/copilot-shell"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
@@ -1959,7 +1959,7 @@ do_build() {
 
 install_cosh() {
     step "Installing copilot-shell"
-    local dir="$PROJECT_ROOT/src/copilot-shell"
+    local dir="$PROJECT_ROOT/deprecated/copilot-shell"
     run_component_make_install "copilot-shell" "$dir"
     if $DRY_RUN; then
         ok "copilot-shell install plan generated"
@@ -2014,14 +2014,14 @@ detect_runtime_package_manager() {
 
 runtime_manifest_path() {
     case "$1" in
-        cosh)      echo "$PROJECT_ROOT/src/anolisa/manifests/components/cosh/component.toml" ;;
-        skills)    echo "$PROJECT_ROOT/src/anolisa/manifests/components/os-skills/component.toml" ;;
+        cosh)      echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/cosh/component.toml" ;;
+        skills)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml" ;;
         sec-core)  echo "$PROJECT_ROOT/src/agent-sec-core/.anolisa/component.toml" ;;
         cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/.anolisa/component.toml" ;;
-        tokenless) echo "$PROJECT_ROOT/src/anolisa/manifests/components/tokenless/component.toml" ;;
-        ws-ckpt)   echo "$PROJECT_ROOT/src/anolisa/manifests/components/ws-ckpt/component.toml" ;;
-        memory)    echo "$PROJECT_ROOT/src/anolisa/manifests/components/agent-memory/component.toml" ;;
-        sight)     echo "$PROJECT_ROOT/src/anolisa/manifests/components/agentsight/component.toml" ;;
+        tokenless) echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/tokenless/component.toml" ;;
+        ws-ckpt)   echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/ws-ckpt/component.toml" ;;
+        memory)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/agent-memory/component.toml" ;;
+        sight)     echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/agentsight/component.toml" ;;
         *)         return 1 ;;
     esac
 }
@@ -2638,7 +2638,7 @@ do_install() {
 
 uninstall_cosh() {
     step "Uninstalling copilot-shell"
-    local dir="$PROJECT_ROOT/src/copilot-shell"
+    local dir="$PROJECT_ROOT/deprecated/copilot-shell"
     run_component_make_uninstall "copilot-shell" "$dir" || true
     if $DRY_RUN; then
         ok "copilot-shell uninstall plan generated"

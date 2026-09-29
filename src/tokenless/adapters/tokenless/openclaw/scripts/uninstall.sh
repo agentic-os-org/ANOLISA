@@ -43,4 +43,21 @@ fi
 # Use openclaw CLI for proper removal (handles file cleanup + config update)
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins uninstall tokenless --force || true
 
+# Verify rather than trust: the status above is swallowed because "was not
+# installed" and "refused" are indistinguishable by exit code alone, and the caller
+# deletes the adapter resources as soon as this script returns 0. The manual path
+# above removes these two directories itself, so the CLI path is held to the same
+# post-condition.
+CLI_FAILED=0
+for leftover in "${OPENCLAW_STATE_DIR%/}/plugins/tokenless" "${OPENCLAW_STATE_DIR%/}/extensions/tokenless"; do
+    if [ -e "$leftover" ] || [ -L "$leftover" ]; then
+        echo "[${COMPONENT}] ERROR: ${leftover} is still there after 'plugins uninstall'." >&2
+        CLI_FAILED=1
+    fi
+done
+if [ "$CLI_FAILED" = "1" ]; then
+    echo "[${COMPONENT}] ${AGENT} plugin removal is incomplete; remove the paths above and run this script again." >&2
+    exit 1
+fi
+
 echo "[${COMPONENT}] ${AGENT} plugin removed via openclaw CLI."

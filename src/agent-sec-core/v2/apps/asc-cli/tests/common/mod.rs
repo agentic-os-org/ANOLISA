@@ -1,5 +1,7 @@
 #![allow(dead_code)] // Shared by independent contract and process test targets.
 
+use std::os::unix::fs::PermissionsExt as _;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -10,15 +12,30 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const METHODS: &str =
-    include_str!("../../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-methods.json");
+    include_str!("../../../../crates/asc-daemon-protocol/tests/fixtures/pap-methods.json");
 pub const SCENARIO: &str =
-    include_str!("../../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json");
+    include_str!("../../../../crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json");
 
 pub struct Directory(pub PathBuf);
 impl Directory {
+    /// Creates a unique directory short enough to hold a bindable socket path.
+    ///
+    /// Sockets in these tests live inside this directory, and `sun_path` caps a
+    /// socket address at 104 bytes on macOS against 108 on Linux. `TMPDIR` there
+    /// expands to a ~49-byte `/var/folders/...` path, which overruns the cap once
+    /// a UUID-named subdirectory and file name are appended. Rooting at `/tmp`
+    /// keeps the total near 60 bytes on both systems, so the length no longer
+    /// depends on how long the caller's `TMPDIR` happens to be.
     pub fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("asc-cli-{}", Uuid::new_v4()));
+        let base = Path::new("/tmp");
+        let base = if base.is_dir() {
+            base.to_path_buf()
+        } else {
+            std::env::temp_dir()
+        };
+        let path = base.join(format!("asc-cli-{}", Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self(path)
     }
 }

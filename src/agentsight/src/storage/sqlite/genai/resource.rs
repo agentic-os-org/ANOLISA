@@ -29,7 +29,6 @@ impl GenAISqliteStore {
         if samples.is_empty() {
             return Ok(());
         }
-        self.check_and_prune_if_needed()?;
         let mut conn = self
             .conn
             .lock()
@@ -70,7 +69,9 @@ mod tests {
                 .expect("system clock after Unix epoch")
                 .as_nanos()
         ));
-        let store = GenAISqliteStore::new_with_path(&path).expect("resource test store");
+        let store =
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+                .expect("resource test store");
         store
             .insert_resource_samples(&[])
             .expect("empty resource batch");

@@ -1614,11 +1614,11 @@ export const AgentHealthPage: React.FC = () => {
 
   return (
     <div className="max-w-screen-xl mx-auto px-6 py-6">
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-none">
         {toasts.map(t => (
           <div
             key={t.id}
-            className="bg-gray-800 text-white text-xs px-4 py-2 rounded shadow-lg pointer-events-auto"
+            className="bg-gray-800 text-white text-sm px-5 py-3 rounded-lg shadow-xl pointer-events-auto"
           >
             {t.message}
           </div>

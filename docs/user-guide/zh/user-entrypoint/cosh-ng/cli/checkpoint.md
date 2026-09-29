@@ -15,7 +15,7 @@
 | 命令 | 必需参数 | 用途 |
 |---|---|---|
 | `cosh-cli checkpoint init` | `--workspace <path>` | 初始化工作区 |
-| `cosh-cli checkpoint recover` | `--workspace <path>` | 恢复工作区元数据 |
+| `cosh-cli checkpoint recover` | `--workspace <path>` | 将工作区恢复为普通目录，或还原中断初始化的备份 |
 | `cosh-cli checkpoint create` | `--workspace <path> --id <id>` | 创建快照 |
 | `cosh-cli checkpoint list` | 无（`--workspace` 可选） | 列出快照 |
 | `cosh-cli checkpoint restore <id>` | `--workspace <path>` | 恢复快照 |
@@ -35,6 +35,12 @@ cosh-cli checkpoint restore before-change --workspace /home/agent/project
 ```
 
 其他可选参数包括：`create` 的 `--pin` 和 `--metadata <json>`，`delete` 的 `--force` 和 `--workspace <path>`，以及 `cleanup` 的 `--keep <count>`。`list` 和 `status` 省略 `--workspace` 时，会查询守护进程记录的所有工作区。
+
+`recover` 由 daemon 判断工作区状态，因此初始化中断后原路径不存在时也可使用。
+恢复成功且仍有迁移数据或备份需要检查时，JSON 响应仍为 `ok: true`，并在
+`meta.warning` 中保留 daemon 提供的提示和位置；常规成功响应省略该字段。
+数据来源与子卷丢失时的处理方式见
+[ws-ckpt 恢复说明](../../../runtime/ws-ckpt.md#恢复中断的初始化与悬空注册)。
 
 ## 典型回滚流程
 

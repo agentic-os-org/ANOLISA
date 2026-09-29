@@ -4,6 +4,12 @@
 
 LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
+随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
+并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
+不按 Tokenless 租户或 Session 隔离。
+Flag 迁移、Pipeline 行为和输出恢复详见
+[随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
@@ -12,6 +18,8 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 | Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
 | 搜索路径共享 | 取决于工作负载 | API 搜索列表（含 Claude 原生 Grep）可共享连续记录的文件路径并保留全部已收到命中；默认开启，通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭；命令输出保持原路由 |
+| Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
+| HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
@@ -138,11 +146,43 @@ sudo anolisa --install-mode system adopt tokenless
 从同一 YUM 源安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel
-Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建发布产物，
-目前不能通过公开的 `anolisa-tokenless` npm 包安装。源码中保留的
-`@anolisa/tokenless-darwin-x64` optional dependency 只是发布构建目标，
-不代表 registry 中已有可安装的软件包。
+另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
+提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
+curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
+
+```bash
+npm install -g anolisa-tokenless
+
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+由于两者都不注册组件，`anolisa adapter enable` 对它们不适用；请改用
+`~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
+下对应框架的脚本启用。curl 安装脚本会把它创建的内容记录到
+`~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
+回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
+adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
+完整的方式对照见 `docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md`。
+
+`~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
+公开路径都不会盲目接管它。所有权必须被证明：npm 的 postinstall 只刷新带有它
+自己或 curl 安装脚本写下的标记的目录，其余一律保留——受管组件安装、旧版本留
+下的目录、手工拷贝的目录都一样——并提示包内资源的位置。
+`ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` 可强制接管。curl 安装
+脚本会把其他所有者放置的目录恢复回去、不为它记录 Adapter 目录，并且用「每次安装
+专属的标记」（`.tokenless-owner`）而不只是内容哈希来证明自己记录的内容归自己所有
+——anolisa 或直接 npm
+安装同一版本会留下逐字相同的字节，此时它的文件、Adapter 资源、框架注册与 npm
+全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
+机器上没有可用 CLI。
+
+当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
+仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
+optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
+因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
+回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
+受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
@@ -279,14 +319,27 @@ RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
 
+通过 ANOLISA 启用已安装的插件，然后重启 OpenCode：
+
+```bash
+anolisa adapter enable tokenless opencode
+```
+
+driver 按 `OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`
+的顺序选择目录并创建 `plugins/tokenless.js`。它不读取 `TOKENLESS_OPENCODE_CONFIG_DIR`；
+如需共用自定义目录，请设置 `OPENCODE_CONFIG_DIR`。enable 会接管指向同一源路径且不经过目录别名的现有链接，
+`anolisa adapter disable tokenless opencode` 会删除该链接。两种操作后都应重启 OpenCode。
+
+独立源码安装可使用：
+
 ```bash
 make opencode-install
 ```
 
-安装器会在 OpenCode 全局 `plugins/` 目录中创建 `tokenless.js` 符号链接，
-不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
-`XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
-安装后重启 OpenCode 即可加载插件。
+Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
+两种方式都会拒绝冲突的文件或链接。在 ANOLISA disable 后若要恢复独立管理，重新运行
+`make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
+完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
 ### QwenPaw 安装
 
@@ -303,6 +356,11 @@ make qwenpaw-install
 `<工作目录>/plugins/tokenless/`（`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
 `~/.copaw`，否则 `~/.qwenpaw`），并按 `requirements.txt` 从对应 GitHub Release
 安装 `anolisa_tokenless` wheel。统计记录写入 `<workspace>/.tokenless`。
+
+在把 Bundle 交给 QwenPaw 之前，安装器会先探测这个 wheel URL，资产返回 `404` 时给出说明性报错并停止。
+离线或镜像网络可用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测；
+`ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。完整参考见
+[故障排查](../../docs/user-guide/zh/token-saving/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
 
 ### DeepSeek Harness 插件
 

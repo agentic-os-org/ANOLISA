@@ -12,10 +12,9 @@ use agentsight_opt_store::{Dimension, OptimizationStore};
 use agentsight_trajectory_collector::TrajectoryStore;
 use serde::{Deserialize, Serialize};
 
-use crate::server::semantic_search;
+use crate::semantic_search;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
-const DB_FILE_NAME: &str = "optimization.db";
 
 /// Runtime LLM configuration for optimization analysis.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -26,6 +25,11 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// LLM ranking budget for semantic session search, in seconds. Separate
+    /// from the analysis path (which has no budget): a slow reasoning model
+    /// should raise this without affecting long-running optimization jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -74,6 +78,13 @@ impl OptLlmConfig {
             .unwrap_or_else(|| "gpt-4o".to_string())
     }
 
+    fn search_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.search_timeout_secs
+                .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        )
+    }
+
     fn masked_api_key(&self) -> Option<String> {
         self.effective_api_key().map(|k| {
             if k.chars().count() <= 12 {
@@ -92,20 +103,13 @@ impl OptLlmConfig {
 pub struct OptimizeState {
     config_path: PathBuf,
     config: RwLock<OptLlmConfig>,
-    store: Option<OptimizationStore>,
+    store: Option<Arc<OptimizationStore>>,
 }
 
 impl OptimizeState {
-    pub fn init(base_dir: &Path) -> Arc<Self> {
+    pub fn init(base_dir: &Path, store: Option<Arc<OptimizationStore>>) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
         let config = OptLlmConfig::load(&config_path);
-        let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
-            Ok(store) => Some(store),
-            Err(e) => {
-                log::warn!("Failed to open local optimization store: {e}");
-                None
-            }
-        };
         Arc::new(Self {
             config_path,
             config: RwLock::new(config),
@@ -113,11 +117,13 @@ impl OptimizeState {
         })
     }
 
-    fn snapshot(&self) -> OptLlmConfig {
+    pub(super) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
-    fn build_client(&self) -> Result<LlmClient, HttpResponse> {
+    // `pub(super)` so the sibling preferences module can reuse the same
+    // configured client for its optional LLM layer.
+    pub(super) fn build_client(&self) -> Result<LlmClient, HttpResponse> {
         let config = self.snapshot();
         let Some(api_key) = config.effective_api_key() else {
             return Err(HttpResponse::BadRequest().json(serde_json::json!({
@@ -388,12 +394,7 @@ pub async fn list_optimization_history(
 #[get("/api/optimize/config")]
 pub async fn get_optimize_config(data: web::Data<OptimizeAppState>) -> impl Responder {
     let config = data.optimize.snapshot();
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": config.masked_api_key(),
-        "base_url": config.effective_base_url(),
-        "model": config.effective_model(),
-        "configured": config.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&config))
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +402,43 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub search_timeout_secs: Option<u64>,
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+    if let Some(ref key) = update.api_key
+        && !key.is_empty()
+        && !key.contains('•')
+    {
+        config.api_key = Some(key.clone());
+    }
+    if let Some(ref url) = update.base_url
+        && !url.is_empty()
+    {
+        config.base_url = Some(url.clone());
+    }
+    if let Some(ref model) = update.model
+        && !model.is_empty()
+    {
+        config.model = Some(model.clone());
+    }
+    if let Some(timeout_secs) = update.search_timeout_secs
+        && timeout_secs > 0
+    {
+        config.search_timeout_secs = Some(timeout_secs);
+    }
+}
+
+fn config_response(config: &OptLlmConfig) -> serde_json::Value {
+    serde_json::json!({
+        "api_key": config.masked_api_key(),
+        "base_url": config.effective_base_url(),
+        "model": config.effective_model(),
+        "search_timeout_secs": config
+            .search_timeout_secs
+            .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        "configured": config.effective_api_key().is_some(),
+    })
 }
 
 /// POST /api/optimize/config
@@ -417,22 +455,7 @@ pub async fn update_optimize_config(
                     .json(serde_json::json!({"error": "config lock poisoned"}));
             }
         };
-        if let Some(ref key) = body.api_key
-            && !key.is_empty()
-            && !key.contains('•')
-        {
-            config.api_key = Some(key.clone());
-        }
-        if let Some(ref url) = body.base_url
-            && !url.is_empty()
-        {
-            config.base_url = Some(url.clone());
-        }
-        if let Some(ref model) = body.model
-            && !model.is_empty()
-        {
-            config.model = Some(model.clone());
-        }
+        apply_config_update(&mut config, &body);
         config.clone()
     };
 
@@ -442,12 +465,7 @@ pub async fn update_optimize_config(
         }));
     }
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": updated.masked_api_key(),
-        "base_url": updated.effective_base_url(),
-        "model": updated.effective_model(),
-        "configured": updated.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&updated))
 }
 
 // ─── Semantic session search ────────────────────────────────────────────────
@@ -464,12 +482,37 @@ pub async fn semantic_search_sessions(
     let client = match data.optimize.build_client() {
         Ok(c) => c,
         Err(_) => {
+            // Same contract as the Linux endpoint: degrade to empty, but make
+            // the most common cause (unconfigured LLM) attributable.
+            log::warn!(
+                "semantic_search: LLM not configured (missing API key), returning empty results"
+            );
             return HttpResponse::Ok()
                 .json(semantic_search::SemanticSearchResponse { results: vec![] });
         }
     };
+    let timeout = data.optimize.snapshot().search_timeout();
     let request = body.into_inner();
-    semantic_search::handle_semantic_search(&client, &request).await
+
+    // Sessions labelled `useless` are out of retrieval scope; same filter as
+    // the Linux endpoint, applied here for the same reason — one policy, every
+    // caller. A store failure degrades to unfiltered rather than failing search.
+    let request = match data.local_state.reuse_store.as_deref() {
+        Some(store) => match store.excluded_sessions() {
+            Ok(excluded) => semantic_search::filter_excluded(
+                request,
+                &excluded
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(error) => {
+                log::warn!("reuse: reading excluded sessions failed, ranking unfiltered: {error}");
+                request
+            }
+        },
+        None => request,
+    };
+    semantic_search::handle_semantic_search(&client, &request, timeout).await
 }
 
 #[cfg(test)]
@@ -567,6 +610,7 @@ mod tests {
             api_key: Some("sk-testkey".to_string()),
             base_url: Some("https://test.api.com".to_string()),
             model: Some("test-model".to_string()),
+            search_timeout_secs: None,
         };
         config.save(&tmp).unwrap();
 
@@ -603,11 +647,66 @@ mod tests {
     }
 
     #[test]
-    fn test_optimize_state_init() {
+    fn test_optimize_state_uses_opened_store() {
         let tmp = std::env::temp_dir().join("agentsight_opt_state_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        let state = OptimizeState::init(&tmp);
+        let store = Arc::new(
+            OptimizationStore::new_with_path(&tmp.join(crate::config::OPTIMIZATION_DB_NAME))
+                .unwrap(),
+        );
+        let state = OptimizeState::init(&tmp, Some(Arc::clone(&store)));
         assert!(state.store.is_some());
+        assert!(Arc::ptr_eq(state.store.as_ref().unwrap(), &store));
+        drop(state);
+        drop(store);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn config_update_persists_and_returns_search_timeout() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_config_timeout_{}.json",
+            std::process::id()
+        ));
+        let mut config = OptLlmConfig::default();
+        let update = UpdateOptConfig {
+            api_key: None,
+            base_url: None,
+            model: None,
+            search_timeout_secs: Some(30),
+        };
+
+        apply_config_update(&mut config, &update);
+        config.save(&tmp).unwrap();
+        let loaded = OptLlmConfig::load(&tmp);
+        assert_eq!(loaded.search_timeout_secs, Some(30));
+        assert_eq!(config_response(&loaded)["search_timeout_secs"], 30);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn config_response_uses_default_search_timeout() {
+        assert_eq!(
+            config_response(&OptLlmConfig::default())["search_timeout_secs"],
+            semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn search_timeout_defaults_to_shared_default() {
+        assert_eq!(
+            OptLlmConfig::default().search_timeout(),
+            std::time::Duration::from_secs(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn search_timeout_secs_round_trips_and_stays_absent_when_unset() {
+        let config: OptLlmConfig =
+            serde_json::from_str(r#"{"search_timeout_secs": 30}"#).expect("deserialize");
+        assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
+        let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
+        assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
     }
 }

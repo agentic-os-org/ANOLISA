@@ -17,7 +17,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
+This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](QUICKSTART.md).
 
 ## Build the Python SDK from source
 
@@ -75,13 +75,18 @@ current host contracts. See
 
 ### Installation does not enable every adapter
 
-`anolisa install tokenless` installs the component and its adapter resources. To make an agent use Tokenless automatically, also run:
+Whichever method you used — anolisa CLI, npm, curl, or Skill — installation only puts the component and its adapter resources on disk. It never registers Tokenless with an agent. The enable step differs per install method, because the three production paths leave different things behind:
 
-```bash
-anolisa adapter enable tokenless <framework>
-```
+| Install method | Adapter resources | Enable step |
+|----------------|-------------------|-------------|
+| anolisa CLI | installed with the component, plus an anolisa component record | `anolisa adapter enable tokenless <framework>` |
+| npm, or curl through its npm path | copied by the package postinstall to `~/.local/share/anolisa/adapters/tokenless/`; no anolisa component record exists | run the framework's bundled script, for example `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`. `anolisa adapter enable` cannot be used here |
+| curl through its source-build path | none — the build installs the `tokenless` CLI only | not applicable. This is a CLI-only install; use the `tokenless` subcommands directly, or reinstall through the anolisa CLI or npm for agent integration |
+| Skill | whichever of the above the Skill ran | follow that method's row |
 
 CLI-only use does not require an adapter.
+
+Disabling follows the same split: `anolisa adapter disable tokenless <framework>` applies to anolisa CLI installs, while an npm-based install is disabled through the framework's own uninstall script or by removing the hook registration the install script created.
 
 ### “Compression off” affects only compression operations
 
@@ -95,11 +100,46 @@ This setting does not disable RTK command rewriting, adapter execution, or retri
 anolisa adapter disable tokenless <framework>
 ```
 
+### Compression trigger conditions and thresholds
+
+Adapters do not compress every tool result. For response compression, compressed content is produced only when all of the following hold:
+
+1. Compression is not switched off. With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0` the run becomes a dry-run: statistics are still calculated, but the original text is returned (see the previous section).
+2. The tool is not a content-retrieval tool. Read/Glob/Grep/LSP/NotebookRead and their aliases skip response compression so their content stays intact. Search path sharing adds one narrow exception: a native Claude Code `Grep` result in no-context content mode is routed to that lossless compressor instead, and still keeps every received match (see [Controlling search path sharing](#controlling-search-path-sharing)).
+3. The response reaches the minimum length. Core skips responses shorter than 200 characters on the shared response hook, OpenClaw, and Hermes paths. Length is counted in characters, not bytes.
+4. The content matches a supported domain. Threshold-based response compression works on JSON objects and arrays; plain text is compressed only by a matching text compressor, and which compressors can fire depends on the path:
+   - **4a. Shared response hook path:** output that arrives as plain text (not JSON) is routed to the content-aware text compressors (build/test log terminal cleanup and progress reduction, CSV/TSV table compaction, API search path sharing, HTML page rendering, and opt-in Git diff context cropping) described in [Adapter processing rules](framework-integration.md#adapter-processing-rules); the table rules are detailed in [CSV/TSV views can be incomplete](#csvtsv-views-can-be-incomplete) and the search rules in [Controlling search path sharing](#controlling-search-path-sharing). For shell tools, the hook first unwraps the envelope's dominant text field (`stdout` or `stderr`, at least 2,000 characters; a Bash `stdout` that starts with `diff --git` is unwrapped even below that minimum) into the text slot and later re-injects the compressed text into a same-shaped envelope.
+   - **4b. OpenClaw:** a plain string, or a `toolResult` message whose content is exactly one valid text block, takes the replaceable text path. Any other `toolResult` — multiple text blocks, image blocks, or empty/invalid content — is skipped as-is: the plugin returns before calling Core, so such results are neither compressed nor recorded in statistics. Non-`toolResult` objects and arrays, including a shell envelope such as `{"stdout": ...}`, are passed to Core whole as structured JSON with text replacement disabled, so the envelope keeps its top-level shape and only JSON-domain compression applies.
+   - **4c. Hermes:** for shell tools, Hermes unwraps the envelope's `output` field, sends that text to Core with replacement allowed, and restores the compressed text into the same envelope; other tools' results go through directly.
+
+   The shared response hook additionally skips skill-like text with YAML frontmatter before spawning a compression subprocess (Core passes such text through anyway).
+5. The compressed result is strictly smaller. When neither response compression nor TOON encoding makes the content smaller, the original text is kept.
+
+After these checks, truncation strength depends on the tool category. Categories and thresholds are defined in `tool_categories.json` inside the adapter directory (the single source of truth shared by all adapters); built-in safe fallbacks are used when the file is missing or invalid:
+
+| Category | Representative tools | String truncation threshold | Array truncation threshold | Maximum nesting depth |
+|----------|----------------------|------------------------------|----------------|-----------------------|
+| Content retrieval | Read, Glob, Grep, LSP, NotebookRead and aliases | Compression skipped | — | — |
+| Shell/exec | Bash, Shell, exec, terminal, etc. | 65,536 characters | 128 items | 8 |
+| Other structured tools | Any tool not in the two categories above | 1,048,576 characters | 65,536 items | 32 |
+
+Threshold semantics: a string longer than the threshold is cut at the threshold (retrievable through Stash when Stash is enabled). An array is truncated only when it is longer than the category threshold plus the tail window: the leading items up to the threshold and the last 8 items (the default tail window) stay inline, the dropped middle segment is retrievable through Stash when enabled, and a marker separates the two windows. Arrays of at least 33 JSON objects ignore these thresholds and go through record reduction instead: a base budget of 32 selected records (the first 4 and the last 4, records carrying error or anomaly signals, numeric outliers, and a stable sample of the rest) plus a retrieval marker, with the complete original array written to Stash; record reduction requires Stash — without it, every record is kept. Subtrees nested deeper than the depth cap collapse into a truncation marker. See the [CLI reference](cli-reference.md) for the full rules and flags.
+
+Per-path differences worth noting:
+
+- Running `tokenless compress-response` standalone uses the CLI's own defaults (4,096-character strings, a 32-item head window plus an 8-item tail window, depth 8), overridable with `--truncate-strings-at`, `--truncate-arrays-at`, `--array-tail-preserve`, and `--max-depth`; see the [CLI reference](cli-reference.md).
+- Codex and Qwen Code do not run response compression or TOON because their current PostToolUse contracts cannot replace the original model-visible output: Codex keeps the original and adds context only for classified environment failures, while Qwen Code passes through. See the adapter table below for what each integration provides.
+- The OpenClaw plugin reads the same `tool_categories.json` lists to map each tool to a content origin (file content, command output, or API response), falling back to its built-in lists when that file is missing or invalid; Core then applies the matching thresholds. Its former `skip_tools` and `shell_tools` overrides have been removed and no longer control the adapter. See [Configuration and data privacy](configuration-and-privacy.md) for the current options.
+- TOON encoding is a separate trigger decision: it runs only on payloads of at least 500 characters and only when the host slot accepts text, and it is adopted only when the encoded result is smaller than the current content.
+- Git diff context cropping is a separate opt-in decision, disabled by default: with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` in the agent process environment (or the SDK's `diff_compression_enabled` option), Core crops unchanged context from command-output Git diffs when the slot accepts text; every changed line is preserved, the complete original output is stashed behind a recovery hint, and a candidate is rejected unless it saves at least 16 estimated tokens net of that wrapper text.
+- The Python SDK and AgentScope layers do not set these thresholds through Python configuration: compression thresholds, content detection, and TOON selection are Core behavior. Direct `TokenlessRuntime.compress_response` calls can still override the truncation limits per call. See the [Python SDK](sdk.md) and [AgentScope integration](sdk/agentscope.md) docs.
+
 ### Controlling search path sharing
 
 API search path sharing is enabled by default. Set `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`
 in the agent process environment to disable it through the CLI. When unset it stays enabled;
-`1`, `true`, and `yes` also enable it (case-insensitively). Empty and other values disable it.
+`1`, `true`, and `yes` also enable it (case-insensitively); an empty value counts as unset, and
+any other value disables it.
 This setting is independent of `config.json`. Python SDK callers can disable it with
 `TokenlessConfig(search_path_sharing_enabled=False)`; Rust callers set
 `RuntimeConfig.search_path_sharing_enabled` to `false`. All entry points default to enabled.
@@ -222,11 +262,13 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | I want to | Document |
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
+| Install via npm, curl, or Skill | [Quick Start · Install Tokenless](QUICKSTART.md#install-tokenless) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
 | Use the in-process Python SDK | [Python SDK](sdk.md) |
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
 | Connect an Agent product | [Agent integration](framework-integration.md) |
 | Compress or retrieve manually | [CLI reference](cli-reference.md) |
+| Understand when compression triggers and what the thresholds are | [This page · Compression trigger conditions and thresholds](#compression-trigger-conditions-and-thresholds) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |
 | Fix missing statistics, adapter, or Stash issues | [Troubleshooting](troubleshooting.md) |

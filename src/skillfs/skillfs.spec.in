@@ -62,6 +62,11 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/runtime/skills/skillfs/
 
 %changelog
+* Sun Sep 20 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.0-1
+- Add multi-source mounts and read-only Ledger deployment support.
+- Supervise sidecar mounts with bounded recovery retries.
+- Keep transformed reads stable per open and cache results across opens.
+
 * Thu Aug 27 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.4.2-1
 - Add an optional Alibaba Cloud Linux 4 sidecar image and operator guidance.
 - Retry startup reconciles after transient notify daemon endpoint failures.

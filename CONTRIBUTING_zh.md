@@ -17,14 +17,14 @@ ANOLISA 是一个 monorepo。下表列出十二个组件及其支持的开发平
 
 | 组件 | 路径 | 平台 | 构建名称 | Scope | 开发入口和最低本地门禁 |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `src/copilot-shell/` | 所有平台 | `cosh` | `cosh` | `cd src/copilot-shell`；`make deps`、`make build`、`make lint`、`make test` |
+| copilot-shell | `deprecated/copilot-shell/` | 所有平台 | `cosh` | `cosh` | `cd deprecated/copilot-shell`；`make deps`、`make build`、`make lint`、`make test` |
 | cosh-ng | `src/cosh-ng/` | Linux 完整功能；macOS 功能受限 | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`、`cargo fmt --all -- --check`，随后按 `src/cosh-ng/CONTRIBUTING_zh.md` 选择最接近改动的测试 |
 | agent-sec-core | `src/agent-sec-core/` | 仅 Linux | `sec-core` | `sec-core` | Python 3.11.6 和 `uv`; `make build-all`、`make test` |
 | agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
 | tokenless | `src/tokenless/` | 完整开发在 Linux；发布的 CLI 二进制和 npm adapter 支持 macOS x64/arm64 | `tokenless` | `tokenless` | `make build`、`make lint`、`make test` |
 | agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
 | os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 静态 Markdown skill 定义和 shell 资源；`make build` 用于确认没有编译步骤 |
-| anolisa | `src/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
+| anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
 | SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
 | ktuner | `src/ktuner/` | 仅 Linux | 不适用 | `ktuner` | `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` |
@@ -167,7 +167,7 @@ scope 会产生警告，发起 review 前应说明理由或改用推荐值。
 
 | Scope | 路径或用途 |
 | --- | --- |
-| `cosh` | `src/copilot-shell/` |
+| `cosh` | `deprecated/copilot-shell/` |
 | `cosh-ng` | `src/cosh-ng/` |
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
@@ -175,7 +175,7 @@ scope 会产生警告，发起 review 前应说明理由或改用推荐值。
 | `tokenless` | `src/tokenless/` |
 | `ckpt` | `src/ws-ckpt/` |
 | `memory` | `src/agent-memory/` |
-| `anolisa` | `src/anolisa/` |
+| `anolisa` | `distribution/anolisa/` |
 | `skillfs` | `src/skillfs/` |
 | `ktuner` | `src/ktuner/` |
 | `blaze` | `src/blaze/` |

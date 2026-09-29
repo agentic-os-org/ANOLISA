@@ -7,7 +7,7 @@ This product includes software developed at Alibaba Cloud.
 Derived Works
 =========================================================================
 
-copilot-shell (src/copilot-shell/)
+copilot-shell (deprecated/copilot-shell/)
   Based on Qwen Code (https://github.com/QwenLM/qwen-code),
   which is itself derived from Gemini CLI.
   Copyright 2025 Google LLC
@@ -84,7 +84,7 @@ rtk (src/tokenless/third_party/rtk/)
   to achieve 60-90% token savings on common development commands.
   Included in the tokenless component.
 
-ripgrep (src/copilot-shell/dist/)
+ripgrep (deprecated/copilot-shell/dist/)
   Vendored binary
   Copyright Andrew Gallant
   Licensed under the MIT License / The Unlicense
@@ -114,7 +114,7 @@ xlsx skill (src/os-skills/others/xlsx/)
 Test Assets
 =========================================================================
 
-terminal-bench (src/copilot-shell/integration-tests/terminal-bench/)
+terminal-bench (deprecated/copilot-shell/integration-tests/terminal-bench/)
   Copyright 2025 Laude Institute
   Source: https://github.com/laude-institute/terminal-bench
   Licensed under the Apache License, Version 2.0

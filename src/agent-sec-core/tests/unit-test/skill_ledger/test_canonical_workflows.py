@@ -201,15 +201,18 @@ def test_batch_error_exposes_only_canonical_path(
     assert str(live) not in json.dumps(result)
 
 
-def test_readonly_host_system_skill_is_skipped_without_skill_directory_writes(
+@pytest.mark.parametrize("root_name", ["system-skills", "data/anolisa/skills"])
+def test_readonly_host_default_skill_is_skipped_without_skill_directory_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root_name: str,
 ) -> None:
-    system_root = tmp_path / "system-skills"
+    system_root = tmp_path / root_name
     skill = _make_skill(system_root, "weather", "weather")
     root = ResolvedSkillRoot(skill, skill, "host")
     backend = _backend(tmp_path, monkeypatch)
-    _set_system_root(system_root, monkeypatch)
+    if root_name == "system-skills":
+        _set_system_root(system_root, monkeypatch)
     scanner_called = False
     remember_called = False
 
@@ -245,7 +248,11 @@ def test_readonly_host_system_skill_is_skipped_without_skill_directory_writes(
             "canonicalSkillDir": str(skill),
             "skillName": "weather",
             "status": "skipped",
-            "reasonCode": "readonly_system_skill",
+            "reasonCode": (
+                "readonly_system_skill"
+                if root_name == "system-skills"
+                else "readonly_default_skill"
+            ),
             "persisted": False,
         }
     ]
@@ -278,15 +285,18 @@ def test_explicit_readonly_host_system_scan_stays_strict(
     ).exists()
 
 
-def test_writable_host_system_skill_is_scanned(
+@pytest.mark.parametrize("root_name", ["system-skills", "data/anolisa/skills"])
+def test_writable_host_default_skill_is_scanned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root_name: str,
 ) -> None:
-    system_root = tmp_path / "system-skills"
+    system_root = tmp_path / root_name
     skill = _make_skill(system_root, "weather", "weather")
     root = ResolvedSkillRoot(skill, skill, "host")
     backend = _backend(tmp_path, monkeypatch)
-    _set_system_root(system_root, monkeypatch)
+    if root_name == "system-skills":
+        _set_system_root(system_root, monkeypatch)
     monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
     monkeypatch.setattr(
         certifier_core,
@@ -306,6 +316,8 @@ def test_writable_host_system_skill_is_scanned(
     assert result[0]["status"] == "scanned"
     assert result[0]["scanStatus"] == "pass"
     assert (skill / ".skill-meta" / "latest.json").is_file()
+    config_path = tmp_path / "config/agent-sec/skill-ledger/config.json"
+    assert json.loads(config_path.read_text())["managedSkillDirs"] == [str(skill)]
 
 
 def test_writable_skillfs_backing_under_system_path_is_scanned(
@@ -334,17 +346,23 @@ def test_writable_skillfs_backing_under_system_path_is_scanned(
     assert not canonical.exists()
 
 
-def test_readonly_skillfs_backing_is_not_downgraded_to_system_skip(
+@pytest.mark.parametrize("root_name", ["system-skills", "data/anolisa/skills"])
+def test_readonly_skillfs_backing_is_not_downgraded_to_default_skip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root_name: str,
 ) -> None:
-    system_root = tmp_path / "system-skills"
+    system_root = tmp_path / root_name
     canonical = system_root / "weather"
     live = _make_skill(tmp_path / "backing", "weather", "weather")
     root = ResolvedSkillRoot(canonical, live, "skillfs")
     backend = _backend(tmp_path, monkeypatch)
-    _set_system_root(system_root, monkeypatch)
+    if root_name == "system-skills":
+        _set_system_root(system_root, monkeypatch)
     monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core, "ledger_update_access", lambda _root: (False, "read-only")
+    )
     monkeypatch.setattr(
         certifier_core,
         "_auto_invoke_scanners",
@@ -368,14 +386,30 @@ def test_readonly_skillfs_backing_is_not_downgraded_to_system_skip(
     assert "backing ledger is read-only" in result[0]["error"]
 
 
-def test_readonly_user_skill_is_not_downgraded_to_system_skip(
+@pytest.mark.parametrize(
+    ("root_name", "managed_suffix"),
+    [
+        ("user-skills", None),
+        ("data/anolisa/skills", "weather"),
+        ("data/anolisa/skills", "*"),
+        ("data/anolisa/skills", "**"),
+    ],
+)
+def test_readonly_managed_or_other_user_skill_is_not_downgraded_to_default_skip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root_name: str,
+    managed_suffix: str | None,
 ) -> None:
-    skill = _make_skill(tmp_path / "user-skills", "weather", "weather")
+    skill = _make_skill(tmp_path / root_name, "weather", "weather")
     root = ResolvedSkillRoot(skill, skill, "host")
     backend = _backend(tmp_path, monkeypatch)
+    if managed_suffix is not None:
+        _write_config(tmp_path, [skill.parent / managed_suffix])
     monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core, "ledger_update_access", lambda _root: (False, "read-only")
+    )
     monkeypatch.setattr(
         certifier_core,
         "_auto_invoke_scanners",

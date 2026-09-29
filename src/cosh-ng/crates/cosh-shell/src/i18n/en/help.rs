@@ -14,11 +14,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Enter send · Shift+Enter newline · Esc cancel"
         }
         MessageId::PromptDraftFooterSubmitted => "Sent to agent",
+        MessageId::PromptDraftFooterControlSubmitted => "Command submitted",
         MessageId::PromptDraftFooterCancelled => "Draft cancelled",
         MessageId::AgentComposerTitle => "Agent Composer",
         MessageId::PromptDraftRuntimeLabel => "Runtime",
         MessageId::AgentComposerFooterEditing => {
-            "Enter send · Shift+Enter newline · Tab complete · @path · /skill:name · Esc cancel"
+            "/ commands · ↑↓ select · Tab complete · Enter submit · Shift+Enter newline · Esc cancel"
         }
         MessageId::AgentComposerRejectedTitle => "References skipped",
         MessageId::AgentComposerRejectedInvalidPathLine => {

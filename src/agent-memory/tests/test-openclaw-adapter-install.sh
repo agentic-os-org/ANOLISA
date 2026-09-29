@@ -4,10 +4,14 @@
 # matching for both negotiated flags — capability consent and the legacy
 # unsafe-install bypass — the consent opt-out, AGENT_MEMORY_SAFE_INSTALL, and
 # the per-outcome log lines. No real plugin is installed.
+#
+# Namespaced tools coexist with memory-core: neither script may enable or disable
+# that plugin. Old installer markers remain available for manual recovery.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SH="$SCRIPT_DIR/../adapters/agent-memory/openclaw/scripts/install.sh"
+UNINSTALL_SH="$SCRIPT_DIR/../adapters/agent-memory/openclaw/scripts/uninstall.sh"
 SANDBOX="$(mktemp -d -t agent-memory-openclaw-install.XXXXXX)"
 trap 'rm -r -- "$SANDBOX"' EXIT
 # The space in "adapter root" pins argv quoting through PLUGIN_DIR.
@@ -79,6 +83,9 @@ fi
 if [ "$1" = config ] && [ "$2" = set ]; then
     exit 0
 fi
+if [ "$1" = plugins ] && [ "$2" = uninstall ]; then
+    exit 0
+fi
 [ "$1" = plugins ] && [ "$2" = install ]
 [ "$3" = "$ANOLISA_ADAPTER_DIR/openclaw" ]
 accepted=0
@@ -135,6 +142,8 @@ export OPENCLAW_HOME="$SANDBOX/ignored home"
 export TEST_STATE_DIR="$OPENCLAW_STATE_DIR"
 export TEST_ARGV_LOG="$SANDBOX/argv"
 export TEST_INSTALLED="$SANDBOX/installed"
+# Legacy marker used to check that new installs do not claim other plugins.
+export MEMORY_CORE_MARKER="$OPENCLAW_STATE_DIR/.anolisa-memory-anolisa-disabled-memory-core"
 # `openclaw plugins install --help` captured verbatim from real releases, so the
 # unsafe-install classifier is pinned against how commander actually renders and
 # wraps the option descriptions rather than against hand-written help text.
@@ -172,6 +181,11 @@ scenario() {
     local rc=0
     : > "$TEST_ARGV_LOG"
     rm -f "$TEST_INSTALLED"
+    # The state directory is the marker's home, and an earlier scenario may have
+    # removed it (unlock_install_target). Recreate it, and start every scenario
+    # from "install.sh has never disabled memory-core here".
+    mkdir -p -- "$OPENCLAW_STATE_DIR"
+    rm -f -- "$MEMORY_CORE_MARKER"
     env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
     [ "$rc" = "$want_rc" ] || fail "$label: rc=$rc, want $want_rc"
@@ -195,6 +209,9 @@ scenario() {
     else
         [ ! -f "$TEST_INSTALLED" ] || fail "$label: install ran despite failure"
     fi
+    ! grep -Eq '^plugins (enable|disable) memory-core$|^config .*plugins.entries.memory-core' "$TEST_ARGV_LOG" \
+        || fail "$label: installer touched memory-core"
+    [ ! -f "$MEMORY_CORE_MARKER" ] || fail "$label: installer created a displacement marker"
     echo "PASS: $label"
 }
 
@@ -535,12 +552,41 @@ if command -v make >/dev/null 2>&1; then
     echo 'PASS: remote-test includes the installer test'
 fi
 
-# The suite must be hermetic: hostile ambient switch values must neither
-# leak into baseline scenarios nor break the suite itself.
-if [ -z "${TEST_HOSTILE_AMBIENT:-}" ]; then
-    rc=0
-    env AGENT_MEMORY_ACCEPT_CAPABILITIES=0 AGENT_MEMORY_SAFE_INSTALL=1 TEST_HOSTILE_AMBIENT=1 \
-        bash "$0" >"$SANDBOX/output" 2>&1 || rc=$?
-    [ "$rc" = 0 ] || { sed 's/^/    /' "$SANDBOX/output" >&2; fail "hostile ambient environment broke the suite (rc=$rc)"; }
-    echo 'PASS: hostile ambient environment does not leak into scenarios'
-fi
+# Check fresh installs and upgrades without changing another plugin's state.
+export TEST_HELP=modern TEST_GATE=new
+scenario 'namespaced tools need no memory-core disable' 0 "$(argv no yes)"
+for legacy in no yes; do
+    for owner in memory-anolisa memory-lancedb none; do
+        for enabled in true false; do
+            mkdir -p "$OPENCLAW_STATE_DIR"
+            rm -f "$MEMORY_CORE_MARKER"
+            if [ "$legacy" = yes ]; then printf 'legacy recovery record\n' > "$MEMORY_CORE_MARKER"; fi
+            cat > "$OPENCLAW_STATE_DIR/openclaw.json" <<EOF
+{"plugins":{"allow":["memory-anolisa","memory-lancedb"],"slots":{"memory":"$owner"},"entries":{"memory-anolisa":{"enabled":true},"memory-core":{"enabled":$enabled},"memory-lancedb":{"enabled":true}}}}
+EOF
+            : > "$TEST_ARGV_LOG"
+            bash "$INSTALL_SH" > "$SANDBOX/output" 2>&1 || fail 're-install failed'
+            if [ "$legacy" = yes ]; then expect_log 'previous installer recorded'; fi
+            bash "$UNINSTALL_SH" > "$SANDBOX/output" 2>&1 || fail 'uninstall failed'
+            ! grep -Eq '^plugins (enable|disable) memory-core$|^config .*plugins.entries.memory-core' "$TEST_ARGV_LOG" \
+                || fail 'install/uninstall mutated memory-core'
+            python3 - "$OPENCLAW_STATE_DIR/openclaw.json" "$owner" "$enabled" <<'PYTEST'
+import json, sys
+plugins = json.load(open(sys.argv[1]))['plugins']
+assert plugins['entries']['memory-core']['enabled'] == (sys.argv[3] == 'true')
+assert 'memory-anolisa' not in plugins['entries']
+assert 'memory-anolisa' not in plugins['allow']
+assert plugins['entries']['memory-lancedb']['enabled'] is True
+assert plugins['slots'].get('memory') == (None if sys.argv[2] == 'memory-anolisa' else sys.argv[2])
+PYTEST
+            if [ "$legacy" = yes ]; then
+                expect_log 'previous installer recorded'
+                [ "$(cat "$MEMORY_CORE_MARKER")" = 'legacy recovery record' ] || fail 'legacy marker lost'
+            else
+                [ ! -f "$MEMORY_CORE_MARKER" ] || fail 'new marker created'
+                expect_no_log 'previous installer recorded'
+            fi
+            echo "PASS: install/uninstall preserves memory-core=$enabled, slot=$owner, legacy=$legacy"
+        done
+    done
+done

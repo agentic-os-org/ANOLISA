@@ -59,6 +59,8 @@ pub(crate) const SLASH_CONFIG_ZH_FORBIDDEN_UI: &[&str] = &[
     "Config saved",
     "language is a persistent config",
     "Use /config language [auto|en-US|zh-CN].",
+    "│ Registry",
+    "组稿一次性 Agent 请求",
 ];
 
 pub(crate) const MODE_ZH_FORBIDDEN_UI: &[&str] = &[

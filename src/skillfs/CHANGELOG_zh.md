@@ -9,6 +9,30 @@
 
 ## [未发布]
 
+## [0.5.0] - 2026-09-20
+
+### 新增
+
+- `skillfs mount --config mount.toml` 现在可按顺序将多个 Skill 来源合并到同一挂载。
+  同名 Skill 整个目录以靠前的来源为准；多来源挂载为只读，修改配置或新增、删除
+  Skill 后需重新挂载
+  ([#3200](https://github.com/agentic-os-org/ANOLISA/pull/3200))。
+- 新增可选的 Kubernetes 部署方案，将只读技能包复制到私有可写来源，再由 Ledger
+  扫描和激活。新增的 `--read-only` 选项禁止通过 Agent 可见的挂载写入；
+  缺少有效激活状态的 Skill 保持隐藏
+  ([#3182](https://github.com/agentic-os-org/ANOLISA/pull/3182))。
+
+### 变更
+
+- Debian 和 Alibaba Cloud Linux 4 Sidecar 镜像现在会检查实际 FUSE 读取，
+  连续失败后尝试重新挂载，并限制重试次数。恢复后，工作负载需要重新打开失败的句柄
+  ([#2701](https://github.com/agentic-os-org/ANOLISA/pull/2701))。
+- 以只读方式打开的转换后 `SKILL.md` 现在会保留打开时的内容，来源修改后，
+  新打开的句柄可读到更新。容量受限的缓存可在属性查询和多次打开之间复用转换结果。
+  这类句柄另有独立的挂载级额度；新句柄若会超出 64 MiB 或 1,024 个句柄的上限，
+  打开操作会返回 `ENOMEM`，关闭已有的这类句柄可释放额度
+  ([#3202](https://github.com/agentic-os-org/ANOLISA/pull/3202))。
+
 ## [0.4.2] - 2026-08-27
 
 ### 新增

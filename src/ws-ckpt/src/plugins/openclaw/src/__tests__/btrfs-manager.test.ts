@@ -339,7 +339,43 @@ describe("BtrfsManager with mocked executor", () => {
     expect(list[0].snapshot).toBe("s1");
   });
 
-  it("listCheckpoints handles CLI failure gracefully", async () => {
+  it("listCheckpoints preserves summary markers", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(
+      ok(
+        JSON.stringify([
+          {
+            id: "s-large",
+            workspace: "/ws",
+            meta: {
+              created_at: "2024-01-01T00:00:00Z",
+              pinned: true,
+              missing: false,
+            },
+            detail: "summary",
+            omitted_fields: ["message", "metadata"],
+          },
+        ]),
+      ),
+    );
+    await mgr.initialize("/ws");
+
+    const list = await mgr.listCheckpoints();
+    expect(list).toEqual([
+      expect.objectContaining({
+        snapshot: "s-large",
+        createdAt: "2024-01-01T00:00:00Z",
+        message: undefined,
+        metadata: undefined,
+        detail: "summary",
+        omittedFields: ["message", "metadata"],
+      }),
+    ]);
+  });
+
+  it("listCheckpoints surfaces CLI failure", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -348,11 +384,26 @@ describe("BtrfsManager with mocked executor", () => {
       .mockResolvedValueOnce(fail("err"));  // listCheckpoints
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Failed to list checkpoints");
   });
 
-  it("listCheckpoints handles exception", async () => {
+  it("listCheckpoints does not return stale cache after CLI failure", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi
+      .fn()
+      .mockResolvedValueOnce(
+        ok(JSON.stringify([{ id: "cached", meta: { created_at: "2024-01-01T00:00:00Z" } }])),
+      )
+      .mockResolvedValueOnce(fail("later page failed"));
+    await mgr.initialize("/ws");
+
+    expect((mgr as any).store.getAll()[0]?.snapshot).toBe("cached");
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Failed to list checkpoints");
+  });
+
+  it("listCheckpoints surfaces exception", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -361,8 +412,7 @@ describe("BtrfsManager with mocked executor", () => {
       .mockRejectedValueOnce(new Error("fail"));
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Failed to list checkpoints: fail");
   });
 
   it("execDiffRaw success", async () => {

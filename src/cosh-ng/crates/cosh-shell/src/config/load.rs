@@ -54,6 +54,12 @@ fn apply_env_overrides(config: &mut CoshConfig) {
     if let Ok(value) = std::env::var("COSH_SHELL_INTEGRATION") {
         config.shell_integration = value;
     }
+    if let Ok(v) = std::env::var("COSH_SHELL_STATUS_SYMBOLS") {
+        config.status_symbols = parse_bool_value(&v);
+    }
+    if let Ok(v) = std::env::var("COSH_SHELL_LOGIN_IDENTITY") {
+        config.login_identity = parse_bool_value(&v);
+    }
     if let Ok(v) = std::env::var("COSH_SHELL_ANALYSIS_MODE") {
         config.analysis_mode = v;
     }
@@ -83,7 +89,7 @@ fn apply_env_overrides(config: &mut CoshConfig) {
         config.log_level = v;
     }
     // debug: true → map to "debug" level if log_level was not explicitly set
-    if config.debug && config.log_level == "warn" {
+    if config.debug && config.log_level == "info" {
         config.log_level = "debug".to_string();
     }
     if let Ok(v) = std::env::var("COSH_SHELL_LANG") {

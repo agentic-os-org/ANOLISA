@@ -324,14 +324,14 @@ pub(crate) fn apply_auth_credentials(
         response.values.get("security_token").cloned()
     };
 
-    // Preserve explicit_cache across auth refresh so a 401/403
-    // re-auth does not silently reset the user's explicit cache preference
-    // to None (which persist_config_to_dir would then omit).
-    let existing_explicit_cache = config
-        .ai
-        .providers
-        .get(&response.provider_id)
-        .and_then(|p| p.explicit_cache);
+    // Preserve settings the auth response cannot carry, so a 401/403 re-auth
+    // does not silently reset them to None (which persist_config_to_dir would
+    // then omit): the user's explicit cache preference, and any SysOM endpoint
+    // they configured -- losing the latter would quietly switch the client back
+    // to probing.
+    let existing = config.ai.providers.get(&response.provider_id);
+    let existing_explicit_cache = existing.and_then(|p| p.explicit_cache);
+    let existing_sysom_endpoint = existing.and_then(|p| p.sysom_endpoint.clone());
 
     config.ai.active_provider = Some(response.provider_id.clone());
     config.ai.active_model = final_model.clone();
@@ -339,6 +339,7 @@ pub(crate) fn apply_auth_credentials(
         provider_type: Some(provider_type),
         auth_source,
         base_url: Some(base_url),
+        sysom_endpoint: existing_sysom_endpoint,
         api_key: Some(api_key),
         model: final_model.clone(),
         extra_params: None,
@@ -985,6 +986,40 @@ mod tests {
         assert_eq!(p.api_key.as_deref(), Some("sk-new"));
         // explicit_cache must survive re-auth
         assert_eq!(p.explicit_cache, Some(true));
+    }
+
+    #[test]
+    fn auth_refresh_preserves_sysom_endpoint() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "aliyun".to_string(),
+            ProviderConfig {
+                provider_type: Some("aliyun".to_string()),
+                sysom_endpoint: Some("https://sysom.cn-shanghai.aliyuncs.com".to_string()),
+                access_key_id: Some("old-ak".to_string()),
+                model: Some("qwen3.7-plus".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let response = AuthResponse {
+            provider_id: "aliyun".to_string(),
+            provider_type: None,
+            values: HashMap::from([
+                ("access_key_id".to_string(), "new-ak".to_string()),
+                ("access_key_secret".to_string(), "new-sk".to_string()),
+            ]),
+            persist: true,
+        };
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let p = config.ai.providers.get("aliyun").unwrap();
+        assert_eq!(p.access_key_id.as_deref(), Some("new-ak"));
+        // Losing this would silently switch the client back to probing.
+        assert_eq!(
+            p.sysom_endpoint.as_deref(),
+            Some("https://sysom.cn-shanghai.aliyuncs.com")
+        );
     }
 
     #[test]

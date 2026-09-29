@@ -21,7 +21,7 @@ Make sure you have:
 Requires [Node.js 20+](https://nodejs.org/download). Check your version with `node -v`.
 
 ```bash
-cd src/copilot-shell
+cd deprecated/copilot-shell
 make build
 ```
 
@@ -231,7 +231,7 @@ sudo yum install copilot-shell
 Requires [Node.js 20+](https://nodejs.org/download). You can check your version with `node -v`.
 
 ```bash
-cd src/copilot-shell
+cd deprecated/copilot-shell
 make build
 ```
 

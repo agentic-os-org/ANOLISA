@@ -25,6 +25,19 @@ pub mod token;
 #[cfg(any(target_os = "linux", feature = "server"))]
 pub mod trace;
 
+/// Print `value` as pretty JSON to stdout, the `--json` output contract shared
+/// by the machine-facing subcommands (`discover`, `token`, …).
+///
+/// The payloads are plain `#[derive(Serialize)]` structs over `String` / `Vec`
+/// / integers with no non-string map keys and no custom `Serialize` impls, so
+/// `to_string_pretty` is infallible here — we assert that invariant with
+/// `expect` rather than carry an unreachable error arm.
+pub fn print_json<T: serde::Serialize>(value: &T) {
+    let json =
+        serde_json::to_string_pretty(value).expect("agent-facing JSON payload must serialize");
+    println!("{json}");
+}
+
 /// Default configuration file path (shared by trace / serve / dashboard).
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentsight/config.json";
@@ -38,7 +51,10 @@ pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerA
 }
 
 /// Loads the server configuration, falling back to safe defaults.
-#[cfg(all(feature = "server", target_os = "linux"))]
+///
+/// Not Linux-only: every function it calls is platform-independent, and the
+/// macOS viewer needs the same flags to decide what it may switch on.
+#[cfg(feature = "server")]
 pub fn load_server_config(config_path: &str) -> agentsight::config::AgentsightConfig {
     use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
 

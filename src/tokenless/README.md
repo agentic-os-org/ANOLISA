@@ -11,6 +11,12 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
+The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+not isolated by Tokenless tenant or session.
+See [bundled RTK commands](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#bundled-rtk-commands)
+for flag migration, pipeline behavior, and output recovery.
+
 Agent adapters are available for:
 
 - **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
@@ -36,6 +42,8 @@ retrieval, and attribution.
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
 | Search path sharing | workload-dependent | Enabled by default: API search listings, including Claude native Grep, share consecutive file paths and retain every received match; disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False`; command output remains on its existing route |
+| Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
+| HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
 | CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
@@ -171,12 +179,54 @@ Installing the CLI from the same YUM repository makes it available on sudo's
 system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
-Current public packages support Linux x86_64/aarch64 and macOS Apple Silicon.
-Intel macOS does not currently have a published package. The repository's npm
-packaging sources are for release construction and are not a public
-`anolisa-tokenless` installation route. The retained
-`@anolisa/tokenless-darwin-x64` optional-dependency entry describes a release
-build target; it does not indicate registry availability.
+Two further public routes install the CLI on their own, without an anolisa
+component record. The npm route ships the prebuilt `tokenless` and `rtk`
+binaries plus the bundled Agent adapters and needs Node.js 16.7+, the release
+`fs.cpSync` arrived in and the one the package postinstall requires. The curl route
+is a standalone installer that prefers npm and builds from source instead. The
+method is chosen before npm runs (npm missing, musl Linux, or
+`TOKENLESS_FORCE_BUILD=1`); once `npm install` has been invoked the installer does
+not switch method automatically, because npm's exit status cannot prove its
+postinstall left no framework registration behind:
+
+```bash
+npm install -g anolisa-tokenless
+
+curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+```
+
+Because neither registers the component, `anolisa adapter enable` does not
+apply to them; enable a framework with its bundled script under
+`~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
+instead. The curl installer records what it created in
+`~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
+consumes to remove exactly those paths; its source-build path is CLI-only
+(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+`install-tokenless` OS Skill. The full method matrix lives in
+`docs/user-guide/en/token-saving/tokenless/QUICKSTART.md`.
+
+`~/.local/share/anolisa/adapters/tokenless` is shared with anolisa-managed
+installs, so neither public route takes it over blindly. Ownership has to be
+proven: the npm postinstall only refreshes a tree carrying the marker it or the
+curl installer wrote, and keeps anything else — a managed component install, a
+tree from an older release, a manual copy — reporting where the resources inside
+the package are. `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` overrides that. The curl installer restores a tree another owner placed there, records no
+adapter directory for it, and proves ownership of everything it does record with
+a per-install marker (`.tokenless-owner`) rather than a content hash alone — a
+later anolisa or npm
+install of the same version reproduces the same bytes, and its files, adapter
+resources, framework registrations and npm package are left alone. A replacement
+that fails halfway (a missing tag, a build error) puts the previous install back
+instead of leaving the machine without a CLI.
+
+Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
+macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
+optional-dependency entry describes a release build target, not a registry
+artifact, so the npm route cannot deliver a binary there. The standalone
+installer does not fall back to a source build on macOS either — it exits with
+an error instead of running `cargo` — so Intel macOS currently has no supported
+install route. Use Linux or Apple Silicon macOS until that package is
+published.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands
@@ -683,16 +733,29 @@ replaces the original model-visible response instead of being appended to it.
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
 | Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
 
-Install the plugin globally, then restart OpenCode:
+Enable the installed plugin through ANOLISA, then restart OpenCode:
+
+```bash
+anolisa adapter enable tokenless opencode
+```
+
+The driver creates `plugins/tokenless.js` under `OPENCODE_CONFIG_DIR`,
+`XDG_CONFIG_HOME/opencode`, or `~/.config/opencode`, in that order. It ignores
+`TOKENLESS_OPENCODE_CONFIG_DIR`; use `OPENCODE_CONFIG_DIR` for a shared custom directory.
+Enable adopts an existing link to the same source path without directory aliases;
+`anolisa adapter disable tokenless opencode` removes that link. Restart OpenCode after either operation.
+
+For standalone source installs, use:
 
 ```bash
 make opencode-install
 ```
 
-The installer creates a `tokenless.js` symbolic link in OpenCode's global
-`plugins/` directory and never overwrites an existing unmanaged file. It honors
-`OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
-`TOKENLESS_OPENCODE_CONFIG_DIR` override.
+The bundled lifecycle scripts additionally honor `TOKENLESS_OPENCODE_CONFIG_DIR` as the
+highest-priority override. Both methods refuse conflicting files or links. To return to standalone
+management after ANOLISA disable, rerun `make opencode-install` or the bundled `scripts/install.sh`.
+See [framework integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#opencode)
+for the complete lifecycle.
 
 If a response contains a Retrieve Marker, OpenCode can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter sends
@@ -721,6 +784,14 @@ bundle into `<working dir>/plugins/tokenless/` (`QWENPAW_WORKING_DIR`, else
 `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`) and installs
 the `anolisa_tokenless` wheel listed in `requirements.txt` from the matching
 GitHub Release. Records are written under `<workspace>/.tokenless`.
+
+Before the bundle is handed over, the installer probes that pinned wheel URL and
+stops with an explanatory error when the asset answers `404`. Set
+`ANOLISA_SKIP_WHEEL_PREFLIGHT=1` to skip the probe on offline or mirrored
+networks; `ANOLISA_TOKENLESS_PROBE_TIMEOUT` bounds each probe in seconds
+(default 15). See
+[troubleshooting](../../docs/user-guide/en/token-saving/tokenless/troubleshooting.md#qwenpaw-install-reports-an-unavailable-sdk-wheel)
+for the full reference.
 
 ## DeepSeek Harness Plugin
 
@@ -895,7 +966,7 @@ tool-output savings and retrieval overhead separately.
 | `make test-agentscope-integration` | Test both wheels with supported AgentScope versions |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests (Rust + hooks) |
-| `make test-hooks` | Run hook integration tests |
+| `make test-hooks` | Run hook integration tests against the installed `tokenless` binary, whose version must match this checkout (`TOKENLESS_ALLOW_VERSION_SKEW=1` overrides) |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |

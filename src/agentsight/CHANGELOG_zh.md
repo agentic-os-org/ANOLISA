@@ -1,5 +1,27 @@
 # 更新日志
 
+## 未发布
+
+### 修复
+- `agentsight-enforcer` 升级后可自行恢复：旧版本遗留的 enforcement 布局无法被新二进制复用时，现在会自动检测并替换，文件删除防护与 enforcement 健康检查不再需要人工清理旧布局才能恢复。(#3445)
+
+## 0.13.0
+
+### 新功能
+- 新增 `GET /api/preferences` 与 `GET /api/preferences/export`，从近期会话中识别用户的工作习惯（语言偏好、先出方案再动手、要求补测试、纠正模式、常用工具倾向），并通过 `/api/preferences/turns` 返回本次分析所依据的用户输入。分析在请求时实时计算，Linux 读取 `genai_events`，其他平台读取已采集的轨迹，因此不产生需要迁移或会过期的派生数据。
+- 新增 `GET /api/trajectories/steps`，按派生类别（`user_input`、`system`、`agent_message`、`thinking`、`tool_call`、`tool_result`）检索 ATIF 步骤，并随每个命中返回其上下文步骤。类别是多标签的：同一个 agent 步骤可能同时包含消息、推理、工具调用与观测结果。
+- 新增可复用轨迹标注体系：为轨迹打上可复用分诊标签、支持人工裁定标签、新增复用标签评审页，并将搜索限定为提供已标注的轨迹历史。
+- 为 5.10/6.6 内核的 file-delete-guard 新增 inode guard，含域隔离、违规事件与启动清理。
+
+### 修复
+- macOS `trace` 路径初始化日志，使轨迹采集失败能够暴露而非被静默丢弃。
+- 新增 token-plan provider 预设。
+- 修复 enforcer ringbuf 消费者在 mmap 推进后的 fd 失效问题。
+- traces 列表中移除 trace_id 别名。(#3261)
+- 主日志器遵循 RUST_LOG 正则。(#3186)
+- 命名空间 PID 解析为宿主 PID，并做 init-ns 自检。(#3041)
+- 先创建 conversation_id 列再建其索引。(#3378)
+
 ## 0.12.1
 
 ### 破坏性变更

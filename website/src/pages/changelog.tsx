@@ -38,7 +38,7 @@ export default function ChangelogPage() {
               <article id={`changelog-source-${index}`} key={document.source} className="changelogDocument">
                 <div className="sourceLabel">
                   <span>{document.name}</span>
-                  <a href={`https://github.com/alibaba/anolisa/blob/main/${document.source}`}>{document.source}</a>
+                  <a href={`https://github.com/agentic-os-org/ANOLISA/blob/main/${document.source}`}>{document.source}</a>
                 </div>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{document.markdown}</ReactMarkdown>
               </article>

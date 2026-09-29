@@ -27,7 +27,7 @@
 
 [package]
 name = "tokenless-bench"
-version = "0.7.1"
+version = "0.7.4"
 edition = "2024"
 license = "Apache-2.0"
 publish = false

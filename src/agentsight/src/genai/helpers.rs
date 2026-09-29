@@ -543,13 +543,16 @@ impl GenAIBuilder {
     /// [Tue 2026-03-31 17:19 GMT+8] 用户实际输入
     /// ````
     ///
-    /// **QwenCode**: `<system-reminder>` 标签块
+    /// **QwenCode**: <system-reminder> 标签块
     /// ```text
     /// <system-reminder>...skills...</system-reminder>
     /// <system-reminder>...context...</system-reminder>
     /// 用户实际输入
     /// ```
-    pub(super) fn strip_user_query_prefix(text: &str) -> String {
+    /// `pub(crate)` rather than `pub(super)`: the preference rule engine
+    /// (`crate::preferences::detector`) reuses this stripper so evidence
+    /// excerpts quote the user's actual words, not agent template noise.
+    pub(crate) fn strip_user_query_prefix(text: &str) -> String {
         // cosh-ng: find a line starting with "user_input:" (after trimming)
         // and extract its value. This line-by-line approach tolerates template
         // adjustments such as indentation changes, missing leading newlines,

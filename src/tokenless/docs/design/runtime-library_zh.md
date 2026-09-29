@@ -59,7 +59,7 @@ API 响应，再只替换原输出对象的 `content` 字段。包括宿主限�
 其他 Grep 模式和宿主保留既有路由。RTK 负责的 Bash 输出继续绕过原生 PostTool 压缩。
 
 搜索路径共享默认开启。CLI 可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 关闭；
-未设置时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；空值和其他值均关闭。
+未设置或为空时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；其他值均关闭。
 该变量独立于 JSON 配置文件。
 Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 `TokenlessConfig(search_path_sharing_enabled=False)` 或 `TokenlessRuntime` 的同名参数。

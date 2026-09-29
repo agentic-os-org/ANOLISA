@@ -51,7 +51,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -120,7 +119,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -191,7 +189,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -241,7 +238,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "read",
@@ -287,7 +283,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "read",
@@ -322,7 +317,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -383,7 +377,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -396,7 +392,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -499,7 +494,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -512,7 +509,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -615,7 +611,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -628,7 +626,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -731,7 +728,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -744,7 +743,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -815,13 +813,17 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "APPLY_FAILED"
+                "status": {
+                  "phase": "APPLY_FAILED"
+                }
               },
               {
                 "spec": {
                   "$ref": "binding.rev-8"
                 },
-                "status": "PENDING_APPLY"
+                "status": {
+                  "phase": "PENDING_APPLY"
+                }
               }
             ]
           },
@@ -834,7 +836,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -910,7 +911,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:error"
           ]
@@ -936,7 +936,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -949,7 +951,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "admit",
             "claim",
@@ -1000,7 +1001,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1018,18 +1018,121 @@
           "faults": [],
           "admission": null,
           "expected": {
-            "$ref": "record.create.registration-failed-retry"
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
           },
           "result": {
             "Ok": {
-              "kind": "retry_at",
-              "at": 100
+              "kind": "skipped"
             }
           },
           "trace": [
             "read",
             "finish",
-            "finish:matched"
+            "finish:matched",
+            "read"
           ]
         }
       ]
@@ -1076,7 +1179,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1094,25 +1196,143 @@
           "faults": [],
           "admission": null,
           "expected": {
-            "$ref": "record.replace.registration-failed-retry"
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "old-A",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
           },
           "result": {
             "Ok": {
-              "kind": "retry_at",
-              "at": 100
+              "kind": "skipped"
             }
           },
           "trace": [
             "read",
             "finish",
-            "finish:matched"
+            "finish:matched",
+            "read"
           ]
         }
       ]
     },
     {
       "caseId": "REC-CORE-010",
-      "variant": "persist-only-retry",
+      "variant": "recompute-after-storage-repair",
       "initial": {
         "$ref": "record.create.pending"
       },
@@ -1161,7 +1381,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1184,7 +1403,287 @@
           "faults": [],
           "admission": null,
           "expected": {
-            "$ref": "record.create.ready"
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "opaque-B",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 7,
+                "presence": "UNKNOWN",
+                "lastConfirmed": null
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "READY"
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "opaque-B",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 7,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
           },
           "result": {
             "Ok": {
@@ -1192,6 +1691,19 @@
             }
           },
           "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
             "finish",
             "finish:matched"
           ]
@@ -1234,7 +1746,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -1280,7 +1791,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -1409,7 +1919,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1469,7 +1978,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1485,7 +1993,7 @@
     },
     {
       "caseId": "REC-CORE-014",
-      "variant": "unknown-reuses-bytes",
+      "variant": "unknown-prepares-again",
       "initial": {
         "$ref": "record.create.pending"
       },
@@ -1535,7 +2043,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1573,7 +2080,25 @@
           "now": 100,
           "calls": [
             {
-              "operation": "create",
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
               "input": {
                 "$ref": "request.new-b.no-previous"
               },
@@ -1596,11 +2121,15 @@
             "read",
             "claim",
             "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
             "read",
             "register",
             "register:matched",
-            "create",
-            "create:return",
+            "update",
+            "update:return",
             "read",
             "finish",
             "finish:matched"
@@ -1660,7 +2189,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1680,6 +2208,24 @@
         {
           "now": 100,
           "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
             {
               "operation": "update",
               "input": {
@@ -1704,6 +2250,10 @@
             "read",
             "claim",
             "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
             "read",
             "register",
             "register:matched",
@@ -1771,7 +2321,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -1823,7 +2372,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -1911,7 +2459,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "read",
@@ -1959,7 +2506,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -2106,7 +2652,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -2144,7 +2689,25 @@
           "now": 100,
           "calls": [
             {
-              "operation": "create",
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
               "input": {
                 "$ref": "request.new-b.no-previous"
               },
@@ -2168,11 +2731,15 @@
             "read",
             "claim",
             "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
             "read",
             "register",
             "register:matched",
-            "create",
-            "create:return",
+            "update",
+            "update:return",
             "read",
             "finish",
             "finish:matched"
@@ -2199,7 +2766,25 @@
           "now": 250,
           "calls": [
             {
-              "operation": "create",
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
               "input": {
                 "$ref": "request.new-b.no-previous"
               },
@@ -2226,11 +2811,15 @@
             "read",
             "claim",
             "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
             "read",
             "register",
             "register:matched",
-            "create",
-            "create:return",
+            "update",
+            "update:return",
             "read",
             "finish",
             "finish:matched"
@@ -2288,7 +2877,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -2463,7 +3051,9 @@
                 "spec": {
                   "$ref": "binding.rev-7"
                 },
-                "status": "PENDING_DELETE"
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
               }
             ]
           },
@@ -2475,7 +3065,6 @@
           },
           "trace": [
             "admit",
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -2489,7 +3078,11 @@
             "finish:matched"
           ]
         }
-      ]
+      ],
+      "initialSchedule": {
+        "attemptsStarted": 1,
+        "nextAttemptAt": 100
+      }
     },
     {
       "caseId": "REC-CORE-019",
@@ -2513,7 +3106,6 @@
             }
           },
           "trace": [
-            "read",
             "read"
           ]
         }
@@ -2541,7 +3133,6 @@
             }
           },
           "trace": [
-            "read",
             "read"
           ]
         }
@@ -2569,7 +3160,6 @@
             }
           },
           "trace": [
-            "read",
             "read"
           ]
         }
@@ -2589,7 +3179,110 @@
           "faults": [],
           "admission": null,
           "expected": {
-            "$ref": "record.skip.applying"
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
           },
           "result": {
             "Ok": {
@@ -2598,6 +3291,8 @@
           },
           "trace": [
             "read",
+            "finish",
+            "finish:matched",
             "read"
           ]
         }
@@ -2617,7 +3312,110 @@
           "faults": [],
           "admission": null,
           "expected": {
-            "$ref": "record.skip.deleting"
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_DELETE",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
           },
           "result": {
             "Ok": {
@@ -2626,6 +3424,8 @@
           },
           "trace": [
             "read",
+            "finish",
+            "finish:matched",
             "read"
           ]
         }
@@ -2676,11 +3476,14 @@
             }
           },
           "trace": [
-            "read",
             "read"
           ]
         }
-      ]
+      ],
+      "initialSchedule": {
+        "attemptsStarted": 1,
+        "nextAttemptAt": 100
+      }
     },
     {
       "caseId": "REC-CORE-019",
@@ -2732,7 +3535,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -2803,7 +3605,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -2873,7 +3674,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -2915,7 +3715,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -2979,7 +3778,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -3051,7 +3849,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -3121,7 +3918,6 @@
             }
           },
           "trace": [
-            "read",
             "read",
             "claim",
             "claim:matched",
@@ -3193,7 +3989,6 @@
           },
           "trace": [
             "read",
-            "read",
             "claim",
             "claim:matched",
             "adapter",
@@ -3208,6 +4003,141 @@
             "read",
             "finish",
             "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-020",
+      "variant": "cross-route-rejected",
+      "initial": {
+        "binding": {
+          "spec": {
+            "$ref": "binding.rev-7"
+          },
+          "status": {
+            "phase": "PENDING_APPLY"
+          }
+        },
+        "deployments": [
+          {
+            "target": {
+              "$ref": "target.unavailable-route"
+            },
+            "revision": 6,
+            "presence": "PRESENT",
+            "lastConfirmed": "PRESENT"
+          }
+        ]
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "$ref": "binding.rev-7"
+              },
+              "status": {
+                "phase": "APPLY_FAILED",
+                "error": {
+                  "kind": "REJECTED",
+                  "code": "RECONCILE_TARGET_UNAVAILABLE"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "$ref": "target.unavailable-route"
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "RECONCILE_TARGET_UNAVAILABLE"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 10000,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "$ref": "binding.rev-7"
+              },
+              "status": {
+                "phase": "APPLY_FAILED",
+                "error": {
+                  "kind": "REJECTED",
+                  "code": "RECONCILE_TARGET_UNAVAILABLE"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "$ref": "target.unavailable-route"
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
           ]
         }
       ]

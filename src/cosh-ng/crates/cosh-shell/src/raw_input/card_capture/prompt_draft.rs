@@ -6,15 +6,103 @@
 
 use super::{CardInputKind, CardInputState, RawInputCapture, RawInputEvent};
 
+use crate::input::composer::{is_slash_submission, slash_completions};
+
+#[derive(Debug)]
+pub(super) struct DraftSlashSelection {
+    text: String,
+    cursor: (usize, usize),
+    index: usize,
+}
+
 impl CardInputState {
-    /// Refreshes the first visible completion without resetting editor state.
-    pub(super) fn refresh_draft_completion(&mut self, capture: &RawInputCapture) {
-        self.draft_completion = match capture {
-            RawInputCapture::PromptDraft { completion, .. } => {
-                completion.as_deref().map(str::to_string)
+    fn draft_cursor(&self) -> (usize, usize) {
+        let view = self.draft.viewport();
+        (view.first_row + view.cursor.0, view.cursor.1)
+    }
+
+    fn draft_selected(&self) -> usize {
+        self.draft_selection
+            .as_ref()
+            .filter(|selection| {
+                selection.text == self.draft.text() && selection.cursor == self.draft_cursor()
+            })
+            .map_or(0, |selection| selection.index)
+    }
+
+    fn draft_commands(&self, capture: &RawInputCapture) -> Vec<&'static str> {
+        if !matches!(
+            capture,
+            RawInputCapture::PromptDraft {
+                agent_composer: true,
+                ..
             }
-            _ => None,
+        ) {
+            return Vec::new();
+        }
+        let (row, col) = self.draft_cursor();
+        slash_completions(&self.draft.text(), row, col)
+    }
+
+    pub(super) fn draft_select_command(&mut self, capture: &RawInputCapture, code: u8) -> bool {
+        let commands = self.draft_commands(capture);
+        if commands.is_empty() || !matches!(code, b'A' | b'B') || self.draft_paste {
+            return false;
+        }
+        let selected = self.draft_selected().min(commands.len() - 1);
+        let index = if code == b'A' {
+            selected.saturating_sub(1)
+        } else {
+            (selected + 1).min(commands.len() - 1)
         };
+        self.draft_selection = Some(DraftSlashSelection {
+            text: self.draft.text(),
+            cursor: self.draft_cursor(),
+            index,
+        });
+        true
+    }
+
+    pub(super) fn draft_complete(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
+        // Resolve slash names from the live editor, including keys in the same
+        // read chunk. Runtime-rendered completions can lag behind that input.
+        let commands = self.draft_commands(capture);
+        let replacement = if let Some(name) = commands.get(self.draft_selected()) {
+            format!("{name} ")
+        } else if let RawInputCapture::PromptDraft {
+            initial_text,
+            completion: Some(completion),
+            ..
+        } = capture
+        {
+            let (replacement, cursor) = completion.as_ref();
+            if initial_text.as_ref() != self.draft.text() || *cursor != self.draft_cursor() {
+                return None;
+            }
+            replacement.clone()
+        } else {
+            return None;
+        };
+        self.draft
+            .replace_current_token(&replacement)
+            .then(|| self.input_event(capture))
+            .flatten()
+    }
+
+    pub(super) fn draft_complete_command_on_submit(
+        &mut self,
+        capture: &RawInputCapture,
+    ) -> Option<RawInputEvent> {
+        // Only a lone command token accepts the menu selection on Enter;
+        // arguments and multiline drafts must retain the user's text.
+        if self.draft.line_count() == 1
+            && self.draft.text().split_whitespace().count() == 1
+            && !self.draft_commands(capture).is_empty()
+        {
+            self.draft_complete(capture)
+        } else {
+            None
+        }
     }
 
     /// A trailing bare ESC may be the first half of a split legacy
@@ -151,13 +239,28 @@ impl CardInputState {
 
     /// Enter submits the whole draft; blank drafts never submit (matrix #9)
     /// so the user can keep composing or cancel with Esc.
-    pub(super) fn draft_submit_event(&self, id: &str) -> Option<RawInputEvent> {
+    pub(super) fn draft_submit_event(
+        &self,
+        id: &str,
+        capture: &RawInputCapture,
+    ) -> Option<RawInputEvent> {
         if self.draft.is_blank() {
             return None;
         }
+        let RawInputCapture::PromptDraft { workspace_cwd, .. } = capture else {
+            return None;
+        };
         Some(RawInputEvent::PromptDraftSubmit {
             id: id.to_string(),
             text: self.draft.text(),
+            workspace_cwd: workspace_cwd.as_deref().map(str::to_owned),
+            slash: matches!(
+                capture,
+                RawInputCapture::PromptDraft {
+                    agent_composer: true,
+                    ..
+                }
+            ) && is_slash_submission(&self.draft.text()),
         })
     }
 
@@ -166,8 +269,13 @@ impl CardInputState {
         RawInputEvent::PromptDraftChanged {
             id: id.to_string(),
             text: self.draft.text(),
-            viewport: self.draft.viewport(),
+            viewport: Box::new(self.draft.viewport()),
             line_count: self.draft.line_count(),
+            selected_completion: self.draft_selected(),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "prompt_draft_tests.rs"]
+mod tests;

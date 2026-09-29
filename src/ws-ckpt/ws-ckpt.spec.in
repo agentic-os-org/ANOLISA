@@ -74,6 +74,7 @@ find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
     -exec rm -rf {} +
 install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
 install -p -m 0644 scripts/openclaw/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0644 scripts/openclaw/lib-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0755 scripts/openclaw/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0755 scripts/openclaw/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
@@ -116,10 +117,21 @@ echo "Run 'ws-ckpt --help' for usage."
 
 %preun
 if [ $1 -eq 0 ]; then
-    # Recover workspaces before stopping the daemon
+    # Recover workspaces before stopping the daemon. A sentinel file carries
+    # the outcome to %postun: when recover fails (e.g. a detached registration
+    # whose snapshots may be the only copy of the data), %postun must NOT wipe
+    # /var/lib/ws-ckpt — that would destroy exactly the data recover refused
+    # to touch. The sentinel lives in /run (tmpfs) so it never survives a
+    # reinstall or leaks into the package's file list.
+    rm -f /run/ws-ckpt-recover-failed
     if [ -x %{_localbindir}/ws-ckpt ]; then
-        %{_localbindir}/ws-ckpt recover --all --force 2>&1 || \
-            echo "WARNING: recover workspaces failed"
+        if ! %{_localbindir}/ws-ckpt recover --all --force; then
+            echo "WARNING: ws-ckpt recover --all failed; preserving /var/lib/ws-ckpt"
+            echo "         (and /data/ws-ckpt if present) for manual inspection."
+            echo "         Reinstall ws-ckpt or inspect the snapshots manually"
+            echo "         before deleting the state directories."
+            : > /run/ws-ckpt-recover-failed
+        fi
     fi
     systemctl stop ws-ckpt.service 2>/dev/null || true
     systemctl disable ws-ckpt.service 2>/dev/null || true
@@ -136,12 +148,30 @@ if [ $1 -eq 0 ]; then
             cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true
     done
     rmdir /mnt/btrfs-workspace 2>/dev/null || true
-    # Remove daemon runtime state to avoid stale state on reinstall
-    rm -rf /var/lib/ws-ckpt /data/ws-ckpt 2>/dev/null || true
+    # Skip the state wipe when %preun's recover failed: the loop image and
+    # state directories may hold the only remaining copies of workspace data
+    # (issue #3069). Loop devices were already detached above, so the files
+    # are merely left on disk for manual recovery.
+    if [ -e /run/ws-ckpt-recover-failed ]; then
+        echo "NOTE: preserving /var/lib/ws-ckpt (recover failed in %preun)."
+        echo "      Remove it manually once the data is no longer needed."
+    else
+        # Remove daemon runtime state to avoid stale state on reinstall
+        rm -rf /var/lib/ws-ckpt /data/ws-ckpt 2>/dev/null || true
+    fi
+    rm -f /run/ws-ckpt-recover-failed
     systemctl daemon-reload
 fi
 
 %changelog
+* Tue Sep 22 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.5.0-1
+- Unified workspace path identity and recovery of interrupted init/unregister
+- Added guarded rollback V2 protocol variants used by cosh-ng governed tasks
+- OpenClaw allowlists now managed via its config CLI, requires OpenClaw 2026.2.13
+- Fixed detached workspaces silently accepting operations and recover --all false success
+- Preserved snapshot state on rpm -e when recover fails
+- Fixed empty-workspace snapshots, disk-pressure reclaim, and raw install discovery
+
 * Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.5-1
 - Fixed intermittent bootstrap failure when all loop devices are in use
 - Scoped sidecar preStop loop cleanup to ws-ckpt-owned devices only

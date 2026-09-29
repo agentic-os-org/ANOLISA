@@ -32,14 +32,14 @@ L2_REMOTE_WORK="${L2_REMOTE_WORK:-/root/work}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 
 remote_ssh() {
-    sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" "$@"
+    SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" "$@"
 }
 
 # --- 1. Upload the idempotent inner build script ----------------------------
 # The heredoc is quoted so nothing is expanded locally; every $VAR is resolved
 # on the remote when the script actually runs.
 echo "[setup] uploading remote build script"
-sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
+SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
     "mkdir -p $L2_REMOTE_WORK/logs && cat > $L2_REMOTE_WORK/remote_build_inner.sh" <<'INNER'
 #!/usr/bin/env bash
 # Heavy, idempotent remote build. Runs under nohup; each step streams to its

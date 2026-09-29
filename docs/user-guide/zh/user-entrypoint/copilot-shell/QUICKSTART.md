@@ -20,7 +20,7 @@
 需要 [Node.js 20+](https://nodejs.org/download)，可通过 `node -v` 检查版本。
 
 ```bash
-cd src/copilot-shell
+cd deprecated/copilot-shell
 make build
 ```
 

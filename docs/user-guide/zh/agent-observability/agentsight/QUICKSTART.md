@@ -112,8 +112,12 @@ AgentSight 仪表盘状态
 
 ![AgentSight Dashboard 登录页](../../../../images/agentsight/zh/dashboard-login.png)
 
-把 `agentsight dashboard --no-open` 打印的令牌粘进去，就会进入 Agent 可观测页面。这里按会话列出
-Token 汇总和中断标记，点击某一行会展开该会话下的对话：
+把 `agentsight dashboard --no-open` 打印的令牌粘进去，就会进入 Agent 看板
+（`http://127.0.0.1:7396/#/health`）——实时 Agent 健康状态与尚未解决的中断收件箱。
+
+会话分析页有自己独立的地址：在导航栏选择 **Agent 可观测**，或直接打开
+`http://127.0.0.1:7396/#/observability`。这里按会话列出 Token 汇总和中断标记，点击某一行会展开
+该会话下的对话：
 
 ![会话列表与展开的会话](../../../../images/agentsight/zh/dashboard-session-expanded.png)
 

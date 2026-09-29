@@ -2,11 +2,11 @@
 
 [中文版](README_zh.md)
 
-Btrfs-based workspace snapshot system for AI Agents, providing sub-second checkpoint creation and rollback. ws-checkpoint is a runtime component of [ANOLISA](../../README.md), designed to give agents instant undo/redo capability at the filesystem level.
+Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime component of [ANOLISA](../../README.md) that provides filesystem-level checkpoint and rollback; latency depends on the filesystem, workload, and host environment.
 
 ## Features
 
-- **Sub-millisecond snapshots** — leverages btrfs COW for near-instant checkpoint and rollback
+- **Copy-on-write snapshots** — uses btrfs COW for efficient checkpoint and rollback; latency depends on the filesystem and workload
 - **Daemon architecture** — privileged operations run in a daemon; CLI clients need no root
 - **Unix Socket IPC** — bincode binary protocol for high-performance communication
 - **systemd integration** — RPM one-click deploy, auto-start on boot
@@ -101,6 +101,12 @@ ws-ckpt list --workspace ~/my-workspace
 # JSON output
 ws-ckpt list --workspace ~/my-workspace --format json
 
+# Read one explicit page (oldest first); output includes next_cursor
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --format json
+
+# Continue that explicit page
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --cursor '<next_cursor>' --format json
+
 # Diff between two snapshots
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 
@@ -110,6 +116,30 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 # Cleanup old snapshots, keep latest 5
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
+
+After interrupted cleanup, restart reconciles missing ordinary snapshots and
+pins recovered orphans until explicitly deleted. Query them with
+`ws-ckpt list -w <workspace> --orphans --format json`, then delete selected full
+IDs with `ws-ckpt delete -w <workspace> -s <complete-id> --force`. Delete no longer
+accepts prefixes. Missing pinned snapshots and guarded evidence remain unavailable;
+deleting an absent target returns `SnapshotNotFound`. Upgrade CLI and daemon together.
+See [snapshot recovery](../../docs/user-guide/en/runtime/ws-ckpt.md#snapshot-recovery-after-an-interrupted-cleanup).
+
+### Recovering interrupted initialization
+
+Recovery confirmation uses the daemon-resolved workspace and snapshot count.
+If the recovery target or snapshot set changes before execution, confirm again.
+Update the CLI and daemon together to use this confirmation protocol.
+
+`ws-ckpt recover -w <workspace> --force` also handles an unregistered workspace:
+it restores `.pre-init-bak` and retains migrated subvolumes for inspection.
+Successful registered recovery archives leftover backups without blocking the
+next `init`. If a
+registered workspace's live subvolume was deleted externally, use
+`ws-ckpt unregister -w <workspace> --force` to remove its stale registration;
+this restores no data and preserves snapshots and backups. For both commands,
+`--force` only skips interactive confirmation. See the
+[recovery guide](../../docs/user-guide/en/runtime/ws-ckpt.md#recovering-interrupted-initialization-and-stale-registrations).
 
 ### Configuration
 
@@ -159,7 +189,11 @@ ws-ckpt reload
 | `status` | Show daemon and workspace status |
 | `config` | View or modify daemon configuration |
 | `reload` | Notify daemon to reload `config.toml` |
+| `recover` | Restore a plain directory or an interrupted initialization backup |
+| `unregister` | Remove a missing-subvolume registration while preserving snapshots and backups |
 | `plugin` | Install/uninstall ws-ckpt Agent runtime plugins (openclaw/hermes) |
+
+The OpenClaw adapter requires OpenClaw >= 2026.2.13. Installation stops rather than leaving a partial integration when the detected version or config capabilities cannot update the tool allowlist safely.
 
 ## License
 

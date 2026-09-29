@@ -179,7 +179,7 @@ pub enum Effect {
 }
 
 /// Explicit operations supported by the selected enforcement backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnforcementCapabilities {
     /// Maximum concurrently active bindings, or no advertised limit.
     #[serde(default)]
@@ -202,6 +202,12 @@ pub struct EnforcementCapabilities {
     /// enforcement coverage instead of a static assumption.
     #[serde(default)]
     pub file_delete_guard: bool,
+    /// When `file_delete_guard` is true, indicates the enforcement mode:
+    /// - `"path"`: full path matching via bpf_d_path (kernel 7.1.x+)
+    /// - `"inode"`: inode-based matching fallback (kernel 5.10+)
+    /// - `None`: file_delete_guard is false
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_delete_guard_mode: Option<String>,
 }
 
 impl EnforcementCapabilities {
@@ -216,6 +222,7 @@ impl EnforcementCapabilities {
             alternate_pid_retarget: false,
             test_development: false,
             file_delete_guard: false,
+            file_delete_guard_mode: None,
         }
     }
 
@@ -230,6 +237,7 @@ impl EnforcementCapabilities {
             alternate_pid_retarget: false,
             test_development: false,
             file_delete_guard: false,
+            file_delete_guard_mode: None,
         }
     }
 
@@ -244,6 +252,7 @@ impl EnforcementCapabilities {
             alternate_pid_retarget: true,
             test_development: true,
             file_delete_guard: true,
+            file_delete_guard_mode: None,
         }
     }
 }

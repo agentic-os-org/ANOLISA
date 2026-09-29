@@ -41,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 `--cosh-ng` remains available as shorthand for `--component cosh-ng`. On
-macOS arm64, use `--backend raw --install-mode user` instead.
+macOS 11+ (arm64 / x86_64), use `--backend raw --install-mode user` instead.
 
 ### Add observability, security, or runtime controls
 

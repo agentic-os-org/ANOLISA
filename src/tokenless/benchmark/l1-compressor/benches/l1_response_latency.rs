@@ -21,7 +21,7 @@
 //! SAME bytes the Python compression-rate scripts measure — so latency and
 //! compression rate are attributable to one input.
 //!
-//! NOTE: the default `truncate_arrays_at` is 32 in tokenless 0.7.1 (was 16 in
+//! NOTE: the default `truncate_arrays_at` is 32 in tokenless 0.7.4 (was 16 in
 //! the 0.2.0 report), so the items/* curve flattens after 32 items rather than
 //! 16 — the shape matches the report, the knee just moves.
 

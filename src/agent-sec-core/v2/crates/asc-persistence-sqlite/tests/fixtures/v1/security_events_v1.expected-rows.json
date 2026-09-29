@@ -1,0 +1,37 @@
+[
+    {
+        "call_id": null,
+        "category": "hardening",
+        "details": {
+            "result": {
+                "passed": 8,
+                "total": 10
+            }
+        },
+        "event_id": "r1-b",
+        "event_type": "harden",
+        "result": "failed",
+        "run_id": null,
+        "session_id": null,
+        "timestamp": "2026-01-02T04:00:00+00:00",
+        "tool_call_id": null,
+        "trace_id": ""
+    },
+    {
+        "call_id": null,
+        "category": "code_scan",
+        "details": {
+            "result": {
+                "verdict": "deny"
+            }
+        },
+        "event_id": "r1-a",
+        "event_type": "code_scan",
+        "result": "succeeded",
+        "run_id": null,
+        "session_id": "s-1",
+        "timestamp": "2026-01-02T03:04:05+00:00",
+        "tool_call_id": null,
+        "trace_id": "t-1"
+    }
+]

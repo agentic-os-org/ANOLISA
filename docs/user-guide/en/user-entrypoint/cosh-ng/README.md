@@ -265,6 +265,16 @@ as well. Neither form uninstalls cosh-ng nor deletes production Gateway state.
   creates neither the baseline nor per-effect barriers. Workspace checkpoints
   do not protect host, credential, network, cloud, or other external effects.
 
+  An empty workspace is valid snapshot state with current ws-ckpt. Older
+  daemons may skip it; with `On`, the Task then fails before Runtime launch
+  because there is no snapshot to restore. Upgrade ws-ckpt or add a file to the
+  workspace and submit a new Task with a new idempotency key. Alternatively,
+  submit a new Task with `--checkpoint off` if checkpoint protection is not
+  needed. The failed Task remains terminal (`retryable=false`): `retry` resumes
+  a suspended Run and does not recreate a failed baseline. `Auto` may continue
+  after a known skip and records the downgrade; `On` never silently becomes
+  `Off`.
+
   Managed Core uses the closed `workspace-write-v1` profile. It exposes only
   `ask_user_question` and `write_file`; every write requires a Runtime-native
   permission decision, the applicable durable checkpoint barrier, and Gateway

@@ -4,8 +4,8 @@ set -euo pipefail
 
 COMPONENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RTK_REPOSITORY="https://github.com/rtk-ai/rtk.git"
-RTK_RELEASE="v0.43.0"
-RTK_COMMIT="5a7880d404db8364d602f2ecdc41dd790f64013f"
+RTK_RELEASE="v0.49.0"
+RTK_COMMIT="b1c0dc00649c50fbe8930f849c800d4d6ca12091"
 RTK_DIR="${1:-$COMPONENT_ROOT/third_party/rtk}"
 PATCH_DIR="$COMPONENT_ROOT/third_party/patches"
 REVISION_MARKER="$RTK_DIR/.anolisa-rtk-commit"
@@ -31,7 +31,7 @@ if [ -e "$RTK_DIR" ]; then
     [ -f "$REVISION_MARKER" ] || \
         die "RTK revision marker is missing; run just clean-rtk and retry"
     [ "$(cat "$REVISION_MARKER")" = "$RTK_COMMIT" ] || \
-        die "RTK checkout does not match pinned commit $RTK_COMMIT"
+        die "RTK checkout does not match pinned commit $RTK_COMMIT; run just clean-rtk and retry"
     if [ -d "$RTK_DIR/.git" ]; then
         [ "$(git -C "$RTK_DIR" rev-parse HEAD)" = "$RTK_COMMIT" ] || \
             die "RTK HEAD does not match pinned commit $RTK_COMMIT"

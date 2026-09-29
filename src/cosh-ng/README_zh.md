@@ -8,6 +8,11 @@ Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可�
 在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
 JSONL 接口。
 
+默认情况下，登录 shell（例如 `cosh --login`）会在 Bash 4+ 上以真实 login 身份
+启动 Bash；设 `shell.login_identity = false` 可保留旧的非 login（`--rcfile`）启动。
+有界的真实 login 身份能力探测失败、使用 Bash 3.2（如 macOS 系统 bash），或父会话导出了 POSIX
+启动无法导入的函数名时，cosh 会自动回退。
+
 ## 为什么使用 cosh-ng
 
 | 传统终端 | cosh-ng |
@@ -50,7 +55,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-在 macOS arm64 上改用 user 范围：
+在 macOS 11+ (arm64 / x86_64) 上改用 user 范围：
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -64,9 +69,13 @@ sudo yum install cosh-ng
 ```
 
 当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
-Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
+Linux 安装路径。raw 包支持 macOS 11+ (arm64 / x86_64)，但依赖 Linux 的软件包和服务操作
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
+
+发版构建矩阵也会生成 macOS x86_64（Intel）raw 包，与 arm64 一样要求 macOS 11.0
+或更新版本。包含此构建支持的版本发布后，Intel 产物可从 GitHub Releases 获取；
+上面的公共安装入口还需要发布 Intel ANOLISA CLI，并单独开放官网安装脚本。
 
 ## 30 秒开始使用
 
@@ -75,22 +84,30 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 Shell 执行前
-分类并路由本次输入。
+Enhanced Assisted 是默认模式。Cosh 保持 Shell 原生提示符外观，并可能在前台
+Shell 执行前分类并路由本次输入。
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ 分析这个服务为什么反复重启
+user@host:~/project$ git status
+user@host:~/project$ 分析这个服务为什么反复重启
 ```
 
-在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌ ` 前缀表示普通
-输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only：普通输入直接交给
+Shell，同时仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
+
+状态符号为可选项：在 `config.toml` 中设置 `shell.status_symbols = true`
+（或单次会话使用 `COSH_SHELL_STATUS_SYMBOLS=1`）后，每个提示符上方会显示
+`◇`（Assisted）或 `◌`（Shell-only）状态行。默认关闭。
 
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
 
 ```bash
 COSH_SHELL_INTEGRATION=native cosh
 ```
+
+Enhanced 不会向子进程保留已导出的 Bash `PROMPT_COMMAND` 值。
+各版本的属性限制及 Native 替代方式见
+[Bash prompt 兼容边界](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-兼容边界)。
 
 ```text
 $ hello
@@ -101,7 +118,19 @@ bash: hello: command not found
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
 统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
-`@路径`引用。
+`@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。
+需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
+普通 Shell prompt 保留原生路径补全。
+
+`cosh-core` 中的配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
+显式设置 `hooks.enabled = false` 后，即使安装了 Extension，配置 Hook 也保持禁用。
+禁用范围和 `PreToolUse` 默认阻断行为详见
+[Hooks](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/hooks.md)。
+
+`type = "aliyun"` 时，SysOM 自动优先使用可达的 VPC 端点。
+设置 `ai.providers.<id>.sysom_endpoint` 可固定端点，`COSH_SYSOM_ENDPOINT` 优先级更高，
+`base_url` 不参与 SysOM 选路。仅自动选中的 VPC 路由绕过系统代理，显式覆盖与公网回退
+仍保留代理设置。详见 [provider 配置](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/providers.md)。
 
 如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
 Adapter，再通过 stdin 发送 prompt。
@@ -223,6 +252,10 @@ Checkpoint policy 同时作用于 Runtime 启动前和获批的 Runtime-native e
 error 或 uncertain result 不能授权 effect。`On` 只有在存在准确 checkpoint evidence 时才
 放行，否则 fail closed；`Off` 既不创建 baseline，也不建立逐 effect barrier。
 
+当前 ws-ckpt 支持为空 workspace 创建 checkpoint。若旧 daemon 跳过初始快照，`On`
+会在 Runtime 启动前终止 Task。升级 ws-ckpt 或添加文件后提交新 Task；若无需 checkpoint
+保护，也可显式选择 `Off`。失败的 Task 已进入终态，`retry` 不会重建失败的 baseline。
+
 托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
 `write_file`。每次写入都是 Runtime-native permission decision；只有 Gateway approval
 以及所需 checkpoint barrier 完成后，Core 才会执行。现有 pinned workspace filesystem
@@ -284,6 +317,10 @@ catalog 的两个条目都声明拥有本地用户权限，即使 token 位于�
 
 仓库为 direct ACP path 提供 Fake Adapter conformance coverage。具体安装在投入生产前，仍需
 另行执行真实 Codex/Claude Adapter 检查与人工 Terminal 验收。
+
+`cosh-cli checkpoint recover --workspace <path>` 支持由 ws-ckpt daemon 恢复
+中断初始化；若还有数据保留供检查，成功 JSON 的 `meta.warning` 会说明位置。
+详见[工作区快照](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/checkpoint.md)。
 
 ## 文档
 

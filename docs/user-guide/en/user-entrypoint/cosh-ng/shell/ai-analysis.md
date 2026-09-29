@@ -3,8 +3,8 @@
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
 Enhanced integration can review command failures and useful diagnostic output,
-then suggest a next step or start an Agent analysis. Both Assisted (`◇ `) and
-Shell-only (`◌ `) can provide post-command insights. Only Assisted performs
+then suggest a next step or start an Agent analysis. Both Assisted and
+Shell-only can provide post-command insights. Only Assisted performs
 pre-command natural-language routing. Native has no command events, insights,
 or Agent request routing.
 

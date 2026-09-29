@@ -29,10 +29,43 @@ pub const LATENCY_BASIS: &str = "in-process";
 /// Output of one in-process compression call.
 #[derive(Debug, Clone)]
 pub struct TokenlessOutput {
-    /// Compact-JSON wire form of the compressed value.
+    /// Compact-JSON wire form of the compressed value; what token counts and
+    /// the compression rate are measured on.
     pub compressed: String,
+    /// Text that retention checks run against. For JSON samples this is the
+    /// wire form; for wrapped text (source code) it is the inner `content`
+    /// string, un-escaped, so a ground-truth literal containing a quote or a
+    /// newline matches the way it was written rather than its JSON-escaped
+    /// serialization — escaping a `"` into `\"` was scoring content that was
+    /// fully present as a spurious retention miss.
+    pub retention_text: String,
     /// Pure compression time in seconds (serialization excluded).
     pub latency_s: f64,
+}
+
+/// Parses a `json`-category sample, rejecting a top-level JSON string.
+///
+/// `JsonCompressor` unwraps an input whose top level is a string carrying a
+/// parseable object or array and compresses the inner value. Its output would
+/// then be counted against that inner value while [`wire_before`] still reports
+/// the quoted form, putting the two sides of the compression rate on different
+/// bases and shifting what retention asserts against. No committed sample is
+/// shaped that way, and the engine only unwraps when the inner text parses as
+/// an object or array; this rejects every top-level string rather than
+/// restating that condition, so the guard cannot drift out of step with the
+/// engine — and a `json` sample that is a bare string measures string escaping
+/// rather than JSON compression in any case.
+fn parse_json_sample(content: &str) -> Result<Value, L2Error> {
+    let value: Value = serde_json::from_str(content)
+        .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?;
+    if value.is_string() {
+        return Err(L2Error::InvalidSample(
+            "json sample has a string at its top level: the compressor may unwrap it and \
+             be measured against a different value than the before-count reports"
+                .to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 /// Compresses `content` with the tokenless `JsonCompressor`.
@@ -46,11 +79,12 @@ pub struct TokenlessOutput {
 /// # Errors
 ///
 /// Returns [`L2Error::InvalidSample`] when a `json`-category sample fails to
-/// parse, and [`L2Error::Json`] if the compressed value cannot serialize.
+/// parse, carries a string at its top level, or the compressor rejects the
+/// input, and [`L2Error::Json`] if the sample cannot be serialized into the
+/// payload handed to the engine.
 pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2Error> {
     let value: Value = if category == Category::Json {
-        serde_json::from_str(content)
-            .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?
+        parse_json_sample(content)?
     } else {
         json!({ "content": content })
     };
@@ -68,16 +102,39 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         min_toon_chars: usize::MAX,
         allow_unrecoverable: true,
     };
-    // Time only the compress call: the wire-form serialization below is
-    // measurement plumbing, not engine work.
+    // Time only the compress call: the envelope handling below is measurement
+    // plumbing, not engine work.
     let start = Instant::now();
-    let compressed = compressor
+    let outcome = compressor
         .compress(&input, &context)
         .map_err(|error| L2Error::InvalidSample(error.to_string()))?;
     let latency_s = start.elapsed().as_secs_f64();
 
+    let compressed = outcome.output;
+    // Retention matches literal source substrings, so for the wrapped-text
+    // envelope it must see the inner string, not its JSON-escaped form. JSON
+    // samples keep the wire form: their ground truth is written to match it.
+    //
+    // The engine returns the wire form, so the envelope is re-parsed here to
+    // reach that inner string. Anything that is not a `{"content": string}`
+    // object falls back to the wire form rather than to an empty haystack,
+    // which would score every ground-truth item as lost and report a harness
+    // fault as a product defect.
+    let retention_text = if category == Category::Json {
+        compressed.clone()
+    } else {
+        let envelope = serde_json::from_str::<Value>(&compressed).ok();
+        envelope
+            .as_ref()
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| compressed.clone())
+    };
+
     Ok(TokenlessOutput {
-        compressed: compressed.output,
+        compressed,
+        retention_text,
         latency_s,
     })
 }
@@ -90,12 +147,11 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
 ///
 /// # Errors
 ///
-/// Same failure modes as [`compress`].
+/// Same failure modes as [`compress`]: both sides must agree on the value they
+/// count, so the top-level-string rejection applies here too.
 pub fn wire_before(category: Category, content: &str) -> Result<String, L2Error> {
     if category == Category::Json {
-        let value: Value = serde_json::from_str(content)
-            .map_err(|e| L2Error::InvalidSample(format!("json sample is not valid JSON: {e}")))?;
-        Ok(serde_json::to_string(&value)?)
+        Ok(serde_json::to_string(&parse_json_sample(content)?)?)
     } else {
         Ok(serde_json::to_string(&json!({ "content": content }))?)
     }

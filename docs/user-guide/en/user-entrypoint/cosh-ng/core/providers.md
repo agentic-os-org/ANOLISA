@@ -66,6 +66,34 @@ model = "qwen3.7-plus"
 For an ECS RAM role, use `type = "aliyun"` with
 `auth_source = "ecs_ram_role"`; static AK/SK values are then unnecessary.
 
+The `aliyun` provider picks its SysOM API host automatically: on an ECS instance
+that can reach the in-VPC proxy it uses that, which lets instances without
+public egress work, and otherwise it uses the public host. Set
+`sysom_endpoint` only to pin a specific host:
+
+```toml
+[ai.providers.aliyun]
+type = "aliyun"
+auth_source = "ecs_ram_role"
+sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
+model = "qwen3.7-plus"
+```
+
+`sysom_endpoint` is deliberately separate from `base_url`: `base_url` is an
+OpenAI-compatible setting and is ignored by the `aliyun` provider.
+
+The override order is `COSH_SYSOM_ENDPOINT`, then `sysom_endpoint`, then the
+VPC probe, then the public endpoint. Overrides accept a bare host with an
+optional port or an HTTP(S) URL; URL paths are discarded and invalid overrides
+are ignored. Only automatically selected VPC routes connect directly, matching
+the probe. Explicit overrides (including an explicitly configured VPC host) and
+public fallback retain system proxy settings. Use `NO_PROXY` when an explicit
+endpoint should bypass your proxy.
+
+Inference allows 3 seconds for connection setup and 120 seconds of read
+inactivity. Successful reads reset the inactivity timer; healthy streaming
+responses have no total-duration deadline.
+
 | `type` | Use |
 |---|---|
 | `dashscope` | DashScope OpenAI-compatible endpoint with Qwen reasoning support |

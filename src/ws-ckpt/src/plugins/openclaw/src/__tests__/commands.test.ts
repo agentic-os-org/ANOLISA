@@ -74,11 +74,12 @@ describe("CommandExecutor", () => {
   });
 
   describe("rollback", () => {
-    it("success", async () => {
+    it("uses the cleanup-compatible timeout and returns success", async () => {
       mockSuccess("rolled back");
       const exec = new CommandExecutor();
       const r = await exec.rollback("/ws", "snap1");
       expect(r.exitCode).toBe(0);
+      expect(promisifiedMock.mock.calls[0][2].timeout).toBe(240_000);
     });
 
     it("passes preview flag", async () => {

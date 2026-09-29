@@ -16,8 +16,8 @@ BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
 Requires(post):   lua
-Requires(postun): lua
 Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
+Requires(postun): /usr/bin/awk /usr/bin/cp /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
@@ -134,7 +134,7 @@ fi
 %post -p <lua>
 local nl = '\n'
 local cosh = '%{_bindir}/cosh'
-local f = io.open('/etc/shells', 'a+')
+local f, err = io.open('/etc/shells', 'a+')
 if f then
   f:seek('set')
   local shells = f:read('*all') or ''
@@ -145,28 +145,50 @@ if f then
     f:write(separator, cosh, nl)
   end
   f:close()
+else
+  io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(err)..nl)
 end
 
-%postun -p <lua>
--- Run it only if we are uninstalling
-if arg[2] == 0
-then
-  t={}
-  for line in io.lines("/etc/shells")
-  do
-    if line ~= "%{_bindir}/cosh"
-    then
-      table.insert(t,line)
-    end
-  end
-
-  f = io.open("/etc/shells", "w+")
-  for n,line in pairs(t)
-  do
-    f:write(line.."\n")
-  end
-  f:close()
-end
+%postun
+# On final erase (not upgrade), drop cosh's own /etc/shells line -- but only
+# when /usr/bin/cosh is gone. If a replacement provider (e.g. copilot-shell)
+# still owns an executable there, its registration stays valid, so the line is
+# kept. Testing the file directly is fail-safe and avoids running rpm inside a
+# scriptlet: a nested query can fail under the transaction lock and would then
+# wrongly drop a still-valid line. A temp copy + atomic rename keeps a crash
+# from truncating the shared table, and cp --attributes-only preserves the
+# original mode/ownership/xattrs. If /etc/shells is an admin-managed symlink,
+# rewrite its target so the link relationship survives. The signal handler must
+# exit (not resume) -- otherwise the EXIT cleanup would delete the temp
+# mid-rewrite and the following cp/mv would clobber the file with an empty copy.
+if [ "$1" -eq 0 ] && [ ! -x "%{_bindir}/cosh" ]; then
+  shells="%{_sysconfdir}/shells"
+  if [ -f "$shells" ]; then
+    target="$shells"
+    if [ -L "$shells" ]; then
+      target="$(readlink -f "$shells")" || target="$shells"
+    fi
+    if ! tmp="$(mktemp "${target}.cosh-ng.XXXXXX")"; then
+      echo "error: cosh-ng: cannot update $shells: failed to create temporary file." >&2
+      exit 1
+    fi
+    trap 'rm -f "$tmp"' EXIT
+    trap 'exit 1' INT TERM HUP
+    if ! awk -v cosh="%{_bindir}/cosh" '$0 != cosh' "$target" > "$tmp"; then
+      echo "error: cosh-ng: cannot update $shells: failed to filter shell registration." >&2
+      exit 1
+    fi
+    if ! cp --attributes-only --preserve=mode,ownership,xattr "$target" "$tmp"; then
+      echo "error: cosh-ng: cannot update $shells: failed to preserve file metadata." >&2
+      exit 1
+    fi
+    if ! mv -f "$tmp" "$target"; then
+      echo "error: cosh-ng: cannot update $shells: failed to replace file." >&2
+      exit 1
+    fi
+    trap - EXIT INT TERM HUP
+  fi
+fi
 
 %changelog
 * Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.0-1

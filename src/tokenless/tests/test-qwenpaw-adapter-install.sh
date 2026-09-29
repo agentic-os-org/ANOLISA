@@ -75,7 +75,15 @@ DETECT_SH="$ADAPTER_DIR/qwenpaw/scripts/detect.sh"
 INSTALL_SH="$ADAPTER_DIR/qwenpaw/scripts/install.sh"
 UNINSTALL_SH="$ADAPTER_DIR/qwenpaw/scripts/uninstall.sh"
 
-run() { HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" "$@"; }
+run() { HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_SKIP_WHEEL_PREFLIGHT=1 "$@"; }
+# Same harness with the wheel preflight armed; every case below pins the probe
+# result through a stub, so the suite never reaches the network.
+# QWENPAW_HOME is pinned because install.sh prepends `${QWENPAW_HOME:-$HOME/.qwenpaw}/bin`
+# to PATH; an ambient value would add a directory this harness does not control.
+run_probe() {
+    HOME="$FAKE_HOME" QWENPAW_HOME="$FAKE_HOME/.qwenpaw" \
+        ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_SKIP_WHEEL_PREFLIGHT=0 "$@"
+}
 
 run bash "$DETECT_SH" >/dev/null 2>&1
 if [ "$?" -eq 1 ]; then
@@ -302,6 +310,300 @@ if [ "$?" -eq 2 ]; then
     pass "detect reports missing prerequisites without a qwenpaw CLI"
 else
     fail "detect did not report missing prerequisites without a qwenpaw CLI"
+fi
+
+# --- wheel preflight -------------------------------------------------------
+# The bundle pins anolisa_tokenless by GitHub Release URL. When the version
+# bump lands before the matching release is published the asset 404s, and
+# `qwenpaw plugin install` used to surface that as a bare pip HTTP error. The
+# installer now probes the asset for this host first and names the missing tag.
+case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64 | Linux/aarch64 | Darwin/arm64) PREFLIGHT_PLATFORM=1 ;;
+    *) PREFLIGHT_PLATFORM=0 ;;
+esac
+
+if [ "$PREFLIGHT_PLATFORM" -eq 0 ]; then
+    echo "[SKIP] this platform has no pinned wheel line; preflight not exercised"
+else
+    PROBE_BIN="$SANDBOX/probebin"
+    PY_BIN="$SANDBOX/pybin"
+    MIN_BIN="$SANDBOX/minbin"
+    PROBE_LOG="$SANDBOX/probe.log"
+    # install.sh prepends `${QWENPAW_HOME:-$HOME/.qwenpaw}/bin:$HOME/.local/bin:
+    # /usr/local/bin` ahead of whatever PATH this harness passes, so stubs on
+    # that PATH alone lose to a real curl/python3 on the host (Homebrew puts
+    # both in /usr/local/bin). The first two are sandboxed through HOME and
+    # QWENPAW_HOME, so publish the stubs into $HOME/.local/bin as well: install.sh
+    # puts that directory ahead of /usr/local/bin, which makes the stub win on
+    # every host. Each case below also asserts which tool actually ran.
+    SHADOW_BIN="$FAKE_HOME/.local/bin"
+    mkdir -p "$PROBE_BIN" "$PY_BIN" "$MIN_BIN" "$SHADOW_BIN"
+
+    # curl wins over python3 inside the installer, so the python3 branch needs
+    # a PATH that carries the interpreter stub and the core tools but no curl.
+    cat > "$PROBE_BIN/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+printf '%s\n' "curl $*" >> "${PROBE_LOG:-/dev/null}"
+# PROBE_STATUS=none models a probe that reports nothing at all, which is what a
+# probe gives up with when it hits its deadline.
+status="${PROBE_STATUS:-000}"
+[ "$status" = "none" ] || printf '%s' "$status"
+CURLEOF
+    cat > "$PROBE_BIN/python3" <<'PYSTUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' "python3 $*" >> "${PROBE_LOG:-/dev/null}"
+printf '%s\n' "${PROBE_STATUS:-000}"
+PYSTUBEOF
+    chmod +x "$PROBE_BIN/curl" "$PROBE_BIN/python3"
+    cp "$PROBE_BIN/python3" "$PY_BIN/python3"
+    for tool in bash cat cmp cp dirname env grep head mkdir rm sed uname; do
+        tool_path="$(command -v "$tool" 2>/dev/null || true)"
+        [ -n "$tool_path" ] && ln -sf "$tool_path" "$MIN_BIN/$tool"
+    done
+
+    # Empties the shadow directory. Guarded so an unset SHADOW_BIN can never turn
+    # this into `rm -f /*`.
+    clear_shadow() {
+        [ -n "$SHADOW_BIN" ] && rm -f "$SHADOW_BIN"/* 2>/dev/null
+        return 0
+    }
+
+    probe_case() {  # probe_case <status> [probe-bin]
+        local probe_path="$MIN_BIN" stub
+        clear_shadow
+        if [ -n "${2:-}" ]; then
+            probe_path="$2:$MIN_BIN"
+            for stub in "$2"/*; do
+                [ -f "$stub" ] && cp "$stub" "$SHADOW_BIN/${stub##*/}"
+            done
+        fi
+        rm -rf "$PLUGIN_DST"
+        : > "$STUB_LOG"
+        rm -f "$PROBE_LOG"
+        run_probe env PATH="$probe_path" PROBE_STATUS="$1" PROBE_LOG="$PROBE_LOG" \
+            bash "$INSTALL_SH" >"$SANDBOX/preflight.out" 2>&1
+        echo "$?"
+    }
+
+    # Proves the case really ran against the stub it set up: a host tool winning
+    # the PATH would leave this log empty (or name the other tool) and the case
+    # would fail instead of passing on a coincidental status.
+    used_tool() {  # used_tool <curl|python3>
+        [ -s "$PROBE_LOG" ] && head -n 1 "$PROBE_LOG" | grep -q "^$1 "
+    }
+
+    # /usr/local/bin is the one directory install.sh prepends that this suite
+    # cannot shadow: the path is absolute and the suite must not need root.
+    # Publishing stubs into $HOME/.local/bin beats it, so every case that needs a
+    # probe tool is safe; a case that needs one *absent* cannot be faked there.
+    # Ask the installer's own question instead of finding out through a red test
+    # that quietly probed the real GitHub.
+    host_probe_tool() {  # host_probe_tool <curl|curl-or-python3>
+        local probe='command -v curl >/dev/null 2>&1'
+        if [ "$1" = "curl-or-python3" ]; then
+            probe="$probe || command -v python3 >/dev/null 2>&1"
+        fi
+        clear_shadow
+        env PATH="$FAKE_HOME/.qwenpaw/bin:$SHADOW_BIN:/usr/local/bin:$MIN_BIN" \
+            bash -c "$probe"
+    }
+
+    status="$(probe_case 404 "$PROBE_BIN")"
+    if [ "$status" -ne 0 ] && used_tool curl &&
+        grep -q 'wheel asset is unavailable (HTTP 404)' "$SANDBOX/preflight.out" &&
+        grep -q 'tokenless/v0\.0\.0-test' "$SANDBOX/preflight.out" &&
+        grep -q 'ANOLISA_SKIP_WHEEL_PREFLIGHT=1' "$SANDBOX/preflight.out"; then
+        pass "installer names the missing wheel asset and its release tag instead of a bare pip 404"
+    else
+        fail "installer did not explain the missing wheel asset (rc=$status)"
+    fi
+    # A 404 on one asset URL proves only that the asset is undownloadable: the
+    # publish workflow can leave an existing release with an incomplete asset
+    # set. The message must offer both maintainer paths and must not assert that
+    # the release itself is absent.
+    # The two `.` wildcards stand for the backticks around the release tag.
+    if ! grep -q 'does not exist' "$SANDBOX/preflight.out" &&
+        grep -q 'push the .tokenless/v0\.0\.0-test. tag' "$SANDBOX/preflight.out" &&
+        grep -q 'delete that release and re-run' "$SANDBOX/preflight.out"; then
+        pass "installer reports an unavailable asset without claiming the release is missing"
+    else
+        fail "installer equated an asset 404 with a missing release"
+    fi
+    if [ ! -d "$PLUGIN_DST" ] && ! grep -q '^plugin install ' "$STUB_LOG"; then
+        pass "installer fails before QwenPaw copies a bundle it cannot run"
+    else
+        fail "installer mutated QwenPaw state for an undownloadable wheel"
+    fi
+
+    status="$(probe_case 200 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && used_tool curl; then
+        pass "installer proceeds when the pinned wheel is published"
+    else
+        fail "installer blocked a published wheel (rc=$status)"
+    fi
+
+    status="$(probe_case 000 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && used_tool curl; then
+        pass "installer leaves the verdict to pip when the wheel host is unreachable"
+    else
+        fail "installer treated an unreachable wheel host as undownloadable (rc=$status)"
+    fi
+
+    status="$(probe_case 403 "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && used_tool curl &&
+        grep -q 'Could not verify the SDK wheel' "$SANDBOX/preflight.out"; then
+        pass "installer warns and proceeds on an inconclusive wheel probe"
+    else
+        fail "installer mishandled an inconclusive wheel probe (rc=$status)"
+    fi
+
+    # An empty answer is not a verdict either: this is what the python3 branch
+    # reports once it hits its deadline, so the wheel has to go to pip.
+    status="$(probe_case none "$PROBE_BIN")"
+    if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && used_tool curl &&
+        ! grep -q 'wheel asset is unavailable' "$SANDBOX/preflight.out"; then
+        pass "installer leaves the verdict to pip when the probe reports no status"
+    else
+        fail "installer mishandled a probe that reported no status (rc=$status)"
+    fi
+
+    # This case needs curl to be *absent* so the installer falls back to python3.
+    if host_probe_tool curl; then
+        echo "[SKIP] a real curl in /usr/local/bin, which install.sh prepends ahead of any"
+        echo "[SKIP] PATH this suite passes; the python3-only probe case is not exercised"
+    else
+        status="$(probe_case 404 "$PY_BIN")"
+        if [ "$status" -ne 0 ] && used_tool python3 &&
+            grep -q 'wheel asset is unavailable (HTTP 404)' "$SANDBOX/preflight.out"; then
+            pass "installer probes the wheel through python3 when curl is absent"
+        else
+            fail "python3 wheel probe did not report the unavailable asset (rc=$status)"
+        fi
+    fi
+
+    # This case needs both probe tools to be absent.
+    if host_probe_tool curl-or-python3; then
+        echo "[SKIP] a real curl/python3 in /usr/local/bin, which install.sh prepends and"
+        echo "[SKIP] this suite cannot shadow; the no-probe-tool case is not exercised"
+    else
+        status="$(probe_case 404 "")"
+        if [ "$status" -eq 0 ] && [ -f "$PLUGIN_DST/plugin.json" ] && [ ! -s "$PROBE_LOG" ]; then
+            pass "installer skips the probe when no probe tool is available"
+        else
+            fail "installer required a wheel probe tool (rc=$status)"
+        fi
+    fi
+
+    # --- python3 probe deadline ---------------------------------------------
+    # urlopen's timeout bounds each socket operation, not the whole exchange, so a
+    # server that dribbles response headers used to keep the python3 probe busy for
+    # many multiples of ANOLISA_TOKENLESS_PROBE_TIMEOUT while curl --max-time gave
+    # up on schedule. The shell stubs above cannot cover this: they print a status
+    # without doing any I/O. Run the program install.sh actually ships against a
+    # slow local server instead -- no external network, no stub in the way.
+    REAL_PYTHON3="$(command -v python3 2>/dev/null || true)"
+    if [ -z "$REAL_PYTHON3" ]; then
+        echo "[SKIP] no python3 on PATH; the probe deadline is not exercised"
+    else
+        PROBE_PY="$SANDBOX/wheel_probe.py"
+        # install.sh carries two `<<'PY'` heredocs; the probe is the one with
+        # urlopen. Failing loudly here beats silently testing the wrong program.
+        awk '/<<.*PY/{flag=1; buf=""; next}
+             /^PY$/{if (flag && buf ~ /urlopen/) printf "%s", buf; flag=0; next}
+             flag{buf=buf $0 ORS}' "$INSTALL_SH" > "$PROBE_PY"
+        if ! grep -q 'urlopen' "$PROBE_PY"; then
+            fail "could not extract the python3 wheel probe program from install.sh"
+        else
+            SLOW_PY="$SANDBOX/slow_response.py"
+            cat > "$SLOW_PY" <<'SLOWEOF'
+import socket
+import sys
+import time
+
+port_file, interval, headers = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+listener.settimeout(30)  # never hold the suite hostage if no client shows up
+with open(port_file, "w") as handle:
+    handle.write(str(listener.getsockname()[1]))
+try:
+    connection, _ = listener.accept()
+except socket.timeout:
+    sys.exit(0)
+connection.recv(65536)
+connection.sendall(b"HTTP/1.1 200 OK\r\n")
+for index in range(headers):
+    time.sleep(interval)
+    try:
+        connection.sendall(b"X-Dribble-%d: x\r\n" % index)
+    except OSError:
+        break
+try:
+    connection.sendall(b"Content-Length: 0\r\n\r\n")
+    connection.close()
+except OSError:
+    pass
+SLOWEOF
+            TIME_PY="$SANDBOX/time_probe.py"
+            cat > "$TIME_PY" <<'TIMEEOF'
+import subprocess
+import sys
+import time
+
+out_path, program, url, timeout = sys.argv[1:5]
+started = time.monotonic()
+with open(out_path, "wb") as handle:
+    subprocess.run([sys.executable, program, url, timeout], stdout=handle,
+                   stderr=subprocess.DEVNULL)
+print("%.2f" % (time.monotonic() - started))
+TIMEEOF
+            SLOW_PORT_FILE="$SANDBOX/slow_response.port"
+            "$REAL_PYTHON3" "$SLOW_PY" "$SLOW_PORT_FILE" 0.5 12 &
+            SLOW_PID=$!
+            slow_port=""
+            for _ in $(seq 1 50); do
+                if [ -s "$SLOW_PORT_FILE" ]; then
+                    slow_port="$(cat "$SLOW_PORT_FILE")"
+                    break
+                fi
+                sleep 0.1
+            done
+            if [ -z "$slow_port" ]; then
+                fail "the slow-response server never reported its port"
+            else
+                # Budget 1s against a server that keeps talking for 6s: a probe
+                # that honours the deadline is back near 1s with no verdict, one
+                # that does not rides the response to the end and reports 200.
+                deadline_out="$SANDBOX/deadline.out"
+                elapsed="$("$REAL_PYTHON3" "$TIME_PY" "$deadline_out" "$PROBE_PY" \
+                    "http://127.0.0.1:${slow_port}/tokenless/v0.0.0-test/anolisa_tokenless-0.0.0-test-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" 1)"
+                if [ -n "$elapsed" ] && [ ! -s "$deadline_out" ] &&
+                    awk -v value="$elapsed" 'BEGIN { exit !(value < 3) }'; then
+                    pass "python3 probe stops at ANOLISA_TOKENLESS_PROBE_TIMEOUT on a slow response"
+                else
+                    fail "python3 probe outlived its deadline (elapsed=${elapsed:-?}s, verdict=$(cat "$deadline_out" 2>/dev/null))"
+                fi
+            fi
+            kill "$SLOW_PID" 2>/dev/null || true
+            wait "$SLOW_PID" 2>/dev/null || true
+        fi
+    fi
+
+    rm -rf "$PLUGIN_DST"
+    clear_shadow
+    : > "$STUB_LOG"
+    rm -f "$PROBE_LOG"
+    if run env PATH="$PROBE_BIN:$MIN_BIN" PROBE_STATUS=404 PROBE_LOG="$PROBE_LOG" \
+            bash "$INSTALL_SH" >/dev/null 2>&1 &&
+        [ -f "$PLUGIN_DST/plugin.json" ] && [ ! -s "$PROBE_LOG" ]; then
+        pass "ANOLISA_SKIP_WHEEL_PREFLIGHT=1 keeps an offline mirror installable"
+    else
+        fail "ANOLISA_SKIP_WHEEL_PREFLIGHT=1 did not bypass the probe"
+    fi
+    run bash "$UNINSTALL_SH" >/dev/null || fail "failed to uninstall after preflight coverage"
 fi
 
 echo ""

@@ -16,7 +16,7 @@ printf 'start\n' >> "$TEST_STATE/starts"
 date +%s%N >> "$TEST_STATE/start_times"
 start_count="$(wc -l < "$TEST_STATE/starts")"
 trap 'printf "term\n" >> "$TEST_STATE/terms"; exit 0' TERM INT
-touch "$TEST_STATE/worker-ready"
+printf 'ready\n' > "$TEST_STATE/worker-ready"
 if [[ "$TEST_SCENARIO" == "exit-once" && "$start_count" == "1" ]]; then
     sleep 0.15
     exit 42
@@ -44,7 +44,7 @@ fi
 count=$((count + 1))
 printf '%s\n' "$count" >> "$TEST_STATE/probes"
 case "$TEST_SCENARIO" in
-sleep-race)
+healthy | sleep-race)
     for _ in {1..100}; do
         [[ -f "$TEST_STATE/worker-ready" ]] && exit 0
         sleep 0.01
@@ -242,6 +242,23 @@ fn make_executable(path: &Path) {
 }
 
 #[test]
+fn healthy_probe_requires_worker_readiness() {
+    let harness = Harness::new();
+    let mut probe = Command::new(&harness.probe);
+    probe
+        .env("PATH", "/usr/bin:/bin")
+        .env("TEST_STATE", &harness.state)
+        .env("TEST_SCENARIO", "healthy");
+
+    assert_eq!(
+        probe.status().expect("probe before readiness").code(),
+        Some(2)
+    );
+    fs::write(harness.state.join("worker-ready"), "ready\n").expect("worker readiness");
+    assert!(probe.status().expect("probe after readiness").success());
+}
+
+#[test]
 fn initial_not_mounted_waits_for_health_without_remounting() {
     let harness = Harness::new();
     let mut supervisor = harness.spawn("delayed-mount");
@@ -307,7 +324,7 @@ fn sigterm_exits_cleanly_without_respawn() {
         ),
     };
     harness.wait_for_lines("probes", 1);
-    std::thread::sleep(Duration::from_millis(50));
+    harness.wait_for_lines("worker-ready", 1);
 
     assert!(supervisor.terminate_and_wait().success());
     std::thread::sleep(Duration::from_millis(150));

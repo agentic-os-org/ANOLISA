@@ -7,12 +7,27 @@ fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
         if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
             continue;
         }
+        let home = temp_shell_home("slash-bearing-han-prompt");
+        if shell == "zsh" {
+            // Path routing requires a stable namespace, without a line-init hook.
+            fs::write(
+                home.join(".zshrc"),
+                "zle -D zle-line-init 2>/dev/null || true\nPROMPT='cosh-osc$ '\n",
+            )
+            .unwrap();
+        }
+        let home_str = home.to_string_lossy().to_string();
         let output = run_raw_cli_with_args_env_and_delayed_input(
             "fake",
             &args,
             &[
                 ("COSH_SHELL_INTEGRATION", "enhanced"),
                 ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("HOME", &home_str),
+                (
+                    "COSH_SHELL_ISOLATED",
+                    if shell == "zsh" { "0" } else { "1" },
+                ),
                 ("LANG", "C.UTF-8"),
                 ("LC_ALL", "C.UTF-8"),
             ],
@@ -26,6 +41,7 @@ fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
                 (b"exit\n".to_vec(), Duration::from_millis(100)),
             ],
         );
+        let _ = fs::remove_dir_all(&home);
 
         assert!(
             output.contains(&format!("Received shell prompt request: {prompt}")),
@@ -1039,7 +1055,18 @@ fn raw_cli_zsh_agent_prompt_restore_suppresses_partial_line_marker() {
     );
     assert!(output.contains("after-agent"), "{output}");
     assert!(count_occurrences(&output, "ZPROMPT> ") >= 2, "{output}");
-    assert_no_standalone_percent_line(&output);
+    let response = output
+        .find("Received shell prompt request: ?? zsh prompt sp smoke")
+        .expect("agent response");
+    let next_command = response
+        + output[response..]
+            .find("echo after-agent")
+            .expect("next shell command");
+    let restored = &output[response..next_command];
+    assert!(restored.contains("ZPROMPT> "), "{output}");
+    // This contract covers Cosh's Agent-to-Shell restoration. The user's
+    // precmd re-enables PROMPT_SP for subsequent ordinary Shell commands.
+    assert_no_standalone_percent_line(restored);
 }
 
 #[test]

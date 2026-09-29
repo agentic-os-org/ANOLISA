@@ -5,9 +5,39 @@ Administration Point, first-version PAP daemon protocol, product Policy-template
 compiler, protocol-independent Unix-domain-socket service framework, and runnable
 foreground process bootstrap, together with the first AgentSight file-deletion
 target Adapter, and its independent deployment Client used by later AgentSecCore
-V2 work packages. It deliberately contains no durable persistence, Policy runtime,
-reconciliation scheduling worker, daemon reconciliation wiring, or outbox.
-The synchronous single-attempt reconciliation core is available as `asc-pcp`.
+V2 work packages. `asc-pcp` provides synchronous attempts and
+`asc-policy-runtime/src/reconciliation/` provides the bounded Binding queue,
+workers, retry timers and compensation scanning. Storage remains process-local.
+
+Each attempt re-reads current state and prepares afresh. Reconciliation writes
+update specific fields without carrying spec; no plan, prepared request or pending
+outcome is stored across calls. See the [runtime design (Chinese)](../docs/design/BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
+for retry, ownership and staged acceptance.
+
+Start the daemon with background Binding delivery:
+
+```sh
+asc-daemon serve --socket /run/agent-sec-core/daemon.sock
+```
+
+The daemon entrypoint starts the reconciliation service. Its `reconciliation.rs`
+composition module registers `AgentSightClientFactory::default()` without reading
+credentials or contacting the PEP. Each due attempt opens its own Client and reuses
+it through preparation and create/update, or through deletion for a saved route.
+Environment-based PEP selection is deferred. The Client owns endpoint/token-file
+defaults; daemon and CLI expose no AgentSight configuration options. Missing or
+invalid credentials are retryable Binding failures; each retry reads the token
+file again. Network failures also follow the Binding retry contract.
+Individual reconcile panics are caught per attempt; core bookkeeping preserves
+completed results and cleanup responsibility, and the worker continues other Bindings.
+Unconfirmed outcomes stop that ID's automatic execution until a new notification.
+Reconciliation startup, timer or worker scheduling failure leaves the daemon serving queries and
+other services, while Binding mutations are rejected using the existing unavailable
+admission error. Policy/Scope CRUD is independent of reconciliation readiness.
+Individual Binding errors are rescheduled without closing PAP admission; exhausted
+CAS contention is distinct from storage unavailability. There is no automatic restart of a failed reconciliation runtime.
+CRUD responses confirm intent admission, and GET/LIST expose subsequent completion.
+No process restart recovery is available with memory storage.
 
 The Rust `agent-sec-cli` exposes all 15 Policy, Scope and Binding CRUD commands through
 an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;
@@ -31,17 +61,18 @@ The current crates are:
   one configured endpoint, with process identity resolution and complete HTTP
   fixtures. It does not depend on a reconciliation framework.
 - `asc-policy-target-contracts`: shared, PEP-neutral `TargetBindingAdapter` and
-  `TargetDeploymentClient` ports; data lives in `asc-policy-types::target`.
+  `TargetDeploymentClientFactory` and `TargetDeploymentClient` ports; data lives in `asc-policy-types::target`.
 - `asc-policy-repository`: shared Binding aggregate data, consistent reads and
-  atomic snapshot CAS; independent of reconciliation implementation.
+  field-scoped conditional writes; independent of reconciliation implementation.
 - `asc-pcp`: synchronous single-attempt `BindingReconciler::reconcile` core over
-  repository, Adapter and Client ports. Event delivery, timers and daemon wiring
-  remain separate work packages.
+  repository, Adapter and Client ports, with fresh preparation on every attempt.
+- `asc-policy-runtime`: bounded Binding queue, workers, retry timers, compensation
+  scans and owned shutdown; the daemon supplies target-specific composition.
 - `asc-pap`: transport-independent current-record Policy/Scope/Binding CRUD with
   monotonic revisions over explicit compiler and repository ports.
 - `asc-pap-repository-memory`: explicitly temporary process-local Repository
   adapter used only to keep daemon/PAP integration runnable before durable
-  persistence lands; also implements aggregate reads/CAS over PAP's Binding map.
+  persistence lands; also implements consistent reads and reconciliation patches over PAP's Binding map.
 - `asc-daemon-protocol`: strict request/response contracts and an explicit
   allowlist for 15 Policy, Scope, and Binding administration methods.
 - `asc-daemon-handler`: inbound protocol adapter that decodes daemon requests,
@@ -61,6 +92,10 @@ The current crates are:
   server dependencies are test-only. `commands.rs` registers and dispatches the
   top-level commands; `commands/{policy,scope,binding}.rs` own their arguments and
   request mappings, with pagination and encoding helpers in `commands/common.rs`.
+  `capabilities.rs` adds the V1-compatible environment-variable capability view,
+  which is rendered locally without a daemon endpoint; its migration contract and
+  the remaining gaps are recorded in
+  [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
 
@@ -69,9 +104,34 @@ compatibility report, direct-consumer evidence, and rollback boundary are record
 in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_zh.md).
 
 The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
-maps Prompt Scan and Code Scan migration work onto this checkout, including module
+maps Prompt Scan and Code Scan migration work onto the repository architecture, including module
 locations, dependency order, interface boundaries, and acceptance requirements.
-It describes planned work; this workspace does not yet expose scan methods.
+The workspace now exposes `action.code_scan` and `action.pii_scan` through the common
+Action Runtime. PII migration and its future policy boundary are described in the
+[two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
+
+## PII scanning
+
+`asc-capability-pii-scan` provides a transport-free Rust detector, immutable centralized
+rule sets, a typed report, executor and safe audit projector. The daemon loads built-ins
+and the optional `/etc/agent-sec/pii-checker/rules.yaml` once; `--pii-rules` accepts an
+administrator-selected absolute path. Restart applies rule changes. There is no HOME
+lookup or caller-selected file access.
+
+`agent-sec-cli --socket /run/agent-sec-core/daemon.sock scan-pii --stdin --redact-output`
+reads input locally and invokes `action.pii_scan` using LocalUser authorization.
+The response preserves V1 fields with coverage, input digests and rule identity under
+`summary`; `deny` classifies findings and is not a PDP decision. Authorized parameter
+failures use the same Finalizer as normal scans. V1-compatible opaque trace metadata
+is accepted through the shared CLI `--trace-context` adapter and top-level OTel
+carrier/compatibility envelope; PII params reject `traceContext`. Finalizer reads
+correlation from Context, while kernel peer identity is passed as `CallerIdentity`.
+Opaque labels are not OpenTelemetry IDs. Business requests retain 4 MiB capacity
+with a separate 32 KiB propagation allowance; responses remain limited to 4 MiB.
+
+See the [PII user guide](../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md)
+for limits, rule migration, compatibility differences and rollback. Hook/RPM tests
+exercise real Rust subprocesses without switching Agent hosts.
 
 ## Daemon service boundary
 
@@ -119,9 +179,16 @@ root-managed Principal policy, and an explicitly transitional process-local
 Repository. Policy CRUD therefore works during one daemon lifetime, but all
 state disappears on restart; this is integration evidence, not durable
 persistence or distribution readiness. The process prints that limitation at
-startup. It also requires an explicit absolute socket path because
-packaging-owned system paths, singleton/stale-socket policy, runtime directory
-hardening, and readiness remain later process-integration work.
+startup. The daemon and CLI default socket is `/run/agent-sec-core/daemon.sock`;
+a nonempty `AGENT_SEC_DAEMON_SOCKET` overrides it, and explicit `--socket` takes
+precedence over both. Both entrypoints require absolute paths. HOME and
+XDG_RUNTIME_DIR do not select a daemon namespace. The V2 RPM stages a system
+unit running as `root:root`, with a 0755 runtime directory and 0666
+socket. Ordinary users can connect; server-side peer-UID authorization still
+protects policy administration. Runtime directory validation, a retained flock and conservative stale
+socket recovery protect this namespace. Readiness and persistence remain separate
+work. See [systemd acceptance](../tests/v2/systemd/README.md) for deployment,
+validation and upgrade boundaries.
 
 UID 0 is always a Policy administrator. A deployment operator can add other UIDs
 at startup with repeatable `--policy-admin-uid <UID>` options. Omitted means root
@@ -130,7 +197,14 @@ still requires root. The allowlist is process-local and must be supplied on each
 startup. Configuration-file loading, persistence and management RPCs remain later
 work. Authorization does not change OS socket permissions or deployment topology.
 
-Run the independent transport process in the foreground:
+Code scanning is available to any caller that can connect to the UDS. Its
+`LocalUser` access policy imposes no administrator or UID allowlist check;
+kernel peer credentials supply audit attribution. PAP methods still require root
+or an explicitly configured administrator. Audit storage remains private
+(`0700` directory, `0600` files).
+
+Run the daemon in the foreground (the existing directory must belong to the
+process UID, have mode 0700, 0750 or 0755, and have protected, non-symlink ancestors):
 
 ```bash
 cargo run -p asc-daemon -- serve --socket /absolute/existing-directory/daemon.sock
@@ -163,8 +237,14 @@ executes the complete scenario without root. A separate default-config case
 verifies non-root `permission_denied` (or full CRUD when root). CLI process tests
 use an in-process daemon service; a combined CLI and daemon binary E2E is deferred.
 
-Binding create/update accepts desired state and returns `PENDING_APPLY`; delete
-returns `PENDING_DELETE`. These responses prove PAP acceptance only. They do not
+New Binding intent normally returns `status: {phase: PENDING_APPLY}` for create/update
+or `status: {phase: PENDING_DELETE}` for delete; no-ops return the current lifecycle.
+After saving intent, queue rejection conditionally records Failed and `status.error`
+and returns the complete BindingView in the same result envelope. Mutation callers
+must inspect status.phase; the CLI prints Failed results to stdout and exits 1,
+while GET/LIST remain successful queries. A concurrent worker claim
+returns the current record; unconfirmed termination returns internal. These
+successful responses prove PAP acceptance only. They do not
 mean target enforcement or deletion completed. LIST is integration-ready but is
 not distribution-ready until a server-owned aggregate encoded-byte budget is
 passed through Repository, PAP, and transport.
@@ -201,18 +281,21 @@ its current lifecycle. Only spec changes increment `bindingRevision`.
 |---|---|---|---|
 | absent | CREATE | fresh server-generated ID, `PENDING_APPLY` | 1 |
 | `PENDING_APPLY`, `APPLYING`, `READY` | identical UPDATE | no-op | unchanged |
-| `APPLY_FAILED` | identical UPDATE | `PENDING_APPLY`, reset retry controls, retain prepared request | unchanged |
-| `PENDING_APPLY`, `READY`, `APPLY_FAILED` | changed-spec UPDATE | `PENDING_APPLY`, clear prepared request, retain cleanup targets | +1 |
+| `APPLY_FAILED` | identical UPDATE | `PENDING_APPLY`, clear status.error, retain cleanup targets | unchanged |
+| `PENDING_APPLY`, `READY`, `APPLY_FAILED` | changed-spec UPDATE | `PENDING_APPLY`, prepare afresh, retain cleanup targets | +1 |
 | `APPLYING` | changed-spec UPDATE | `OperationInProgress` | unchanged |
 | `PENDING_DELETE`, `DELETING`, `DELETE_FAILED` | any UPDATE | `OperationInProgress`; deletion is irreversible | unchanged |
-| Apply-side states, `DELETE_FAILED` | DELETE | `PENDING_DELETE`, reset retry controls, retain spec/prepared/targets | unchanged |
+| Apply-side states, `DELETE_FAILED` | DELETE | `PENDING_DELETE`, clear status.error, retain spec/targets | unchanged |
 | `PENDING_DELETE`, `DELETING` | DELETE | no-op | unchanged |
 | absent | GET / UPDATE / DELETE | `NotFound` | — |
 
 Workers claim pending work as `APPLYING` or `DELETING`. Apply success becomes
 `READY`; retryable failure returns to the corresponding pending state with a
-deadline; permanent/exhausted failure becomes `APPLY_FAILED` or `DELETE_FAILED`.
-Delete success atomically removes the Binding and all runtime data only after
+WorkQueue-owned deadline; permanent/exhausted failure becomes `APPLY_FAILED` or `DELETE_FAILED`.
+Attempt counts and deadlines are process-local; explicit pending requests without
+an error reset that progress on the next attempt. The table describes Repository
+admission before queue notification; queue rejection can replace Pending with Failed.
+Delete success atomically removes the Binding and its deployment records only after
 all targets are confirmed absent. `Deleted` remains an internal completion marker
 in the state machine, never a persisted current status. LIST omits removed rows.
 Re-deployment uses CREATE with a new ID at revision 1.
@@ -221,28 +304,153 @@ PAP writes compare the complete expected Binding under the same transaction as
 request admission. `update_binding(None, next)` inserts a fresh ID;
 `update_binding(Some(expected), next)` updates only an existing record. It cannot
 resurrect a record removed between the service read and repository write.
-Reconciler aggregate CAS also compares runtime and deployments; it cannot erase
+Reconciler patches compare revision/phase and the status/error or deployment fields
+being written; attempt counts and deadlines are not Repository fields. Patches carry no spec and cannot erase
 a newer intent or target observation. A Delete accepted while Apply is running
 keeps the same revision, and the old Apply still records its target observations
 before the next cleanup attempt.
 
-PAP request semantics and the synchronous reconciler are tested together using
-the memory repository. The daemon still has no notification/timer worker wired
-to accepted requests; PAP acceptance does not imply target completion. Durable
-storage and cross-process recovery remain separate work packages.
-
-Durable persistence, Policy runtime, reconciliation scheduling worker, and
-outbox belong to later work packages and are intentionally absent
-from this slice. The compiler included here is limited to the one golden-backed
+PAP request semantics, the synchronous core and background Runtime are tested with
+the memory repository. The daemon wires post-commit notifications and timers
+through an attempt-local Client factory. PAP acceptance still does not imply target
+completion. Full process E2E, durable storage, cross-process recovery and outbox
+remain separate work. The compiler is limited to the golden-backed
 `prevent_file_deletion` lowering described above.
 
 Dependency sources, TLS/unsafe boundaries and release audit requirements are
 recorded in [DEPENDENCIES.md](DEPENDENCIES.md).
 
-Run the branch-owned validation from this directory:
+Run the workspace validation from this directory:
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## Shared scan lifecycle
+
+Scan handlers now receive `asc-daemon-core::ActionService`; production runtime
+registration lives in `apps/asc-daemon/src/actions.rs`. The process constructs one
+shared finalizer with security-event, telemetry and diagnostic outputs. Each scan
+invocation automatically finalizes; handlers and capabilities do not own sinks.
+
+`asc-telemetry` provides the V1 scan field allowlist and policy gates;
+`asc-event-sink::telemetry::TelemetryWriter` appends only to an existing uploader-owned
+file. Audit JSONL/SQLite and telemetry attempts remain synchronous and independent.
+Code Scan and PII Scan share this lifecycle. PII parameters and normalized business
+metadata enter the typed `ActionService`; authorized parameter rejection uses
+`Invocation.reject` and the same finalizer. Telemetry retains only allowlisted
+scalars, including PII verdict and elapsed time, independently of audit output.
+Other scan capabilities add their own identities and projections when implemented.
+
+See the [implementation, compatibility and acceptance record](../docs/design/RUST_SECURITY_CORE_EXECUTION_ARCHITECTURE_zh.md#54-已实现的共享生命周期)
+for the exact scope, executable checks, deferred work, and rollback procedure.
+
+## Native OpenTelemetry tracing
+
+This is the first OTel integration. V1/V2 refer to the Python/Rust product
+implementations, not OTel generations. Existing `--trace-context` JSON and record
+metadata remain supported inputs. `bind_trace_context_input` maps the former into
+the unified OTel Context. Caller-supplied opaque trace/invocation labels retain
+their correlation meaning separately from SDK TraceId/SpanId.
+
+`asc-observability` supplies the current OTel Context, five Agent baggage fields,
+read-only correlation snapshots and a process-owned `runtime` feature. CLI/client,
+daemon, PAP and compiler spans share SDK identity. A raw UDS caller that omits
+context gets a fresh daemon root. Missing Agent metadata is allowed for ordinary
+PAP calls; future observability consumers call `validate_metadata` when required.
+Adapters for the existing V1 record input use `bind_metadata(parent, value, kind)` with `AgentRun`,
+`ModelCall` or `ToolCall`. It validates the record's own V1 metadata before replacing
+session/run/call/tool fields: missing required fields fail even if the parent has
+them; omitted/null optional fields clear inherited values. Trace parentage,
+request correlation, compatibility labels and independent agent attribution remain.
+Metadata extras are ignored per hook schema; `agent_name` comes from trace-context
+or the native carrier. Ordinary child-context propagation continues to inherit.
+The production runtime uses a real SDK with fixed `AlwaysOff` sampling for local
+correlation. IDs, parentage and baggage remain available; no exporter is installed.
+
+Existing caller input remains flat JSON; put this bootstrap option before command
+names and before other options' non-option values, matching the V1 parser:
+
+```bash
+agent-sec-cli --trace-context '{"agent_name":"openclaw","session_id":"session-123","tool_call_id":"tool-1"}' \
+  --socket /run/agent-sec-core/daemon.sock policy list
+```
+
+A native upstream parent may be supplied alongside it:
+
+```bash
+agent-sec-cli --trace-context '{"session_id":"session-123"}' \
+  --otel-context '{"version":1,"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}' \
+  --socket /run/agent-sec-core/daemon.sock policy list
+```
+
+The current release exposes no OTLP exporter or exporter configuration. `OTEL_*`
+export, sampling and batch settings cannot enable export or change the fixed
+local sampling policy. No Collector, HTTP client or exporter worker is created.
+
+| Variable | Behavior |
+| --- | --- |
+| `RUST_LOG` | Default warn; `info` enables bounded JSON correlation diagnostics on stderr; `off` suppresses these records without disabling context |
+| `AGENT_SEC_INVOCATION_ID` | Optional caller-supplied invocation label; never automatically generated |
+
+Service resources use `asc-daemon` / `agent-sec-cli` and the build package version.
+Each runtime owns one diagnostic worker with a 64-record queue and a 32 KiB
+per-record limit (2 MiB queued payload). It also handles daemon startup warnings
+and operational errors, independently of `RUST_LOG`. Reconciliation, JSONL and
+SQLite library warnings use the `asc_process_diagnostic` tracing target, routed
+to the same writer without a synchronous fallback. Library hosts must install a
+subscriber; the libraries do not create threads or initialize the SDK. Producers never wait for
+stderr I/O; overflow, oversized records, worker creation failure and sink failures
+lose diagnostics. There is no per-second rate limit; the stderr consumer owns
+retention and rotation. CLI draining waits at most 50 ms; daemon draining shares
+the additional 2 s provider shutdown budget after service/runtime shutdown.
+`init_runtime` is called once from main. Subscriber conflicts or invalid SDK
+identity fail before business work with exit 1; `otel: <reason>` is best effort,
+using a bounded worker even before successful runtime initialization.
+The process panic hook also queues only `runtime: panic`, without payloads;
+unwind/abort behavior is unchanged.
+CLI help, usage, errors and business results retain synchronous output semantics.
+These required outputs can wait for their consumer; the diagnostic queue is not a
+lossy replacement for business output.
+
+Native requests support optional `traceContext` (version 1, optional string
+`traceparent`, `tracestate`, `baggage`) and `compatibility` (version 1, optional
+`traceId`, `invocationLabel`). The new CLI requires a daemon supporting this
+carrier; pre-carrier daemons are outside the supported version matrix. Deploy
+server first; a client never retries without context after rejection. Regular
+RPCs inject a carrier even without tracing flags. The preserved `--trace-context`
+input and explicit `AGENT_SEC_INVOCATION_ID` can affect wire attribution/labels. Requests have separate 4 MiB business and 32 KiB
+propagation budgets; response capacity remains 4 MiB, including LF.
+
+Business functions use `tracing::info_span!` or `#[tracing::instrument(skip_all)]`;
+names are defined at each callsite. For a task/thread boundary, capture
+`asc_observability::Context::current()`, bind a fresh child using `parent_span`,
+and instrument the future. Do not hold an entered span/Context guard across await.
+Consumers call `snapshot()` inside the scope, then persist that read-only snapshot
+independently of span sampling/export. This package does not implement event
+storage or local trajectory reconstruction.
+
+Validation and rollback: [OTel acceptance](../docs/design/V2_OTEL_ACCEPTANCE_zh.md).
+
+The AgentSec UDS adapter accepts up to 16 KiB of encoded baggage, preserving all
+five 256-code-point values. Non-ASCII bytes must be percent-encoded; using fewer
+ASCII escapes does not reduce their size. Receivers supporting only the W3C
+8192-byte interoperability minimum may drop larger headers; the locked SDK's
+standard BaggagePropagator drops them whole. Cross-service forwarding must define
+its own budget/compatibility contract before use. The local adapter does not
+silently shrink original metadata to meet another receiver's limit.
+
+After building the V2 workspace, run the cases from the component directory:
+
+```bash
+PATH="$PWD/v2/target/debug:$PATH" uv run --project agent-sec-cli pytest tests/v2/e2e/test_otel_e2e.py -v
+```
+
+These tests require Linux, UDS, loopback TCP and subprocess support. Missing
+binaries on PATH or unavailable sockets fail; only the root-inapplicable non-root
+authorization case explicitly skips. The existing `make test-e2e-rpm-v2` target
+also collects these cases against installed binaries. Source-built process tests
+do not establish RPM/systemd acceptance. Storage-fault cases verify that blocked
+stderr cannot prevent scanning, independent audit writes or shutdown.

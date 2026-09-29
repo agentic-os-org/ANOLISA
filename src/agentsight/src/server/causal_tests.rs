@@ -144,9 +144,10 @@ fn normalize_attrib_invalid_defaults_to_model() {
 // suspicion, and must not be dressed up as an established defect
 // ---------------------------------------------------------------------------
 
-use grounding::claims::{Claim, ClaimClass};
-use grounding::evidence::{Finding, GroundingIndex, StepCallVerdict};
-use grounding::outcome::{CallStatus, CallVerdict, Confidence};
+use crate::grounding;
+use crate::grounding::claims::{Claim, ClaimClass};
+use crate::grounding::evidence::{Finding, GroundingIndex, StepCallVerdict};
+use crate::grounding::outcome::{CallStatus, CallVerdict, Confidence};
 
 fn failing_case() -> CausalCase {
     CausalCase {
@@ -606,4 +607,19 @@ fn a_repeated_failure_alone_does_not_condemn_the_round() {
     // Still reported: it is true, and useful context for a reader.
     assert_eq!(case_.findings.len(), 1);
     assert_eq!(case_.findings[0].kind, "repeated_identical_failure");
+}
+
+#[test]
+fn schema_probe_does_not_create_a_missing_database() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentsight-causal-missing-{}-{nonce}.db",
+        std::process::id()
+    ));
+
+    assert!(probe_atif_column(&path, "missing-session").is_err());
+    assert!(!path.exists());
 }

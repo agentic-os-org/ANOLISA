@@ -31,6 +31,8 @@ Agent framework, and sandbox you already run.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/installation/)
+[![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
+[![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/en/agent-security/owasp-agentic-top10.md)
 
 </div>
 
@@ -232,6 +234,13 @@ calls from an existing Agent without changing its framework.
 
 [Read the Quick Start →](https://agentic-os.sh/docs/quickstart/)
 
+## Standards & Compliance
+
+| Standard / Framework | Status and details |
+|---|---|
+| [AARM](https://aarm.dev/builders/agentseccore-anolisa) | **Aligned** · Registry entry: AgentSecCore (ANOLISA) |
+| [OWASP Agentic Top 10 (2026)](docs/user-guide/en/agent-security/owasp-agentic-top10.md) | All 10 ASI risk categories mapped to security controls |
+
 ## Documentation
 
 [Quick Start](https://agentic-os.sh/docs/quickstart/) ·
@@ -240,6 +249,33 @@ calls from an existing Agent without changing its framework.
 [Troubleshooting](https://agentic-os.sh/docs/user-guide/troubleshooting/) ·
 [Build from Source](https://agentic-os.sh/docs/building/) ·
 [Changelog](https://agentic-os.sh/changelog/)
+
+## Repository layout
+
+Components remain independently buildable in one repository. Directory placement
+separates runtime capabilities, distribution tooling, evaluation, and retained
+legacy code; it does not rename installed commands, packages, or release tags.
+
+| Directory | Contents |
+|---|---|
+| [`src/`](src/) | Runtime components, including AW, cosh-ng, observability, security, memory, and sandbox capabilities. Each component keeps its own build and test entry points. |
+| [`distribution/`](distribution/) | Distribution tooling. `anolisa/` owns the installation CLI, component manifests, and packaging resources. |
+| [`benchmark/`](benchmark/) | Cross-component evaluation runners: ClawEval, SWE, and Terminal Bench. Component-specific benchmarks stay with their components. |
+| [`deprecated/`](deprecated/) | Retained legacy implementations. `copilot-shell/` is deprecated for new development; its existing build, install, CI, and release paths remain available until a separate retirement. |
+| [`scripts/`](scripts/) | Repository-wide build, packaging, and validation scripts. |
+| [`tests/`](tests/) | Repository-wide regression checks and test orchestration. Component tests remain local to each component. |
+| [`docker/`](docker/) | Container image definitions and build resources. |
+| [`docs/`](docs/) | User and developer guides, source-build instructions, and shared documentation assets. |
+| [`specs/`](specs/) | Contribution standards, component onboarding, and documentation rules. |
+| [`website/`](website/) | Public website source and generators. Generated output is not a second documentation source. |
+| [`.github/`](.github/) | CI, release workflows, component routing metadata, and ownership. |
+
+Before changing files, start with [AGENTS.md](AGENTS.md) for repository rules,
+component locations, and build/test commands, then read the component's scoped
+`AGENTS.md` when present. Use [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution
+workflow. Source-path changes must be reflected in `.github/components.json` and
+its build, release, ownership, and documentation consumers without changing the
+component's public identity.
 
 ## Community
 

@@ -116,7 +116,7 @@ class NativeEd25519Backend(SigningBackend):
         return "ed25519"
 
     # ------------------------------------------------------------------
-    # Key generation (used by init and init-keys)
+    # Key generation (used by init)
     # ------------------------------------------------------------------
 
     def generate_keys(self, passphrase: str | None = None) -> dict[str, str]:

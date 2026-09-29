@@ -3,7 +3,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
+pub(crate) mod composer;
 pub(crate) mod path_prompt;
 pub(crate) use path_prompt::{PathPromptIntercept, ShellPathCommandNames, ShellPromptCwd};
 

@@ -57,8 +57,10 @@ const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
 const BOOTSTRAP_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_PATH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
+mod bash_capability;
 mod descendants;
 mod recommendations;
+pub(crate) use bash_capability::{exported_bash_functions_posix_compatible, resolve_bash_for_r2};
 #[cfg(test)]
 use recommendations::{
     append_startup_auth_hint, plan_startup_for_render, record_visible_personal_impressions,
@@ -286,7 +288,7 @@ fn run_bootstrap_path_probe(
             run_bootstrap_path_probe_direct(command, timeout, io, winsize, false)
         }
         BootstrapPathProbeIo::Pty => {
-            descendants::run_supervised_profile_probe(command, timeout, winsize)
+            descendants::run_supervised_profile_probe(command, None, timeout, winsize)
         }
     }
 }
@@ -328,7 +330,7 @@ fn execute_bootstrap_path_probe(
     } else {
         None
     };
-    let (mut child, output) = match io {
+    let spawned = match io {
         BootstrapPathProbeIo::Pipes => {
             command
                 .stdin(Stdio::null())
@@ -345,35 +347,38 @@ fn execute_bootstrap_path_probe(
                     Ok(())
                 });
             }
-            let mut child = command.spawn().map_err(BootstrapPathProbeError::Spawn)?;
-            let stdout = drain_bootstrap_path_pipe(child.stdout.take());
-            let stderr = drain_bootstrap_path_pipe(child.stderr.take());
-            (child, vec![stdout, stderr])
+            command.spawn().map(|mut child| {
+                let stdout = drain_bootstrap_path_pipe(child.stdout.take());
+                let stderr = drain_bootstrap_path_pipe(child.stderr.take());
+                (child, vec![stdout, stderr])
+            })
         }
         BootstrapPathProbeIo::Pty => {
-            let (child, master) = crate::shell_host::spawn_profile_probe_on_pty(command, winsize)
-                .map_err(BootstrapPathProbeError::Spawn)?;
-            (child, vec![drain_bootstrap_path_pty(master)])
+            crate::shell_host::spawn_profile_probe_on_pty(command, winsize)
+                .map(|(child, master)| (child, vec![drain_bootstrap_path_pty(master)]))
+        }
+    };
+    let (mut child, output) = match spawned {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            descendants::cancel_pending(descendants)?;
+            return Err(BootstrapPathProbeError::Spawn(error));
         }
     };
     let process_group = child.id();
 
     let status = match child.wait_timeout(timeout) {
-        Ok(Some(status)) => status,
+        Ok(Some(status)) => Ok(status),
         Ok(None) => {
             terminate_bootstrap_path_probe(&mut child, process_group);
-            return Err(BootstrapPathProbeError::TimedOut(timeout));
+            Err(BootstrapPathProbeError::TimedOut(timeout))
         }
         Err(error) => {
             terminate_bootstrap_path_probe(&mut child, process_group);
-            return Err(BootstrapPathProbeError::Wait(error));
+            Err(BootstrapPathProbeError::Wait(error))
         }
     };
-    if let Some(descendants) = descendants {
-        descendants
-            .finish()
-            .map_err(BootstrapPathProbeError::Containment)?;
-    }
+    let status = descendants::finish_pending(descendants, status)?;
     let mut streams = Vec::with_capacity(output.len());
     for receiver in output {
         let stream = collect_bootstrap_path_pipe(receiver, deadline, timeout, process_group)?;

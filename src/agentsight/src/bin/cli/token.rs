@@ -1,5 +1,6 @@
 //! Token query subcommand
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::{
     SqliteConfig, TimePeriod, TokenQueryResult, TokenStore, Trend, format_tokens_with_commas,
 };
@@ -44,8 +45,25 @@ impl TokenCommand {
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
-        // Open token store
-        let store = TokenStore::new(data_path);
+        if self.data_file.is_some()
+            && let Err(error) = agentsight::check_data_file(data_path)
+        {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+
+        let store = match DatabaseManager::open_query(
+            DatabaseId::Primary,
+            data_path,
+            DatabaseCoverage::Full,
+            |path| TokenStore::open_read_only_existing(path, "token_records"),
+        ) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("Failed to open token database: {error}");
+                std::process::exit(1);
+            }
+        };
         let query = agentsight::TokenQuery::new(&store);
 
         // Execute query
@@ -70,7 +88,7 @@ impl TokenCommand {
 
         // Output result
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            super::print_json(&result);
         } else {
             print_human_readable(&result, self.compare);
         }

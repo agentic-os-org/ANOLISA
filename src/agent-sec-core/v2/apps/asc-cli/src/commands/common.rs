@@ -28,6 +28,8 @@ impl Page {
 
 pub(super) fn encode(method: &str, params: &impl Serialize) -> Result<DaemonRequest, InputError> {
     Ok(DaemonRequest {
+        trace_context: None,
+        compatibility: None,
         method: method.to_owned(),
         params: serde_json::to_value(params)?,
     })

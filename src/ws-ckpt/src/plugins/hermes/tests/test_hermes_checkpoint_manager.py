@@ -129,11 +129,12 @@ class TestCheckpointManager:
         out = mgr.init_workspace()
         assert out.exit_code == 0
         assert out.stdout == "ok"
+        assert mock_run.call_args.kwargs["timeout"] == 240
 
     @patch("hermes.checkpoint_manager.subprocess.run")
     def test_run_timeout(self, mock_run):
         import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ws-ckpt", timeout=30)
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ws-ckpt", timeout=240)
         mgr = self._make("/ws")
         out = mgr.init_workspace()
         assert out.exit_code == 1

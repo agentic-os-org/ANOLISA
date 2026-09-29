@@ -727,7 +727,7 @@ to test the built-in `sandbox-guard.py` hook with a dangerous command:
 ```bash
 printf '{"hook_event_name":"PreToolUse","tool_name":"run_shell_command",
   "tool_input":{"command":"rm -rf /tmp/test"}}' \
-  | python3 src/copilot-shell/hooks/sandbox-guard.py
+  | python3 deprecated/copilot-shell/hooks/sandbox-guard.py
 ```
 
 For live tracing during a session, set `COPILOT_SHELL_DEBUG=1` to see hook

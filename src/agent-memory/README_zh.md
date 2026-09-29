@@ -59,6 +59,14 @@ openclaw gateway restart
 }
 ```
 
+OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 ANOLISA
+记忆，另提供 `memory_observe` 和 `memory_get_context`。升级时请更新提示词和白名单
+中的旧工具名，重启 gateway 并开始新会话；内部 MCP 方法名和数据保持不变。
+旧安装脚本曾禁用 `memory-core` 的迁移说明见
+[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。manifest 声明会让全部四个插件工具
+保留在 OpenClaw 2026.9.2 的 `coding` 会话 profile 中。自定义白名单、sandbox 策略及
+不采用该元数据的宿主需要显式添加新名称；指南说明了如何追加而不覆盖已有策略。
+
 ## 架构
 
 单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 37 个 MCP 工具：
@@ -67,6 +75,10 @@ openclaw gateway restart
 - **Tier B**（6 工具）：结构化检索
 - **Tier C**（7 工具）：治理（快照、版本控制、聚合）
 - **主权**（13 工具）：关于、遗忘、同意、导入导出、任务、梦境合成
+
+Profile 门控（basic/advanced/expert）按部署形态控制工具可见性。OpenClaw 适配器会把该档位
+透传给子进程，但只接受 `basic`/`advanced`：`expert` 会隐藏其 memory 契约所依赖的 Tier B
+工具，插件会拒绝加载。
 
 ## 环境要求
 

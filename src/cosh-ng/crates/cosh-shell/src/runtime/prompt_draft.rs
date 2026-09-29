@@ -26,6 +26,7 @@ pub(crate) struct PromptDraftCardState {
     pub(crate) workspace_cwd: Option<String>,
     pub(crate) skill_names: Vec<String>,
     pub(crate) completions: Vec<ComposerCompletion>,
+    pub(crate) selected_completion: usize,
     pub(crate) text: String,
     pub(crate) rows: Vec<String>,
     pub(crate) hidden_above: usize,
@@ -35,6 +36,26 @@ pub(crate) struct PromptDraftCardState {
     /// First paint opens on a fresh line below the bash prompt (relay
     /// path); the slash path starts at a fresh column already (#1932).
     pub(crate) line_break_before: bool,
+}
+
+impl PromptDraftCardState {
+    pub(crate) fn capture(&self) -> crate::raw_input::RawInputCapture {
+        crate::raw_input::RawInputCapture::PromptDraft {
+            id: self.id.clone(),
+            initial_text: self.text.clone().into_boxed_str(),
+            completion: self
+                .completions
+                .get(self.selected_completion)
+                .map(|completion| {
+                    Box::new((
+                        completion.replacement.clone(),
+                        (self.hidden_above + self.cursor.0, self.cursor.1),
+                    ))
+                }),
+            agent_composer: self.kind == PromptDraftKind::AgentComposer,
+            workspace_cwd: self.workspace_cwd.as_deref().map(Into::into),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +96,7 @@ fn card_width() -> usize {
 enum CardPhase {
     Editing,
     Submitted,
+    ControlSubmitted,
     Cancelled,
 }
 
@@ -145,6 +167,7 @@ fn open_prompt_editor<W: Write>(
         workspace_cwd: workspace_cwd.map(str::to_string),
         skill_names,
         completions: Vec::new(),
+        selected_completion: 0,
         text,
         rows: view.rows,
         hidden_above: view.hidden_above,
@@ -211,6 +234,9 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                         &card.skill_names,
                     );
                 }
+                card.selected_completion = (value["selected_completion"].as_u64().unwrap_or(0)
+                    as usize)
+                    .min(card.completions.len().saturating_sub(1));
                 draw_card(&mut card, state, output, CardPhase::Editing)?;
                 state.prompt_draft = Some(card);
             }
@@ -218,7 +244,8 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                 let Some(mut card) = state.prompt_draft.take() else {
                     continue;
                 };
-                if card.kind == PromptDraftKind::AgentComposer {
+                let slash = value["slash"].as_bool().unwrap_or(false);
+                if card.kind == PromptDraftKind::AgentComposer && !slash {
                     state.pending_agent_composer_submission =
                         Some(PendingAgentComposerSubmission {
                             text: value["text"]
@@ -228,10 +255,20 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                             workspace_cwd: card.workspace_cwd.clone(),
                         });
                 }
+                if slash {
+                    state.pending_agent_composer_submission = None;
+                    state.agent_run.needs_prompt_after_run = true;
+                    state.agent_run.native_prompt_after_run = false;
+                }
                 card.completions.clear();
-                // The agent turn starts via the intercept event pushed in the
-                // same batch; here the card just freezes as history.
-                draw_card(&mut card, state, output, CardPhase::Submitted)?;
+                // The corresponding intercept dispatches after the editor
+                // releases input; its command may open another capture.
+                let phase = if slash {
+                    CardPhase::ControlSubmitted
+                } else {
+                    CardPhase::Submitted
+                };
+                draw_card(&mut card, state, output, phase)?;
             }
             Some("cancel") => {
                 let Some(mut card) = state.prompt_draft.take() else {
@@ -351,11 +388,12 @@ fn draw_card<W: Write>(
     let footer = match phase {
         CardPhase::Editing => i18n.t(MessageId::PromptDraftFooterEditing),
         CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
+        CardPhase::ControlSubmitted => i18n.t(MessageId::PromptDraftFooterControlSubmitted),
         CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
     };
     let border = match phase {
         CardPhase::Editing => "\x1b[36m",
-        CardPhase::Submitted | CardPhase::Cancelled => "\x1b[2m",
+        CardPhase::Submitted | CardPhase::ControlSubmitted | CardPhase::Cancelled => "\x1b[2m",
     };
     let reset = "\x1b[0m";
     let width = card_width();
@@ -432,12 +470,24 @@ fn draw_agent_composer<W: Write>(
         lines.push(format!("{prefix}{body}"));
     }
     if phase == CardPhase::Editing {
-        for (index, completion) in card.completions.iter().enumerate() {
-            let marker = if index == 0 { "›" } else { " " };
+        let start = card.selected_completion / 6 * 6;
+        for (index, completion) in card.completions.iter().enumerate().skip(start).take(6) {
+            let marker = if index == card.selected_completion {
+                "›"
+            } else {
+                " "
+            };
             let suggestion = format!("{marker} {}", completion.display);
-            let body = content_row(&suggestion, None, budget, index != 0);
+            let body = content_row(&suggestion, None, budget, index != card.selected_completion);
             lines.push(format!("  {body}"));
         }
+    }
+    if phase == CardPhase::Editing && card.completions.len() > 6 {
+        lines.push(format!(
+            "  {}/{}",
+            card.selected_completion + 1,
+            card.completions.len()
+        ));
     }
     if card.hidden_below > 0 {
         lines.push(format!("  \x1b[2m… ↓ {}\x1b[22m", card.hidden_below));
@@ -446,15 +496,17 @@ fn draw_agent_composer<W: Write>(
     let footer = match phase {
         CardPhase::Editing => i18n.t(MessageId::AgentComposerFooterEditing),
         CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
+        CardPhase::ControlSubmitted => i18n.t(MessageId::PromptDraftFooterControlSubmitted),
         CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
     };
     let status = format!(
-        "{} · {}: {} · {footer}",
+        "{} · {}: {}",
         i18n.t(MessageId::AgentComposerTitle),
         i18n.t(MessageId::PromptDraftRuntimeLabel),
         card.runtime
     );
     lines.push(format!("  {}", content_row(&status, None, budget, true)));
+    lines.push(format!("  {}", content_row(footer, None, budget, true)));
 
     repaint_editor(card, output, phase, &lines)
 }
@@ -507,6 +559,7 @@ mod tests {
             workspace_cwd: None,
             skill_names: Vec::new(),
             completions: Vec::new(),
+            selected_completion: 0,
             text: rows.join("\n"),
             rows: rows.iter().map(|row| row.to_string()).collect(),
             hidden_above: 0,
@@ -533,6 +586,12 @@ mod tests {
 
         let mut composer = card_with_rows(&[""], (0, 0));
         composer.kind = PromptDraftKind::AgentComposer;
+        composer.workspace_cwd = Some("/workspace/project".into());
+        assert!(
+            matches!(composer.capture(), crate::raw_input::RawInputCapture::PromptDraft {
+            workspace_cwd: Some(cwd), ..
+        } if cwd.as_ref() == "/workspace/project")
+        );
         composer.line_break_before = false;
         let mut out: Vec<u8> = Vec::new();
         draw_card(&mut composer, &mut state, &mut out, CardPhase::Editing).expect("draw");
@@ -608,7 +667,7 @@ mod tests {
         let rendered = String::from_utf8(out).expect("utf8");
         assert!(rendered.contains("◆ review @Car"), "{rendered}");
         assert!(rendered.contains("› @Cargo.toml"), "{rendered}");
-        assert_eq!(card.panel_height, 3, "input + result + status");
+        assert_eq!(card.panel_height, 4, "input + result + status + footer");
     }
 
     #[test]

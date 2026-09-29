@@ -1,5 +1,53 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
+  "storage": {
+    "base_path": "/var/log/sysak/.agentsight",
+    "primary": {
+      "retention_days": 30,
+      "max_db_size_mb": 500,
+      "check_interval_secs": 60
+    },
+    "genai": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 60
+    },
+    "interruptions": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    },
+    "trajectories": {
+      "retention_days": 30,
+      "max_db_size_mb": 500,
+      "check_interval_secs": 300
+    },
+    "optimization": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "security_audit": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 3600
+    },
+    "reuse": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "causal": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "enforcement": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    }
+  },
   "runtime": {
     "sls_logtail_path": ""
   },
@@ -31,9 +79,7 @@
     },
     "resource_sampling": false,
     "interruption_detection": {
-      "enabled": true,
-      "retention_days": 30,
-      "max_db_size_mb": 100
+      "enabled": true
     },
     "audit": true,
     "token_consumption": false,
@@ -41,7 +87,8 @@
     "trajectory_collection": {
       "enabled": false,
       "scan_interval_secs": 30
-    }
+    },
+    "reuse_llm_judge": false
   },
   "runtime_limits": {
     "event_channel_capacity": 10000,

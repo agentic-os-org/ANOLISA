@@ -99,7 +99,7 @@ Add to your MCP config:
 
 ### OpenClaw
 
-The bundled plugin forwards 4 memory-contract tools (`memory_search`, `memory_get`, `memory_observe`, `memory_get_context`) to agent-memory:
+The bundled plugin forwards 4 memory-contract tools (`anolisa_memory_search`, `anolisa_memory_get`, `memory_observe`, `memory_get_context`) to agent-memory:
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
@@ -131,12 +131,79 @@ The standalone `install.sh` negotiates the unsafe-install bypass the same way: i
 
 When an install fails, the script reports only what it can verify. An unwritable `${OPENCLAW_STATE_DIR}/extensions` is named as the filesystem-permission failure that on its own would break the install — fix that directory, and do not touch the policy for it. Otherwise the `openclaw` output above the script's note is the evidence, and `security.installPolicy` appears only as a conditional to confirm there, never as an asserted cause: a host that advertises the bypass as a deprecated no-op says nothing about why an install failed.
 
+The OpenClaw plugin exposes `anolisa_memory_search` and `anolisa_memory_get` for
+ANOLISA memories. OpenClaw's `memory_search` and `memory_get` remain host tools;
+the namespaced tools do not compete for those names. Both `install.sh` and
+`anolisa adapter enable agent-memory openclaw` install the same plugin bundle.
+The scripts no longer explicitly disable or re-enable `memory-core`. OpenClaw
+still manages its memory slot and plugin loading according to its own configuration.
+
+When upgrading, update prompts, skills, tool allowlists and direct callers that
+used the plugin's old `memory_search` / `memory_get` names. There are no old-name
+aliases; restart the gateway and start a new conversation so its tool list and
+memory instructions use the new names. Internal MCP names and stored memories
+are unchanged.
+
+The plugin declares all four contract tools for the `coding` profile through
+its manifest's `toolMetadata`. OpenClaw 2026.9.2 conversation tool resolution
+honors this declaration, so both installation paths expose search, read,
+observe, and context tools without modifying your tool policy. Explicit
+allow/deny restrictions still apply.
+`group:memory` expands only to OpenClaw's `memory_search` and `memory_get`; it
+does not include the ANOLISA names.
+
+Profile metadata support is not an installation requirement: older hosts can
+use explicit tool grants. OpenClaw 2026.5.7 does not honor
+`toolMetadata.profiles`; automatic profile contributions are
+verified separately on 2026.9.2. For a host or tool surface that does not honor
+this metadata, add `anolisa_memory_search`, `anolisa_memory_get`, `memory_observe`,
+and `memory_get_context` to the effective `tools.alsoAllow`
+(or the corresponding agent/provider policy). Merge these entries into your
+existing list rather than replacing it. For example, when no list exists:
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": [
+      "anolisa_memory_search",
+      "anolisa_memory_get",
+      "memory_observe",
+      "memory_get_context"
+    ]
+  }
+}
+```
+
+Sandbox sessions have an additional policy: the default sandbox does not allow
+memory tools, including the old names. If you intend to allow ANOLISA search/read
+there, also add the two new names to `tools.sandbox.tools.alsoAllow` (or the
+agent's sandbox policy). An existing sandbox `allow: ["group:memory"]` needs this
+addition too. Add `memory_observe` and `memory_get_context` there only if those
+capabilities are intended as well. Keep explicit deny rules and other
+agent/provider restrictions;
+`alsoAllow` does not override a deny. Installers do not grant these permissions.
+Restart the gateway and start a new conversation after editing the policy.
+
+If an earlier installer left
+`${OPENCLAW_STATE_DIR}/.anolisa-memory-anolisa-disabled-memory-core`, the scripts
+warn and retain it for manual recovery. Inspect `plugins.slots.memory` and
+`plugins.entries.memory-core.enabled` first. To allow the bundled sidecar while
+keeping your current slot, set `plugins.entries.memory-core.enabled` to `true`
+with `openclaw config set`, then restart the gateway; host policy and version
+still determine whether the sidecar loads. To select `memory-core` as the active
+backend after removing this plugin, use `openclaw plugins enable memory-core`.
+That command changes the memory slot, so do not use it if you want to keep
+`memory-anolisa`, another backend, or `none`. Remove the marker only after you
+have confirmed the desired state, including an intentional choice to keep
+`memory-core` disabled. The new tools work without restoring it.
+
 Plugin contract ↔ agent-memory MCP tool mapping:
 
 | OpenClaw contract | agent-memory MCP tool |
 |---|---|
-| `memory_search` | `memory_search` (BM25 default; `mode=vector\|hybrid` with embedding) |
-| `memory_get` | `mem_read` |
+| `anolisa_memory_search` | `memory_search` (BM25 default; `mode=vector\|hybrid` with embedding) |
+| `anolisa_memory_get` | `mem_read` |
 | `memory_observe` | `memory_observe` |
 | `memory_get_context` | `memory_get_context` |
 
@@ -146,7 +213,7 @@ Plugin config (via OpenClaw UI or `openclaw.json` `plugins.entries["memory-anoli
 |---|---|---|
 | `binaryPath` | auto-discovery: `$PATH` → `/usr/bin/agent-memory` → `/usr/local/bin/agent-memory` → `~/.local/bin/agent-memory` | absolute binary path |
 | `userId` | env `USER_ID` → OS `uid` → env `$USER` | namespace `user_id`; same validation as Rust side |
-| `profile` | `advanced` | profile gate, passed as `MEMORY_PROFILE` env |
+| `profile` | `advanced` | profile gate, passed as `MEMORY_PROFILE` env; `basic` or `advanced` only — the plugin rejects `expert` at load (see Profiles below) |
 | `maxReadBytes` | `1048576` (1 MiB) | `mem_read` cap, passed as `MEMORY_MAX_READ_BYTES` |
 | `maxWriteBytes` | `16777216` (16 MiB) | `mem_write` cap, passed as `MEMORY_MAX_WRITE_BYTES` |
 | `sessionId` | env `MEMORY_SESSION_ID` → new `ses_<random>` | namespace session; must be fixed |
@@ -425,6 +492,17 @@ Profiles are UX hints, not security boundaries, but enforced at both `tools/list
 - **advanced** (default) — all 37 tools shown; stronger models should prefer Tier A file ops.
 - **expert** — hides Tier B (`memory_search`, `memory_observe`, `memory_get_context`, `mem_consolidate`, `memory_forget`, `memory_consent`); `tools/call` returns `METHOD_NOT_FOUND`. For proficient models that only need Tier A and Tier C.
 
+`expert` is a setting for direct MCP clients, which drive the Tier A file tools
+themselves. The OpenClaw adapter rejects
+`plugins.entries["memory-anolisa"].config.profile = "expert"` when the plugin
+loads: three of the four tools it registers for the host's memory contract
+(`anolisa_memory_search` → `memory_search`, `memory_observe`, `memory_get_context`)
+use Tier B MCP methods, and so do
+the two paths that call `memory_search` on the agent's behalf — auto-recall
+before each prompt and the `corpus=all` supplement. Forwarding the profile would
+leave the memory slot loaded while every one of those calls came back
+`METHOD_NOT_FOUND`, so the adapter fails at boot and says why instead.
+
 ### Embedding config
 
 ```toml
@@ -606,6 +684,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | search misses just-written content | inside the 200 ms debounce window | retry, or use `mem_grep` (regex on the filesystem, no index) |
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
+| OpenClaw calls the host memory backend or reports `plugin tool name conflict` | Old plugin bundle, stale gateway/session, or old tool names in prompts | Update the plugin, restart the gateway, start a new session, and use `anolisa_memory_search` / `anolisa_memory_get` for ANOLISA memories |
 | install.sh reports `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 consent gate; installer-options probe failed, `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` is set, or script predates the fix | check install output for the probe WARNING or opt-out refusal line; update agent-memory, unset the opt-out, or run `openclaw plugins install <plugin-dir> --force --accept-capabilities` manually. A withheld install rejected by the gate exits with code 3; if OpenClaw rewords the rejection message, the script falls back to exit 1 with the opt-out note |
 | install.sh reports the install target is not writable | `${OPENCLAW_STATE_DIR}/extensions` (or its nearest existing parent) is not writable by the user running the script, so OpenClaw's `mkdir extensions/memory-anolisa` fails with `EACCES` | fix that directory's ownership/permissions — or point `OPENCLAW_STATE_DIR` at a writable state directory — and re-run. This is a filesystem failure, not a policy refusal: do not relax `security.installPolicy` for it |
 | install.sh fails on a host that lists `--dangerously-force-unsafe-install` as a deprecated no-op | OpenClaw 2026.6.5+ runs no install-time scan, so the script sent no bypass and cannot shape install-time safety there; the cause is in the `openclaw` output | read the CLI output above the script's note. Only if it names `security.installPolicy` is that operator-owned policy what to relax — re-running the script or setting `AGENT_MEMORY_SAFE_INSTALL` cannot override it |

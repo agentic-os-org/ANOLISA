@@ -23,14 +23,14 @@ scopes are used in commit subjects and PR titles.
 
 | Component | Path | Platform | Build name | Scope | Development entry and minimum local gate |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `src/copilot-shell/` | All platforms | `cosh` | `cosh` | `cd src/copilot-shell`; `make deps`, `make build`, `make lint`, `make test` |
+| copilot-shell | `deprecated/copilot-shell/` | All platforms | `cosh` | `cosh` | `cd deprecated/copilot-shell`; `make deps`, `make build`, `make lint`, `make test` |
 | cosh-ng | `src/cosh-ng/` | Linux full; macOS limited functionality | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`, `cargo fmt --all -- --check`, then run the closest targeted test described in `src/cosh-ng/CONTRIBUTING.md` |
 | agent-sec-core | `src/agent-sec-core/` | Linux only | `sec-core` | `sec-core` | Python 3.11.6 and `uv`; `make build-all`, `make test` |
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
 | tokenless | `src/tokenless/` | Linux for full development; macOS x64/arm64 for shipped CLI binaries and npm adapters | `tokenless` | `tokenless` | `make build`, `make lint`, `make test` |
 | agent-memory | `src/agent-memory/` | Linux only | `memory` | `memory` | `make build`, `make fmt-check`, `make lint`, `make test`; use `make smoke` for MCP changes |
 | os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | Static Markdown skill definitions and shell assets; `make build` confirms that no compilation step is required |
-| anolisa | `src/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
+| anolisa | `distribution/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
 | ktuner | `src/ktuner/` | Linux only | n/a | `ktuner` | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
@@ -210,7 +210,7 @@ warning and should be justified or replaced before review.
 
 | Scope | Path or purpose |
 | --- | --- |
-| `cosh` | `src/copilot-shell/` |
+| `cosh` | `deprecated/copilot-shell/` |
 | `cosh-ng` | `src/cosh-ng/` |
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
@@ -218,7 +218,7 @@ warning and should be justified or replaced before review.
 | `tokenless` | `src/tokenless/` |
 | `ckpt` | `src/ws-ckpt/` |
 | `memory` | `src/agent-memory/` |
-| `anolisa` | `src/anolisa/` |
+| `anolisa` | `distribution/anolisa/` |
 | `skillfs` | `src/skillfs/` |
 | `ktuner` | `src/ktuner/` |
 | `blaze` | `src/blaze/` |

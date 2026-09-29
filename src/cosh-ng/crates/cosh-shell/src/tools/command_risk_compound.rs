@@ -76,7 +76,8 @@ pub(super) fn assess_stripped_compound(
                 CommandShape::Simple
             },
             stages: segment.clone(),
-            null_redirections: 0,
+            requires_shell_expansion: false,
+            null_redirections: Default::default(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };

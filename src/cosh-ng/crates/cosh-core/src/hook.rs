@@ -334,6 +334,15 @@ impl HookSystem {
         );
         hooks.insert(HookEventName::AfterModel, filter_named(&config.after_model));
 
+        if !enabled && hooks.values().any(|defs| !defs.is_empty()) {
+            eprintln!(
+                "[cosh-core] Warning: config hooks are disabled by hooks.enabled=false; \
+                 set hooks.enabled=true to activate them"
+            );
+            // Extension registration must not reactivate disabled config hooks.
+            hooks.clear();
+        }
+
         Self {
             enabled,
             allow_extension_auto_enable: config.enabled_override != Some(false),
@@ -1644,6 +1653,29 @@ mod tests {
         let result =
             rt.block_on(sys.fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None));
         assert_eq!(result.decision, HookDecision::Passthrough);
+    }
+
+    #[test]
+    fn config_hook_events_default_to_enabled() {
+        for event in [
+            HookEventName::PreToolUse,
+            HookEventName::PostToolUse,
+            HookEventName::PostToolUseFailure,
+            HookEventName::UserPromptSubmit,
+            HookEventName::SessionStart,
+            HookEventName::Stop,
+            HookEventName::BeforeModel,
+            HookEventName::AfterModel,
+        ] {
+            let config: HooksConfig = toml::from_str(&format!(
+                "[[{}]]\nname = 'config-probe'\ncommand = 'true'\n",
+                event.as_str()
+            ))
+            .unwrap();
+            let system = HookSystem::from_config(&config);
+            assert!(system.enabled, "{event:?}");
+            assert_eq!(system.active_hooks(event).len(), 1);
+        }
     }
 
     fn extension_pre_tool_hook(command: &str) -> crate::extension::ExtensionHooks {

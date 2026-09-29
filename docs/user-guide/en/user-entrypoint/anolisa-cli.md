@@ -60,19 +60,20 @@ An installation in the other scope does not make the selected scope
 "already installed." Reinstalling or changing an existing record is handled
 by lifecycle planning rather than silently overwriting it.
 
-RPM installs, including `--dry-run` and merged `--all` plans, ask DNF to
-resolve dependencies and package conflicts before creating recovery journals.
-The check uses the same repositories and version pins as the install. It may
-refresh repository metadata but does not download packages or change rpmdb.
-DNF 4 requires root for this check:
+RPM installs support Yum 3 and DNF 4. ANOLISA prefers yum and uses dnf when
+yum is absent. Use `sudo` to check dependencies and conflicts before installing:
 
 ```bash
 sudo anolisa --install-mode system --dry-run install cosh --backend rpm
 ```
 
-A conflict fails the command without leaving a pending operation. Resolve the
-reported conflict before retrying. A successful check does not guarantee that
-a later download, scriptlet, or transaction will succeed.
+This check does not install or change packages. Resolve any reported conflicts
+before retrying; a successful check does not guarantee the later installation
+will succeed. If a requested version conflicts with system restrictions such
+as a version lock, the command fails without substituting another version.
+
+If ANOLISA cannot identify the system's package manager, follow the reported
+instructions to install missing dependencies manually, then retry.
 
 ### uninstall
 
@@ -219,6 +220,45 @@ help advertises it, including in the dry-run plan. Capability consent does
 not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
 separately from a plugin-safety rejection.
 
+For OpenCode, manage an installed Tokenless plugin with:
+
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
+
+The driver finds `opencode` on PATH, or uses `OPENCODE_BIN`. It registers the
+manifest's `.js` or `.ts` entry as `plugins/<plugin_id>.<extension>` under
+`OPENCODE_CONFIG_DIR`, otherwise `XDG_CONFIG_HOME/opencode`, otherwise
+`~/.config/opencode`. Custom directory values must be absolute. Keep the same
+directory configuration for later status and disable commands; if it changes,
+restore the original environment before retrying cleanup. Project-local plugin
+installation and npm plugin management are outside this driver's scope.
+
+Enable adopts an existing symlink to the same plugin source, including one
+created by Tokenless's standalone installer. Relative links must resolve lexically to the
+recorded source path; directory aliases are rejected so cleanup remains possible after
+package removal. After adoption, disable removes
+that link. A conflicting file, directory, or different symlink is preserved;
+failed cleanup keeps the receipt so it can be retried after resolving the conflict.
+Same-path upgrades replace the entry atomically. If enable or disable is interrupted,
+retry the command with the same configuration to recover pending changes. If an error
+reports a preserved entry, keep its recovery directory, resolve the conflicting public
+path, and retry; recovery also restores displaced directories. Complete ANOLISA disable and
+recovery before switching back to a standalone installer, which does not process these journals.
+The configuration directory's filesystem must support atomic exchange and non-overwriting
+rename for replacement and cleanup. If it does not, the operation fails; resolving a pathname
+conflict alone will not add the missing filesystem support.
+If the old installer used `TOKENLESS_OPENCODE_CONFIG_DIR`, set
+`OPENCODE_CONFIG_DIR` to that same directory before enabling through ANOLISA.
+
+Restart OpenCode after enabling or disabling. Status verifies the link and
+package source and preserves `cleanup_failed` when enable was interrupted or cleanup still
+needs a retry, even if the active link matches. Retry enable or complete disable to resolve it. Runtime loading is reported as `unknown`; an existing link
+does not prove a running OpenCode process loaded it. `--dry-run` previews the
+operation without modifying plugin files or receipts.
+
 ### logs and bug reports
 
 Inspect component logs or generate a diagnostic bundle:
@@ -231,6 +271,20 @@ anolisa bug
 ```
 
 `--level` is an alias for `--severity`.
+
+With `--component cosh-ng`, `anolisa bug` also asks the installed
+`cosh-shell` binary to export its sanitized diagnostic bundle to a fresh
+private path (`0600`, never overwritten) and summarizes the bundle's health
+finding IDs and manifest in the report. The binary is resolved from the
+cosh-ng installation's private libexec locations (the raw contract's
+directory and the RPM's `/usr/libexec` path), with `COSH_SHELL_BIN` as an
+override and PATH as a development fallback; the printed manual and
+reproduction commands use the resolved absolute path so they stay runnable.
+The bundle is written below the calling user's own state root —
+even when diagnosing a system-scope installation — and is never uploaded;
+review it locally before attaching it to an issue. If no bundle can be
+produced, the report says so explicitly and prints the manual
+`cosh-shell diagnostics export` command instead.
 
 ---
 
@@ -305,6 +359,12 @@ index cache and no stale-index fallback, so an unreachable repository fails the
 command instead of resolving against older data. `cache_ttl_secs` and
 `offline_fallback` were never wired up; configs that still set them keep
 parsing, but the values are ignored.
+
+For RPM repositories that require a proxy or a private CA, set `proxy`,
+`proxy_username`, `proxy_password`, or `sslcacert` directly in `[main]` of
+`/etc/yum.conf` (or `/etc/dnf/dnf.conf` when the former is absent).
+Without explicit settings, ANOLISA uses environment proxies (`http_proxy`,
+`https_proxy`, `all_proxy`, `no_proxy`) and the system's trusted certificates.
 
 CLI flags override the operation being run; there is no `[install] mode`
 setting.

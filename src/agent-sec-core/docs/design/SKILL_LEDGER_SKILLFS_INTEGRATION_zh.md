@@ -327,8 +327,9 @@ UTF-8 JSON payload：
 
 activation target 由 Ledger 独立选择，SkillFS 不参与策略判定。当前 `pass_warn_only`
 优先遵循用户决策；无决策时使用可信 latest snapshot、历史可信 fallback 或安全审查占位。
-`block` 和 fail-safe 场景使用 `target: null`。历史配置值 `pass_only` / `latest_scanned`
-会被归一化为 `pass_warn_only`；策略只激活 snapshot，不激活 source/current workspace。
+`block` 和 fail-safe 场景使用 `target: null`。daemon 在创建密钥、扫描和更新
+activation 前校验配置；错误记入 Job 状态，本次处理停止，修正后可处理后续通知。
+策略只激活 snapshot，不激活 source/current workspace。
 
 错误边界：
 

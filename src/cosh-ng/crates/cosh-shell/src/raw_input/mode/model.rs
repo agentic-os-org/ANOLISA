@@ -242,8 +242,13 @@ pub enum RawInputCapture {
     /// until submit (Enter) or cancel (Esc/Ctrl+C).
     PromptDraft {
         id: String,
-        initial_text: String,
-        completion: Option<Box<str>>,
+        initial_text: Box<str>,
+        /// Replacement and its absolute editor cursor, boxed to keep mode snapshots small.
+        completion: Option<Box<(String, (usize, usize))>>,
+        /// Enables local slash completion and control-command submission.
+        agent_composer: bool,
+        /// Composer-owned directory, independent of later shell prompt events.
+        workspace_cwd: Option<Box<str>>,
     },
 }
 

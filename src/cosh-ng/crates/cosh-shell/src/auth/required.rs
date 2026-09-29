@@ -44,6 +44,8 @@ pub(crate) fn record_auth_required(
                 field_capture_revision: 0,
                 existing_providers: Vec::new(),
                 editing_provider_name: None,
+                default_provider_id: false,
+                from_sysom_shortcut: false,
                 error_message: error_message.clone(),
                 backend: AuthBackend::ActiveRun,
                 // The active-run flow never shows the management menu.

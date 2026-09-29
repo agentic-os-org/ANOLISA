@@ -94,13 +94,6 @@ impl GenAISqliteStore {
     /// a unique unfinished idle snapshot with the same match key; replaying an
     /// existing call ID leaves its row unchanged.
     pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
-        // Enforce size limit before creating a new row. Best-effort: if
-        // pruning fails (e.g. VACUUM error), proceed with the INSERT — a
-        // missed prune is better than losing the event entirely.
-        if let Err(e) = self.check_and_prune_if_needed() {
-            log::warn!("Pre-insert size check failed: {e}");
-        }
-
         // Cold instance-ID resolution may perform I/O; keep it outside the writer lock.
         let instance = crate::genai::instance_id::get_instance_id();
         let mut conn = self

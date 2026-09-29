@@ -1,19 +1,10 @@
 diff --git a/src/cmds/python/pytest_cmd.rs b/src/cmds/python/pytest_cmd.rs
-index 2febb2e..1fb1b40 100644
+index 63b76e3..4604d63 100644
 --- a/src/cmds/python/pytest_cmd.rs
 +++ b/src/cmds/python/pytest_cmd.rs
-@@ -2,7 +2,7 @@
- 
- use crate::core::runner;
- use crate::core::truncate::CAP_WARNINGS;
--use crate::core::utils::{resolved_command, tool_exists, truncate};
-+use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
- use anyhow::Result;
- 
- const MAX_XFAIL: usize = CAP_WARNINGS;
-@@ -69,7 +69,11 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -81,7 +81,11 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
      let mut summary_line = String::new();
- 
+
      for line in output.lines() {
 -        let trimmed = line.trim();
 +        // Strip ANSI escape codes before matching — pytest with color-enabled
@@ -21,10 +12,10 @@ index 2febb2e..1fb1b40 100644
 +        // which breaks starts_with("===") checks.
 +        let stripped = strip_ansi(line);
 +        let trimmed = stripped.trim();
- 
+
          // State transitions
          if trimmed.starts_with("===") && trimmed.contains("test session starts") {
-@@ -78,6 +82,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -90,6 +94,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
          } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
              state = ParseState::Failures;
              continue;
@@ -35,7 +26,7 @@ index 2febb2e..1fb1b40 100644
          } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
              state = ParseState::Summary;
              // Save current failure if any
-@@ -89,7 +97,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -101,7 +109,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
          } else if trimmed.starts_with("===")
              && (trimmed.contains("passed")
                  || trimmed.contains("failed")
@@ -45,7 +36,7 @@ index 2febb2e..1fb1b40 100644
          {
              summary_line = trimmed.to_string();
              continue;
-@@ -100,7 +109,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -112,7 +121,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
              && !trimmed.starts_with("ERROR")
              && (trimmed.contains(" passed")
                  || trimmed.contains(" failed")
@@ -55,26 +46,15 @@ index 2febb2e..1fb1b40 100644
              && trimmed.contains(" in ")
          {
              summary_line = trimmed.to_string();
-@@ -153,16 +163,29 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -164,17 +174,18 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+         failures.push(current_failure.join("\n"));
      }
- 
-     // Build compact output
--    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
-+    let result = build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines);
-+
-+    // If stdout was empty/minimal and we got "No tests collected", the real error
-+    // is likely on stderr (e.g. a Python traceback before pytest could start).
-+    // The caller in runner.rs includes stderr in the output for this case.
-+    //
-+    // NOTE: runner.rs matches on "No tests collected" substring to trigger the
-+    // stderr fallback. Keep "No tests collected" stable if message wording changes.
-+    if result == "Pytest: No tests collected" && output.trim().is_empty() {
-+        return "Pytest: No tests collected (empty stdout, see stderr below)".to_string();
-+    }
-+
-+    result
+
+-    // Build compact output
++    // Preserve the sentinel used by the exit-aware startup-error fallback.
+     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
  }
- 
+
 -#[derive(Default)]
 +#[derive(Default, Debug, PartialEq)]
  struct PytestCounts {
@@ -85,36 +65,41 @@ index 2febb2e..1fb1b40 100644
      xpassed: usize,
 +    errors: usize,
  }
- 
+
  fn build_pytest_summary(
-@@ -178,13 +201,14 @@ fn build_pytest_summary(
+@@ -190,13 +201,15 @@ fn build_pytest_summary(
          skipped,
          xfailed,
          xpassed,
 +        errors,
      } = counts;
- 
+
 -    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
 +    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 && errors == 0 {
-         return "Pytest: No tests collected".to_string();
+         return PYTEST_NO_TESTS.to_string();
      }
- 
+
 -    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
-+    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || errors > 0 || !xfail_lines.is_empty();
- 
++    let extras_present =
++        skipped > 0 || xfailed > 0 || xpassed > 0 || errors > 0 || !xfail_lines.is_empty();
+
      if failed == 0 && passed > 0 && !extras_present {
          return format!("Pytest: {} passed", passed);
-@@ -201,6 +225,9 @@ fn build_pytest_summary(
+@@ -213,6 +226,13 @@ fn build_pytest_summary(
      if xpassed > 0 {
          result.push_str(&format!(", {} xpassed", xpassed));
      }
 +    if errors > 0 {
-+        result.push_str(&format!(", {} error{}", errors, if errors == 1 { "" } else { "s" }));
++        result.push_str(&format!(
++            ", {} error{}",
++            errors,
++            if errors == 1 { "" } else { "s" }
++        ));
 +    }
      result.push('\n');
-     result.push_str("═══════════════════════════════════════\n");
- 
-@@ -248,6 +275,17 @@ fn build_pytest_summary(
+
+     // Surface xfail/xpass entries (with their reasons) — XPASS in particular
+@@ -259,6 +279,17 @@ fn build_pytest_summary(
                      result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
                  }
                  continue;
@@ -131,8 +116,8 @@ index 2febb2e..1fb1b40 100644
 +                continue;
              }
          }
- 
-@@ -310,6 +348,9 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
+
+@@ -321,6 +352,9 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                  counts.failed = n;
              } else if word.contains("skipped") {
                  counts.skipped = n;
@@ -142,7 +127,7 @@ index 2febb2e..1fb1b40 100644
              }
          }
      }
-@@ -517,4 +558,203 @@ collected 3 items
+@@ -528,4 +562,218 @@ collected 3 items
              result
          );
      }
@@ -180,7 +165,11 @@ index 2febb2e..1fb1b40 100644
 +5 passed, 2 errors in 0.50s
 +"#;
 +        let result = filter_pytest_output(output);
-+        assert!(result.contains("5 passed") && result.contains("2 error"), "Got: {}", result);
++        assert!(
++            result.contains("5 passed") && result.contains("2 error"),
++            "Got: {}",
++            result
++        );
 +        assert!(
 +            result.contains("[ERROR]"),
 +            "ERROR line should be rendered in Failures. Got: {}",
@@ -196,16 +185,39 @@ index 2febb2e..1fb1b40 100644
 +    #[test]
 +    fn test_parse_summary_line_with_errors() {
 +        assert_eq!(
-+            parse_summary_line("=============================== 1 error in 0.10s ==============================="),
-+            PytestCounts { passed: 0, failed: 0, skipped: 0, xfailed: 0, xpassed: 0, errors: 1 }
++            parse_summary_line(
++                "=============================== 1 error in 0.10s ==============================="
++            ),
++            PytestCounts {
++                passed: 0,
++                failed: 0,
++                skipped: 0,
++                xfailed: 0,
++                xpassed: 0,
++                errors: 1
++            }
 +        );
 +        assert_eq!(
 +            parse_summary_line("5 passed, 2 errors in 0.50s"),
-+            PytestCounts { passed: 5, failed: 0, skipped: 0, xfailed: 0, xpassed: 0, errors: 2 }
++            PytestCounts {
++                passed: 5,
++                failed: 0,
++                skipped: 0,
++                xfailed: 0,
++                xpassed: 0,
++                errors: 2
++            }
 +        );
 +        assert_eq!(
 +            parse_summary_line("3 passed, 1 failed, 2 errors, 1 skipped in 1.00s"),
-+            PytestCounts { passed: 3, failed: 1, skipped: 1, xfailed: 0, xpassed: 0, errors: 2 }
++            PytestCounts {
++                passed: 3,
++                failed: 1,
++                skipped: 1,
++                xfailed: 0,
++                xpassed: 0,
++                errors: 2
++            }
 +        );
 +    }
 +
@@ -300,13 +312,11 @@ index 2febb2e..1fb1b40 100644
 +ERROR test_foo.py::test_c - ImportError
 +=== 1 passed, 1 failed, 1 error in 0.50s ==="#;
 +        let result = filter_pytest_output(output);
++        assert!(!result.contains("No tests collected"), "Got: {}", result);
 +        assert!(
-+            !result.contains("No tests collected"),
-+            "Got: {}",
-+            result
-+        );
-+        assert!(
-+            result.contains("1 passed") && result.contains("1 failed") && result.contains("1 error"),
++            result.contains("1 passed")
++                && result.contains("1 failed")
++                && result.contains("1 error"),
 +            "Got: {}",
 +            result
 +        );
@@ -319,18 +329,8 @@ index 2febb2e..1fb1b40 100644
 +
 +    #[test]
 +    fn test_filter_pytest_empty_stdout() {
-+        // Simulating pytest crash before producing any stdout output
-+        let result = filter_pytest_output("");
-+        assert!(
-+            result.contains("No tests collected"),
-+            "Empty stdout should say 'No tests collected'. Got: {}",
-+            result
-+        );
-+        assert!(
-+            result.contains("empty stdout"),
-+            "Should indicate empty stdout. Got: {}",
-+            result
-+        );
++        // The exit-aware fallback must recognize an empty filter result.
++        assert_eq!(filter_pytest_output(""), PYTEST_NO_TESTS);
 +    }
 +
 +    #[test]
@@ -347,57 +347,46 @@ index 2febb2e..1fb1b40 100644
 +    }
  }
 diff --git a/src/core/runner.rs b/src/core/runner.rs
+index 05ff6b1..7793b9a 100644
 --- a/src/core/runner.rs
 +++ b/src/core/runner.rs
-@@ -129,6 +129,36 @@
+@@ -132,16 +132,34 @@ where
      };
      let filtered = filter_fn(text_to_filter, exit_code);
- 
-+    // [tokenless] When filtering stdout only, if the filter produced a "no
-+    // tests" result (e.g. pytest stderr had the actual error but stdout was
-+    // empty), surface stderr content so the agent sees what went wrong instead
-+    // of retrying with different parameters. Coupled to
-+    // pytest_cmd::filter_pytest_output which emits "No tests collected".
-+    // Bypasses never_worse below: the stderr content is intentionally absent
-+    // from raw_stdout, so the guard would otherwise revert to an empty
-+    // display and hide the error.
+
+-    let raw_for_tracking = if opts.filter_stdout_only {
+-        raw_stdout
++    // A stdout-only filter can hide startup errors written solely to stderr.
++    // Keep the sentinel aligned with pytest_cmd::PYTEST_NO_TESTS.
 +    let stderr_output: Option<String> = if opts.filter_stdout_only
 +        && (filtered.contains("No tests collected") || filtered.trim().is_empty())
 +        && !result.raw_stderr.trim().is_empty()
 +    {
-+        let mut preview = String::from("[stderr output]\n");
-+        let max_lines = 40;
-+        let stderr_lines: Vec<&str> = result.raw_stderr.lines().collect();
-+        for line in stderr_lines.iter().take(max_lines) {
-+            preview.push_str(line);
-+            preview.push('\n');
-+        }
-+        if stderr_lines.len() > max_lines {
-+            preview.push_str(&format!(
-+                "… ({} more stderr lines — full output available via tee)\n",
-+                stderr_lines.len() - max_lines
-+            ));
-+        }
-+        Some(preview)
-+    } else {
++        // Recovery may be disabled or unavailable, so retain every stderr line.
++        Some(format!(
++            "{}\n[stderr output]\n{}",
++            filtered, result.raw_stderr
++        ))
+     } else {
+-        raw
 +        None
 +    };
 +
-     let raw_for_tracking = if opts.filter_stdout_only {
-         raw_stdout
-     } else {
-@@ -138,7 +168,13 @@
++    // Include stderr in the guard budget and statistics when it is displayed.
++    let (filtered, raw_for_tracking) = if let Some(stderr) = stderr_output.as_deref() {
++        (stderr, raw)
++    } else if opts.filter_stdout_only {
++        (filtered.as_str(), raw_stdout)
++    } else {
++        (filtered.as_str(), raw)
+     };
+
      let shown = if let Some(label) = opts.tee_label {
-         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
++        print_with_hint(filtered, raw, raw_for_tracking, label, exit_code)
      } else {
 -        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-+        let guarded = match &stderr_output {
-+            // Bypass never_worse: stderr surfacing is intentional, not a
-+            // compression regression. The guard would revert to empty
-+            // raw_stdout and hide the error from the agent.
-+            Some(d) => d.clone(),
-+            None => crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string(),
-+        };
++        let guarded = crate::core::guard::never_worse(raw_for_tracking, filtered).to_string();
          if opts.no_trailing_newline {
              print!("{}", guarded);
          } else {

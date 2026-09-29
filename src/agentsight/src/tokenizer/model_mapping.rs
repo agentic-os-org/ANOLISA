@@ -96,6 +96,11 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qwen3.5-turbo", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("qwen3.5-max", "Qwen/Qwen2.5-72B-Instruct");
 
+    // DashScope `qwen3.8-max` ↔ the open Max-class release of the same
+    // generation; without this entry the DrainCheck fallback silently
+    // tokenizes it with the Qwen3.5 tokenizer instead.
+    m.insert("qwen3.8-max", "Qwen/Qwen3.8-2.4T-A95B");
+
     // ============== DeepSeek Models ==============
     m.insert("deepseek-chat", "deepseek-ai/DeepSeek-V3");
     m.insert("deepseek-coder", "deepseek-ai/DeepSeek-Coder-V2-Instruct");
@@ -282,7 +287,10 @@ pub fn map_to_hf_model_id(model_name: &str) -> &str {
         return model_name;
     }
 
-    // Return original name - will fail at download time with clear error
+    // Unknown models deliberately fall back to the Qwen3.5 tokenizer so
+    // DrainCheck can still compute tokens (pinned by `test_unknown_model`);
+    // the approximation is wrong for unrelated families, so production models
+    // must be added to MODEL_MAPPING explicitly rather than fixed here.
     "Qwen/Qwen3.5-397B-A17B"
 }
 
@@ -340,6 +348,7 @@ mod tests {
         assert_eq!(map_to_hf_model_id("qwen-turbo"), "Qwen/Qwen2.5-7B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen-plus"), "Qwen/Qwen2.5-14B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen-max"), "Qwen/Qwen2.5-72B-Instruct");
+        assert_eq!(map_to_hf_model_id("qwen3.8-max"), "Qwen/Qwen3.8-2.4T-A95B");
         assert_eq!(
             map_to_hf_model_id("qwen2.5-7b-instruct"),
             "Qwen/Qwen2.5-7B-Instruct"
@@ -377,6 +386,19 @@ mod tests {
         assert_eq!(
             map_to_hf_model_id("meta-llama/Llama-2-7b"),
             "meta-llama/Llama-2-7b"
+        );
+    }
+
+    /// Models observed in production traffic must resolve through the
+    /// table, never through the Qwen3.5 fallback — a missing entry here means
+    /// DrainCheck silently tokenizes them with the wrong model. Extend the
+    /// list when a new production model is observed.
+    #[test]
+    fn test_production_models_resolve_via_table() {
+        // Convert to a slice + loop when a second production model is observed.
+        assert!(
+            MODEL_MAPPING.get("qwen3.8-max").is_some(),
+            "production model qwen3.8-max must be mapped explicitly"
         );
     }
 

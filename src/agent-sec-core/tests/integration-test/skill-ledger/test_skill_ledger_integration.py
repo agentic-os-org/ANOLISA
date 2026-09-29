@@ -296,35 +296,35 @@ class Workspace:
 def ws():
     """Session-wide isolated workspace with keys already initialized."""
     workspace = Workspace()
-    r = run_skill_ledger(["init-keys"], env_extra=workspace.env())
-    assert r.returncode == 0, f"Workspace fixture init-keys failed: {r.stderr}"
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=workspace.env())
+    assert r.returncode == 0, f"Workspace fixture init --no-baseline failed: {r.stderr}"
     yield workspace
     workspace.cleanup()
 
 
-# ── Group 1: init-keys ─────────────────────────────────────────────────────
+# ── Group 1: init --no-baseline ─────────────────────────────────────────────────────
 
 
-def test_init_keys_no_passphrase(ws):
-    """init-keys without passphrase → exit 0, encrypted: false."""
+def test_init_no_passphrase(ws):
+    """init --no-baseline without passphrase → exit 0, encrypted: false."""
     alt_data = ws.root / "nopass_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r = run_skill_ledger(["init-keys"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert out.get("encrypted") is False, f"expected encrypted=false, got {out}"
     assert out.get("fingerprint", "").startswith("sha256:"), f"bad fingerprint: {out}"
 
 
-def test_init_keys_json_structure(ws):
+def test_init_json_structure(ws):
     """JSON output must contain all 4 expected fields."""
     alt_data = ws.root / "json_struct_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r = run_skill_ledger(["init-keys"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     for key in ("fingerprint", "publicKeyPath", "privateKeyPath", "encrypted"):
         assert key in out, f"Missing field '{key}' in output: {out}"
     assert len(out["fingerprint"]) > 10
@@ -332,40 +332,42 @@ def test_init_keys_json_structure(ws):
     assert len(out["privateKeyPath"]) > 0
 
 
-def test_init_keys_reject_duplicate(ws):
-    """Second init-keys without --force → exit 1."""
+def test_init_reuses_existing_keys(ws):
+    """Repeated initialization reuses existing key material."""
     # Generate fresh keys in a separate XDG
     alt_data = ws.root / "alt_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0, f"first init failed: {r1.stderr}"
 
-    r2 = run_skill_ledger(["init-keys"], env_extra=env)
-    assert r2.returncode != 0, "Expected non-zero exit without --force"
-    assert (
-        "already exists" in r2.stderr.lower() or "already exists" in r2.stdout.lower()
-    ), f"Expected 'already exists' message: stdout={r2.stdout}, stderr={r2.stderr}"
+    before = snapshot_file_tree(alt_data / "agent-sec" / "skill-ledger")
+    r2 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
+    assert r2.returncode == 0, r2.stderr
+    repeated = parse_json_output(r2.stdout)
+    assert repeated["keyCreated"] is False
+    assert repeated["key"] is None
+    assert snapshot_file_tree(alt_data / "agent-sec" / "skill-ledger") == before
 
 
-def test_init_keys_force_overwrite(ws):
+def test_init_force_overwrite(ws):
     """--force overwrites existing keys and produces a new fingerprint."""
     alt_data = ws.root / "force_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0
-    fp1 = parse_json_output(r1.stdout)["fingerprint"]
+    fp1 = parse_json_output(r1.stdout)["key"]["fingerprint"]
 
-    r2 = run_skill_ledger(["init-keys", "--force"], env_extra=env)
+    r2 = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=env)
     assert r2.returncode == 0, f"exit {r2.returncode}: {r2.stderr}"
-    fp2 = parse_json_output(r2.stdout)["fingerprint"]
+    fp2 = parse_json_output(r2.stdout)["key"]["fingerprint"]
 
     # New key pair → almost certainly different fingerprint
     assert fp1 != fp2, f"Fingerprint should change after --force: {fp1}"
 
 
-def test_init_keys_with_passphrase_env(ws):
+def test_init_with_passphrase_env(ws):
     """SKILL_LEDGER_PASSPHRASE env var → encrypted: true."""
     alt_data = ws.root / "pass_data"
     alt_data.mkdir()
@@ -375,9 +377,9 @@ def test_init_keys_with_passphrase_env(ws):
             "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
         }
     )
-    r = run_skill_ledger(["init-keys", "--passphrase"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert out.get("encrypted") is True, f"expected encrypted=true, got {out}"
 
 
@@ -391,7 +393,7 @@ def test_init_passphrase_existing_key_requires_force_keys(ws):
             "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
         }
     )
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0, f"initial key setup failed: {r1.stderr}"
 
     r2 = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
@@ -434,7 +436,7 @@ def test_init_force_key_archive_error_has_context(ws, monkeypatch):
     alt_data = ws.root / "init_force_archive_error_data"
     alt_data.mkdir()
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
-    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    r1 = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r1.returncode == 0, f"initial key setup failed: {r1.stderr}"
 
     def fail_archive():
@@ -569,7 +571,7 @@ def test_certify_auto_key_creation_warns_unencrypted(ws):
 
 
 def test_full_lifecycle_pass(ws):
-    """init-keys → check (none/read-only) → certify --findings (pass) → check (pass) → audit."""
+    """init --no-baseline → check (none/read-only) → certify --findings (pass) → check (pass) → audit."""
     skill = make_skill(
         ws.skills_dir,
         "lifecycle-pass",
@@ -1187,31 +1189,6 @@ def test_scan_second_run_noop_when_scanners_present(ws):
     assert out["skippedScanners"] == ["code-scanner", "static-scanner"]
 
 
-def test_scan_legacy_scanner_aliases_write_canonical_names(ws):
-    """Legacy scanner ids are accepted but new manifests use canonical names."""
-    skill = make_skill(ws.skills_dir, "scan-legacy-aliases", {"f.txt": "f"})
-    env = ws.env()
-
-    r = run_skill_ledger(
-        [
-            "scan",
-            str(skill),
-            "--scanners",
-            "skill-code-scanner,cisco-static-scanner",
-        ],
-        env_extra=env,
-    )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
-    assert out["scannersRun"] == ["code-scanner", "static-scanner"]
-
-    manifest = read_latest_manifest(skill)
-    assert {scan["scanner"] for scan in manifest["scans"]} == {
-        "code-scanner",
-        "static-scanner",
-    }
-
-
 def test_scan_static_scanner_detects_dangerous_script(ws):
     """Default static scanner findings are written into manifest."""
     skill = make_skill(
@@ -1600,28 +1577,150 @@ def test_readonly_system_scan_all_skips_while_read_commands_still_run(
     assert not (system_skill / ".skill-meta").exists()
 
 
-def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
-    ws,
-    monkeypatch,
+@pytest.mark.parametrize("command", [["scan", "--all"], ["init"]])
+@pytest.mark.parametrize("existing_meta", [False, True])
+def test_readonly_raw_user_batch_skips_but_explicit_and_managed_scans_fail(
+    tmp_path, monkeypatch, command, existing_meta
 ):
-    """Skipped system Skills do not mask writable success or real user errors."""
-    case_root = ws.root / "mixed_system_scan"
-    system_root = case_root / "system-skills"
+    """Exercise real write permissions at the skill root and existing metadata."""
+    data_root = tmp_path / "xdg_data"
+    skill = make_skill(data_root / "anolisa/skills", "weather", {})
+    target = skill / ".skill-meta" if existing_meta else skill
+    target.mkdir(exist_ok=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    config = {"enableDefaultSkillDirs": True, "managedSkillDirs": []}
+    write_skill_ledger_config(tmp_path, config)
+    config_path = tmp_path / "xdg_config/agent-sec/skill-ledger/config.json"
+    config_before = config_path.read_bytes()
+    tree_before = snapshot_file_tree(skill)
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
+
+    target.chmod(0o555)
+    try:
+        if os.access(target, os.W_OK):
+            pytest.skip("requires a user subject to directory write permissions")
+        result = run_skill_ledger(command, env_extra=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        out = parse_json_output(result.stdout)
+        assert out["keyCreated"] is True
+        assert out["results"] == [
+            {
+                "canonicalSkillDir": str(skill),
+                "skillName": "weather",
+                "status": "skipped",
+                "reasonCode": "readonly_default_skill",
+                "persisted": False,
+            }
+        ]
+        assert config_path.read_bytes() == config_before
+        assert snapshot_file_tree(skill) == tree_before
+        assert (skill / ".skill-meta").exists() == existing_meta
+
+        explicit = run_skill_ledger(["scan", str(skill)], env_extra=env)
+        assert explicit.returncode == 1
+
+        config["enableDefaultSkillDirs"] = False
+        for entry in (str(skill), str(skill.parent) + "/*"):
+            config["managedSkillDirs"] = [entry]
+            write_skill_ledger_config(tmp_path, config)
+            managed = run_skill_ledger(command, env_extra=env)
+            assert managed.returncode == 1
+            assert parse_json_output(managed.stdout)["results"][0]["status"] == "error"
+            assert config_path.read_bytes() == json.dumps(config).encode()
+            assert snapshot_file_tree(skill) == tree_before
+    finally:
+        target.chmod(0o755)
+
+
+@pytest.mark.parametrize("command", [["scan", "--all"], ["init"]])
+@pytest.mark.parametrize("readonly_first", [False, True])
+@pytest.mark.parametrize("existing_meta", [False, True])
+def test_raw_user_mixed_readonly_batch_remains_skipped_on_repeat(
+    tmp_path, monkeypatch, command, readonly_first, existing_meta
+):
+    """Remembering a writable Skill must not manage its read-only sibling."""
+    data_root = tmp_path / "data"
+    root = data_root / "anolisa/skills"
+    readonly = make_skill(root, "a-readonly" if readonly_first else "z-readonly", {})
+    writable = make_skill(root, "z-writable" if readonly_first else "a-writable", {})
+    target = readonly / ".skill-meta" if existing_meta else readonly
+    target.mkdir(exist_ok=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "AGENT_SEC_DATA_DIR": str(tmp_path / "events"),
+    }
+    write_skill_ledger_config(tmp_path, {"managedSkillDirs": []})
+    config_path = tmp_path / "xdg_config/agent-sec/skill-ledger/config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
+    tree_before = snapshot_file_tree(readonly)
+    target.chmod(0o555)
+    try:
+        if os.access(target, os.W_OK):
+            pytest.skip("requires a user subject to directory write permissions")
+        for writable_status in ("scanned", "noop"):
+            result = run_skill_ledger(
+                [*command, "--scanners", "code-scanner"], env_extra=env
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            items = parse_json_output(result.stdout)["results"]
+            assert [item["skillName"] for item in items] == sorted(
+                [readonly.name, writable.name]
+            )
+            by_name = {item["skillName"]: item for item in items}
+            assert by_name[readonly.name] == {
+                "canonicalSkillDir": str(readonly),
+                "skillName": readonly.name,
+                "status": "skipped",
+                "reasonCode": "readonly_default_skill",
+                "persisted": False,
+            }
+            assert by_name[writable.name]["status"] == writable_status
+            assert json.loads(config_path.read_text())["managedSkillDirs"] == [
+                str(writable)
+            ]
+            assert (writable / ".skill-meta/latest.json").is_file()
+            assert snapshot_file_tree(readonly) == tree_before
+            assert (readonly / ".skill-meta").exists() == existing_meta
+    finally:
+        target.chmod(0o755)
+
+
+@pytest.mark.parametrize("raw_user", [False, True])
+def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
+    tmp_path,
+    monkeypatch,
+    raw_user,
+):
+    """Skipped defaults do not mask writable success or real user errors."""
+    case_root = tmp_path / "mixed_system_scan"
+    data_root = case_root / "xdg_data"
+    system_root = (
+        data_root / "anolisa/skills" if raw_user else case_root / "system-skills"
+    )
     system_skill = make_skill(system_root, "system", {"main.py": "print('ok')\n"})
     user_skill = make_skill(
         case_root / "user-skills",
         "user",
         {"main.py": "print('ok')\n"},
     )
-    data_root = case_root / "xdg_data"
     runtime_root = case_root / "runtime"
-    data_root.mkdir(parents=True)
+    data_root.mkdir(parents=True, exist_ok=True)
     runtime_root.mkdir()
     write_skill_ledger_config(
         case_root,
         {
-            "enableDefaultSkillDirs": False,
-            "managedSkillDirs": [str(system_skill), str(user_skill)],
+            "enableDefaultSkillDirs": raw_user,
+            "managedSkillDirs": (
+                [str(user_skill)] if raw_user else [str(system_skill), str(user_skill)]
+            ),
         },
     )
     env = {
@@ -1629,11 +1728,9 @@ def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
         "XDG_DATA_HOME": str(data_root),
         "XDG_RUNTIME_DIR": str(runtime_root),
     }
-    monkeypatch.setattr(
-        config_module,
-        "DEFAULT_SYSTEM_SKILL_ROOTS",
-        (system_root,),
-    )
+    if not raw_user:
+        monkeypatch.setattr(config_module, "DEFAULT_SYSTEM_SKILL_ROOTS", (system_root,))
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
     monkeypatch.setattr(
         "agent_sec_cli.skill_ledger.core.certifier.ledger_update_access",
         lambda _root: (False, "read-only"),
@@ -2254,39 +2351,7 @@ def test_resolve_without_writing_reports_stable_xattr_status(ws):
     assert not (skill / ".skill-meta" / "activation.json").exists()
 
 
-def test_resolve_legacy_pass_only_policy_normalizes_and_activates_warn_snapshot(ws):
-    """Legacy pass_only config behaves as silent pass_warn_only."""
-    skill = make_skill(ws.skills_dir, "resolve-warn", {"data.txt": "v1"})
-    env = ws.env()
-    pass_findings = write_findings_file(
-        ws.fixtures,
-        "resolve-warn-pass.json",
-        [{"rule": "ok", "level": "pass", "message": "pass"}],
-    )
-    warn_findings = write_findings_file(
-        ws.fixtures,
-        "resolve-warn-warn.json",
-        [{"rule": "warn", "level": "warn", "message": "warning"}],
-    )
-    run_skill_ledger(
-        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
-    )
-    (skill / "data.txt").write_text("v2 warning")
-    run_skill_ledger(
-        ["certify", str(skill), "--findings", str(warn_findings)], env_extra=env
-    )
-
-    out = resolve_skill_activation(skill, env, policy="pass_only")
-
-    assert out["status"] == "warn"
-    assert out["policy"] == "pass_warn_only"
-    assert out["activeVersionId"] == "v000002"
-    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
-    assert out["reasonCode"] == "normal"
-    assert out["message"] is None
-
-
-def test_decide_allow_activates_latest_deny_snapshot_under_pass_only(ws):
+def test_decide_allow_activates_latest_deny_snapshot_under_current_policy(ws):
     """A user allow decision overrides scanStatus for the latest signed version."""
     skill = make_skill(ws.skills_dir, "decision-allow", {"data.txt": "v1"})
     env = ws.env()
@@ -2308,7 +2373,7 @@ def test_decide_allow_activates_latest_deny_snapshot_under_pass_only(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
 
-    before = resolve_skill_activation(skill, env, policy="pass_only")
+    before = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert before["activeVersionId"] == "v000001"
 
     r = run_skill_ledger(
@@ -2326,7 +2391,7 @@ def test_decide_allow_activates_latest_deny_snapshot_under_pass_only(ws):
         "v000002.json",
     ]
 
-    after = resolve_skill_activation(skill, env, policy="pass_only")
+    after = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert after["activeVersionId"] == "v000002"
     assert after["target"] == ".skill-meta/versions/v000002.snapshot"
     assert after["reasonCode"] == "user_allow"
@@ -2401,7 +2466,7 @@ def test_decide_block_hides_skill_even_when_pass_snapshot_exists(ws):
     )
     assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
 
-    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert out["activeVersionId"] is None
     assert out["target"] is None
     assert read_activation(skill) == {"schemaVersion": 1, "target": None}
@@ -2477,7 +2542,7 @@ def test_decide_always_allow_inherits_to_future_versions(ws):
     latest = read_latest_manifest(skill)
     assert latest["versionId"] == "v000002"
     assert latest["userDecision"]["action"] == "always_allow"
-    out = resolve_skill_activation(skill, env, policy="pass_only")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert out["activeVersionId"] == "v000002"
 
 
@@ -2506,7 +2571,7 @@ def test_decide_block_does_not_inherit_to_future_versions(ws):
     latest = read_latest_manifest(skill)
     assert latest["versionId"] == "v000002"
     assert latest.get("userDecision") is None
-    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert out["activeVersionId"] == "v000002"
     assert out["target"] == ".skill-meta/versions/v000002.snapshot"
 
@@ -2537,7 +2602,7 @@ def test_decide_clear_returns_to_activation_policy(ws):
         env_extra=env,
     )
     assert (
-        resolve_skill_activation(skill, env, policy="pass_only")["activeVersionId"]
+        resolve_skill_activation(skill, env, policy="pass_warn_only")["activeVersionId"]
         == "v000002"
     )
 
@@ -2546,7 +2611,7 @@ def test_decide_clear_returns_to_activation_policy(ws):
 
     latest = read_latest_manifest(skill)
     assert latest.get("userDecision") is None
-    out = resolve_skill_activation(skill, env, policy="pass_only")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert out["activeVersionId"] == "v000001"
 
 
@@ -2584,7 +2649,7 @@ def test_decide_rollback_restores_pass_snapshot_and_records_new_version(ws):
     assert out["userDecision"]["targetVersionId"] == "v000001"
     assert (skill / "data.txt").read_text() == "safe"
 
-    activation = resolve_skill_activation(skill, env, policy="pass_only")
+    activation = resolve_skill_activation(skill, env, policy="pass_warn_only")
     assert activation["activeVersionId"] == "v000003"
     assert activation["target"] == ".skill-meta/versions/v000003.snapshot"
 
@@ -2667,7 +2732,7 @@ def test_decide_rollback_acquires_skill_lock(ws, monkeypatch):
 
 def test_decide_rollback_defaults_to_active_version(ws):
     """Rollback without --version restores the currently active snapshot."""
-    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_only"})
+    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_warn_only"})
     skill = make_skill(ws.skills_dir, "decision-rollback-default", {"data.txt": "safe"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -2703,7 +2768,7 @@ def test_decide_rollback_defaults_to_active_version(ws):
 
 def test_decide_rollback_without_version_errors_when_active_is_empty(ws):
     """Rollback without --version fails when no snapshot is currently active."""
-    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_only"})
+    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_warn_only"})
     skill = make_skill(
         ws.skills_dir, "decision-rollback-no-active", {"data.txt": "risk"}
     )
@@ -2783,7 +2848,9 @@ def test_show_reports_active_latest_decision_and_root_match(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
 
-    r = run_skill_ledger(["show", str(skill), "--policy", "pass_only"], env_extra=env)
+    r = run_skill_ledger(
+        ["show", str(skill), "--policy", "pass_warn_only"], env_extra=env
+    )
     assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
 
@@ -3036,7 +3103,9 @@ def test_show_findings_summary_strips_control_characters(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
 
-    r = run_skill_ledger(["show", str(skill), "--policy", "pass_only"], env_extra=env)
+    r = run_skill_ledger(
+        ["show", str(skill), "--policy", "pass_warn_only"], env_extra=env
+    )
     assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     message = out["message"]
@@ -3518,44 +3587,6 @@ def test_resolver_target_helpers_and_empty_active_lookup(ws):
                 os.environ[key] = value
 
 
-def test_resolve_legacy_latest_scanned_policy_normalizes_and_activates_warn_snapshot(
-    ws,
-):
-    """Legacy latest_scanned config behaves as silent pass_warn_only."""
-    skill = make_skill(ws.skills_dir, "resolve-latest-warn", {"data.txt": "v1"})
-    env = ws.env()
-    pass_findings = write_findings_file(
-        ws.fixtures,
-        "resolve-latest-warn-pass.json",
-        [{"rule": "ok", "level": "pass", "message": "pass"}],
-    )
-    warn_findings = write_findings_file(
-        ws.fixtures,
-        "resolve-latest-warn-warn.json",
-        [{"rule": "warn", "level": "warn", "message": "warning"}],
-    )
-    run_skill_ledger(
-        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
-    )
-    (skill / "data.txt").write_text("v2 warning")
-    run_skill_ledger(
-        ["certify", str(skill), "--findings", str(warn_findings)], env_extra=env
-    )
-
-    out = resolve_skill_activation(skill, env, policy="latest_scanned")
-
-    assert out["status"] == "warn"
-    assert out["policy"] == "pass_warn_only"
-    assert out["activeVersionId"] == "v000002"
-    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
-    assert out["reasonCode"] == "normal"
-    assert out["message"] is None
-    assert read_activation(skill) == {
-        "schemaVersion": 1,
-        "target": ".skill-meta/versions/v000002.snapshot",
-    }
-
-
 def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
     """pass_warn_only activates valid warn snapshots without warning."""
     skill = make_skill(ws.skills_dir, "resolve-pass-warn-warn", {"data.txt": "v1"})
@@ -3581,6 +3612,7 @@ def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
     out = resolve_skill_activation(skill, env, policy="pass_warn_only")
 
     assert out["status"] == "warn"
+    assert out["policy"] == "pass_warn_only"
     assert out["activeVersionId"] == "v000002"
     assert out["target"] == ".skill-meta/versions/v000002.snapshot"
     assert out["reasonCode"] == "normal"
@@ -3603,8 +3635,8 @@ def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
     ]
 
 
-def test_resolve_legacy_latest_scanned_policy_skips_deny_snapshot(ws):
-    """Legacy latest_scanned no longer activates deny snapshots."""
+def test_resolve_current_policy_skips_deny_snapshot(ws):
+    """The current policy does not activate deny snapshots."""
     skill = make_skill(ws.skills_dir, "resolve-latest-deny", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -3625,7 +3657,7 @@ def test_resolve_legacy_latest_scanned_policy_skips_deny_snapshot(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
 
-    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
 
     assert out["status"] == "deny"
     assert out["policy"] == "pass_warn_only"
@@ -3707,8 +3739,8 @@ def test_resolve_pass_warn_only_uses_pending_stub_without_pass_or_warn_snapshot(
     assert "export --version latest" in shown["message"]
 
 
-def test_resolve_legacy_latest_scanned_excludes_none_snapshot(ws):
-    """Legacy latest_scanned still requires a pass/warn snapshot."""
+def test_resolve_current_policy_excludes_none_snapshot(ws):
+    """The current policy requires a pass/warn snapshot."""
     skill = make_skill(ws.skills_dir, "resolve-latest-none", {"data.txt": "v1"})
     env = ws.env()
     previous = {key: os.environ.get(key) for key in env}
@@ -3734,7 +3766,7 @@ def test_resolve_legacy_latest_scanned_excludes_none_snapshot(ws):
             else:
                 os.environ[key] = value
 
-    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
 
     assert out["status"] == "none"
     assert out["activeVersionId"] is None
@@ -3959,24 +3991,6 @@ def test_status_drifted_shows_details(ws):
 # ── Group 8: reserved commands & edge cases ───────────────────────────────
 
 
-def test_set_policy_removed(ws: Workspace) -> None:
-    """The removed set-policy placeholder fails without creating ledger state."""
-    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
-    metadata_dir = skill / ".skill-meta"
-    assert not metadata_dir.exists()
-
-    r = run_skill_ledger(
-        ["set-policy", str(skill), "--policy", "allow"],
-        env_extra=ws.env(),
-    )
-    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
-    assert r.stdout == ""
-    error = strip_ansi(r.stderr).lower()
-    assert "no such command" in error
-    assert "set-policy" in error
-    assert not metadata_dir.exists()
-
-
 def test_rotate_keys_not_implemented(ws: Workspace) -> None:
     """rotate-keys fails explicitly without changing the isolated key store."""
     key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
@@ -4008,8 +4022,6 @@ def test_list_scanners(ws):
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
     assert "code-scanner" in names, f"Expected code-scanner in scanners: {names}"
     assert "static-scanner" in names, f"Expected static-scanner in scanners: {names}"
-    assert "skill-code-scanner" not in names
-    assert "cisco-static-scanner" not in names
     by_name = {s["name"]: s for s in out["scanners"]}
     assert by_name["code-scanner"]["autoInvocable"] is True
     assert by_name["static-scanner"]["autoInvocable"] is True
@@ -4044,9 +4056,7 @@ def test_contract_help_available(ws):
     assert "scan" in r.stdout
     assert "certify" in r.stdout
     assert "list-scanners" in r.stdout
-    assert "init-keys" not in r.stdout
-    assert "rotate-keys" not in r.stdout
-    assert "set-policy" not in r.stdout
+    assert "rotate-keys" in r.stdout
 
 
 def test_contract_certify_help_is_findings_only(ws):
@@ -4061,7 +4071,7 @@ def test_contract_certify_help_is_findings_only(ws):
     assert "--all" not in help_text
 
 
-def test_contract_init_keys_empty_passphrase_env(ws):
+def test_contract_init_empty_passphrase_env(ws):
     """Step 0.2: SKILL_LEDGER_PASSPHRASE=\"\" → passphrase-free init.
 
     This is the exact invocation SKILL.md uses for first-time auto-init.
@@ -4074,9 +4084,9 @@ def test_contract_init_keys_empty_passphrase_env(ws):
             "SKILL_LEDGER_PASSPHRASE": "",  # empty string, NOT absent
         }
     )
-    r = run_skill_ledger(["init-keys"], env_extra=env)
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
+    out = parse_json_output(r.stdout)["key"]
     assert (
         out.get("encrypted") is False
     ), f"Empty passphrase should produce unencrypted keys, got {out}"
@@ -4311,7 +4321,7 @@ def test_contract_check_status_values_complete(ws):
 
 
 def test_key_rotation_old_sigs_verifiable(ws):
-    """After init-keys --force, old signatures must still pass `check`.
+    """After init --no-baseline --force-keys, old signatures must still pass `check`.
 
     The old public key should be archived into the keyring so that
     `verify()` can fall back to it for manifests signed with the
@@ -4339,9 +4349,9 @@ def test_key_rotation_old_sigs_verifiable(ws):
     assert out["status"] == "pass", f"Expected pass before rotation, got {out}"
 
     # --- Rotate the key ---
-    r = run_skill_ledger(["init-keys", "--force"], env_extra=env)
-    assert r.returncode == 0, f"init-keys --force failed: {r.stderr}"
-    new_fp = parse_json_output(r.stdout)["fingerprint"]
+    r = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=env)
+    assert r.returncode == 0, f"init --no-baseline --force-keys failed: {r.stderr}"
+    new_fp = parse_json_output(r.stdout)["key"]["fingerprint"]
     assert (
         new_fp != old_fp
     ), f"Key rotation must produce a different fingerprint: old={old_fp}, new={new_fp}"
@@ -4361,3 +4371,119 @@ def test_key_rotation_old_sigs_verifiable(ws):
     assert (
         out["status"] == "pass"
     ), f"Expected 'pass' for unchanged skill after key rotation, got '{out['status']}'"
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_unimplemented_rotation_leaves_keys_unchanged(tmp_path, initialized):
+    env = {
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }
+    if initialized:
+        result = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
+        assert result.returncode == 0, result.stderr
+    key_dir = tmp_path / "data" / "agent-sec" / "skill-ledger"
+    before = snapshot_file_tree(key_dir)
+    existed = key_dir.exists()
+    result = run_skill_ledger(["rotate-keys"], env_extra=env)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert (
+        result.stderr
+        == "Error: rotate-keys is not implemented; no keys were changed.\n"
+    )
+    assert snapshot_file_tree(key_dir) == before
+    assert key_dir.exists() == existed
+
+
+@pytest.mark.parametrize("command", ["show", "export"])
+def test_cli_rejects_invalid_policy_without_writes(tmp_path, command):
+    policy = "invalid"
+    skill = make_skill(tmp_path / "skills", "demo", {})
+    env = {
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }
+    args = [command, str(skill), "--policy", policy]
+    if command == "export":
+        args += ["--output", str(tmp_path / "export")]
+    before = snapshot_file_tree(tmp_path)
+    result = run_skill_ledger(args, env_extra=env)
+    assert result.returncode == 2
+    error = strip_ansi(result.stderr)
+    assert policy in error and "pass_warn_only" in error
+    assert snapshot_file_tree(tmp_path) == before
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_invalid_config_fails_before_cli_mutations(tmp_path, initialized):
+    invalid_config = {"activationPolicy": "invalid"}
+    skill = make_skill(tmp_path / "skills", "demo", {})
+    env = {
+        "XDG_DATA_HOME": str(tmp_path / "xdg_data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+    }
+    if initialized:
+        result = run_skill_ledger(["scan", str(skill)], env_extra=env)
+        assert result.returncode == 0, result.stderr
+    findings = write_findings_file(tmp_path, "findings.json", [])
+    write_skill_ledger_config(tmp_path, invalid_config)
+    key_dir = tmp_path / "xdg_data" / "agent-sec" / "skill-ledger"
+    config_path = tmp_path / "xdg_config" / "agent-sec" / "skill-ledger" / "config.json"
+    protected = [key_dir, skill, config_path.parent]
+    before = [snapshot_file_tree(path) for path in protected]
+    for args in (
+        ["init", "--no-baseline", "--force-keys"],
+        ["scan", str(skill)],
+        ["certify", str(skill), "--findings", str(findings)],
+        ["decide", str(skill), "--action", "block"],
+        ["show", str(skill)],
+        ["export", str(skill), "--output", str(tmp_path / "export")],
+    ):
+        result = run_skill_ledger(args, env_extra=env)
+        assert result.returncode == 1, (args, result.stderr)
+        assert str(config_path) in result.stderr
+        assert "activationPolicy" in result.stderr
+        assert [snapshot_file_tree(path) for path in protected] == before
+        assert not (tmp_path / "export").exists()
+
+
+def test_certify_custom_external_scanner(tmp_path):
+    env = {
+        "XDG_DATA_HOME": str(tmp_path / "xdg_data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+    }
+    skill = make_skill(tmp_path / "skills", "demo", {})
+    write_skill_ledger_config(
+        tmp_path,
+        {
+            "scanners": [
+                {
+                    "name": "team-review",
+                    "type": "skill",
+                    "parser": "findings-array",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+    findings = write_findings_file(tmp_path, "findings.json", [])
+    result = run_skill_ledger(
+        [
+            "certify",
+            str(skill),
+            "--scanner",
+            "team-review",
+            "--findings",
+            str(findings),
+        ],
+        env_extra=env,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = read_latest_manifest(skill)
+    assert [entry["scanner"] for entry in manifest["scans"]] == ["team-review"]
+    result = run_skill_ledger(
+        ["audit", str(skill), "--verify-snapshots"], env_extra=env
+    )
+    assert result.returncode == 0, result.stderr

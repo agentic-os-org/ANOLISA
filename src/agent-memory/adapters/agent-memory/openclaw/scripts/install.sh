@@ -270,6 +270,15 @@ if [ "$INSTALL_RC" -ne 0 ]; then
     exit 1
 fi
 
+# Earlier installers recorded an explicit memory-core disable. Keep that record
+# for the operator: enabling it here would also change the selected memory slot.
+MEMORY_CORE_MARKER="${OPENCLAW_STATE_DIR}/.anolisa-memory-anolisa-disabled-memory-core"
+if [ -f "$MEMORY_CORE_MARKER" ]; then
+    echo "[${COMPONENT}] WARNING: a previous installer recorded a memory-core disable: ${MEMORY_CORE_MARKER}." >&2
+    echo "[${COMPONENT}]          Review plugins.slots.memory before restoring it; 'plugins enable memory-core'" >&2
+    echo "[${COMPONENT}]          also selects that backend. The marker is kept for manual recovery; see the user guide." >&2
+fi
+
 # OpenClaw 2026.6.11 requires non-bundled plugins to explicitly opt-in
 # to conversation hooks (agent_end, before_prompt_build, etc.). Without
 # this setting the hooks are silently blocked and auto-capture /

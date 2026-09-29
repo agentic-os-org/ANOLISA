@@ -1,5 +1,7 @@
 # AgentSec Security Actions 权威参考
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python capability 基线、compatibility fixtures 及 V2 CapabilityExecutor 目标 |
@@ -517,7 +519,6 @@ Skill Ledger 完整性状态恰好为以下六种，文档和实现不得删减�
 | command | 参数 | 读写/说明 |
 | --- | --- | --- |
 | `init` | `baseline=true`, `passphrase=null`, `passphrase_requested=false`, `force_keys=false`, `scanner_names=null` | 创建/轮换 key；可为已覆盖 Skill 建 baseline |
-| `init-keys` | `force=false`, `passphrase=null` | 低层兼容入口，生成/轮换 key |
 | `check` | `skill_dir=null`, `all_skills=false` | 只读；单目录必填或 `all_skills=true` |
 | `certify` | `skill_dir`, `findings`, `scanner=skill-vetter`, `scanner_version=null`, `delete_findings=false`, `all_skills=false`, `scanner_names=null` | 导入外部 findings，签名建版本；`all_skills` 必须 false、`scanner_names` 必须 null |
 | `scan` | `skill_dir=null`, `all_skills=false`, `scanner_names=null`, `force=false` | 运行 built-in scanner，签名建版本 |
@@ -559,6 +560,13 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 
 ### 10.5 Success/error 规则
 
+- 所有受支持的 middleware command 在执行前加载并校验配置。配置错误返回
+  ConfigError/exit 1，不执行密钥、扫描、签名、activation 或导出操作。
+- 请求参数 `scanner_names`、`scanner`、`policy` 校验失败时，middleware 返回
+  ValueError/exit 1，CLI 参数错误退出 2。
+- `rotate-keys` 是 CLI 可见命令，不经过 middleware；stdout 为空、stderr 明确报未实现、
+  exit 1，不修改密钥与 keyring。
+
 - `check` 单目录：`deny/tampered` 为 success false/exit 1；其它六状态中的
   pass/none/drifted/warn 为 success true/exit 0。
 - `check --all`：任一 `tampered/deny/error` 导致 success false/exit 1；只有 error item
@@ -567,7 +575,7 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 - `scan/certify` 单目录：只要领域调用无 exception 就 success true；scan verdict
   warn/deny 是正常结果。
 - `audit`：`valid` 决定 success 和 exit code。
-- `status/decide/show/export/init-keys`：领域调用成功即 success true；exception 转为
+- `status/decide/show/export`：领域调用成功即 success true；exception 转为
   success false/exit 1 和 exception type。
 - `list-scanners`：成功时 success true；当前 registry 加载 exception 走 middleware
   unhandled-error path，而不是返回 ActionResult failure。
@@ -577,7 +585,7 @@ stdout 是 JSON 加末尾换行。部分 legacy 单目录 command 的 stdout 是
 ### 10.6 Side effects 和并发
 
 - `check/status/audit/list-scanners/show` 是领域只读。
-- `init/init-keys` 写 key；force rotation 先归档旧 public key。
+- `init` 写 key；`force_keys=true` 先归档旧 public key。
 - `scan/certify` 写 config、signed manifest、version snapshot 和 latest。
 - `certify(delete_findings=true)` 成功后删除输入 findings。
 - `decide` 写 signed user decision，rollback 可以恢复文件并产生新版本；clear 也刷新
@@ -647,7 +655,7 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 - code：bash/python、空输入、unsupported language、regex/LLM、四 verdict；
 - prompt：四 mode、空输入、native unavailable、model exception、完整 1.0 schema；
 - PII：七 source、低置信度、UTF-8 byte 截断、raw/redact、custom rules invalid、四 verdict；
-- Skill Ledger：11 command、六状态、batch severity、key lifecycle、write failure、并发和
+- Skill Ledger：10 command、六状态、batch severity、key lifecycle、write failure、并发和
   crash recovery。
 
 ## 13. 当前实现证据
@@ -660,3 +668,27 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 - PII schema/redaction：`agent_sec_cli/pii_checker/models.py`、`scanner.py`、`audit.py`。
 - Skill Ledger：`agent_sec_cli/skill_ledger/core/`、`signing/`、`scanner/`。
 - action characterization：`tests/unit-test/security_middleware/backends/`。
+
+## PII 第一阶段 V2 替代契约
+
+**[TARGET V2，已实现]** `PiiScanner` 和 `PiiScanExecutor` 保留本文 PII 的 11 类检测、
+校验、置信度、去重排序、Unicode 字符 span、重叠保留与合并脱敏语义。
+顶层 V1 字段保留；新增信息仅放入 `summary`：`execution_status`、`coverage`、
+`input_sha256`、`scanned_input_sha256`、`scanned_bytes`、`scanner_version` 和 `ruleset_id`。
+`coverage` 使用 complete/partial/unavailable；partial 时 verdict 仍仅聚合已有 findings。
+输入摘要对应检测器收到的文本，不冒充调用前被截断的完整操作内容。
+
+本文 V1 用户目录/每次扫描重载规则由版本化 V2 中央配置替代：默认
+`/etc/agent-sec/pii-checker/rules.yaml`，daemon `--pii-rules` 可选绝对路径，启动编译、重启生效。
+默认缺失为 absent，显式读取失败或任一无效规则使自定义集合 invalid，内置检测继续、coverage partial。
+V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
+100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
+与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
+检测语义版本 `scanner_version=2.0.0` 纳入规则标识，成功/失败报告及审计均保留；
+内置 engine 为 regex_v2，自定义为 fancy_regex。此版本修复空 claims JWT 的候选漏报，
+接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
+其他格式、置信度、位置和脱敏契约保留，变化由独立质量用例定义。
+
+差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 142 个
+V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。保留 V1 实现独立回滚。

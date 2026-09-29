@@ -25,8 +25,8 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     except SkillRootResolveError as exc:
         return _skipped_resolve_failure_result(change, str(exc))
 
-    backend = _ensure_default_backend()
     policy = _resolve_activation_policy()
+    backend = _ensure_default_backend()
     scan_result: dict[str, Any] | None = None
     scan_error: str | None = None
     try:

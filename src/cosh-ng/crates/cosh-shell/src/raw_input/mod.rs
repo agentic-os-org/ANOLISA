@@ -115,13 +115,16 @@ pub(crate) enum RawInputEvent {
     PromptDraftChanged {
         id: String,
         text: String,
-        viewport: draft_editor::DraftViewport,
+        viewport: Box<draft_editor::DraftViewport>,
         line_count: usize,
+        selected_completion: usize,
     },
     /// Enter inside the draft card: submit the multi-line prompt.
     PromptDraftSubmit {
         id: String,
         text: String,
+        slash: bool,
+        workspace_cwd: Option<String>,
     },
     /// Esc/Ctrl+C inside the draft card: cancel composition (D15).
     PromptDraftCancel {

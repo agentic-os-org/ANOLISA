@@ -24,6 +24,7 @@ pub mod consolidation;
 pub mod embedding;
 pub mod error;
 pub mod git_repo;
+pub mod host;
 pub mod index;
 pub mod mcp_server;
 pub mod mount;

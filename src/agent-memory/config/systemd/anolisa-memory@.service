@@ -13,6 +13,13 @@ Environment=MEMORY_MOUNT_STRATEGY=auto
 Environment=USER_ID=%i
 RuntimeDirectory=anolisa/sessions/%i
 RuntimeDirectoryMode=0700
+# Point the server at the runtime directory the two lines above create.
+# Without this it used the compiled-in default /run/anolisa/sessions, which
+# the RPM's tmpfiles.d snippet creates 0700 root:root and this *user* unit
+# can therefore neither traverse nor write — so the RuntimeDirectory= was
+# dead config and the session log (mem_promote / mem_session_log) was lost.
+# %t is $XDG_RUNTIME_DIR for a user unit.
+Environment=MEMORY_SESSION_DIR=%t/anolisa/sessions/%i
 
 # user namespace + mount namespace are both unprivileged, so no
 # AmbientCapabilities= are required. ProtectSystem/Home are off because the
@@ -45,12 +52,18 @@ RestrictNamespaces=user mnt
 # to our own scope.
 
 # Read-only root filesystem with explicit write paths for the memory
-# store (~/.anolisa), session scratch (/run/anolisa), and cgroupfs
-# (the Delegate=memory subtree below requires cgroup.subtree_control
-# and memory.max writes; ReadOnlyPaths=/ would otherwise mount
-# /sys/fs/cgroup read-only inside our namespace and EROFS those writes).
+# store (~/.anolisa), session scratch (the per-user runtime dir created by
+# RuntimeDirectory= above, plus the legacy /run/anolisa for operators who
+# point MEMORY_SESSION_DIR back at it), and cgroupfs (the Delegate=memory
+# subtree below requires cgroup.subtree_control and memory.max writes;
+# ReadOnlyPaths=/ would otherwise mount /sys/fs/cgroup read-only inside our
+# namespace and EROFS those writes).
+#
+# %t/anolisa has to be listed explicitly: ReadOnlyPaths=/ makes the whole
+# tree read-only inside the unit's namespace, so a RuntimeDirectory= that
+# systemd creates outside it is still unwritable from inside.
 ReadOnlyPaths=/
-ReadWritePaths=~/.anolisa /run/anolisa /sys/fs/cgroup
+ReadWritePaths=~/.anolisa /run/anolisa %t/anolisa /sys/fs/cgroup
 
 # P6.4: delegate cgroup controllers so [memory.cgroup].enabled=true can
 # create a child cgroup under our scope and apply memory.max. Without

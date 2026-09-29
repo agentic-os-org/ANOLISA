@@ -20,6 +20,8 @@ mod approval;
 mod audit;
 #[path = "raw_cli/auth.rs"]
 mod auth;
+#[path = "raw_cli/auth_ecs.rs"]
+mod auth_ecs;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
 #[path = "raw_cli/compaction.rs"]
@@ -30,6 +32,9 @@ mod composer;
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]
 mod cosh_core;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/daily_terminal.rs"]
+mod daily_terminal;
 #[path = "raw_cli/diagnostics.rs"]
 mod diagnostics;
 #[path = "raw_cli/doctor.rs"]
@@ -78,6 +83,15 @@ mod startup;
 mod support;
 #[path = "raw_cli/task.rs"]
 mod task;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_ownership.rs"]
+mod terminal_ownership;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_resize.rs"]
+mod terminal_resize;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/terminal_unicode.rs"]
+mod terminal_unicode;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;

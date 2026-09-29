@@ -11,7 +11,7 @@ AgentSecCore OpenClaw plugin 的 OpenClaw host 兼容边界是 `>=2026.4.14`。
 - `openclaw-plugin/package.json` 的 `openclaw.compat.pluginApi`
 - `openclaw-plugin/package.json` 的 `peerDependencies.openclaw`
 
-当前 e2e 流水线已验证以下 OpenClaw host 矩阵：
+以下矩阵记录此前的 CI 验证：
 
 | OpenClaw host | 验证结果 |
 |---------------|----------|
@@ -25,6 +25,15 @@ AgentSecCore OpenClaw plugin 的 OpenClaw host 兼容边界是 `>=2026.4.14`。
 | `latest` | 通过 |
 
 验证证据：GitHub Actions `OpenClaw Plugin E2E` run `28774739252`。
+
+本地 E2E 也已在 `2026.8.1` 和旧版本 `2026.4.23` 通过，环境为 Node
+`22.22.3` 和已安装的 `agent-sec-cli 0.13.0`，覆盖安装、运行时加载、Gateway
+流量、全部四个策略用例和 14 个直接 hook 探针。测试使用 mock 模型和确定性的
+deny fixture；`2026.8.1` 的审批用例验证了无可用审批路由时阻止执行。
+
+OpenClaw 2.0 对应版本 `2026.8.1`，要求 Node `>=22.22.3 <23`、
+`>=24.15.0 <25` 或 `>=25.9.0`。插件安装记录位于宿主管理的 SQLite 状态中；
+请使用 `plugins inspect` 校验安装，不要读取已停用的 `plugins.installs` 配置键。
 
 ## 前置条件
 
@@ -93,8 +102,9 @@ OPENCLAW_STATE_DIR=~/.openclaw-dev ./scripts/deploy.sh "$(pwd)"
 
 - 读取 `openclaw --version`，要求 OpenClaw `>=2026.4.14`
 - 读取 `openclaw plugins install --help`，确认支持 `--force`
-- 如果当前 OpenClaw installer help 暴露 `--dangerously-force-unsafe-install`，安装时传入该参数
-- 如果当前 OpenClaw installer help 不暴露该参数，安装时不传入
+- 支持时传入 `--accept-capabilities`，接受 agent-sec 声明的能力（OpenClaw 2.0 要求）
+- 不支持能力确认的旧版本仅在 help 中提供时传入 `--dangerously-force-unsafe-install`；现代版本中该旧参数不再起作用
+- 保留运维配置的 `security.installPolicy` 决策；接受能力不会绕过策略阻断
 - OpenClaw `>=2026.4.24` 时写入 `plugins.entries.agent-sec.hooks.allowConversationAccess=true`
 - OpenClaw `2026.4.14` 到 `2026.4.23` 跳过 `allowConversationAccess`
 - 使用 `openclaw plugins inspect agent-sec --json` 校验安装记录

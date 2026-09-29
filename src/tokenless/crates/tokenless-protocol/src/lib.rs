@@ -353,6 +353,8 @@ pub enum ContentOrigin {
     CommandOutput,
     /// A copy of authoritative file content.
     FileContent,
+    /// Local files printed by a shell command such as `cat`.
+    FileRead,
     /// A service or framework response.
     ApiResponse,
 }
@@ -364,6 +366,7 @@ impl ContentOrigin {
         match self {
             Self::CommandOutput => "command_output",
             Self::FileContent => "file_content",
+            Self::FileRead => "file_read",
             Self::ApiResponse => "api_response",
         }
     }
@@ -501,6 +504,11 @@ pub enum AppliedOperation {
     TabularRowReduction,
     /// Consecutive search records share a full path without removing source text.
     SearchPathSharing,
+    /// Unmodified Git diff context was reduced with the original available in Stash.
+    DiffReduction,
+    /// An HTML page was rendered as Markdown with enumerated non-content elements
+    /// removed and the original available in Stash.
+    HtmlExtraction,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -522,6 +530,8 @@ impl AppliedOperation {
             Self::TabularCompaction => "tabular_compaction",
             Self::TabularRowReduction => "tabular_row_reduction",
             Self::SearchPathSharing => "search_path_sharing",
+            Self::DiffReduction => "diff_reduction",
+            Self::HtmlExtraction => "html_extraction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

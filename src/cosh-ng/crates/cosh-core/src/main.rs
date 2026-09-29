@@ -57,7 +57,9 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
         if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-            return Box::new(provider::sysom::SysomProvider::from_ecs_ram_role());
+            return Box::new(provider::sysom::SysomProvider::from_ecs_ram_role(
+                &resolved.sysom_endpoint,
+            ));
         }
         if resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty() {
             tracing::warn!("no AK/SK configured for aliyun, using mock provider");
@@ -69,6 +71,7 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
             &resolved.access_key_id,
             &resolved.access_key_secret,
             resolved.security_token.as_deref(),
+            &resolved.sysom_endpoint,
         ));
     }
     if resolved.api_key.is_empty() {

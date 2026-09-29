@@ -1,0 +1,42 @@
+# V2 host service; rendered by install-systemd-system.
+[Unit]
+Description=Agent Security Core V2 daemon
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart="{bindir}/agent-sec-daemon" serve
+RuntimeDirectory=agent-sec-core
+RuntimeDirectoryMode=0755
+# Keep the lock inode across stop/restart. The daemon safely reclaims stale sockets.
+RuntimeDirectoryPreserve=yes
+UMask=0007
+Restart=on-failure
+RestartSec=2
+# 2s UDS drain + 30s reconciliation join + 1s Tokio shutdown, with margin.
+TimeoutStopSec=45
+KillSignal=SIGTERM
+KillMode=control-group
+SendSIGKILL=yes
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

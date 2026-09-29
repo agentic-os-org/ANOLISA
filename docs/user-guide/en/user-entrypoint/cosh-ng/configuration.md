@@ -47,18 +47,20 @@ auto_persist = true
 persist_dir = "~/.copilot-shell/cosh-core/sessions"
 
 [logging]
-level = "warn"
+level = "info"
 
 [ui]
 language = "auto"
-log_level = "warn"
+log_level = "info"
 
 [shell]
 default = "auto"
 integration = "enhanced"
+login_identity = true
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
+status_symbols = false
 ```
 
 Use environment expansion or `/auth` instead of writing a raw secret into
@@ -129,17 +131,33 @@ expected = "active"
 ```
 
 `integration` accepts `native` or `enhanced`. Enhanced is the default and starts
-in Assisted mode (`◇ `), with marker-based Agent routing and command events.
-At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only
-(`◌ `); Shell-only keeps command events and post-command insights but sends
+in Assisted mode, with marker-based Agent routing and command events.
+At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only;
+Shell-only keeps command events and post-command insights but sends
 ordinary input to bash or zsh. Native leaves input, Shell options, traps, and
 startup files under bash or zsh ownership and provides no Cosh observation or
 insights. The integration value is read when `cosh` starts, so changing it
 requires a new session. Invalid values reject startup with a visible error.
 
+`status_symbols` is `false` by default. Set it to `true` (or
+`COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇ ` (Assisted) or
+`◌ ` (Shell-only) status line above each Enhanced prompt. Native sessions
+never show status symbols. The value is read at startup, and invalid values
+fall back to `false`.
+
 `analysis_mode` accepts `smart`, `auto`, or `manual`; shell approval accepts
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
+
+`login_identity` (default `true`) gives an interactive Enhanced login shell a
+real login identity: the inner bash starts as a login shell (`shopt -q
+login_shell` == yes) and reads `/etc/profile` and `~/.bash_profile` like `bash
+-l`. Set `login_identity = false` to fall back to the previous non-login startup
+(`--rcfile`). Bash 4 and newer use the login-identity path when the bounded
+real-launch capability probe succeeds. Bash 3.2 (including the macOS system
+Bash), probe failures, and
+parent environments that export function names POSIX startup cannot import all
+fall back automatically. Zsh is unaffected.
 
 ## Audit settings
 
@@ -194,6 +212,7 @@ required.
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET`, `ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun credential fallbacks |
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
 | `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
+| `COSH_SHELL_LOGIN_IDENTITY` | `on`/`off` real login identity for the next Enhanced login shell (default on) |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |

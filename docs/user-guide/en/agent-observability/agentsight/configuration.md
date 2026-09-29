@@ -18,7 +18,19 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
+  "storage": {
+    "base_path": "/var/log/sysak/.agentsight",
+    "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 60 },
+    "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 60 },
+    "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
+    "trajectories": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 300 },
+    "optimization": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "security_audit": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 3600 },
+    "reuse": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "causal": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 300 },
+    "enforcement": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 }
+  },
   "runtime": {
     "sls_logtail_path": ""
   },
@@ -35,11 +47,12 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
     "session_mapping": { "enabled": true, "max_entries": 10000 },
     "sqlite_storage": { "enabled": true, "batch": { "max_size": 100, "flush_ms": 100 } },
     "resource_sampling": false,
-    "interruption_detection": { "enabled": true, "retention_days": 30, "max_db_size_mb": 100 },
+    "interruption_detection": { "enabled": true },
     "audit": true,
     "token_consumption": false,
     "sls_logtail": false,
-    "trajectory_collection": { "enabled": false, "scan_interval_secs": 30 }
+    "trajectory_collection": { "enabled": false, "scan_interval_secs": 30 },
+    "reuse_llm_judge": false
   },
   "runtime_limits": {
     "event_channel_capacity": 10000,
@@ -70,6 +83,36 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 }
 ```
 
+## SQLite storage policies
+
+`storage.base_path` is the directory shared by AgentSight-owned databases. In schema v4, every
+policy uses the same keys: `retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero
+value disables the corresponding age-retention, capacity, or scheduled-maintenance rule. If
+`check_interval_secs` is `0`, no automatic pass is scheduled even when the other two values are
+non-zero.
+
+| Store | Retention | Size limit | Check interval |
+|---|---:|---:|---:|
+| `storage.primary` (`agentsight.db`) | 30 days | 500 MiB | 60 seconds |
+| `storage.genai` (`genai_events.db`, including evaluations) | 30 days | 200 MiB | 60 seconds |
+| `storage.interruptions` | 30 days | 100 MiB | 60 seconds |
+| `storage.trajectories` | 30 days | 500 MiB | 300 seconds |
+| `storage.optimization` | 30 days | 200 MiB | 300 seconds |
+| `storage.security_audit` | 30 days | 200 MiB | 3,600 seconds |
+| `storage.reuse` | 30 days | 200 MiB | 300 seconds |
+| `storage.causal` | 30 days | 200 MiB | 300 seconds |
+| `storage.enforcement` | 30 days | 100 MiB | 60 seconds |
+
+Maintenance first removes expired eligible rows. If that changed the database, a successful WAL
+checkpoint gates the capacity phase. Physical allocation above `max_db_size_mb` triggers pruning;
+the pass deletes the oldest eligible records until logical usage is at most 90% of the limit. It
+does not run `VACUUM`, so freed pages remain on the SQLite freelist for later writes.
+
+`check_interval_inserts` is no longer supported. The configuration format is replaced as a unit when
+`schema_version` changes: a missing or pre-v4 version is backed up and replaced with schema v4
+instead of merging old settings. Start custom files from the shipped `agentsight.json` and do not
+copy the old key into the replacement.
+
 ## Feature switches
 
 Everything under `features` can be turned off independently. A disabled feature is not
@@ -87,6 +130,9 @@ instantiated at all, so it costs no memory and no I/O.
 | Token consumption records | `features.token_consumption` | `false` | Extra aggregated consumption records |
 | External log export | `features.sls_logtail` | `false` | Writes structured events to a log file for an external collector |
 | Trajectory collection | `features.trajectory_collection.enabled` | `false` | Periodically scans local Agent JSONL sessions into `trajectories.db` (trace mode only) |
+| Reuse LLM judge | `features.reuse_llm_judge` | `false` | Allows `POST /api/reuse/judge` to ask the configured LLM to label trajectories the rules cannot place; every call is billed |
+
+`reuse_llm_judge` affects only `POST /api/reuse/judge`. Leave it disabled unless you have configured an optimization LLM and explicitly want paid second-level labelling. Reload the service after changing it so the server reads the new setting.
 
 Tuning knobs that come with a feature:
 
@@ -96,9 +142,7 @@ Tuning knobs that come with a feature:
 | `features.session_mapping.max_entries` | `10000` | Bound of the response-ID → session-ID map |
 | `features.sqlite_storage.batch.max_size` | `100` | Rows per write batch |
 | `features.sqlite_storage.batch.flush_ms` | `100` | Maximum batch delay in milliseconds |
-| `features.interruption_detection.retention_days` | `30` | How long interruption events are kept |
-| `features.interruption_detection.max_db_size_mb` | `100` | Size cap for `interruption_events.db` |
-| `features.trajectory_collection.scan_interval_secs` | `30` | Scan interval for the trajectory collector |
+| `features.trajectory_collection.scan_interval_secs` | `30` | Scan interval for discovering trajectory files; storage cleanup uses `storage.trajectories.check_interval_secs` |
 
 ## Runtime limits
 
@@ -217,26 +261,21 @@ this table. If a new Codex release is not captured, regenerate the entry with
 
 ## schema_version and upgrades
 
-`schema_version` (currently `2`) marks the config format. On start, AgentSight compares it with the
+`schema_version` (currently `4`) marks the config format. On start, AgentSight compares it with the
 built-in version:
 
 - equal or newer → your file is left untouched;
-- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>`, then writes a
-  merged file: it starts from the current defaults and overlays every top-level key you had set
-  (`cmdline`, `https`, `features`, `codex_offsets`, …), finally bumping `schema_version`.
+- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>` and replaces it
+  with the current default file.
 
-The merge is shallow and per top-level key, so a section you customised is kept as a whole while new
-sections from the defaults are added. That also means a partially customised `cmdline` block stays
-partial — the replace-not-extend rule above still applies.
-
-RPM upgrades use `%config(noreplace)`, so the file on disk survives package upgrades and this check
-handles format changes.
+Schema v4 replaces insert-count storage checks with `check_interval_secs` for every policy and adds
+`reuse`, `causal`, and `enforcement`. Custom settings from an older schema are not merged. Reapply
+required custom rules to the new file, then reload the service.
 
 ## Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB` | Size cap for the GenAI event database (default 200) |
 | `AGENTSIGHT_TOKENIZER_PATH` | Directory holding local tokenizer models |
 | `AGENTSIGHT_ENFORCER_SOCKET` | Enforcer socket path (default `/run/agentsight/enforcer.sock`) |
 | `AGENTSIGHT_CHROME_TRACE` | Writes a Chrome trace file for pipeline profiling |

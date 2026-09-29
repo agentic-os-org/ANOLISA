@@ -10,6 +10,13 @@ bash or zsh must own the session without Cosh hooks, observation, or insights.
 Structured JSON and JSONL interfaces remain available for automation and
 Agent integration.
 
+By default a login shell (for example `cosh --login`) launches Bash with a real
+login identity on Bash 4+; set `shell.login_identity = false` to keep the previous
+non-login (`--rcfile`) startup. Cosh falls back automatically when the bounded
+login-identity capability probe fails, on Bash 3.2 (such as the macOS system
+bash), or when the
+parent exports a function name that POSIX startup cannot import.
+
 ## Why cosh-ng
 
 | In a conventional terminal | In cosh-ng |
@@ -52,7 +59,7 @@ curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode syste
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
 ```
 
-On macOS arm64, use user scope instead:
+On macOS 11+ (arm64 / x86_64), use user scope instead:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
@@ -67,9 +74,15 @@ sudo yum install cosh-ng
 
 The published Linux raw contract is not currently portable across all routed
 distributions, so it is not the recommended Linux installation path. The raw
-package supports macOS arm64, where Linux-only package and service operations
+package supports macOS 11+ (arm64 / x86_64), where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
+
+The release build matrix also produces a macOS x86_64 (Intel) raw archive,
+with the same macOS 11.0 minimum as arm64. Intel artifacts are available from
+GitHub Releases once a version containing this build support is published;
+the public installer above also requires an Intel ANOLISA CLI release and
+separate enablement of the website installer.
 
 ## Start in 30 seconds
 
@@ -78,17 +91,22 @@ cd your-project
 cosh
 ```
 
-Enhanced Assisted is the default. The `◇ ` prefix shows that Cosh may classify
-and route submitted input before the foreground Shell executes it:
+Enhanced Assisted is the default. Cosh keeps the shell's native prompt
+appearance, and may classify and route submitted input before the foreground
+Shell executes it:
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ explain why this service keeps restarting
+user@host:~/project$ git status
+user@host:~/project$ explain why this service keeps restarting
 ```
 
-At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only. Its
-`◌ ` prefix means ordinary input goes to the Shell while post-command insights
-remain available. Press `Shift+Tab` again to return to Assisted mode.
+At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only, where
+ordinary input goes straight to the Shell while post-command insights remain
+available. Press `Shift+Tab` again to return to Assisted mode.
+
+Status symbols are optional: set `shell.status_symbols = true` in `config.toml`
+(or `COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇` (Assisted) or
+`◌` (Shell-only) status line above each prompt. They are off by default.
 
 Start Native explicitly when the session must have no Cosh hooks, observation,
 or insights:
@@ -96,6 +114,10 @@ or insights:
 ```bash
 COSH_SHELL_INTEGRATION=native cosh
 ```
+
+Enhanced does not preserve exported Bash `PROMPT_COMMAND` values in child
+processes. See [Bash prompt compatibility](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-compatibility)
+for the version-specific attribute limits and Native alternative.
 
 ```text
 $ hello
@@ -108,7 +130,22 @@ for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. In enhanced integration, the cosh-core runtime makes
 `/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
-`@path` references.
+`@path` references. Type `/` in the Composer to browse slash commands, use
+Up/Down to select, and press Enter to execute the selected command. Use Tab to
+complete a command before adding arguments; Enter submits drafts with arguments
+or multiple lines as written.
+Ordinary shell prompts keep native path completion.
+
+In `cosh-core`, configured Hooks run by default without `hooks.enabled = true`.
+Explicit `hooks.enabled = false` keeps config Hooks disabled even when Extensions
+are installed. See [Hooks](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md)
+for disable scope and fail-closed `PreToolUse` behavior.
+
+For `type = "aliyun"`, SysOM automatically prefers a reachable VPC endpoint.
+Set `ai.providers.<id>.sysom_endpoint` to pin an endpoint; `COSH_SYSOM_ENDPOINT`
+takes precedence, and `base_url` does not route SysOM. Only automatic VPC routes
+bypass system proxies; explicit overrides and public fallback retain proxy
+settings. See [provider configuration](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/providers.md).
 
 To run one locally installed ACP adapter without entering the interactive
 Shell, verify it first and then pipe the prompt through stdin:
@@ -244,6 +281,12 @@ does not authorize the effect. `On` fails closed unless exact checkpoint
 evidence exists, while `Off` creates neither the baseline nor per-effect
 barriers.
 
+Empty workspaces are valid checkpoint state in current ws-ckpt. If an older
+daemon skips the initial snapshot, `On` stops the Task before Runtime launch.
+Upgrade ws-ckpt or add a file and submit a new Task, or explicitly select `Off`
+when checkpoint protection is not needed. The failed Task is terminal;
+`retry` does not rebuild a failed baseline.
+
 Managed Core uses the closed `workspace-write-v1` profile. It exposes only
 `ask_user_question` and `write_file`; every write is a Runtime-native permission
 decision, and Core executes it only after Gateway approval and any required
@@ -315,6 +358,11 @@ daemon exits. The daemon remains Unix-only and does not open a remote listener.
 The repository includes fake-adapter conformance coverage for the direct ACP
 path. Run the separate real Codex/Claude adapter checks and manual Terminal
 acceptance before treating a particular ACP installation as production-validated.
+
+`cosh-cli checkpoint recover --workspace <path>` supports recovery of interrupted
+initialization through the ws-ckpt daemon. Successful JSON includes `meta.warning`
+when retained data needs inspection. See
+[workspace checkpoints](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/checkpoint.md).
 
 ## Documentation
 

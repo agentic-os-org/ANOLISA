@@ -85,6 +85,7 @@ impl RuntimeDispatcher {
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let batch = snapshot.batch_since(state.control.event_cursor());
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
+        crate::auth::ecs_poll::poll(adapter, state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])
     }
 
@@ -177,6 +178,13 @@ fn render_inline_guidance_from_batch<W: Write>(
         stop_active_agent_run_without_rendering(state, output)?;
         return Ok(());
     }
+    // Freeze/release the draft before any control consumer renders or opens a card.
+    crate::runtime::prompt_draft::handle_prompt_draft_events(
+        action_events,
+        state,
+        output,
+        adapter.name(),
+    )?;
     // Task forms reuse Question/TextQuestion captures. Route them first and
     // reserve their answer events so QuestionConsumer never emits a false
     // "No pending question" notice for Task-owned input.
@@ -253,12 +261,6 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
     update_soft_newline_tip_state(action_events, state);
-    crate::runtime::prompt_draft::handle_prompt_draft_events(
-        action_events,
-        state,
-        output,
-        adapter.name(),
-    )?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,6 +58,10 @@ async fn start(
     let inner = Arc::new(DaemonDispatcher::new(
         application,
         Arc::new(TestPolicy(role)),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let dispatcher = Arc::new(RecordingDispatcher {
@@ -76,8 +81,16 @@ async fn start(
         .await
         .unwrap();
     });
+    // Binding publishes the socket file slightly before the listener starts
+    // accepting, so waiting for the path to exist can hand back an endpoint that
+    // still refuses connections. Probing with a real connect is what makes the
+    // readiness signal trustworthy; the probe closes immediately.
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !socket.exists() {
+        loop {
+            if let Ok(probe) = tokio::net::UnixStream::connect(socket).await {
+                drop(probe);
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -136,7 +149,26 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
     assert_ne!(variables["policy_id"], variables["scope_id"]);
     assert_ne!(variables["binding_id"], variables["scope_id"]);
     assert_ne!(variables["binding_id"], variables["policy_id"]);
-    assert_eq!(*requests.lock().unwrap(), expected_requests);
+    let actual: Vec<_> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(|mut request| {
+            let carrier: asc_daemon_protocol::TraceCarrierV1 = serde_json::from_value(
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("traceContext")
+                    .expect("CLI must propagate its SDK context"),
+            )
+            .unwrap();
+            assert_eq!(carrier.version, 1);
+            assert_eq!(carrier.traceparent.as_ref().unwrap().len(), 55);
+            request
+        })
+        .collect();
+    assert_eq!(actual, expected_requests);
     let request = json!({"method":"policy.templates.get","params":{"id":variables["policy_id"],"revision":2}});
     let args = common::args_for(&request, &directory.0, &socket);
     let output = tokio::task::spawn_blocking(move || common::run(&args))
@@ -150,6 +182,91 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
     shutdown.request();
     task.await.unwrap();
     assert!(!socket.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_cli_processes_code_scan_through_the_daemon() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, requests) = start(&socket, PrincipalRole::LocalUser).await;
+    let scan_args = vec![
+        OsString::from("--socket"),
+        socket.into_os_string(),
+        OsString::from("scan-code"),
+        OsString::from("--code"),
+        OsString::from("rm -rf /tmp/test"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&scan_args))
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["verdict"], "warn");
+    assert_eq!(result["language"], "bash");
+    let mut actual = requests.lock().unwrap().clone();
+    let carrier: asc_daemon_protocol::TraceCarrierV1 = serde_json::from_value(
+        actual[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("traceContext")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(carrier.version, 1);
+    assert_eq!(carrier.traceparent.as_ref().unwrap().len(), 55);
+    assert_eq!(
+        actual,
+        vec![json!({
+            "method": "action.code_scan",
+            "params": {
+                "code": "rm -rf /tmp/test",
+                "language": "bash",
+                "rules": null,
+                "mode": "regex"
+            }
+        })]
+    );
+
+    let bad_language = vec![
+        OsString::from("--socket"),
+        directory.0.join("daemon.sock").into_os_string(),
+        OsString::from("scan-code"),
+        OsString::from("--code"),
+        OsString::from("puts 1"),
+        OsString::from("--language"),
+        OsString::from("ruby"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&bad_language))
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"scan error: unsupported language: ruby\n");
+
+    let empty = vec![
+        OsString::from("--socket"),
+        directory.0.join("daemon.sock").into_os_string(),
+        OsString::from("scan-code"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&empty))
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"Error: --code is required (use --code '<source>')\n"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    shutdown.request();
+    task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,6 +333,139 @@ async fn domain_validation_and_pagination_are_owned_by_the_daemon() {
         5,
         "CLI must not auto-page or perform hidden reads"
     );
+    shutdown.request();
+    task.await.unwrap();
+}
+
+#[test]
+fn failed_binding_results_preserve_cli_stdout_and_mutation_exit_status() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../fixtures/reconciliation/admission-wire.json"
+    ))
+    .unwrap();
+    let methods: Value = serde_json::from_str(common::METHODS).unwrap();
+    for case in cases {
+        for operation in ["create", "update", "delete", "get"] {
+            let directory = common::Directory::new();
+            let socket = directory.0.join("result.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let binding = case["binding"].clone();
+            let method = format!("policy.bindings.{operation}");
+            let expected_method = method.clone();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&request).unwrap()["method"],
+                    expected_method
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"requestId":"10000000-0000-4000-8000-000000000001", "result":binding})
+                )
+                .unwrap();
+            });
+            let row = methods
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["method"] == method)
+                .unwrap();
+            let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+                .args(common::args_for(row, &directory.0, &socket))
+                .output()
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(output.status.code(), Some(i32::from(operation != "get")));
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                case["binding"]
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pii_cli_uses_common_context_envelope_and_keeps_params_trace_free() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, requests) = start(&socket, PrincipalRole::LocalUser).await;
+    let native = json!({
+        "version": 1,
+        "traceparent": "00-11111111111111111111111111111111-2222222222222222-01",
+        "baggage": "agentsec.run.id=inherited-run"
+    })
+    .to_string();
+    let legacy = json!({
+        "traceId": " opaque-label ", "sessionId": " session ",
+        "agentName": " codex ", "uid": 424_242, "unknown": "PRIVATE_UNKNOWN"
+    })
+    .to_string();
+    let args: Vec<OsString> = [
+        "--trace-context",
+        &legacy,
+        "--otel-context",
+        &native,
+        "--socket",
+        socket.to_str().unwrap(),
+        "scan-pii",
+        "--text",
+        "--otel-context",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    let output = tokio::task::spawn_blocking(move || common::run(&args))
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["verdict"],
+        "pass"
+    );
+    {
+        let wire = requests.lock().unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["method"], "action.pii_scan");
+        assert_eq!(wire[0]["params"]["text"], "--otel-context");
+        assert!(wire[0]["params"].get("traceContext").is_none());
+        let carrier = &wire[0]["traceContext"];
+        assert_eq!(carrier["version"], 1);
+        assert!(
+            carrier["traceparent"]
+                .as_str()
+                .unwrap()
+                .starts_with("00-11111111111111111111111111111111-")
+        );
+        assert_ne!(
+            carrier["traceparent"],
+            "00-11111111111111111111111111111111-2222222222222222-01"
+        );
+        let baggage = carrier["baggage"].as_str().unwrap();
+        for field in [
+            "agentsec.session.id=session",
+            "agentsec.agent.name=codex",
+            "agentsec.run.id=inherited-run",
+        ] {
+            assert!(baggage.split(',').any(|item| item == field), "{baggage}");
+        }
+        assert_eq!(wire[0]["compatibility"]["traceId"], "opaque-label");
+        assert!(!wire[0].to_string().contains("PRIVATE_UNKNOWN"));
+        assert!(!wire[0].to_string().contains("424242"));
+    }
     shutdown.request();
     task.await.unwrap();
 }

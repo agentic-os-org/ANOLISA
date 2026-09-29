@@ -60,9 +60,9 @@ The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SH
 Python SDK), with `lossless` recoverability and no Stash writes.
 
 Search path sharing is enabled by default. CLI callers can disable it with
-`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`. When unset it stays enabled; `1`, `true`, and `yes`
-also enable it (case-insensitively). Empty and other values disable it. This variable is
-independent of the JSON config file.
+`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`. When unset or empty it stays enabled; `1`, `true`,
+and `yes` also enable it (case-insensitively), and any other value disables it. This variable
+is independent of the JSON config file.
 Rust callers use `RuntimeConfig.search_path_sharing_enabled`; Python callers use
 `TokenlessConfig(search_path_sharing_enabled=False)` or the matching `TokenlessRuntime` keyword.
 Disabling this domain returns search listings unchanged without computing a search candidate.

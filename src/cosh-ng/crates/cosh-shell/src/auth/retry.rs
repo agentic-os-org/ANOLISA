@@ -16,6 +16,9 @@ pub(super) fn restore_after_failed_submission_at(
 ) {
     auth.phase = AuthPhase::FillingField;
     auth.field_error = None;
+    if field_name == Some("provider_id") && auth.editing_provider_name.is_none() {
+        auth.default_provider_id = false;
+    }
     let Some(provider_id) = auth.editing_provider_name.clone() else {
         let fields = &auth.providers[auth.selected_provider].fields;
         let secret_fields: HashSet<_> = fields
@@ -25,19 +28,12 @@ pub(super) fn restore_after_failed_submission_at(
             .collect();
         auth.collected_values
             .retain(|name, _| !secret_fields.contains(name.as_str()));
-        auth.current_field = field_name
-            .and_then(|name| fields.iter().position(|field| field.name == name))
-            .unwrap_or(0);
+        auth.current_field = retry_field(auth, field_name);
         auth.load_current_field_input();
         return;
     };
 
     let fields = &auth.providers[auth.selected_provider].fields;
-    // Slash auth prepends provider_id before edit mode, so retries preserve that identity.
-    debug_assert_eq!(
-        fields.first().map(|field| field.name.as_str()),
-        Some("provider_id")
-    );
     let secret_fields: HashSet<String> = fields
         .iter()
         .filter(|field| field.secret)
@@ -53,13 +49,20 @@ pub(super) fn restore_after_failed_submission_at(
     auth.collected_values
         .insert("provider_id".to_string(), provider_id);
     clear_ecs_auth_source(&mut auth.collected_values);
-    auth.current_field = 1.min(fields.len());
-    if let Some(field_name) = field_name {
-        if let Some(index) = fields.iter().position(|field| field.name == field_name) {
-            auth.current_field = index;
-        }
-    }
+    auth.current_field = retry_field(auth, field_name);
     auth.load_current_field_input();
+}
+
+fn retry_field(auth: &RuntimeAuthState, field_name: Option<&str>) -> usize {
+    field_name
+        .and_then(|name| {
+            auth.current_provider()
+                .fields
+                .iter()
+                .position(|field| field.name == name)
+        })
+        .filter(|&index| auth.field_is_editable(index))
+        .unwrap_or_else(|| auth.first_editable_field())
 }
 
 /// Drops the ECS RAM-role marker, which the restored phase contradicts.

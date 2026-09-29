@@ -16,11 +16,13 @@ use agentsight_opt::llm::{ChatMessage, LlmClient};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
+use super::causal_store;
+use crate::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use crate::storage::sqlite::GenAISqliteStore;
 
 // Deterministic grounding engine: establishes what can be checked before the
 // model is asked anything.
-mod grounding;
+use crate::grounding;
 
 // ─── In-memory cache ─────────────────────────────────────────────────────────
 //
@@ -301,8 +303,7 @@ pub async fn run_causal_attribution(
         }
     };
 
-    let genai_store =
-        crate::storage::sqlite::GenAISqliteStore::new_with_path(&state.storage_path).ok();
+    let genai_store = state.genai_store.as_ref().map(Arc::clone);
     let trajectory_store = state.trajectory_store();
 
     // Scope resolution: "conversation" means the frontend is asking us to
@@ -365,12 +366,58 @@ pub async fn run_causal_attribution(
                 }
             }
         }
+
+        // Missed in memory — the durable store is next, before the pipeline is
+        // paid for again. A restart empties the memory cache but not this one.
+        if let Some(store) = state.causal_store.as_deref() {
+            let key = causal_store::CaseKey {
+                session_key: &cache_key.0,
+                round: cache_key.1,
+                complaint: &req.complaint,
+            };
+            match store.get(key) {
+                Ok(Some(case_json)) => {
+                    // The stored bytes are exactly what the client received
+                    // last time; replaying them verbatim cannot drift.
+                    match serde_json::from_str::<serde_json::Value>(&case_json) {
+                        Ok(case_value) => {
+                            log::info!(
+                                "Causal attribution: restored case for {} round={:?} from causal.db",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "case": case_value,
+                                "cached": true,
+                            }));
+                        }
+                        Err(error) => {
+                            // A corrupt row must not wedge the feature: log it
+                            // and fall through to a fresh run, which overwrites.
+                            log::warn!(
+                                "Causal attribution: stored case for {} round={:?} is unparsable ({error}); re-running",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "Causal attribution: reading causal.db for {} round={:?} failed: {error}; re-running",
+                        resolved_session_id,
+                        req.round_index,
+                    );
+                }
+            }
+        }
     }
 
     let trajectory = match load_trajectory(
         &state.storage_path,
         &resolved_session_id,
-        genai_store.as_ref(),
+        genai_store.as_deref(),
         trajectory_store.as_deref(),
         req.id_kind.as_deref(),
     ) {
@@ -406,6 +453,34 @@ pub async fn run_causal_attribution(
 
     match run_pipeline(&client, &trajectory, round, &req).await {
         Ok(case_) => {
+            // Write through to the durable store first: it is what survives the
+            // restart, and the run has already been paid for.
+            if let Some(store) = state.causal_store.as_deref() {
+                let key = causal_store::CaseKey {
+                    session_key: &cache_key.0,
+                    round: cache_key.1,
+                    complaint: &req.complaint,
+                };
+                match serde_json::to_string(&case_) {
+                    Ok(case_json) => {
+                        if let Err(error) = store.put(key, &case_json) {
+                            log::warn!(
+                                "Causal attribution: persisting the case for {} round={:?} failed: {error}",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Causal attribution: serialising the case for {} round={:?} failed: {error}",
+                            resolved_session_id,
+                            req.round_index,
+                        );
+                    }
+                }
+            }
+
             // Stash successful run in the cache so reopening the panel is instant.
             // Bump the clock, evict the oldest entry when the cap is exceeded.
             if let Ok(mut guard) = causal_cache().lock() {
@@ -1133,6 +1208,22 @@ fn session_label(trajectory: &AtifTrajectory) -> &str {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+fn open_existing_read_only(
+    id: DatabaseId,
+    path: &std::path::Path,
+) -> Result<rusqlite::Connection, crate::database::DatabaseManagerError> {
+    DatabaseManager::open_query(id, path, DatabaseCoverage::Full, |registered| {
+        agentsight_sqlite_lifecycle::open_connection(
+            registered,
+            agentsight_sqlite_lifecycle::ConnectionOptions {
+                mode: agentsight_sqlite_lifecycle::ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..agentsight_sqlite_lifecycle::ConnectionOptions::default()
+            },
+        )
+    })
+}
+
 /// Map a user-supplied identifier to the `session_id` the trajectory loaders
 /// understand. The dashboard may hand us one of three shapes:
 ///
@@ -1144,7 +1235,6 @@ fn session_label(trajectory: &AtifTrajectory) -> &str {
 /// Returns `None` when no mapping exists, in which case the caller falls back
 /// to passing the original ID through to the trajectory loader.
 fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<String> {
-    use rusqlite::Connection;
     let base_dir = db_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -1158,37 +1248,33 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
             candidate,
             candidate.exists(),
         );
-        if candidate.exists() {
-            if let Ok(conn) = Connection::open(&candidate) {
-                let sql = "SELECT session_id FROM interruption_events \
-                           WHERE conversation_id = ?1 AND session_id IS NOT NULL \
-                             AND length(session_id) > 0 \
-                           ORDER BY occurred_at_ns DESC LIMIT 1";
-                let found: Option<String> = conn
-                    .query_row(sql, [incoming], |r| r.get::<_, String>(0))
-                    .ok();
-                log::info!("resolver: conversation_id lookup → {:?}", found);
-                if found.is_some() {
-                    return found;
-                }
+        if let Ok(conn) = open_existing_read_only(DatabaseId::Interruptions, &candidate) {
+            let sql = "SELECT session_id FROM interruption_events \
+                       WHERE conversation_id = ?1 AND session_id IS NOT NULL \
+                         AND length(session_id) > 0 \
+                       ORDER BY occurred_at_ns DESC LIMIT 1";
+            let found: Option<String> = conn
+                .query_row(sql, [incoming], |r| r.get::<_, String>(0))
+                .ok();
+            log::info!("resolver: conversation_id lookup → {:?}", found);
+            if found.is_some() {
+                return found;
             }
         }
     }
 
     // 2. trace_id — genai_events
     let genai_candidate = base_dir.join("genai_events.db");
-    if genai_candidate.exists() {
-        if let Ok(conn) = Connection::open(&genai_candidate) {
-            let sql = "SELECT session_id FROM genai_events \
-                       WHERE trace_id = ?1 AND session_id IS NOT NULL \
-                       LIMIT 1";
-            let found: Option<String> = conn
-                .query_row(sql, [incoming], |r| r.get::<_, String>(0))
-                .ok();
-            log::info!("resolver: trace_id lookup → {:?}", found);
-            if found.is_some() {
-                return found;
-            }
+    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, &genai_candidate) {
+        let sql = "SELECT session_id FROM genai_events \
+                   WHERE trace_id = ?1 AND session_id IS NOT NULL \
+                   LIMIT 1";
+        let found: Option<String> = conn
+            .query_row(sql, [incoming], |r| r.get::<_, String>(0))
+            .ok();
+        log::info!("resolver: trace_id lookup → {:?}", found);
+        if found.is_some() {
+            return found;
         }
     }
 
@@ -1277,8 +1363,8 @@ fn probe_atif_column(
     db_path: &std::path::Path,
     session_id: &str,
 ) -> Result<Option<String>, String> {
-    use rusqlite::Connection;
-    let conn = Connection::open(db_path).map_err(|e| format!("open {db_path:?}: {e}"))?;
+    let conn = open_existing_read_only(DatabaseId::Trajectories, db_path)
+        .map_err(|e| format!("open {db_path:?}: {e}"))?;
 
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table'")

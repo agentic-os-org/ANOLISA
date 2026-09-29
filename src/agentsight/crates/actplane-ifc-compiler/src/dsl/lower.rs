@@ -156,16 +156,16 @@ fn lower_path(pat: &str) -> (u8, String) {
     }
     let repo_relative = !pat.starts_with('/');
     // **/middle/** → contains "/middle/" (substring search)
-    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/**")) {
-        if !inner.contains('*') {
-            return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
-        }
+    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/**"))
+        && !inner.contains('*')
+    {
+        return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
     }
     // **/middle/* → contains "/middle/" (files directly inside)
-    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/*")) {
-        if !inner.contains('*') {
-            return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
-        }
+    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/*"))
+        && !inner.contains('*')
+    {
+        return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
     }
     if let Some(inner) = pat.strip_prefix("**/") {
         if let Some(suffix) = inner.strip_prefix('*') {
@@ -470,11 +470,15 @@ fn resolve_hostname_ipv4s(host: &str) -> Vec<u32> {
     out.into_iter().collect()
 }
 
+/// Gate allocation table: `(kernel op, match kind, literal, exit code)` maps to
+/// `(latching bit, gate slot index)`.
+type GateBits = HashMap<(u8, u8, String, Option<u8>), (u64, u32)>;
+
 struct Ctx {
     labels: HashMap<String, u64>,
     used_labels: u64,
     updates: Vec<CUpdate>,
-    gate_bits: HashMap<(u8, u8, String, Option<u8>), (u64, u32)>,
+    gate_bits: GateBits,
     next_gate: u32,
     inval_slots: HashMap<(u8, u8, String, String), u32>,
     next_inval: u32,

@@ -4,10 +4,14 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from agent_sec_cli.daemon.jobs.skill_ledger import (
     worker_client as worker_client_module,
+)
+from agent_sec_cli.daemon.jobs.skill_ledger.activation import (
+    SkillLedgerActivationJob,
 )
 from agent_sec_cli.daemon.jobs.skill_ledger.protocol import (
     SkillFsChange,
@@ -368,6 +372,63 @@ def test_worker_cancellation_terminates_process(monkeypatch, tmp_path: Path):
     assert process.stderr.cancelled is True
     assert stderr_task is not None and stderr_task.done()
     assert pid is None
+
+
+def test_activation_stop_when_worker_response_completes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = FakeProcess(101, "success", blocking_stderr=True)
+    install_process_factory(monkeypatch, [process])
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
+        lambda: [],
+    )
+
+    async def scenario() -> None:
+        client = SkillLedgerWorkerClient()
+        job = SkillLedgerActivationJob(debounce_seconds=0, worker_client=client)
+        response_completed = asyncio.Event()
+        stop_task: asyncio.Task[None] | None = None
+        process_once = client._process_once
+
+        async def complete_and_stop(change: SkillFsChange) -> dict[str, Any]:
+            nonlocal stop_task
+            result = await process_once(change)
+            # Queue shutdown before wait_for can consume the completed inner task.
+            stop_task = asyncio.create_task(job.stop())
+            response_completed.set()
+            return result
+
+        monkeypatch.setattr(client, "_process_once", complete_and_stop)
+        await job.start()
+        activation_task = job._task
+        try:
+            job.enqueue(make_change(tmp_path))
+            async with asyncio.timeout(1):
+                await response_completed.wait()
+            assert stop_task is not None
+            # A cancelling timeout would inject a second cancellation and hide the race.
+            done, _ = await asyncio.wait({stop_task}, timeout=1)
+            assert stop_task in done, "activation shutdown lost cancellation"
+            stop_task.result()
+            assert activation_task is not None and activation_task.cancelled()
+            assert job.status().state == "stopped"
+            assert client.pid is None
+            assert client._stderr_task is None
+            assert process.returncode == 0
+            assert process.stdin.closed is True
+            assert process.stderr.cancelled is True
+        finally:
+            # Recover only after recording failure so the regression cannot hang pytest.
+            if job._task is not None:
+                job._task.cancel()
+            async with asyncio.timeout(1):
+                if stop_task is not None:
+                    await stop_task
+                else:
+                    await job.stop()
+
+    asyncio.run(scenario())
 
 
 def test_cancelled_stderr_task_does_not_interrupt_stop(monkeypatch, tmp_path: Path):

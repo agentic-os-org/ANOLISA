@@ -51,6 +51,7 @@ fn default_config_values() {
     let cfg = CoshConfig::default();
     assert_eq!(cfg.shell_default, "auto");
     assert_eq!(cfg.shell_integration, "enhanced");
+    assert!(cfg.login_identity, "R2 default is on (flip-on gate passed)");
     assert_eq!(cfg.analysis_mode, "smart");
     assert_eq!(cfg.approval_mode, CoshApprovalMode::Auto);
     assert_eq!(cfg.adapter_default, "cosh-core");
@@ -214,6 +215,7 @@ fn parse_simple_key_value() {
     let content = r#"
 shell.default = "zsh"
 shell.integration = enhanced
+shell.login_identity = off
 shell.analysis_mode = conservative
 shell.approval_mode = recommend
 shell.adapter_default = "qwen"
@@ -223,6 +225,12 @@ ui.language = zh-CN
     parse_simple_config(content, &mut cfg);
     assert_eq!(cfg.shell_default, "zsh");
     assert_eq!(cfg.shell_integration, "enhanced");
+    // #R2: dotted `shell.login_identity` parses the rollback (default is on, so
+    // parsing `off` must flip it).
+    assert!(
+        !cfg.login_identity,
+        "shell.login_identity = off must disable R2"
+    );
     assert_eq!(cfg.analysis_mode, "conservative");
     assert_eq!(cfg.approval_mode, CoshApprovalMode::Recommend);
     assert_eq!(cfg.adapter_default, "qwen");
@@ -327,10 +335,17 @@ fn parse_toml_adapter_default() {
     let content = r#"
 [shell]
 adapter_default = "qwen"
+login_identity = false
 "#;
     let mut cfg = CoshConfig::default();
     parse_toml_config(content, &mut cfg);
     assert_eq!(cfg.adapter_default, "qwen");
+    // #R2: the canonical `[shell]` table form must honour the rollback
+    // `login_identity = false` (native TOML bool), not only the dotted key.
+    assert!(
+        !cfg.login_identity,
+        "[shell] table login_identity = false must disable R2"
+    );
 }
 
 #[test]

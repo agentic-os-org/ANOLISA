@@ -158,6 +158,7 @@ pub fn sibling_db_path(filename: &str) -> PathBuf {
 | `/api/trajectories` | GET | `project`, `source`, `agent_name`, `limit`(默认 200) | `Vec<TrajectorySummary>` |
 | `/api/trajectories/{session_id}` | GET | — | 原始 ATIF v1.7 JSON（直接回传存储的 `atif_json` 字符串，`Content-Type: application/json`，不二次解析） |
 | `/api/trajectories/filters` | GET | — | `TrajectoryFilters` |
+| `/api/trajectories/steps` | GET | `category`, `agent_name`, `project`, `source`, `session_id`, `limit`(默认 50), `context`(默认 3), `max_scan`(默认 500) | `StepScanOutcome`（见 §4.4） |
 
 错误语义：
 
@@ -168,8 +169,56 @@ pub fn sibling_db_path(filename: &str) -> PathBuf {
 
 > 注意路由注册顺序：`/api/trajectories/filters` 必须在 `/api/trajectories/{session_id}` **之前**
 > 注册，否则 `filters` 会被当成 `session_id` 捕获（actix 动态段匹配）。
+> 同理，后续新增的 `/api/trajectories/steps` 也必须注册在动态段之前。
 
-### 4.4 文档同步
+### 4.4 步骤分类查询（`/api/trajectories/steps`）
+
+轨迹列表回答「有哪些会话」，步骤查询回答「哪些步骤属于某一类」——例如只看工具调用，或只看思考过程，并顺带读到命中步骤的上下文。
+
+#### 4.4.1 分类为派生标签
+
+ATIF 的 `StepSource` 只有 `system` / `user` / `agent` 三值，**没有工具维度**：工具调用在 `step.tool_calls`，工具结果在 `step.observation`，思考过程在 `step.reasoning_content`，都是 agent 步骤内部的字段。因此分类由 `Step::categories()` 从类型化字段派生（`crates/agentsight-atif/src/lib.rs` 的 `StepCategory`），不写入 ATIF 线上格式。
+
+| 分类 | 判定条件 |
+|------|----------|
+| `user_input` | `source == User` |
+| `system` | `source == System` |
+| `agent_message` | `source == Agent` 且 `message.trim()` 非空 |
+| `thinking` | `reasoning_content` 存在且 `trim()` 非空 |
+| `tool_call` | `tool_calls` 存在且非空 |
+| `tool_result` | `observation.results` 非空 |
+
+**多标签**：一个 agent 步骤可以同时思考并调用工具，此时它同时带 `agent_message` / `thinking` / `tool_call`，按任一分类过滤都能命中。「present-but-empty」不算命中——`tool_calls: []` 或 `observation.results: []` 不传递任何信息。
+
+需注意工具结果落在 `source == user` 的回合上，因此这类步骤同时带 `user_input` 与 `tool_result`。
+
+#### 4.4.2 参数与默认值
+
+| 参数 | 默认 | 上限 | 说明 |
+|------|------|------|------|
+| `category` | — | — | 逗号分隔多值，语义为 OR；缺省表示不按分类过滤 |
+| `agent_name` / `project` / `source` / `session_id` | — | — | 轨迹级过滤，在 SQL 中先行收窄 |
+| `limit` | 50 | 500 | 命中数上限 |
+| `context` | 3 | 10 | 每条命中前后各返回几条邻居；允许为 0 |
+| `max_scan` | 500 | 2000 | 最多读取多少条轨迹，成本硬上限 |
+
+非正的 `limit` / `max_scan` 一律落回默认值：SQLite 把负 `LIMIT` 视为无限制，直接透传会退化成全表扫描。
+
+#### 4.4.3 实现方式与 `truncated` 语义
+
+步骤并非独立行——它们在 `atif_json` 大字段里，所以匹配需要反序列化候选轨迹。成本由三处收敛：SQL `WHERE` 先收窄候选、`collected_at_ns DESC` 让新轨迹优先、`max_scan` 限制读取条数。命中后取邻居是零成本的，因为文档已在内存中。
+
+`truncated: true` 表示 `hits` 只是完整匹配集的前缀，出现在两种情况：命中数达到 `limit` 提前结束，或候选轨迹超过 `max_scan` 被截断。**响应不返回匹配总数**——提前结束后任何总数都是猜测。
+
+`atif_json` 解析失败的行计入 `skipped_unparsable` 并跳过，不使整个查询失败：一份损坏文档不应遮蔽其余所有结果。
+
+错误语义与既有端点一致：非法 `category` → `400 {"error":"invalid_category", "valid_categories":[...]}`（拒绝而非静默忽略，否则会返回一批看似合法的无关步骤）；store 为 `None` → 空结果 + 200；SQL 失败 → 500。
+
+#### 4.4.4 后续升级路径
+
+若轨迹量增长导致响应变慢，可新增 `trajectory_steps` 派生索引表（采集时写入 `source` 与工具/思考布尔标记），接口契约不变，只替换 `scan_steps` 内部实现。
+
+### 4.5 文档同步
 
 - `AGENTS.md` §8 API Endpoints 表新增 3 行；
 - `AGENTS.md` §4 Module Map 的 TrajectoryCollector 行补充"可经 `/api/trajectories` 查询"。

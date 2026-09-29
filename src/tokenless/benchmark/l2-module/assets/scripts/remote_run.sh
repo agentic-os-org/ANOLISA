@@ -53,7 +53,7 @@ for arg in "$@"; do
 done
 
 echo "[run] executing l2_compare on $L2_SSH_HOST"
-sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
+SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
     "DASHSCOPE_API_KEY=$SAFE_DASHSCOPE_API_KEY \
      HEADROOM_PYTHON=$L2_REMOTE_WORK/headroom-venv/bin/python \
      RTK_BIN=$L2_REMOTE_WORK/anolisa/src/tokenless/third_party/rtk/target/release/rtk \
@@ -64,7 +64,7 @@ sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
 LOCAL_REPORTS="$SCRIPT_DIR/../../reports"
 mkdir -p "$LOCAL_REPORTS"
 echo "[run] pulling reports back to $LOCAL_REPORTS"
-sshpass -p "$L2_SSH_PASS" rsync -az -e "ssh ${SSH_OPTS[*]}" \
+SSHPASS="$L2_SSH_PASS" sshpass -e rsync -az -e "ssh ${SSH_OPTS[*]}" \
     "$L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/anolisa/src/tokenless/benchmark/l2-module/reports/" \
     "$LOCAL_REPORTS/"
 

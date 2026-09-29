@@ -236,6 +236,10 @@ asc-state-migrator 必须定义并验证：
 
 ### 5.2 Crate 工作包边界
 
+现有库 crate 统一直接放在 `v2/crates/asc-*/`，产品入口保留在
+`v2/apps/`。action、daemon、data、foundation、integrations、policy 是逻辑分类，
+不再作为目录层级；目录扁平化不改变 package 名称、依赖、feature 或工作包边界。
+
 工作包采用本文定义的目标 workspace，至少包括：
 
 - 产品入口：asc-daemon、agent-sec-cli、asc-state-migrator；
@@ -245,13 +249,23 @@ asc-state-migrator 必须定义并验证：
   其中 asc-policy-target-contracts 只定义共享 Adapter/Client trait，依赖纯数据契约
   asc-policy-types；Reconciler 与具体 PEP 实现均依赖该共享层，而不互相依赖实现。
 - data：asc-security-events、asc-observability、asc-session、asc-state、
-  asc-persistence-sqlite；
+  asc-persistence-sqlite；其中事件持久化实际落地时又拆出 asc-sqlite-kernel（与领域
+  无关的 SQLite 内核）、asc-event-log（JSONL 落盘）、asc-security-summary（摘要渲染）
+  和 asc-event-sink（双写装配与进程级单例），拆分理由与 schema/迁移契约见
+  [《V2 数据持久化层迁移设计》](V2_DATA_PERSISTENCE_MIGRATION_zh.md)；
 - integrations：AgentSight/ActPlane、模型和 credential adapter；
 - tests：asc-testkit、asc-contract-tests、asc-integration-tests。
 
 asc-foundation-types 只承载真正跨多个 bounded context 的稳定值类型和纯转换，不演变为
 common/utils。具体 capability 不依赖 daemon-core；Action Runtime 不依赖具体 capability；
 composition root 负责注入。
+
+Policy reconciliation 的具体目录与边界见
+[调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)：拟建
+`v2/crates/asc-policy-runtime/src/reconciliation/` 承载 WorkQueue、worker 和恢复调度，
+`asc-pcp` 每次重新读取并从头执行，不保留跨调用计算缓存；共享 Repository 定义局部条件写，未来
+`v2/crates/asc-persistence-sqlite/` 实现持久化。daemon 只装配并管理进程生命周期。
+这是目标实施位置，不代表相应 crate、后台接线或恢复已交付。
 
 ### 5.3 Integration slices
 
@@ -380,3 +394,17 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 | OTel 故障影响安全功能 | tracing/export 与 ActionResult、SecurityEvent sink 隔离 |
 | per-user 数据迁移丢失 owner | state migrator owner mapping、事务、重复运行和回滚测试 |
 | 只有 Markdown、没有可执行门禁 | manifest、fixture、runner、pass/fail matrix 是完成条件 |
+
+### OTel tracing 基础切片落地
+
+`asc-observability` 已提供统一 OTel Context、Agent Baggage、兼容输入及只读关联快照；
+CLI/client/daemon/PAP/compiler 已接线，产品 main 启用 runtime feature 和可选 OTLP。
+该基础设施不依赖尚未落地的 Action Runtime、安全事件 Rust sink 或本地链路重组。
+协议/部署/中间件契约同步记录 TARGET V2 条款，V1 实现继续仅作为冻结输入 oracle。
+实施、验收边界及 server-first/caller-first 回滚顺序见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。
+
+## PII Checker 第一阶段实现入口
+
+PII 检测核心、中央规则、Runtime/Finalizer、RPC/CLI 和 Hook/RPM 验收位于
+[PII 两阶段迁移设计](PII_V2_MIGRATION_zh.md)。该文显式区分当前执行服务与未来
+PIP 证据获取、PDP 决策、PEP 执行反馈的覆盖范围；不改变本文的系统级部署及 OTel 目标。

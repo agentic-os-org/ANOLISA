@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 use super::broker;
 use super::command_risk::CommandShape;
 use super::command_risk_parser::{parse_command, SegmentConnector};
+use super::readonly_interceptor::build_interceptor_step;
 use super::readonly_pipeline::{
     error, limit_clean_text, wait_child_with_deadline, ReadonlyPipelineConfig,
     ReadonlyPipelineError, ReadonlyPipelineOutput,
 };
 
-/// Execution plan for a fully-whitelisted compound command (issue #1882).
+/// Execution plan for a readonly compound or a single stderr-suppressed command.
 /// The plan carries parser tokens verbatim: steps are spawned directly
 /// with `std::process::Command`, so no shell parsing layer ever touches
 /// the assessed text and every expansion mechanism (history, glob,
@@ -34,15 +35,26 @@ pub(crate) struct ReadonlyCompoundStep {
     /// eligibility verdict and the executed binary can never diverge.
     pub(crate) program: PathBuf,
     pub(crate) argv: Vec<String>,
+    /// Connect stderr to the null device rather than capturing it.
+    pub(crate) suppress_stderr: bool,
+    /// Env assignments injected after the executor's `env_clear` and
+    /// passthrough allowlist. Populated only by interceptor wrappers,
+    /// whose spec gates which command-text keys may appear here at
+    /// plan-build time, plus trusted process-level session config the
+    /// command did not carry; values are passed verbatim and never
+    /// re-parsed.
+    pub(crate) env: Vec<(String, String)>,
 }
 
-/// Builds an execution plan when — and only when — a compound command is
-/// eligible for auto-execution. Eligibility is exactly "a plan exists",
-/// so the assessment path and the execution path can never disagree
-/// about what would run. Returns `None` for every ineligible shape, in
-/// which case the caller keeps the pre-existing AskUser flow untouched.
+/// Builds a readonly argv plan without overriding the caller's risk policy.
+/// Assessment and execution use the same builder, so the validated argv is
+/// the argv that runs. Returns `None` for shapes that still need approval.
 ///
-/// Eligibility rules (design §2):
+/// A simple command with exclusively `2>` / `2>>` null sinks uses one step
+/// with null stderr. All other simple commands keep their existing route.
+/// An interceptor-wrapped simple command (`readonly_interceptor`) is
+/// peeled for assessment and kept for execution before both routes.
+/// Compound eligibility rules (design §2):
 /// 1. shape is `AndOrList` or `Sequence` (all other shapes fail closed);
 /// 2. no null-redirections were stripped by the parser (stripping loses
 ///    the user's output-suppression intent);
@@ -73,37 +85,37 @@ pub(crate) struct ReadonlyCompoundStep {
 ///    terminal instead.
 pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyCompoundPlan> {
     let parsed = parse_command(command);
-    if !matches!(
-        parsed.shape,
-        CommandShape::AndOrList | CommandShape::Sequence
-    ) {
-        return None;
+    let suppress_stderr =
+        parsed.shape == CommandShape::Simple && parsed.null_redirections.is_stderr_only();
+    if let Some(step) = build_interceptor_step(&parsed) {
+        return Some(ReadonlyCompoundPlan { steps: vec![step] });
     }
-    if parsed.null_redirections > 0 {
-        return None;
-    }
-    if parsed.segments.len() < 2 {
-        return None;
-    }
-    if parsed.segment_connectors.len() != parsed.segments.len() - 1 {
-        // A doubled separator (`pwd && && df`) swallows an empty segment;
-        // bash would reject the line outright, so fail closed instead of
-        // executing a re-interpretation.
-        return None;
-    }
+    let segments = if suppress_stderr {
+        if parsed.requires_shell_expansion {
+            return None;
+        }
+        vec![parsed.stages]
+    } else {
+        if !matches!(
+            parsed.shape,
+            CommandShape::AndOrList | CommandShape::Sequence
+        ) || !parsed.null_redirections.is_empty()
+            || parsed.segments.len() < 2
+            || parsed.segment_connectors.len() != parsed.segments.len() - 1
+        {
+            // Missing segments/connectors would change shell short-circuit semantics.
+            return None;
+        }
+        parsed.segments
+    };
 
-    let mut steps = Vec::with_capacity(parsed.segments.len());
-    for (index, segment) in parsed.segments.iter().enumerate() {
+    let mut steps = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
         if segment.len() != 1 {
             return None;
         }
         let argv = &segment[0];
-        if argv.is_empty()
-            || argv.iter().any(|token| token.contains(['$', '`']))
-            || CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
-            || segment_reads_stdin(argv)
-            || !broker::configured_readonly_command(argv)
-        {
+        if !eligible_readonly_argv(argv, suppress_stderr) {
             return None;
         }
         let program = resolve_trusted_executable(&argv[0])?;
@@ -115,9 +127,28 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
             },
             program,
             argv: argv.clone(),
+            suppress_stderr,
+            env: Vec::new(),
         });
     }
     Some(ReadonlyCompoundPlan { steps })
+}
+
+/// Shared payload predicate for every plan step: readonly allowlist,
+/// no expansion markers, no context-observing or stdin-reading
+/// commands. The ponytail escape/comment rejection applies only on the
+/// stderr-suppressed path, where ambiguous tokens stay manual until
+/// the parser models them.
+pub(super) fn eligible_readonly_argv(argv: &[String], suppress_stderr: bool) -> bool {
+    !argv.is_empty()
+        && !argv.iter().any(|token| token.contains(['$', '`']))
+        && !(suppress_stderr
+            && argv
+                .iter()
+                .any(|token| token.contains(['\\', '\n', '\r', '#'])))
+        && !CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
+        && !segment_reads_stdin(argv)
+        && broker::configured_readonly_command(argv)
 }
 
 /// Runs a compound plan with bash list semantics: `&&` runs the next
@@ -165,7 +196,7 @@ pub(crate) fn run_readonly_compound(
 /// `PATH` closes the shadowing hole where a user-writable directory
 /// earlier in `PATH` provides a fake `pwd`/`cat` that would run without
 /// approval under an allowlisted name.
-const TRUSTED_EXECUTABLE_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+pub(super) const TRUSTED_EXECUTABLE_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /// Environment keys passed through from the cosh process to a compound
 /// step. Everything else is cleared: the step must not observe the
@@ -270,11 +301,21 @@ fn run_compound_steps(
             .env("PATH", TRUSTED_EXECUTABLE_DIRS.join(":"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(if step.suppress_stderr {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            });
         for key in PASSTHROUGH_ENV_KEYS {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        // Wrapper-declared assignments (e.g. TOKENLESS_* for rtk):
+        // keys were gated by the interceptor spec at plan-build time,
+        // values are data passed verbatim.
+        for (key, value) in &step.env {
+            command.env(key, value);
         }
         // Each step leads its own process group so a deadline expiry
         // can reap the whole descendant tree, not just the direct
@@ -579,4 +620,38 @@ fn append_bounded_text(
     exhausted: &mut bool,
 ) {
     append_step_output(aggregate, text.as_bytes(), false, config, exhausted);
+}
+
+/// Test-only surface for the lib-only regression module
+/// (`tools/readonly_interceptor_tests.rs`, declared from `lib.rs`):
+/// keeps `SegmentConnector` and `TRUSTED_EXECUTABLE_DIRS` private to
+/// the `tools` tree while the crate-root tests build steps through
+/// these wrappers. Absent from production builds.
+#[cfg(test)]
+#[allow(dead_code)] // compiled but unused in the bin test target
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    use super::{ReadonlyCompoundStep, SegmentConnector, TRUSTED_EXECUTABLE_DIRS};
+
+    pub(crate) fn trusted_executable_dirs() -> &'static [&'static str] {
+        TRUSTED_EXECUTABLE_DIRS
+    }
+
+    /// Single-step constructor with `;` connector and live stderr —
+    /// the shape the executor env-injection test needs, without
+    /// naming the private connector type.
+    pub(crate) fn seq_step(
+        program: PathBuf,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> ReadonlyCompoundStep {
+        ReadonlyCompoundStep {
+            connector: SegmentConnector::Seq,
+            program,
+            argv,
+            suppress_stderr: false,
+            env,
+        }
+    }
 }

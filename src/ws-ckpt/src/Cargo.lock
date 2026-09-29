@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "ws-ckpt-cli"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "ws-ckpt-common"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "ws-ckpt-daemon"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",

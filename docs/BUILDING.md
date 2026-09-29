@@ -28,14 +28,14 @@ The `src/` tree currently contains these twelve components:
 
 | Component | Directory | Platform and role |
 |-----------|-----------|-------------------|
-| copilot-shell (`cosh`) | [`src/copilot-shell`](../src/copilot-shell/README.md) | TypeScript terminal assistant; Linux, macOS, and Windows |
+| copilot-shell (`cosh`) | [`deprecated/copilot-shell`](../deprecated/copilot-shell/README.md) | TypeScript terminal assistant; Linux, macOS, and Windows |
 | cosh-ng | [`src/cosh-ng`](../src/cosh-ng/README.md) | Rust Agent OS CLI and shell; full Linux build, limited macOS source build |
 | agent-sec-core | [`src/agent-sec-core`](../src/agent-sec-core/README.md) | Rust sandbox plus Python security CLI; Linux |
 | agentsight | [`src/agentsight`](../src/agentsight/README.md) | Rust/eBPF observability; full tracing on Linux, `trace` and `serve` on macOS |
 | tokenless | [`src/tokenless`](../src/tokenless/README.md) | Rust token and command-output optimization; Linux source build, with cross-compiled npm artifacts for macOS |
 | agent-memory (`memory`) | [`src/agent-memory`](../src/agent-memory/README.md) | Rust MCP memory server; Linux |
 | os-skills (`skills`) | [`src/os-skills`](../src/os-skills/README.md) | Static skill definitions and scripts; all platforms supported by each skill |
-| anolisa | [`src/anolisa`](../src/anolisa/README.md) | Rust component lifecycle CLI; Linux and macOS arm64 |
+| anolisa | [`distribution/anolisa`](../distribution/anolisa/README.md) | Rust component lifecycle CLI; Linux and macOS arm64 |
 | SkillFS (`skillfs`) | [`src/skillfs`](../src/skillfs/README.md) | Rust FUSE skill filesystem; Linux |
 | ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README.md) | Rust workspace checkpoint daemon and TypeScript adapters; Linux system service |
 | ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel-tuning engine; Linux |
@@ -53,9 +53,9 @@ component.
 
 | Need | Source of truth |
 |------|-----------------|
-| Node.js | `src/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
+| Node.js | `deprecated/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
 | Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
-| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `src/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/blaze/rust-toolchain.toml` pins `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `distribution/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/blaze/rust-toolchain.toml` pins `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
 | agent-sec-core | Linux sandbox runtime and integration checks may need bubblewrap, GnuPG, and `jq`. |
 | agentsight | Linux eBPF builds need clang, LLVM, libbpf and ELF development headers, kernel headers, and a BTF-enabled kernel. `make build-mac` builds the macOS local viewer without eBPF. |
@@ -154,7 +154,7 @@ guide before changing component internals.
 
 | Component | Build | Test and quality gate |
 |-----------|-------|-----------------------|
-| [copilot-shell](../src/copilot-shell/README.md) | `cd src/copilot-shell && make deps && make build` | `cd src/copilot-shell && make lint && make test` |
+| [copilot-shell](../deprecated/copilot-shell/README.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README.md) | `cd src/os-skills && make build` | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
 | [agent-sec-core](../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
 | [agentsight](../src/agentsight/README.md) | Linux: `cd src/agentsight && make build-all`; macOS local viewer: `cd src/agentsight && make build-mac` | Linux: `cd src/agentsight && make lint && make test`; macOS: run the tests relevant to the local viewer and trajectory collector. |
@@ -162,7 +162,7 @@ guide before changing component internals.
 | [agent-memory](../src/agent-memory/README.md) | `cd src/agent-memory && make build` | `cd src/agent-memory && make fmt-check && make lint && make test`; `cd src/agent-memory && make smoke` covers the MCP stdio path. Linux only. |
 | [ws-ckpt](../src/ws-ckpt/README.md) | `cd src/ws-ckpt && make build` | `cd src/ws-ckpt && make test`; install and service checks require Linux system mode. |
 | [cosh-ng](../src/cosh-ng/README.md) | `cd src/cosh-ng && cargo build --workspace` | `cd src/cosh-ng && cargo fmt --all -- --check`, then select the closest targeted test from its [contribution guide](../src/cosh-ng/CONTRIBUTING.md). Full local gates are reserved for explicitly requested large or cross-cutting validation. |
-| [anolisa](../src/anolisa/README.md) | `cd src/anolisa && cargo build --release --locked` | `cd src/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
+| [anolisa](../distribution/anolisa/README.md) | `cd distribution/anolisa && cargo build --release --locked` | `cd distribution/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
 | [SkillFS](../src/skillfs/README.md) | `cd src/skillfs && cargo build --workspace --release` | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; on Linux, `cd src/skillfs && scripts/test.sh` adds the FUSE smoke test. |
 | [ktuner](../src/ktuner/README.md) | `cd src/ktuner && cargo build --release` | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
 | [blaze](../src/blaze/README.md) | `cd src/blaze && cargo build --workspace --release` | `cd src/blaze && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |

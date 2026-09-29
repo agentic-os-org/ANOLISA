@@ -3,14 +3,10 @@ use crate::genai::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
 };
 
-/// Integration test: store_event (post-fix, no per-insert VACUUM) still
-/// persists data correctly and the row is immediately readable.
-/// Reverting the VACUUM removal does NOT make this test fail (it would just
-/// be slower), but this proves the write path is functional — the
-/// discriminating signal for the per-insert VACUUM removal is the latency
-/// benchmark, not a correctness test.
+/// An expired event remains immediately after insertion because normal writes
+/// never run lifecycle maintenance synchronously.
 #[test]
-fn store_event_persists_without_per_insert_vacuum() {
+fn store_event_does_not_run_synchronous_maintenance() {
     let path = std::env::temp_dir().join(format!(
         "test_genai_store_{}.db",
         std::time::SystemTime::now()
@@ -18,7 +14,9 @@ fn store_event_persists_without_per_insert_vacuum() {
             .unwrap()
             .as_nanos()
     ));
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
 
     let call = LLMCall::new(
         "test-call-001".to_string(),
@@ -68,8 +66,7 @@ fn store_event_persists_without_per_insert_vacuum() {
     let _ = std::fs::remove_file(format!("{}-shm", path.display()));
 }
 
-/// Verify busy_timeout is set on connections (create_connection is used by
-/// GenAISqliteStore::new_with_path internally).
+/// Verify the shared lifecycle connection applies the configured busy timeout.
 #[test]
 fn connection_has_busy_timeout() {
     let path = std::env::temp_dir().join(format!(
@@ -79,7 +76,9 @@ fn connection_has_busy_timeout() {
             .unwrap()
             .as_nanos()
     ));
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     let conn = store.conn.lock().unwrap();
     // PRAGMA busy_timeout returns the current value in ms
     let timeout: i64 = conn
@@ -207,7 +206,9 @@ fn cleanup_db(path: &std::path::Path) {
 fn create_populated_store(suffix: &str) -> (GenAISqliteStore, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("test_genai_{suffix}_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
 
     let b = BASE_NS;
     let s = STEP_NS;
@@ -452,7 +453,9 @@ fn test_token_aggregations_apply_provider_cache_rule() {
     let path =
         std::env::temp_dir().join(format!("test_genai_cache_rule_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
 
     let sql = "INSERT INTO genai_events (\
                call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
@@ -583,7 +586,9 @@ fn test_token_aggregations_apply_provider_cache_rule() {
 fn test_get_agent_token_summary_empty() {
     let path = std::env::temp_dir().join(format!("test_genai_ats_empty_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     assert!(store.get_agent_token_summary().unwrap().is_empty());
     cleanup_db(&path);
 }
@@ -757,6 +762,16 @@ fn test_get_trace_events() {
     cleanup_db(&path);
 }
 
+/// trace_id (per-call response id) and conversation_id are distinct
+/// namespaces: the trace-detail query must never match a conversation id.
+#[test]
+fn test_get_trace_events_never_matches_conversation_id() {
+    let (store, path) = create_populated_store("trace_ns_separation");
+    assert!(!store.get_trace_events("trace-1").unwrap().is_empty());
+    assert!(store.get_trace_events("conv-1").unwrap().is_empty());
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_events_by_conversation() {
     let (store, path) = create_populated_store("conv_events");
@@ -802,7 +817,9 @@ fn test_get_events_in_time_range_with_agent_filter() {
 fn test_insert_pending() {
     let path = std::env::temp_dir().join(format!("test_genai_ins_pend_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     let info = PendingCallInfo {
         call_id: "p-001".to_string(),
         trace_id: Some("t-p".to_string()),
@@ -843,7 +860,9 @@ fn test_insert_pending_records_idle_origin_and_match_key() {
     let path =
         std::env::temp_dir().join(format!("test_genai_idle_origin_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     let info = PendingCallInfo {
         call_id: "idle-temp".to_string(),
         trace_id: None,
@@ -886,7 +905,9 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     let path =
         std::env::temp_dir().join(format!("test_genai_idle_promote_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     let info = PendingCallInfo {
         call_id: "idle-temp".to_string(),
         trace_id: None,
@@ -1013,7 +1034,9 @@ fn test_complete_pending_backfills_is_sse_from_observed_metadata() {
     let path =
         std::env::temp_dir().join(format!("test_genai_sse_backfill_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     // Simulate a native DashScope streaming request: body has no "stream"
     // field so the request-side capture writes is_sse=false.
     let info = PendingCallInfo {
@@ -1178,7 +1201,9 @@ fn test_crash_sweep_ignores_idle_drain_pending() {
     let path =
         std::env::temp_dir().join(format!("test_genai_idle_sweep_{}.db", std::process::id()));
     cleanup_db(&path);
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
 
     for (call_id, origin) in [
         ("dead-drain", PendingOrigin::DeadPidDrain),
@@ -1263,15 +1288,14 @@ fn test_enrich_pending_from_sse() {
 // ─── schema.rs tests ──────────────────────────────────────────────────────────
 
 #[test]
-fn test_check_and_prune_if_needed_below_threshold() {
+fn test_maintain_applies_age_retention_below_size_threshold() {
     let (store, path) = create_populated_store("prune_check");
-    // Tiny test DB is well below the 200 MB default threshold
-    store.check_and_prune_if_needed().unwrap();
+    store.maintain().unwrap();
     let conn = store.conn.lock().unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 6); // no pruning occurred
+    assert_eq!(count, 0);
     drop(conn);
     cleanup_db(&path);
 }
@@ -1306,7 +1330,9 @@ fn make_store_with_pending(records: &[(&str, &str, &str, &str, i64)]) -> GenAISq
             .unwrap()
             .as_nanos()
     ));
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     for (call_id, sid, cid, kind, ts) in records {
         let info = PendingCallInfo {
             call_id: call_id.to_string(),
@@ -1642,16 +1668,16 @@ fn test_update_fallback_session_id_keeps_non_hex_32_chars() {
 }
 
 // ---------------------------------------------------------------------------
-// Size-based pruning (check_and_prune_if_needed / startup cleanup)
+// Background maintenance and emergency size pruning
 // ---------------------------------------------------------------------------
 
-/// Cap the genai database at 1MB for size-limit tests.
-///
-/// All tests set the same value, so parallel execution never observes
-/// conflicting limits, and other tests' databases stay far below the
-/// resulting 0.9MB prune threshold.
-fn set_test_db_limit() {
-    unsafe { std::env::set_var("AGENTSIGHT_GENAI_DB_MAX_SIZE_MB", "1") };
+/// Cap the GenAI database at 1 MiB for size-limit tests.
+fn size_test_policy() -> crate::config::PeriodicStoragePolicy {
+    crate::config::PeriodicStoragePolicy {
+        retention_days: 0,
+        max_db_size_mb: 1,
+        check_interval_secs: 1,
+    }
 }
 
 fn unique_size_test_db(label: &str) -> std::path::PathBuf {
@@ -1699,20 +1725,19 @@ fn row_count(store: &GenAISqliteStore) -> i64 {
 /// iteration), 2-5x (25%), and 5x+ (50%). Each scenario must converge
 /// below the prune threshold within the iteration bound.
 #[test]
-fn check_and_prune_converges_for_all_overshoot_levels() {
-    set_test_db_limit();
+fn maintenance_converges_for_all_overshoot_levels() {
     // (label, rows x 10KB) => ~1.5MB / ~3MB / ~6MB against a 1MB cap.
     for (label, rows) in [("low", 150), ("mid", 300), ("high", 600)] {
         let path = unique_size_test_db(label);
-        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
         grow_db(&store, rows, 10 * 1024);
-        let threshold = super::schema::get_prune_threshold();
+        let threshold = 1024 * 1024 * 9 / 10;
         assert!(
             store.get_total_db_size() > threshold,
             "{label}: setup must exceed the prune threshold"
         );
 
-        store.check_and_prune_if_needed().unwrap();
+        store.maintain().unwrap();
 
         // Convergence is on logical size: the physical file keeps its peak
         // size (freed pages stay on the freelist, #2888).
@@ -1732,13 +1757,98 @@ fn check_and_prune_converges_for_all_overshoot_levels() {
 
 /// A no-op when the database is already within the threshold.
 #[test]
-fn check_and_prune_noop_below_threshold() {
-    set_test_db_limit();
+fn maintenance_prunes_dominant_evaluations_without_deleting_genai_events() {
+    let path = unique_size_test_db("dominant-evaluations");
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE evaluation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                result_json TEXT
+            );",
+        )
+        .unwrap();
+        for index in 0..10 {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', ?1, 'small')",
+                [index],
+            )
+            .unwrap();
+        }
+        let payload = "x".repeat(32 * 1024);
+        for _ in 0..100 {
+            conn.execute(
+                "INSERT INTO evaluation_runs (result_json) VALUES (?1)",
+                [&payload],
+            )
+            .unwrap();
+        }
+    }
+    store.wal_checkpoint().unwrap();
+
+    store.maintain().unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))
+        .unwrap();
+    let evaluations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 10);
+    assert!(evaluations < 100);
+    drop(conn);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_never_size_prunes_pending_calls() {
+    let path = unique_size_test_db("pending-protected");
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    let payload = "x".repeat(32 * 1024);
+    {
+        let conn = store.conn.lock().unwrap();
+        for index in 0..50 {
+            conn.execute(
+                "INSERT INTO genai_events
+                    (event_type, status, call_id, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', 'pending', ?1, ?2, ?3)",
+                rusqlite::params![format!("pending-{index}"), index, payload],
+            )
+            .unwrap();
+        }
+    }
+    store.wal_checkpoint().unwrap();
+
+    store.maintain().unwrap();
+
+    let pending: i64 = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM genai_events WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 50);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+/// A no-op when the database is already within the threshold.
+#[test]
+fn maintenance_noop_below_threshold() {
     let path = unique_size_test_db("noop");
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
     grow_db(&store, 10, 64);
 
-    store.check_and_prune_if_needed().unwrap();
+    store.maintain().unwrap();
 
     assert_eq!(
         row_count(&store),
@@ -1749,16 +1859,113 @@ fn check_and_prune_noop_below_threshold() {
     cleanup_size_test_db(&path);
 }
 
+#[test]
+fn maintenance_removes_expired_evaluation_rows() {
+    let path = unique_size_test_db("evaluation-retention");
+    let store = GenAISqliteStore::new_with_path(
+        &path,
+        crate::config::PeriodicStoragePolicy {
+            retention_days: 1,
+            max_db_size_mb: 0,
+            check_interval_secs: 1,
+        },
+    )
+    .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE evaluation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+             );
+             INSERT INTO evaluation_runs(created_at) VALUES ('2000-01-01 00:00:00');",
+        )
+        .unwrap();
+    }
+
+    store.maintain().unwrap();
+
+    let count: i64 = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
 /// When another connection holds a read snapshot, the truncating WAL
 /// checkpoint returns busy and the prune loop must stop instead of deleting
 /// round after round against a size that cannot converge (only the WAL keeps
 /// growing) — under the pre-fix behavior the loop deleted until the table was
 /// empty.
 #[test]
-fn check_and_prune_stops_when_wal_checkpoint_busy() {
-    set_test_db_limit();
+fn age_retention_stops_before_size_pruning_when_checkpoint_is_busy() {
+    let path = unique_size_test_db("age-checkpoint-busy");
+    let store = GenAISqliteStore::new_with_path(
+        &path,
+        crate::config::PeriodicStoragePolicy {
+            retention_days: 1,
+            max_db_size_mb: 1,
+            check_interval_secs: 1,
+        },
+    )
+    .unwrap();
+    let payload = "x".repeat(20 * 1024);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    {
+        let conn = store.conn.lock().unwrap();
+        for index in 0..100 {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, start_timestamp_ns, call_id, event_json)
+                 VALUES ('llm_call', 1, ?1, ?2)",
+                rusqlite::params![format!("expired-{index}"), payload],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, call_id, event_json)
+             VALUES ('llm_call', ?1, 'retained', ?2)",
+            rusqlite::params![now_ns, payload],
+        )
+        .unwrap();
+    }
+
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM genai_events;")
+        .unwrap();
+
+    store.maintain().unwrap();
+
+    let retained: i64 = store
+        .conn
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .query_row(
+            "SELECT COUNT(*) FROM genai_events WHERE call_id = 'retained'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained, 1,
+        "size pruning must wait for a successful checkpoint"
+    );
+    drop(reader);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_stops_when_wal_checkpoint_busy() {
     let path = unique_size_test_db("busy");
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
     grow_db(&store, 300, 10 * 1024);
     store.wal_checkpoint().unwrap();
 
@@ -1768,38 +1975,42 @@ fn check_and_prune_stops_when_wal_checkpoint_busy() {
     reader
         .execute_batch("BEGIN; SELECT COUNT(*) FROM genai_events;")
         .unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json)
+             VALUES ('llm_call', 301, ?1)",
+            ["new-wal-frame"],
+        )
+        .unwrap();
 
-    store.check_and_prune_if_needed().unwrap();
+    store.maintain().unwrap();
 
     let rows = row_count(&store);
-    assert!(
-        rows > 0,
-        "prune must stop once the WAL cannot be truncated, not delete everything \
-         (remaining: {rows})"
+    assert_eq!(
+        rows, 301,
+        "a busy pre-maintenance checkpoint must prevent the first deletion"
     );
     drop(reader);
     drop(store);
     cleanup_size_test_db(&path);
 }
 
-/// Reopening an oversized database triggers the startup cleanup path in
-/// `new_with_path_and_batch`.
 #[test]
-fn startup_cleanup_prunes_oversized_db() {
-    set_test_db_limit();
+fn reopening_does_not_run_synchronous_maintenance() {
     let path = unique_size_test_db("startup");
     {
-        let store = GenAISqliteStore::new_with_path(&path).unwrap();
-        grow_db(&store, 300, 10 * 1024); // ~3MB > 1MB cap
+        let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+        grow_db(&store, 300, 10 * 1024);
     }
 
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    assert_eq!(row_count(&store), 300);
 
-    let threshold = super::schema::get_prune_threshold();
-    assert!(
-        store.effective_db_size() < threshold,
-        "startup cleanup must bring the logical size below the threshold"
-    );
+    store.maintain().unwrap();
+    assert!(row_count(&store) < 300);
     drop(store);
     cleanup_size_test_db(&path);
 }
@@ -1807,7 +2018,9 @@ fn startup_cleanup_prunes_oversized_db() {
 #[test]
 fn agent_activity_summaries_group_names_and_aggregate_calls() {
     let path = unique_size_test_db("agent_activity");
-    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
     {
         let conn = store.conn.lock().unwrap();
         // `provider` is set explicitly because the aggregated total depends on

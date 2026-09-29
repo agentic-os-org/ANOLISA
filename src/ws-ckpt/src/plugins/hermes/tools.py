@@ -20,7 +20,12 @@ import subprocess
 from typing import Any, Dict, Optional, Tuple
 
 from .config import load_config
-from .checkpoint_manager import cwd_inside_workspace, cwd_inside_workspace_reason, get_manager
+from .checkpoint_manager import (
+    DEFAULT_TIMEOUT_S,
+    cwd_inside_workspace,
+    cwd_inside_workspace_reason,
+    get_manager,
+)
 
 
 # Cached once per process: ws-ckpt is a system-installed binary, so a path
@@ -60,12 +65,12 @@ def _run_ws_ckpt_cmd(cmd: list) -> Tuple[bool, str]:
     """Execute a ws-ckpt CLI command and return (success, output)."""
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30,
+            cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT_S,
             env={**os.environ, "WS_CKPT_AGENT_NAME": "hermes"},
         )
         return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
     except subprocess.TimeoutExpired:
-        return False, "Command timed out (30s)"
+        return False, f"Command timed out ({DEFAULT_TIMEOUT_S}s)"
     except FileNotFoundError:
         return False, "ws-ckpt not found. Is it installed and in PATH?"
     except Exception as e:

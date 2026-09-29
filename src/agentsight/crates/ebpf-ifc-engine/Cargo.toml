@@ -16,3 +16,4 @@ path = "src/lib.rs"
 aya = "0.13"
 libc = "0.2"
 libbpf-sys = "1.7"
+log = { workspace = true }

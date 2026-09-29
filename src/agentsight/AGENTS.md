@@ -13,6 +13,7 @@
 
 ### 架构
 - 禁止高层模块直接 import 低层模块（如 `server/` → `probes/`），遵循 [ARCHITECTURE.md](docs/ARCHITECTURE.md) 中 L0–L8 层级约束
+- 生产代码必须通过 `DatabaseManager` 打开 typed Store；CI 禁止直接 `Connection::open*`。仅 lifecycle crate 的统一连接入口、`private_sqlite` 的安全文件语义和外部 Tokenless 只读入口例外
 - 优先扩展现有模块，而非创建新文件
 - 单模块目标 < 500 行（不含测试）；超过 2,000 行的文件在增加代码前必须先有拆分计划
 
@@ -110,7 +111,8 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Aggregator** | `src/aggregator/` | 请求-响应关联 + SSE continuation buffer | `Aggregator`, `AggregatedResult` |
 | **Analyzer** | `src/analyzer/` | Token/审计/消息分析 | `Analyzer`, `AnalysisResult` |
 | **GenAI** | `src/genai/` | 语义事件构建+导出 | `GenAIBuilder`, `GenAISemanticEvent`, `GenAIExporter` |
-| **Storage** | `src/storage/` | SQLite 持久化 | `Storage`, `SqliteStore`, `AuditStore`, `TokenStore` |
+| **Storage** | `src/storage/` | 业务 Store、schema 与安全删除规则 | `Storage`, `SqliteStore`, `AuditStore`, `TokenStore` |
+| **DatabaseManager** | `src/database.rs` | 生产 typed Store 组合边界、物理库清单与单 worker 所有权 | `DatabaseManager`, `DatabaseId`, `DatabaseSpec` |
 | **Discovery** | `src/discovery/` | Agent 进程发现 | `AgentScanner`, `AgentMatcher`, `known_agents` |
 | **Health** | `src/health/` | Agent 健康检查 | `HealthChecker`, `HealthStore` |
 | **Tokenizer** | `src/tokenizer/` | LLM Token 计数 | `LlmTokenizer`, `MultiModelTokenizer` |
@@ -121,6 +123,7 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
+| **SQLiteLifecycle** | `crates/agentsight-sqlite-lifecycle/` | 无业务模型依赖的 leaf crate：连接、容量计量、checkpoint、跨进程锁与单线程维护调度 | `ConnectionOptions`, `SizeSnapshot`, `SizePolicy`, `MaintenanceWorker` |
 | **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
 | **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
@@ -228,9 +231,9 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus token 指标 |
 | `/api/sessions` | GET | 会话列表 |
-| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM） |
+| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM）；排除有效标签为 `useless` 的会话，标签库不可用时退化为不过滤 |
 | `/api/sessions/{id}/traces` | GET | 会话下的 trace |
-| `/api/traces/{id}` | GET | trace 详情 |
+| `/api/traces/{id}` | GET | 单次调用详情（按 per-call response_id 查询，非 conversation_id） |
 | `/api/conversations/{id}` | GET | conversation 事件详情 |
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/timeseries` | GET | 时序 Token 统计 |
@@ -259,9 +262,20 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
-| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/reuse/triage` | POST | 用确定性规则为已采集轨迹生成自动标签（可选 `session_id`, `limit`） |
+| `/api/reuse/sessions` | GET | 列出有效标签已解析的轨迹标签（支持 `label`, `confirm_state`, `changed_since_decision`, `limit`） |
+| `/api/reuse/sessions/{session_id}/label` | POST | 人工确认或覆盖单条轨迹标签；只有人工或 LLM 可以标为 `bad` |
+| `/api/reuse/sessions/labels:batch-confirm` | POST | 批量确认自动标签 |
+| `/api/reuse/label-stats` | GET | 按规则统计人工接受与覆盖情况 |
+| `/api/reuse/judge` | POST | 用已配置 LLM 判定规则无法归类的轨迹；仅在 `features.reuse_llm_judge=true` 时可用，调用会产生费用 |
+| `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
+| `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
+| `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`, `label`, `exclude_label`, `human_backed`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
-| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
+| `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |
+| `/api/storage/status` | GET | schema v2：各 SQLite store（含 reuse/causal 与外部 tokenless）的策略、物理/逻辑占用、full/partial/external 覆盖和 worker 调度/heartbeat/尝试结果，不返回文件路径 |
 
 ## 9. Frontend
 
@@ -281,7 +295,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 `agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
 
-- **版本缺失或过旧**（如从 0.6 升级到 0.7）：先把旧文件复制为 `config.json.bak.<unix秒>`，再写入浅合并结果——以内嵌默认配置为底，逐个顶层键叠加用户已设置的内容（`schema_version` 除外），最后提升版本号（`config.rs` 的 `ensure_default_agents_config`，见 #1496）
+- **版本缺失或过旧**：先把旧文件复制为 `config.json.bak.<unix秒>`，再用当前内嵌默认配置整体替换；旧字段不迁移
 - **版本一致或更新**：保留用户自定义配置不动
 - **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
 
@@ -289,6 +303,29 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 1. 是否新增/删除/重命名了字段？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
 2. 是否改变了字段语义（如默认值翻转）？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
 3. 是否纯新增可选字段（旧配置完全兼容）？→ 无需 bump
+
+当前配置为 schema v4。所有 `storage` 策略统一使用 `retention_days`、`max_db_size_mb`、
+`check_interval_secs`；旧 `check_interval_inserts` 不受支持。旧 schema 按上述机制备份后整体替换。三个值中
+任一为 `0` 都关闭对应的按时间、按容量或定时治理。默认策略如下：
+
+| Store | retention_days | max_db_size_mb | check_interval_secs |
+|-------|---------------:|---------------:|--------------------:|
+| primary | 30 | 500 | 60 |
+| genai（含同一物理库中的 evaluation） | 30 | 200 | 60 |
+| interruptions | 30 | 100 | 60 |
+| trajectories | 30 | 500 | 300 |
+| optimization | 30 | 200 | 300 |
+| security_audit | 30 | 200 | 3600 |
+| reuse | 30 | 200 | 300 |
+| causal | 30 | 200 | 300 |
+| enforcement | 30 | 100 | 60 |
+
+每个长期运行的 trace/serve/local 进程最多一个 `sqlite-maintenance` 线程，顺序调度该进程的物理库；不新增
+维护进程。trace 与 serve 通过 `<db>.maintenance.lock` 跨进程协调，拿锁后重新测量。维护顺序固定为
+age retention → checkpoint gate → physical trigger → logical 90% target；不自动 `VACUUM`，释放页由 freelist
+复用。业务 Store 保留 schema 与安全删除规则：reuse 保护人工/确认标签，causal 可淘汰最旧缓存并可能导致
+付费重算，enforcement 只删除 violations 与终态 transition，并保护 bindings、pending/indeterminate 与
+credential 状态；外部 tokenless 库只读且由 tokenless 管理。
 
 ### 功能开关（`features`）
 
@@ -305,6 +342,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
 | 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
+| 轨迹 LLM 判定 | `features.reuse_llm_judge` | `false` | 允许 `POST /api/reuse/judge` 调用已配置 LLM 判定规则无法归类的轨迹；每次调用会产生费用 |
 
 ### 运行时资源上限（`runtime_limits`）
 

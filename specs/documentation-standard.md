@@ -139,6 +139,11 @@ Design documents live **only** in the component's own directory:
 src/<component>/docs/design/    ← component-specific design docs
 ```
 
+For distribution tooling or retained deprecated components, substitute the source
+root registered in `.github/components.json`, such as
+`distribution/anolisa/docs/design/`. Component-local documentation stays with its
+component when that directory moves.
+
 Design docs are **never** placed at:
 - Repository root
 - `docs/` top level
@@ -235,7 +240,7 @@ AgentSight captures kernel-level events without modifying agent code...
 
 **Content boundaries:**
 
-- Only document components whose source code exists in `src/`. No code = no docs.
+- Only document components whose source code exists at their registered repository path (`src/`, `distribution/`, or `deprecated/`). No code = no docs.
 - Cloud-specific configuration (SLS endpoints, AK/SK auth, security groups) belongs to cloud vendor docs
 - Never document planned-but-unimplemented features as available
 

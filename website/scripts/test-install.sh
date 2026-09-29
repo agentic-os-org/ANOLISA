@@ -11,7 +11,7 @@ OLD_CLI_VERSION="0.0.0-old"
 REAL_TAR="$(command -v tar)"
 TOOL_DIR="${TEST_ROOT}/tools"
 REQUIRED_TOOLS="
-  awk bash cat chmod dirname env grep gzip install ln mkdir mv readlink rm sed
+  awk bash cat chmod cp dirname env grep gzip install ln mkdir mv readlink rm sed
   sh tar tr
 "
 SYSTEM_PATH="$TOOL_DIR"
@@ -48,21 +48,33 @@ cat >"${FAKE_BIN}/curl" <<'EOF'
 set -euo pipefail
 
 output=""
+url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o)
       output="$2"
       shift 2
       ;;
+    https://*)
+      url="$1"
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
+printf '%s\n' "$url" >>"${ANOLISA_TEST_SHA_FILE}.urls"
 
 if [ -z "$output" ]; then
   test -s "$ANOLISA_TEST_SHA_FILE"
   printf '%s  artifact\n' "$(cat "$ANOLISA_TEST_SHA_FILE")"
+  exit 0
+fi
+
+if [ "$url" = "https://fixture.invalid/intel-cli.tar.gz" ]; then
+  [ "${ANOLISA_TEST_DOWNLOAD_FAIL:-0}" != 1 ] || exit 22
+  cp "${ANOLISA_TEST_SHA_FILE}.tar.gz" "$output"
   exit 0
 fi
 
@@ -85,13 +97,29 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 "$output" | awk '{print $1}' >"$ANOLISA_TEST_SHA_FILE"
 fi
+if [ "${output##*/}" = release-manifest.toml ]; then
+  cp "$output" "${ANOLISA_TEST_SHA_FILE}.tar.gz"
+  digest="$(cat "$ANOLISA_TEST_SHA_FILE")"
+  if [ "${ANOLISA_TEST_BAD_CHECKSUM:-0}" = 1 ]; then
+    digest="$(printf '%064d' 0)"
+  fi
+  cat >"$output" <<MANIFEST
+schema_version = 1
+version = "$ANOLISA_TEST_VERSION"
+[[artifacts]]
+os = "macos"
+arch = "${ANOLISA_TEST_MANIFEST_ARCH:-x86_64}"
+url = "https://fixture.invalid/intel-cli.tar.gz"
+sha256 = "$digest"
+MANIFEST
+fi
 EOF
 
 cat >"${FAKE_BIN}/uname" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
-  -s) echo Darwin ;;
-  -m) echo arm64 ;;
+  -s) echo "${ANOLISA_TEST_OS:-Darwin}" ;;
+  -m) echo "${ANOLISA_TEST_ARCH:-arm64}" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -178,7 +206,7 @@ run_install_case() {
     ANOLISA_TEST_SHA_FILE="${case_root}/artifact.sha256" \
     ANOLISA_TEST_TAR="$REAL_TAR" \
     ANOLISA_TEST_VERSION="$TEST_CLI_VERSION" \
-    ANOLISA_VERSION="$TEST_CLI_VERSION" \
+    ANOLISA_VERSION="${ANOLISA_TEST_REQUEST_VERSION:-$TEST_CLI_VERSION}" \
     bash -s -- "$@" <"$INSTALLER" >"${case_root}/stdout" \
       2>"${case_root}/stderr" || LAST_STATUS=$?
 }
@@ -213,6 +241,8 @@ run_case() {
 }
 
 run_case cli-only ""
+assert_contains "${TEST_ROOT}/cli-only/artifact.sha256.urls" \
+  "/artifacts/macos/aarch64/anolisa-cli-${TEST_CLI_VERSION}-aarch64-apple-darwin.tar.gz" cli-only
 run_case help "" --help
 grep -Fq -- "--component NAME" "${TEST_ROOT}/help/stdout"
 grep -Fq -- "--backend BACKEND" "${TEST_ROOT}/help/stdout"
@@ -235,6 +265,54 @@ run_case upgrade-component \
 run_case uninstall-component \
   "--install-mode system uninstall cosh-ng" \
   --uninstall --component cosh-ng --install-mode system
+
+ANOLISA_TEST_ARCH=x86_64 run_case intel-pinned \
+  "--install-mode user install cosh-ng --backend raw" \
+  --cosh-ng --backend raw --install-mode user
+assert_contains "${TEST_ROOT}/intel-pinned/artifact.sha256.urls" \
+  "/artifacts/macos/x86_64/anolisa-cli-${TEST_CLI_VERSION}-x86_64-apple-darwin.tar.gz" intel-pinned
+ANOLISA_TEST_ARCH=x86_64 ANOLISA_TEST_REQUEST_VERSION=stable \
+  run_case intel-stable "--install-mode user install cosh-ng --backend raw" \
+  --cosh-ng --backend raw --install-mode user
+assert_contains "${TEST_ROOT}/intel-stable/artifact.sha256.urls" \
+  'https://fixture.invalid/intel-cli.tar.gz' intel-stable
+test ! -e "${TEST_ROOT}/intel-stable/sudo.log"
+ANOLISA_TEST_OS=Linux ANOLISA_TEST_ARCH=x86_64 \
+  run_case linux-x64 "install cosh-ng --backend raw" --cosh-ng
+assert_contains "${TEST_ROOT}/linux-x64/artifact.sha256.urls" \
+  "/artifacts/linux/x86_64/anolisa-cli-${TEST_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" linux-x64
+
+for failure in missing-platform checksum download; do
+  name="intel-$failure"
+  existing="${TEST_ROOT}/${name}/install/anolisa"
+  make_cli "$existing" "$OLD_CLI_VERSION"
+  case "$failure" in
+    missing-platform)
+      export ANOLISA_TEST_MANIFEST_ARCH=aarch64
+      expected='release manifest has no artifact for macos/x86_64'
+      ;;
+    checksum)
+      export ANOLISA_TEST_BAD_CHECKSUM=1
+      expected='sha256 mismatch'
+      ;;
+    download)
+      export ANOLISA_TEST_DOWNLOAD_FAIL=1
+      expected='download failed'
+      ;;
+  esac
+  ANOLISA_TEST_ARCH=x86_64 ANOLISA_TEST_REQUEST_VERSION=stable \
+    run_install_case "$name" "$BASE_PATH" \
+      --cosh-ng --backend raw --install-mode user
+  test "$LAST_STATUS" -ne 0 || fail "$name unexpectedly succeeded"
+  assert_contains "${TEST_ROOT}/${name}/stderr" "$expected" "$name"
+  test "$("$existing" --version)" = "anolisa $OLD_CLI_VERSION"
+  test ! -e "${TEST_ROOT}/${name}/commands.log"
+  if [ "$failure" = missing-platform ]; then
+    assert_not_contains "${TEST_ROOT}/${name}/artifact.sha256.urls" \
+      'https://fixture.invalid/intel-cli.tar.gz' "$name"
+  fi
+  unset ANOLISA_TEST_MANIFEST_ARCH ANOLISA_TEST_BAD_CHECKSUM ANOLISA_TEST_DOWNLOAD_FAIL
+done
 
 assert_shadow_reported() {
   local name="$1" active_path="$2" active_version="$3"

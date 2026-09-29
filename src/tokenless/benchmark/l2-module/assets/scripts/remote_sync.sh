@@ -53,10 +53,10 @@ fi
 # do not break the pipeline.
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 # third_party/rtk is excluded on purpose: it is a gitignored pinned clone
-# (just setup-rtk fetches v0.43.0 and applies the tokenless patches). Syncing a
-# developer's local rtk would let it bypass the pin — setup-rtk only checks for
-# Cargo.toml before skipping the clone — and attribute results from arbitrary
-# rtk sources to the ANOLISA SHA. Leaving it out forces the remote to build the
+# (just setup-rtk fetches v0.49.0 and applies the tokenless patches). Syncing a
+# developer's local rtk could carry edits beyond the pinned upstream commit
+# and attribute results from those sources to the ANOLISA SHA.
+# Leaving it out forces the remote to build the
 # pinned tree, whose revision the report then records.
 RSYNC_EXCLUDES=(
     --exclude target
@@ -69,16 +69,16 @@ RSYNC_EXCLUDES=(
 # fresh box without the workspace root would fail on the very first transfer.
 # Create the destination root up front (idempotent).
 echo "[sync] ensuring $L2_REMOTE_WORK exists on $L2_SSH_HOST"
-sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
+SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
     "mkdir -p $L2_REMOTE_WORK"
 
 echo "[sync] anolisa -> $L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/anolisa"
-sshpass -p "$L2_SSH_PASS" rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
+SSHPASS="$L2_SSH_PASS" sshpass -e rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
     -e "ssh ${SSH_OPTS[*]}" \
     "$ANOLISA_SRC/" "$L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/anolisa/"
 
 echo "[sync] headroom -> $L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/headroom"
-sshpass -p "$L2_SSH_PASS" rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
+SSHPASS="$L2_SSH_PASS" sshpass -e rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
     -e "ssh ${SSH_OPTS[*]}" \
     "$HEADROOM_SRC/" "$L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/headroom/"
 

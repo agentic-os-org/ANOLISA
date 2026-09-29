@@ -112,8 +112,11 @@ test-rpm-packaging: ## Validate the portable RPM payload contract
 	cd $(CURDIR) && bash scripts/test-rpm-packaging.sh
 
 .PHONY: lint
-lint: ## Check formatting + clippy
+lint: ## Check formatting + architecture + clippy
 	cd $(CURDIR) && cargo fmt --all --check
+	cd $(CURDIR) && python3 scripts/check-arch-boundaries.py
+	cd $(CURDIR) && python3 scripts/check-sqlite-entrypoints.py --self-test
+	cd $(CURDIR) && python3 scripts/check-sqlite-entrypoints.py
 	cd $(CURDIR) && cargo clippy --all-targets -- -D warnings
 
 .PHONY: test-coverage

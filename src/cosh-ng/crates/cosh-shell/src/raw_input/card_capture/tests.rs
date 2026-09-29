@@ -1018,8 +1018,10 @@ fn secret_submit_clears_free_text_for_next_capture() {
 fn draft_capture() -> RawInputCapture {
     RawInputCapture::PromptDraft {
         id: "draft-1".to_string(),
-        initial_text: "第一行".to_string(),
+        initial_text: "第一行".into(),
         completion: None,
+        agent_composer: false,
+        workspace_cwd: None,
     }
 }
 
@@ -1027,8 +1029,10 @@ fn draft_capture() -> RawInputCapture {
 fn draft_tab_accepts_the_runtime_completion() {
     let capture = RawInputCapture::PromptDraft {
         id: "draft-1".to_string(),
-        initial_text: "review @sr".to_string(),
-        completion: Some("@src/".into()),
+        initial_text: "review @sr".into(),
+        completion: Some(Box::new(("@src/".into(), (0, 10)))),
+        agent_composer: true,
+        workspace_cwd: None,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);

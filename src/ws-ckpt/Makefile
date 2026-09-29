@@ -24,7 +24,7 @@ PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
-.PHONY: build install uninstall clean test help
+.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall help
 
 build:
 	cd src && cargo build --release --workspace
@@ -48,6 +48,7 @@ else
 	rm -rf "$(DESTDIR)$(ADAPTER_DIR)/scripts" 2>/dev/null || true
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw"
 	install -p -m 0644 scripts/openclaw/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -p -m 0644 scripts/openclaw/lib-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
@@ -91,11 +92,20 @@ uninstall:
 ifeq ($(INSTALL_PROFILE),user)
 	@echo "User mode: ws-ckpt was not installed (requires systemd/root daemon); skipping uninstall."
 else
-	@# 1. Pre-removal: recover workspaces and stop daemon (skip when staging)
-	@if [ -z "$(DESTDIR)" ]; then \
+	@# 1. Pre-removal: recover workspaces and stop daemon (skip when staging).
+	@#    A sentinel file carries the recover outcome across recipe lines to
+	@#    the state-wipe below (each recipe line is a fresh shell): when
+	@#    recover fails the state dirs may hold the only copies of workspace
+	@#    data, so they must be preserved for manual inspection (#3069).
+	@#    /run is tmpfs, so the sentinel never leaks past a reboot.
+	@rm -f /run/ws-ckpt-recover-failed; \
+	if [ -z "$(DESTDIR)" ]; then \
 		if [ -x "$(BINDIR)/ws-ckpt" ]; then \
-			"$(BINDIR)/ws-ckpt" recover --all --force 2>&1 || \
-				echo "WARNING: recover workspaces failed"; \
+			if ! "$(BINDIR)/ws-ckpt" recover --all --force; then \
+				echo "WARNING: ws-ckpt recover --all failed; preserving /var/lib/ws-ckpt"; \
+				echo "         (and /data/ws-ckpt if present) for manual inspection."; \
+				: > /run/ws-ckpt-recover-failed; \
+			fi; \
 		fi; \
 		systemctl stop ws-ckpt.service 2>/dev/null || true; \
 		systemctl disable ws-ckpt.service 2>/dev/null || true; \
@@ -119,18 +129,28 @@ else
 				"$(DESTDIR)$(CONFIG_DIR)/config.toml.rpmsave"; \
 		fi; \
 	fi
-	@# 3. Post-removal: cleanup BtrfsLoop backend (skip when staging)
+	@# 3. Post-removal: cleanup BtrfsLoop backend (skip when staging). When
+	@#    recover failed above, keep the loop image and state dirs on disk
+	@#    (detached loops, plain files) for manual data recovery (#3069).
 	@if [ -z "$(DESTDIR)" ]; then \
 		umount /mnt/btrfs-workspace 2>/dev/null || true; \
 		for img in /var/lib/ws-ckpt/btrfs-data.img /data/ws-ckpt/btrfs-data.img; do \
 			losetup -j "$$img" 2>/dev/null | \
 				cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true; \
-			rm -f "$$img" 2>/dev/null || true; \
 		done; \
 		rmdir /mnt/btrfs-workspace 2>/dev/null || true; \
-		rmdir /data/ws-ckpt 2>/dev/null || true; \
-		rm -f /var/lib/ws-ckpt/state.json /var/lib/ws-ckpt/daemon.lock 2>/dev/null || true; \
-		rmdir /var/lib/ws-ckpt 2>/dev/null || true; \
+		if [ -e /run/ws-ckpt-recover-failed ]; then \
+			echo "NOTE: preserving /var/lib/ws-ckpt (recover failed)."; \
+			echo "      Remove it manually once the data is no longer needed."; \
+		else \
+			for img in /var/lib/ws-ckpt/btrfs-data.img /data/ws-ckpt/btrfs-data.img; do \
+				rm -f "$$img" 2>/dev/null || true; \
+			done; \
+			rmdir /data/ws-ckpt 2>/dev/null || true; \
+			rm -f /var/lib/ws-ckpt/state.json /var/lib/ws-ckpt/daemon.lock 2>/dev/null || true; \
+			rmdir /var/lib/ws-ckpt 2>/dev/null || true; \
+		fi; \
+		rm -f /run/ws-ckpt-recover-failed 2>/dev/null || true; \
 		systemctl daemon-reload 2>/dev/null || true; \
 	fi
 endif
@@ -140,9 +160,21 @@ clean:
 
 test:
 	cd src && cargo test --workspace
+	$(MAKE) test-openclaw-scripts
+
+test-openclaw-scripts: test-openclaw-compat test-openclaw-install test-openclaw-uninstall
+
+test-openclaw-compat:
+	bash tests/openclaw-compat.sh
+
+test-openclaw-install:
+	bash tests/openclaw-install.sh
+
+test-openclaw-uninstall:
+	bash tests/openclaw-uninstall.sh
 
 help:
-	@echo "Targets: build install uninstall clean test"
+	@echo "Targets: build install uninstall clean test test-openclaw-scripts"
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= staging root for packages"

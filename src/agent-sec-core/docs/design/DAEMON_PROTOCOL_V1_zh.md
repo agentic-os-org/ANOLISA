@@ -1,5 +1,7 @@
 # AgentSec daemon 协议 V1
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 wire 基线、兼容语料及 V2 asc-daemon-protocol 候选扩展 |
@@ -49,6 +51,8 @@ V1 默认 request 和 response frame 上限均为 4194304 bytes（4 MiB），wir
 末尾 LF。未完成 frame 超过上限时必须返回 `payload_too_large`；响应序列化后超过上限
 时也使用 `payload_too_large`。例外是启用 notify authentication 后、第一帧尚不能安全
 分类的 timeout/oversize：服务端按认证 fail-closed 规则静默关闭连接。
+
+以上为冻结的 Python V1 上限；Rust 原生 PAP 的请求分项预算与错误类别见 §13。
 
 ### 2.2 一般 JSON 规则
 
@@ -428,11 +432,11 @@ next offset。items 按 `(timestamp_epoch, kind)` 升序排列：
 PAP administration 是新增的 V2 method family，不是九个 V1 method 之一。第一版接口采用
 互斥的 `{requestId,result}` 或 `{requestId,error}` 响应，不保留 POC 的 `poc.*` method、
 `ok/data/stdout/stderr/exit_code` envelope 或兼容分支。输入和输出以
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-methods.json` 为可执行清单。
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-methods.json` 为可执行清单。
 `requestId` 是 daemon 为每次 dispatch 生成的 UUID；`error` 固定为 `{code,message}`，
 success 不得再包一层 `{policy}`、`{scope}` 或 `{binding}`。
 
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
 15 个 method 的有状态 CRUD 场景及完整 response value，包括 Canonical Policy IR、Scope
 template、Binding 内嵌快照、revision、status 和确定性 digest。daemon 生成的 request/resource
 UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 UUID 格式、CREATE 捕获值在后续
@@ -441,7 +445,7 @@ UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 
 bootstrap E2E 消费。binary 测试通过服务端启动配置 `--policy-admin-uid <测试 UID>`
 执行完整成功场景，无需 root；另行验证非 root 默认 `permission_denied`。root 环境同时
 验证默认授权成功路径，不使用跳过授权的测试开关。
-`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-invalid-requests.json` 冻结 method
+`v2/crates/asc-daemon-protocol/tests/fixtures/pap-invalid-requests.json` 冻结 method
 params 构造失败时的 `invalid_request` code 和有界、安全 message，并由真实 UDS integration
 fixture 消费。
 
@@ -482,6 +486,16 @@ CREATE 的 stable identity 由 PAP 生成；UPDATE 不兼作 upsert。Policy/Sco
 Apply/Delete 意图返回对应 pending 状态；幂等请求返回已有状态（如 READY、APPLYING、
 DELETING）。daemon handler 不等待 Reconciler，不把 acceptance 表述为目标完成。
 
+[TARGET V2] Binding 入队被拒且条件失败写入成功时，命令返回错误：队列满为
+`resource_exhausted`，提交后队列停止为 `unavailable`。message 包含已保存的 Binding
+ID/revision 及具体原因。Failed 写入未确认时返回 `internal`，明确后台仍可能执行；
+worker 已抢先认领则返回当前状态，不覆盖为 Failed。BindingView 的 status 从字符串改为
+`{phase, error?: {kind, code}}`；无错误时省略 error，显式重试及 worker 认领时清除旧错误。
+Repository 不保存尝试次数、重试时间或策略；它们仅为进程内调度信息，重启不继承。调度原因码为
+`RECONCILE_QUEUE_FULL`/`RECONCILE_QUEUE_STOPPED`，kind 为 `REJECTED`。
+这是未发布 V2 契约修订，不改 V1；详见
+[调度拒绝验收及并发边界](BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。
+
 [TARGET V2] `bindingRevision` 仅在 spec 改变时递增；同 spec 的 ApplyFailed 重试、
 Delete 和 DeleteFailed 重试均保留 revision。Delete 保留完整 spec 与既有部署记录，
 允许在 Applying 时受理；PendingDelete/Deleting/DeleteFailed 拒绝所有 UPDATE，不能
@@ -493,7 +507,7 @@ reconcile worker；硬删除行为由 PAP + Reconciler 内存组合测试验证�
 Policy CREATE/UPDATE 在 PAP 内同步调用 `PolicyCompiler::lower(TemplateEnvelope) ->
 PolicyEnvelope`。当前产品 compiler 只实现 `prevent_file_deletion`，其输入与完整 Canonical
 Policy IR 输出由
-`v2/crates/policy/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
+`v2/crates/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
 `ResourceOperation::Delete + FileResolution::PathEntry`。该模板只覆盖对匹配目录项的删除操作，
 例如 unlink/rmdir；rename/move、link、truncate、内容修改和其它 namespace mutation 不在其
 保护范围内。其它 `PolicyTemplate` kind 在各自 lowering 与直接 Adapter conformance 完成前
@@ -831,3 +845,73 @@ struct 的构造函数不足以证明 wire compatibility。
 [`ef0d75f27c389434cf6f4361f5dbcdeaff42ab72`](https://github.com/alibaba/anolisa/commit/ef0d75f27c389434cf6f4361f5dbcdeaff42ab72)
 中的 `daemon/handlers/prompt_scan.py`、`prompt_scan_protocol.md`、
 `test_prompt_scan_handler.py` 和 CLI daemon call path。
+
+## 13. **[TARGET V2]** 原生 PAP OTel carrier 扩展
+
+本节只扩展 Rust 原生 PAP envelope，不改变前文冻结的 Python V1 `request_id/ok/data` 协议。
+Rust 响应仍保留公开 `requestId` UUID 和既有 result/error 结构。
+
+```json
+{
+  "method": "policy.templates.list",
+  "params": {},
+  "traceContext": {
+    "version": 1,
+    "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "baggage": "agentsec.session.id=session-123"
+  },
+  "compatibility": {"version": 1, "traceId": "caller-label"}
+}
+```
+
+- 两个扩展对象可省略/null。对象内 version 必须为整数 1；traceContext 的三个可选字段
+  traceparent/tracestate/baggage 若出现必须是 string，不能是 null。compatibility 的可选
+  traceId/invocationLabel 可省略/null，只作关联标签，不决定 SDK ID。
+- 未知字段、重复 JSON key、错误类型/version 返回 `invalid_request`，不执行 PAP。
+  W3C 内容错误独立降级：无效 parent 新建 root，保留有效 Agent Baggage；坏 tracestate 丢弃；
+  坏 Baggage 整体丢弃。未知 Baggage key 不传播，其值不做 UTF-8 解码；
+  member 结构/key/property/percent 语法仍须有效。允许 key 重复或值解码失败时整体丢弃。
+- 仅允许 agentsec.agent.name、agentsec.session.id、agentsec.run.id、agentsec.call.id、
+  agentsec.tool_call.id。字段上限 256 Unicode 字符；Baggage wire ≤16384 bytes/32 input members；
+  traceparent/tracestate 各 ≤512 bytes。metadata 原值空白通过 percent encoding 保留；V1 trace-context 输入适配独立归一化。
+- 所有正常 dispatch 从干净 Context 开始，没有 context 也生成 SDK root。归属字段不参与授权；
+  Principal 仍来自 kernel peer 和服务端 policy。非法 envelope 不从坏 JSON 抢救 parent。
+- LF-inclusive 请求业务预算 4 MiB，传播成员另有 32 KiB，总 wire 上限 4 MiB+32 KiB。
+  按原始字节计量；超出业务/传播预算返回 `invalid_request`，超出 transport 总上限沿用
+  `resource_exhausted`。原先超过 4 MiB 就被 transport 拒绝的帧，如今在总上限内
+  若违反分项预算则返回 `invalid_request`，合法传播扩展则正常处理。响应仍为 4 MiB。caller 不会为了适配旧 server 自动去掉 context 重发。
+
+支持范围为新 CLI 与支持 carrier 的新 daemon；旧 daemon 不属于兼容验收范围，
+不增加 opt-in、版本协商或无 carrier 重试。部署时先升级 daemon，回滚时先回滚 caller。
+正常 RPC 即使未传 tracing 参数也会注入 carrier；V1 `--trace-context` 与显式
+`AGENT_SEC_INVOCATION_ID` 会影响 wire 归属/标签，保留输入语义不代表 wire 不变。
+关闭 exporter 不关闭 carrier。
+兼容记录 OTEL-CR-001/002/005/006/007、执行 fixtures、直接消费者和回滚见
+[V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。冻结 V1 运行时没有增加 OTel 依赖。
+
+## PII 第一阶段 V2 协议扩展
+
+**[TARGET V2，已实现]** 新增唯一方法 `action.pii_scan`，角色为 `LocalUser`，保持现有
+V2 顶层 OTel 信封及第 13 节独立预算（请求业务 4 MiB + 传播 32 KiB，响应 4 MiB）。
+本文原有 V1 默认 catalogue 不因此改变。
+
+| `params` 字段 | 类型与默认值 |
+|---------------|----------------|
+| `text` | 必填 string，允许空文本 |
+| `source` | string，默认 `unknown`；允许 user_input/tool_input/tool_output/model_output/observability/manual/unknown |
+| `includeLowConfidence`、`rawEvidence`、`redactOutput` | bool，默认 false |
+| `maxBytes` | 可选正整数或 null |
+| `inputTruncated` | bool，默认 false |
+| `inputBytesScanned` | 可选非负整数或 null；必须等于收到文本字节数，截断时可多出最多 3 个 UTF-8 尾字节 |
+
+拒绝未知字段，包括未发布的 `params.traceContext`；不接受输入文件或规则路径，
+也不接受调用者 UID/GID/PID。关联信息仅使用公共顶层 `traceContext` / `compatibility`。
+识别方法并完成授权后，DTO/schema 错误返回 `invalid_request`，无效 source 或语义限制返回
+`invalid_argument`；错误消息固定为 `PII scan parameters are invalid`，通过公共 Finalizer
+记录安全终态。扫描结果（含执行失败报告）置于 daemon success 响应；CLI 对扫描失败退出 1。
+未处理的执行 panic 由公共 Runtime 捕获并收尾，再返回 `internal` 和固定消息
+`capability execution failed`，不把原始异常内容返回给调用者。
+
+可执行契约为 `tests/v2/e2e/test_pii_cli_e2e.py`，实现 DTO 为
+`v2/crates/asc-daemon-protocol/src/action.rs`。当前/未来链路、兼容性和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。

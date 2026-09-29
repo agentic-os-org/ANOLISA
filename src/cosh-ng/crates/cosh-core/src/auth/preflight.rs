@@ -14,10 +14,19 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::ResolvedProvider;
+use crate::provider::sysom::{CredentialStatus, ProbeError};
+
+fn ecs_preflight_result(
+    result: Result<CredentialStatus, ProbeError>,
+) -> Result<(), AuthPreflightError> {
+    match result.map_err(AuthPreflightError::MetadataProbe)? {
+        CredentialStatus::Ready => Ok(()),
+        CredentialStatus::NotReady(_) => Err(AuthPreflightError::CredentialSourceUnavailable),
+    }
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-const ALIYUN_SYSOM_ENDPOINT: &str = "https://sysom.cn-hangzhou.aliyuncs.com";
 const ALIYUN_PERMISSION_PATH: &str = "/api/v1/openapi/initial";
 const ALIYUN_PERMISSION_ACTION: &str = "InitialSysom";
 const ALIYUN_COPILOT_PATH: &str = "/api/v1/copilot/generate_copilot_stream_response";
@@ -47,6 +56,7 @@ pub(crate) enum AuthPreflightError {
     ProviderUnavailable,
     ServiceNotReady,
     CredentialSourceUnavailable,
+    MetadataProbe(ProbeError),
     UnsupportedResponse,
 }
 
@@ -62,6 +72,7 @@ impl AuthPreflightError {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::ServiceNotReady => "service_not_ready",
             Self::CredentialSourceUnavailable => "credential_source_unavailable",
+            Self::MetadataProbe(error) => error.code(),
             Self::UnsupportedResponse => "unsupported_response",
         }
     }
@@ -81,25 +92,26 @@ impl fmt::Display for AuthPreflightError {
                 "Model {model:?} is unavailable. Check the Model name and access entitlement."
             ),
             Self::EndpointUnreachable => formatter.write_str(
-                "The endpoint could not be reached. Check the Base URL and network connection.",
+                "The endpoint could not be reached. Check the endpoint configuration and network connection.",
             ),
             Self::Timeout => formatter.write_str(
-                "The endpoint did not respond in time. Check the Base URL and network connection.",
+                "The endpoint did not respond in time. Check the endpoint configuration and network connection.",
             ),
             Self::RateLimited => formatter.write_str(
                 "The provider rate-limited the validation request. Check quota or try again later.",
             ),
             Self::ProviderUnavailable => formatter.write_str(
-                "The provider is temporarily unavailable. Try again later or check the Base URL.",
+                "The provider is temporarily unavailable. Try again later or check the endpoint configuration.",
             ),
             Self::ServiceNotReady => formatter.write_str(
                 "Aliyun SysOM is not authorized for this account. Complete service authorization and try again.",
             ),
             Self::CredentialSourceUnavailable => formatter.write_str(
-                "ECS RAM Role credentials are not available yet. Authorize the instance role and try again.",
+                "ECS RAM Role credentials are not available yet. Check the instance role or wait for credential refresh.",
             ),
+            Self::MetadataProbe(error) => error.fmt(formatter),
             Self::UnsupportedResponse => formatter.write_str(
-                "The endpoint returned an unsupported validation response. Check the Base URL and provider compatibility.",
+                "The endpoint returned an unsupported validation response. Check the endpoint configuration and provider compatibility.",
             ),
         }
     }
@@ -139,7 +151,7 @@ async fn preflight_auth_inner(provider: &ResolvedProvider) -> Result<(), AuthPre
         return preflight_aliyun(provider).await;
     }
 
-    let client = build_client()?;
+    let client = build_client(None)?;
     match provider.provider_type.as_str() {
         "dashscope" => {
             preflight_model_endpoint(&client, provider, ModelFallback::ListThenChat).await
@@ -155,11 +167,18 @@ async fn preflight_auth_inner(provider: &ResolvedProvider) -> Result<(), AuthPre
     }
 }
 
-fn build_client() -> Result<Client, AuthPreflightError> {
-    Client::builder()
+fn build_client(
+    endpoint: Option<&crate::provider::sysom::endpoint::ResolvedEndpoint>,
+) -> Result<Client, AuthPreflightError> {
+    let builder = Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match endpoint {
+        Some(endpoint) => endpoint.configure_client(builder),
+        None => builder,
+    };
+    builder
         .build()
         .map_err(|_| AuthPreflightError::EndpointUnreachable)
 }
@@ -186,11 +205,17 @@ async fn preflight_model_endpoint(
         }
         return preflight_model_fallback(client, provider, fallback).await;
     }
-    if fallback != ModelFallback::None
+    // The token-plan gateway answers GET /models/{model} with HTTP 400
+    // "Model not exist." even for models its own model list contains and
+    // chat serves. Only fall back on 400 when chat will verify credentials;
+    // a public model list alone cannot establish that the key is valid.
+    if (fallback != ModelFallback::None
         && matches!(
             status,
             StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
-        )
+        ))
+        || (status == StatusCode::BAD_REQUEST
+            && matches!(fallback, ModelFallback::Chat | ModelFallback::ListThenChat))
     {
         return preflight_model_fallback(client, provider, fallback).await;
     }
@@ -360,21 +385,18 @@ async fn response_explicitly_reports_missing_model(response: Response) -> bool {
 
 async fn preflight_aliyun(provider: &ResolvedProvider) -> Result<(), AuthPreflightError> {
     if provider.auth_source.as_deref() == Some("ecs_ram_role") {
-        return tokio::task::spawn_blocking(
-            crate::provider::sysom::ecs_ram_role_credentials_available,
-        )
-        .await
-        .map_err(|_| AuthPreflightError::EndpointUnreachable)?
-        .then_some(())
-        .ok_or(AuthPreflightError::CredentialSourceUnavailable);
+        return ecs_preflight_result(crate::provider::sysom::probe_ecs_ram_role().await);
     }
 
-    let client = build_client()?;
-    let base_url = if provider.base_url.trim().is_empty() {
-        ALIYUN_SYSOM_ENDPOINT
-    } else {
-        provider.base_url.as_str()
-    };
+    let resolved = crate::provider::sysom::endpoint::resolve(&provider.sysom_endpoint).await;
+    let client = build_client(Some(&resolved))?;
+    tracing::debug!(
+        host = %resolved.host,
+        origin = resolved.origin.as_str(),
+        "sysom preflight endpoint"
+    );
+    let base_url = resolved.base_url();
+    let base_url = base_url.as_str();
     let payload = br#"{"check_only":true,"source":"cosh"}"#;
     let request = signed_aliyun_request(
         &client,
@@ -717,12 +739,46 @@ fn hex_sha256(value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn ecs_metadata_preflight_distinguishes_ready_from_not_ready() {
+        use crate::provider::sysom::NotReadyReason;
+        assert_eq!(ecs_preflight_result(Ok(CredentialStatus::Ready)), Ok(()));
+        for reason in [
+            NotReadyReason::RoleMissing,
+            NotReadyReason::CredentialsExpired,
+        ] {
+            assert_eq!(
+                ecs_preflight_result(Ok(CredentialStatus::NotReady(reason))),
+                Err(AuthPreflightError::CredentialSourceUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn ecs_metadata_preflight_preserves_probe_errors_through_configure() {
+        for probe_error in [
+            ProbeError::AccessDenied,
+            ProbeError::InvalidResponse,
+            ProbeError::Unreachable,
+            ProbeError::Timeout,
+            ProbeError::Http,
+        ] {
+            let error = ecs_preflight_result(Err(probe_error)).expect_err("probe failure");
+            assert_eq!(error.code(), probe_error.code());
+            assert_eq!(error.to_string(), probe_error.to_string());
+            let configure_error = crate::auth::AuthConfigureError::from(error);
+            assert_eq!(configure_error.code(), probe_error.code());
+            assert_eq!(configure_error.to_string(), probe_error.to_string());
+        }
+    }
 
     #[derive(Clone)]
     struct Reply {
@@ -750,14 +806,50 @@ mod tests {
     }
 
     impl MockServer {
+        /// How long the mock waits for a connection that may never come.
+        ///
+        /// A client that gives up before it dials — `request_timeout_is_classified`
+        /// uses a 10ms timeout, which under a saturated CPU can fire before the
+        /// request future is ever polled — leaves nothing to accept. A blocking
+        /// accept would then leave the thread alive forever and `finish()`'s
+        /// `join()` would stall the whole test binary rather than failing one
+        /// test.
+        const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+
         fn spawn(replies: Vec<Reply>) -> Self {
+            Self::spawn_with_accept_timeout(replies, Self::ACCEPT_TIMEOUT)
+        }
+
+        fn spawn_with_accept_timeout(replies: Vec<Reply>, accept_timeout: Duration) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock address");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let captured = Arc::clone(&requests);
             let thread = thread::spawn(move || {
+                listener
+                    .set_nonblocking(true)
+                    .expect("mock listener nonblocking");
                 for reply in replies {
-                    let (mut stream, _) = listener.accept().expect("accept mock request");
+                    let deadline = Instant::now() + accept_timeout;
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    // No client arrived. Leave the recorded
+                                    // requests short so an assertion fails
+                                    // instead of the suite hanging.
+                                    return;
+                                }
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(err) => panic!("accept mock request: {err}"),
+                        }
+                    };
+                    // `read_request` relies on a read timeout, which needs a
+                    // blocking socket; accepted sockets can inherit the
+                    // listener's non-blocking flag.
+                    stream.set_nonblocking(false).expect("mock stream blocking");
                     let request = read_request(&mut stream);
                     captured.lock().unwrap().push(request);
                     if !reply.delay.is_zero() {
@@ -840,7 +932,12 @@ mod tests {
 
     fn provider(base_url: &str, provider_type: &str) -> ResolvedProvider {
         ResolvedProvider {
-            base_url: base_url.to_string(),
+            base_url: if provider_type == "aliyun" {
+                "http://127.0.0.1:1".to_string()
+            } else {
+                base_url.to_string()
+            },
+            sysom_endpoint: base_url.to_string(),
             api_key: "sk-private-value".to_string(),
             model: "test-model".to_string(),
             provider_type: provider_type.to_string(),
@@ -851,6 +948,52 @@ mod tests {
             security_token: None,
             explicit_cache: false,
         }
+    }
+
+    #[test]
+    fn endpoint_error_messages_are_provider_neutral() {
+        for (error, code) in [
+            (
+                AuthPreflightError::EndpointUnreachable,
+                "endpoint_unreachable",
+            ),
+            (AuthPreflightError::Timeout, "timeout"),
+            (
+                AuthPreflightError::ProviderUnavailable,
+                "provider_unavailable",
+            ),
+            (
+                AuthPreflightError::UnsupportedResponse,
+                "unsupported_response",
+            ),
+        ] {
+            let message = error.to_string();
+            assert_eq!(error.code(), code);
+            assert!(
+                message.contains("endpoint configuration"),
+                "{code}: {message}"
+            );
+            assert!(!message.contains("Base URL"), "{code}: {message}");
+            assert!(!message.contains("sysom_endpoint"), "{code}: {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn aliyun_connection_failure_uses_neutral_endpoint_hint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut aliyun = provider(&format!("http://{address}"), "aliyun");
+        aliyun.access_key_id = "test-access-key".to_string();
+        aliyun.access_key_secret = "test-secret".to_string();
+
+        let error = preflight_auth(&aliyun)
+            .await
+            .expect_err("unreachable SysOM endpoint");
+        assert_eq!(error, AuthPreflightError::EndpointUnreachable);
+        let message = error.to_string();
+        assert!(message.contains("endpoint configuration"), "{message}");
+        assert!(!message.contains("Base URL"), "{message}");
     }
 
     #[tokio::test]
@@ -907,7 +1050,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_compat_falls_back_for_ambiguous_model_endpoint_failures() {
-        for status in [404, 405, 501] {
+        for status in [400, 404, 405, 501] {
             let server = MockServer::spawn(vec![
                 Reply::json(status, r#"{"error":{"code":"route_not_found"}}"#),
                 Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
@@ -1024,6 +1167,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieve_bad_request_does_not_accept_a_public_model_list() {
+        for provider_type in ["openai", "generic", "deepseek"] {
+            let server = MockServer::spawn(vec![
+                Reply::json(400, r#"{"error":{"code":"route_not_found"}}"#),
+                Reply::json(
+                    200,
+                    r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#,
+                ),
+            ]);
+            let mut candidate = provider(&server.base_url, provider_type);
+            candidate.api_key = "invalid-key".to_string();
+
+            let result = preflight_auth(&candidate).await;
+            let requests = server.finish();
+            assert_eq!(
+                result,
+                Err(AuthPreflightError::UnsupportedResponse),
+                "provider type {provider_type}"
+            );
+            assert_eq!(requests.len(), 1, "must not trust a public model list");
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieve_bad_request_fallback_rejects_invalid_credentials() {
+        for provider_type in ["dashscope", "coding_plan", "token_plan", "openai_compat"] {
+            let mut replies = vec![Reply::json(
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist."}"#,
+            )];
+            if provider_type != "openai_compat" {
+                replies.push(Reply::json(
+                    200,
+                    r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#,
+                ));
+            }
+            replies.push(Reply::json(401, r#"{"error":{"code":"invalid_api_key"}}"#));
+            let server = MockServer::spawn(replies);
+            let mut candidate = provider(&server.base_url, provider_type);
+            candidate.api_key = "invalid-key".to_string();
+
+            let result = preflight_auth(&candidate).await;
+            let requests = server.finish();
+            assert_eq!(
+                result,
+                Err(AuthPreflightError::InvalidCredentials),
+                "provider type {provider_type}"
+            );
+            assert!(requests
+                .last()
+                .unwrap()
+                .starts_with("POST /v1/chat/completions HTTP/1.1"));
+        }
+    }
+
+    #[tokio::test]
     async fn plan_provider_uses_chat_when_model_list_route_is_unavailable() {
         let server = MockServer::spawn(vec![
             Reply::json(404, r#"{"error":{"code":"route_not_found"}}"#),
@@ -1035,6 +1234,36 @@ mod tests {
             .expect("chat fallback succeeds");
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
+    }
+
+    /// The real token-plan gateway answers GET /models/{model} with HTTP 400
+    /// "Model not exist." even for models its own model list contains and
+    /// chat serves, so the retrieve-route 400 must defer to the list+chat
+    /// chain instead of ending validation.
+    #[tokio::test]
+    async fn token_plan_retrieve_bad_request_defers_to_list_and_chat() {
+        let server = MockServer::spawn(vec![
+            Reply::json(
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist.","request_id":"tp"}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"object":"list","data":[{"id":"qwen3.8-max","object":"model"}]}"#,
+            ),
+            Reply::json(200, r#"{"choices":[{"message":{"content":""}}]}"#),
+        ]);
+        let mut token_plan = provider(&server.base_url, "token_plan");
+        token_plan.model = "qwen3.8-max".to_string();
+
+        preflight_auth(&token_plan)
+            .await
+            .expect("list and chat are the authority");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /v1/models/qwen3.8-max HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/models HTTP/1.1"));
         assert!(requests[2].starts_with("POST /v1/chat/completions HTTP/1.1"));
     }
 
@@ -1107,6 +1336,32 @@ mod tests {
         assert_eq!(
             preflight_auth(&provider(&format!("http://{address}/v1"), "dashscope")).await,
             Err(AuthPreflightError::EndpointUnreachable)
+        );
+    }
+
+    /// `finish()` must return even when no client ever connects.
+    ///
+    /// This is the hang `request_timeout_is_classified` triggered: a 10ms client
+    /// timeout can fire before the request future is first polled, so nothing is
+    /// ever dialed. With a blocking accept the mock thread never exits and
+    /// `join()` stalls the entire test binary — one flaky test becomes a hung
+    /// suite with no failing assertion to point at.
+    #[test]
+    fn mock_server_finish_returns_when_no_client_connects() {
+        let accept_timeout = Duration::from_millis(200);
+        let server = MockServer::spawn_with_accept_timeout(
+            vec![Reply::json(200, r#"{"id":"unused"}"#)],
+            accept_timeout,
+        );
+
+        let started = Instant::now();
+        let requests = server.finish();
+        let elapsed = started.elapsed();
+
+        assert!(requests.is_empty(), "no request should have been recorded");
+        assert!(
+            elapsed < accept_timeout * 10,
+            "finish() blocked for {elapsed:?}, accept timeout was {accept_timeout:?}"
         );
     }
 

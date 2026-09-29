@@ -16,7 +16,7 @@
   "REC-CORE-008/read-failure",
   "REC-CORE-009/create-registration",
   "REC-CORE-009/update-registration",
-  "REC-CORE-010/persist-only-retry",
+  "REC-CORE-010/recompute-after-storage-repair",
   "REC-CORE-011/semantic-rejection",
   "REC-CORE-012/fault-retry-exhausted",
   "REC-CORE-013/rejected",
@@ -24,7 +24,7 @@
   "REC-CORE-014/duplicate-target",
   "REC-CORE-014/foreign-target",
   "REC-CORE-014/missing-confirmation",
-  "REC-CORE-014/unknown-reuses-bytes",
+  "REC-CORE-014/unknown-prepares-again",
   "REC-CORE-015/B-rejected",
   "REC-CORE-015/B-unknown",
   "REC-CORE-016/exhausted",
@@ -45,5 +45,6 @@
   "REC-CORE-020/missing-route",
   "REC-CORE-020/opaque-id",
   "REC-CORE-021/fresh-binding",
-  "REC-CORE-022/timeout-join-before-delete"
+  "REC-CORE-022/timeout-join-before-delete",
+  "REC-CORE-020/cross-route-rejected"
 ]

@@ -138,6 +138,11 @@ agent-sec-cli skill-ledger init --no-baseline
 ```
 
 初始化失败时停止。不要要求用户提供口令，除非用户明确要求使用带口令密钥。
+重复初始化复用密钥，返回 `keyCreated: false`、`key: null`；新建密钥信息从 `key` 读取。
+
+CLI 或配置校验失败时停止，并报告错误。
+`rotate-keys` 尚未实现，执行失败时必须报告错误。
+`init --force-keys` 会更换当前密钥并归档旧公钥，只在用户明确要求更换时使用。
 
 ### 1.3 获取当前状态
 

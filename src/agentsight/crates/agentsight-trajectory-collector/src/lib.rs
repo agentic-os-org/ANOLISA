@@ -14,8 +14,9 @@ pub mod qoder;
 pub mod store;
 
 pub use store::{
-    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryRecord, TrajectoryStore,
-    TrajectorySummary,
+    strip_system_context, StepContext, StepHit, StepScanFilter, StepScanOutcome, StepView,
+    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryMaintenancePolicy,
+    TrajectoryMaintenanceReport, TrajectoryRecord, TrajectoryStore, TrajectorySummary,
 };
 
 use std::path::PathBuf;
@@ -35,31 +36,23 @@ pub struct CollectorConfig {
     /// Optional override of the projects directories to scan; `None` probes
     /// `/root` + `/home/*` for the default Qoder/QoderWork layout.
     pub scan_dirs: Option<Vec<PathBuf>>,
-    /// Path of the `trajectories.db` SQLite file.
-    pub db_path: PathBuf,
+    /// Retention used to skip already-expired source files during scans.
+    pub maintenance: TrajectoryMaintenancePolicy,
 }
 
 /// Scan-convert-persist loop; returns when `stop` is cleared.
 ///
-/// Runs one scan immediately, then sleeps `scan_interval_secs` between
-/// rounds (checking `stop` every second). Store open failure is logged and
-/// aborts the loop — the feature is best-effort and must never take the
-/// tracer down.
-pub fn run_collector_loop(config: &CollectorConfig, stop: &AtomicBool) {
-    let store = match TrajectoryStore::new_with_path(&config.db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!(
-                "Trajectory collector disabled: failed to open {}: {e}",
-                config.db_path.display()
-            );
-            return;
-        }
-    };
+/// Runs one scan immediately, then sleeps `scan_interval_secs` between rounds
+/// (checking `stop` every second). Database lifecycle is owned by the caller's
+/// maintenance worker.
+pub fn run_collector_loop(
+    store: std::sync::Arc<TrajectoryStore>,
+    config: &CollectorConfig,
+    stop: &AtomicBool,
+) {
     log::info!(
-        "Trajectory collector started (interval={}s, db={})",
-        config.scan_interval_secs,
-        config.db_path.display()
+        "Trajectory collector started (interval={}s)",
+        config.scan_interval_secs
     );
 
     // Single exit point: the loop always exits via the `sleep_or_stop` check,
@@ -80,7 +73,7 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
     let sessions = discovery::discover_sessions(config.scan_dirs.as_deref());
     let mut collected = 0usize;
     for session in &sessions {
-        match process_session(store, session) {
+        match process_session(store, session, config.maintenance.retention_days) {
             Ok(true) => collected += 1,
             Ok(false) => {}
             Err(e) => {
@@ -106,7 +99,11 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
 
 /// Ingest a single session file. Returns `Ok(true)` when the row was
 /// (re)written, `Ok(false)` when the file is unchanged.
-fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Result<bool> {
+fn process_session(
+    store: &TrajectoryStore,
+    session: &DiscoveredSession,
+    retention_days: u64,
+) -> Result<bool> {
     let meta = std::fs::metadata(&session.path)
         .with_context(|| format!("stat {}", session.path.display()))?;
     let file_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
@@ -118,6 +115,17 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         .unwrap_or(0);
 
     let file_path = session.path.to_string_lossy().to_string();
+    if retention_days > 0 {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let cutoff_ns = agentsight_sqlite_lifecycle::retention_cutoff_ns(now_ns, retention_days)?;
+        if file_mtime_ns < i64::try_from(cutoff_ns).unwrap_or(i64::MAX) {
+            store.set_file_state(&file_path, file_size, file_mtime_ns)?;
+            return Ok(false);
+        }
+    }
     if let Some((size, mtime)) = store.get_file_state(&file_path)? {
         if size == file_size && mtime == file_mtime_ns {
             return Ok(false);
@@ -260,7 +268,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects.clone()]),
-            db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
         };
 
         scan_once(&store, &config);
@@ -295,21 +303,32 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
-            db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy {
+                retention_days: 1,
+                max_db_size_mb: 1,
+            },
         };
+        let db_path = base.join("t.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        scan_once(&store, &config);
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute("UPDATE collected_trajectories SET collected_at_ns = 1", [])
+            .unwrap();
+        let loop_store = Arc::clone(&store);
         let stop = Arc::new(AtomicBool::new(true));
         let stop_clone = Arc::clone(&stop);
         let config_clone = config.clone();
         let handle = std::thread::spawn(move || {
-            run_collector_loop(&config_clone, &stop_clone);
+            run_collector_loop(loop_store, &config_clone, &stop_clone);
         });
 
         std::thread::sleep(Duration::from_millis(1500));
         stop.store(false, Ordering::SeqCst);
         handle.join().unwrap();
 
-        // The first immediate scan must have ingested the session.
-        let store = TrajectoryStore::new_with_path(&config.db_path).unwrap();
+        // The caller-owned row remains even though its collection timestamp is
+        // expired, proving the collector loop never runs lifecycle maintenance.
         assert_eq!(store.count().unwrap(), 1);
     }
 
@@ -330,7 +349,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![projects]),
-            db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
         };
 
         scan_once(&store, &config);
@@ -355,7 +374,7 @@ mod tests {
         let config = CollectorConfig {
             scan_interval_secs: 1,
             scan_dirs: Some(vec![sessions_root]),
-            db_path: base.join("t.db"),
+            maintenance: TrajectoryMaintenancePolicy::default(),
         };
 
         scan_once(&store, &config);

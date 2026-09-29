@@ -175,6 +175,9 @@ impl CardInputState {
             }
             RawInputCapture::Evidence { .. } => None,
             RawInputCapture::PromptDraft { .. } => {
+                if self.draft_select_command(capture, code) {
+                    return self.input_event(capture);
+                }
                 match code {
                     b'A' => self.draft.move_up(),
                     b'B' => self.draft.move_down(),
@@ -240,13 +243,7 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Evidence { .. } => None,
-            RawInputCapture::PromptDraft { .. } => {
-                let replacement = self.draft_completion.clone()?;
-                self.draft
-                    .replace_current_token(&replacement)
-                    .then(|| self.input_event(capture))
-                    .flatten()
-            }
+            RawInputCapture::PromptDraft { .. } => self.draft_complete(capture),
         }
     }
 

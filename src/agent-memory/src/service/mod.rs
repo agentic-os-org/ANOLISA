@@ -1,15 +1,21 @@
-use std::path::PathBuf;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use nix::errno::Errno;
+use nix::fcntl::{AtFlags, OFlag};
+use nix::sys::stat::{Mode, SFlag};
+use nix::unistd::UnlinkatFlags;
 
 use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::consolidation::{OwnedAuditEntry, run_consolidation_owned};
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::index::{IndexHandle, SearchHit};
 use crate::mount::pick_strategy;
 use crate::ns::{MountPoint, Namespace};
-use crate::session::{EndAction, SessionId, SessionLogService};
+use crate::session::{EndAction, SessionBase, SessionId, SessionLogService};
 use crate::tools::{GrepHit, GrepOptions, ListEntry, ListOptions};
 
 /// MemoryService is the top-level entry point used by both the MCP server and
@@ -45,6 +51,13 @@ impl MemoryService {
     /// directory is writable. Failure to start the session is logged and
     /// degrades gracefully (mem_promote / mem_session_log will return errors).
     pub fn new(config: AppConfig) -> Result<Self> {
+        // `pick_strategy` below may unshare into a user namespace, after
+        // which `geteuid()` reports the mapped uid (0 for the default
+        // `0 <host uid> 1` mapping) instead of the one we were launched
+        // with. Record it now so the per-user session fallback name stays
+        // per *host* user; `main` does the same, earlier, for the binary.
+        crate::host::capture_host_uid();
+
         let base = config.resolved_base_dir();
         std::fs::create_dir_all(&base)?;
 
@@ -413,9 +426,331 @@ impl MemoryService {
     }
 }
 
+/// Monotonic suffix for the writability probe file so two servers probing
+/// the same candidate concurrently never collide on the name. Each probe
+/// reserves a whole `PROBE_ATTEMPTS` block, so a retry cannot step onto a
+/// name another prober was just handed either.
+static PROBE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Session base directories to try, in preference order.
+///
+/// The second element of each pair says whether the candidate is one *we*
+/// picked (and therefore has to be hardened against a local user planting
+/// the name first) or one the operator configured (their own choice, so it
+/// is only required to be a usable directory).
+///
+/// The configured directory — `/run/anolisa/sessions` by default, and the
+/// value the OpenClaw plugin forwards as `MEMORY_SESSION_DIR` on every
+/// spawn — is only writable by root, yet the server always runs
+/// unprivileged:
+///
+/// - the RPM ships `config/systemd/anolisa-memory-tmpfiles.conf`, which
+///   creates `/run/anolisa` and `/run/anolisa/sessions` `0700 root:root`.
+///   A non-root server can neither traverse the parent (no `x` for others)
+///   nor create `<sid>` inside it.
+/// - `make install`, containers and dev boxes ship no tmpfiles snippet at
+///   all, and `/run` itself is `drwxr-xr-x root root`, so even the first
+///   `create_dir_all` component fails with EACCES.
+/// - the shipped unit is a *user* template (`anolisa-memory@.service`), and
+///   MCP clients such as the OpenClaw plugin spawn `agent-memory serve`
+///   directly as the logged-in user.
+///
+/// Before the fallback existed, every one of those cases made
+/// `start_session` fail and `MemoryService::new` degrade to `session = None`
+/// behind a single `warn!` — so on a stock install *every* `mem_promote`
+/// returned `SessionUnavailable`, every `mem_session_log` returned
+/// `NotImplemented`, and the session-scoped consolidation path had no log
+/// to read.
+///
+/// Both fallbacks are per-user by construction: `$XDG_RUNTIME_DIR` is
+/// already `0700` and owned by the user, and the tmp candidate is suffixed
+/// with the *host* uid so two users on one host never share a base.
+fn session_base_candidates(configured: &Path) -> Vec<(PathBuf, bool)> {
+    candidates_for_host_uid(configured, crate::host::host_uid())
+}
+
+/// [`session_base_candidates`] with the host uid supplied explicitly, so the
+/// naming rule can be tested without entering a user namespace.
+///
+/// `host_uid` has to be the uid the process was *launched* with, not the one
+/// the kernel reports now. `main::early_enter_userns` runs before the
+/// service is constructed and `LinuxUserNsMount::enter` installs the mapping
+/// `0 <host uid> 1`, so `geteuid()` is 0 for every user on the box by the
+/// time this is reached. Suffixing the tmp candidate with that would make
+/// all of them compute `/tmp/anolisa-sessions-0` whenever the configured base
+/// is unusable, `XDG_RUNTIME_DIR` is absent and `TMPDIR` is unset or shared:
+/// whoever creates it first ends up owning a directory every other user's
+/// namespace reports as foreign-owned, so the ownership check rejects the
+/// last candidate and they lose the session anyway.
+fn candidates_for_host_uid(configured: &Path, host_uid: u32) -> Vec<(PathBuf, bool)> {
+    let mut out: Vec<(PathBuf, bool)> = vec![(configured.to_path_buf(), false)];
+
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let xdg = xdg.trim();
+        if !xdg.is_empty() {
+            out.push((Path::new(xdg).join("anolisa").join("sessions"), true));
+        }
+    }
+
+    let tmp = std::env::var("TMPDIR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    out.push((tmp.join(format!("anolisa-sessions-{host_uid}")), true));
+
+    out
+}
+
+/// First candidate that can be created *and* written to, else an error
+/// naming every directory that was tried.
+///
+/// The winner comes back as a [`SessionBase`] — an open descriptor plus the
+/// path derived from it — so that validation and use are bound to the same
+/// directory rather than to a pathname that can be swapped in between.
+fn pick_session_base(candidates: &[(PathBuf, bool)]) -> Result<SessionBase> {
+    let mut rejected: Vec<String> = Vec::with_capacity(candidates.len());
+    for (dir, ours) in candidates {
+        match probe_session_base(dir, *ours) {
+            Ok(base) => return Ok(base),
+            Err(e) => rejected.push(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(MemoryError::Other(format!(
+        "no writable session directory; tried {}",
+        rejected.join(", ")
+    )))
+}
+
+/// Resolve the session scratch base, falling back to a per-user runtime or
+/// tmp directory when the configured one is not usable. A fallback is
+/// reported with `warn!` so the operator can see that the configured
+/// location was ignored and why.
+fn resolve_session_base(config: &AppConfig) -> Result<SessionBase> {
+    let configured = config.resolved_session_dir();
+    let candidates = session_base_candidates(&configured);
+    let base = pick_session_base(&candidates)?;
+    if base.display_path() != configured.as_path() {
+        tracing::warn!(
+            "session dir {} is not usable by uid {}; using {} instead \
+             (set MEMORY_SESSION_DIR to override)",
+            configured.display(),
+            crate::host::host_uid(),
+            base.display_path().display()
+        );
+    }
+    Ok(base)
+}
+
+/// How many distinct probe names one `probe_writable` call may burn before
+/// it gives up on the candidate. Only a stale probe left by a killed server
+/// can occupy a name (a symlink ends the attempt immediately), so a handful
+/// is plenty; the whole block is reserved out of `PROBE_SEQ` at once so two
+/// concurrent probers can never be handed the same name.
+const PROBE_ATTEMPTS: usize = 8;
+
+/// Whether a session base *we* chose may be used given the uid that owns it.
+///
+/// There is deliberately no root exemption. `/tmp/anolisa-sessions-0` is a
+/// predictable name in a world-writable directory, so "the owner is not me
+/// but I am root, so it is fine" lets any local user pre-create the base and
+/// then own every session root a root server builds inside it — scratch
+/// files, `log.jsonl` and the `mem_promote` source tree — including swapping
+/// a known `MEMORY_SESSION_ID` entry for a symlink that the server's own
+/// `create_dir_all` / chmod / metadata writes then follow.
+///
+/// Both arguments are uids in the namespace the *filesystem metadata* is
+/// reported in, i.e. the current one — inside our own user namespace a base
+/// we own on `/tmp` shows `st_uid == 0` and one a neighbour owns shows the
+/// overflow uid. Comparing against the host uid (see
+/// [`candidates_for_host_uid`], which needs it for the *name*) would reject
+/// every fallback we own.
+fn fallback_owner_is_us(owner: u32, me: u32) -> bool {
+    owner == me
+}
+
+/// Prove `base` is writable by creating and removing a scratch file in it.
+///
+/// `seq_base` is the first of `PROBE_ATTEMPTS` reserved probe names.
+///
+/// The name is predictable, so on a base another local user can write to —
+/// which includes an operator-configured one, since a group- or
+/// world-writable `MEMORY_SESSION_DIR` is explicitly allowed — it can be
+/// pre-planted. `std::fs::write` follows symlinks and truncates the target,
+/// so probing with it turned the writability check itself into a
+/// file-clobber primitive against anything the server uid can write.
+/// `O_CREAT|O_EXCL` refuses to open, let alone follow, whatever already
+/// occupies the name, and `openat`/`unlinkat` against the base descriptor
+/// look the name up in the directory that was actually validated rather
+/// than in whatever the pathname resolves to now.
+fn probe_writable(base: &SessionBase, seq_base: usize) -> Result<()> {
+    let pid = std::process::id();
+    let flags =
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    for offset in 0..PROBE_ATTEMPTS {
+        let name = format!(".anolisa-probe-{pid}-{}", seq_base + offset);
+        match nix::fcntl::openat(
+            Some(base.fd()),
+            name.as_str(),
+            flags,
+            Mode::from_bits_truncate(0o600),
+        ) {
+            Ok(raw) => {
+                // Close before unlinking so the name is released even on
+                // filesystems that defer deletion of open files.
+                // SAFETY: `openat` just handed us this descriptor.
+                drop(unsafe { OwnedFd::from_raw_fd(raw) });
+                let _ = nix::unistd::unlinkat(
+                    Some(base.fd()),
+                    name.as_str(),
+                    UnlinkatFlags::NoRemoveDir,
+                );
+                return Ok(());
+            }
+            Err(Errno::EEXIST) => {
+                // A symlink means somebody is actively squatting on this
+                // base, so refuse the candidate rather than unlink their
+                // file. A regular file is a stale probe from a killed
+                // server: not ours to delete, so take the next name.
+                if is_planted_symlink(base.fd(), name.as_str()) {
+                    return Err(MemoryError::Other(format!(
+                        "{} holds a symlink at {name}; refusing it as a session dir",
+                        base.display_path().display()
+                    )));
+                }
+            }
+            Err(e) => {
+                return Err(MemoryError::Other(format!(
+                    "cannot probe {} ({name}): {e}",
+                    base.display_path().display()
+                )));
+            }
+        }
+    }
+
+    Err(MemoryError::Other(format!(
+        "no free .anolisa-probe-* name under {} after {PROBE_ATTEMPTS} attempts",
+        base.display_path().display()
+    )))
+}
+
+/// Whether `name` inside `dirfd` is a symlink. `AT_SYMLINK_NOFOLLOW`, so
+/// this reports the entry itself and not whatever it points at.
+fn is_planted_symlink(dirfd: RawFd, name: &str) -> bool {
+    nix::sys::stat::fstatat(Some(dirfd), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| SFlag::from_bits_truncate(st.st_mode).contains(SFlag::S_IFLNK))
+}
+
+/// The one and only pathname resolution for a candidate: open it, and
+/// validate the descriptor we get. `ours` decides whether a symlink in the
+/// final component is an attack or the operator's own choice.
+///
+/// The base is opened read-only because a directory cannot be opened for
+/// writing; `O_DIRECTORY` is what turns "a regular file sits where the
+/// session base should be" into `ENOTDIR` instead of a later surprise.
+fn open_candidate(dir: &Path, ours: bool) -> Result<SessionBase> {
+    if ours {
+        SessionBase::open_nofollow(dir)
+    } else {
+        SessionBase::open(dir)
+    }
+}
+
+/// Create `dir` if needed, prove it is a writable directory, and hand back
+/// the descriptor the decision was made on.
+///
+/// Existence alone is not enough: a pre-existing read-only directory
+/// passes `create_dir_all` and then fails on the first session, so the
+/// probe does a real create-and-remove.
+///
+/// For directories *we* chose (`ours`), additionally refuse a symlink, an
+/// owner other than our effective uid (root included), and a base that
+/// cannot be tightened to `0700`. Without that, any local user could plant
+/// `/tmp/anolisa-sessions-<victim uid>` as a symlink — or, against a root
+/// server, own the directory outright — and redirect both the probe and
+/// every session root into a directory of their choosing. The
+/// operator-configured directory is exempt from those three: a symlink, a
+/// shared owner or a group-writable mount there is the operator's own
+/// decision. It still gets the `O_EXCL` probe, because "the operator chose
+/// a world-writable location" is not "the operator chose to let neighbours
+/// clobber our files".
+///
+/// Every check below is an `fstat`/`fchmod` on a descriptor from a single
+/// `open`, and that is load-bearing. The previous shape looked at the
+/// pathname twice — `symlink_metadata`, then `metadata` — and each lookup
+/// resolved the name from scratch, so a local user could let the first one
+/// see an ordinary directory they had pre-created under `/tmp`, rename it
+/// away, and leave a symlink to a directory the server already owns. The
+/// second lookup followed it, both the ownership and the mode check passed
+/// against the wrong inode, and `SessionLogService` went on to build the
+/// session under the redirect target. Returning the descriptor is what makes
+/// the decision stick; another pathname check would only move the window.
+fn probe_session_base(dir: &Path, ours: bool) -> Result<SessionBase> {
+    let base = match open_candidate(dir, ours) {
+        Ok(base) => base,
+        Err(MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir)?;
+            // Re-open rather than re-check: the name may have been swapped
+            // while we were creating it, and `O_NOFOLLOW` on this second
+            // open is what catches that.
+            open_candidate(dir, ours)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    let mut st = base.stat()?;
+    if !SFlag::from_bits_truncate(st.st_mode).contains(SFlag::S_IFDIR) {
+        return Err(MemoryError::Other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+
+    if ours {
+        let me = nix::unistd::Uid::current().as_raw();
+        if !fallback_owner_is_us(st.st_uid, me) {
+            return Err(MemoryError::Other(format!(
+                "{} is owned by uid {}, not {me}; refusing it as a session dir",
+                dir.display(),
+                st.st_uid
+            )));
+        }
+
+        // Fallbacks can land under a world-writable /tmp, and a base created
+        // before this hardening keeps whatever the umask gave it. Each
+        // `<sid>` is already forced to 0700 by `SessionLogService::start`,
+        // but the base should not be listable or writable by other users
+        // either. Both failures reject the candidate instead of being
+        // swallowed: a chmod that errors, or that a filesystem accepts
+        // without applying (some FUSE and network mounts do), would
+        // otherwise leave session data in a base we just promised was 0700.
+        // Going through `fchmod` on the descriptor means the tightening
+        // cannot be redirected at a different inode either.
+        if st.st_mode & 0o077 != 0 {
+            nix::sys::stat::fchmod(base.fd(), Mode::from_bits_truncate(0o700)).map_err(|e| {
+                MemoryError::Other(format!("cannot tighten {} to 0700: {e}", dir.display()))
+            })?;
+            st = base.stat()?;
+            if st.st_mode & 0o077 != 0 {
+                return Err(MemoryError::Other(format!(
+                    "{} is still mode {:o} after chmod; refusing it as a session dir",
+                    dir.display(),
+                    st.st_mode & 0o777
+                )));
+            }
+        }
+    }
+
+    probe_writable(
+        &base,
+        PROBE_SEQ.fetch_add(PROBE_ATTEMPTS, Ordering::Relaxed),
+    )?;
+    Ok(base)
+}
+
 fn start_session(config: &AppConfig, ns: &Namespace) -> Result<SessionLogService> {
-    let base = config.resolved_session_dir();
-    std::fs::create_dir_all(&base)?;
+    let base = resolve_session_base(config)?;
     let sid = match std::env::var("MEMORY_SESSION_ID") {
         Ok(s) if !s.is_empty() => match SessionId::from_string(&s) {
             Ok(sid) => sid,
@@ -432,8 +767,8 @@ fn start_session(config: &AppConfig, ns: &Namespace) -> Result<SessionLogService
     // Session logs are mirrored here so they survive SIGKILL and tmpfs loss.
     let mirror_dir = mount_root_for_session_mirror(config, ns);
 
-    SessionLogService::start(
-        &base,
+    SessionLogService::start_in(
+        base,
         sid,
         &config.global.user_id,
         agent_id.as_deref(),
@@ -451,4 +786,437 @@ fn mount_root_for_session_mirror(config: &AppConfig, ns: &Namespace) -> Option<P
         .join(".anolisa")
         .join("session-logs");
     Some(mirror)
+}
+
+#[cfg(test)]
+mod session_base_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn modes(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn prefers_a_writable_configured_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let configured = tmp.path().join("sessions");
+        let fallback = tmp.path().join("fallback");
+        let picked =
+            pick_session_base(&[(configured.clone(), false), (fallback.clone(), true)]).unwrap();
+        assert_eq!(picked.display_path(), configured);
+        assert!(
+            !fallback.exists(),
+            "must not touch the fallback unnecessarily"
+        );
+    }
+
+    #[test]
+    fn skips_a_configured_dir_that_cannot_be_created() {
+        // A regular file where the session base should be: create_dir_all can
+        // never succeed. This is the shape a non-root server hits on the
+        // shipped default /run/anolisa/sessions.
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let fallback = tmp.path().join("fallback");
+
+        let picked =
+            pick_session_base(&[(blocker.join("sessions"), false), (fallback.clone(), true)])
+                .unwrap();
+        assert_eq!(picked.display_path(), fallback);
+        assert!(fallback.join("x").parent().unwrap().exists());
+    }
+
+    #[test]
+    fn skips_an_existing_read_only_dir() {
+        if nix::unistd::Uid::current().is_root() {
+            eprintln!("skipped: root bypasses directory permissions");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ro = tmp.path().join("ro");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let fallback = tmp.path().join("fallback");
+
+        // create_dir_all succeeds on `ro` (it already exists), so only the
+        // write probe can catch it.
+        let picked = pick_session_base(&[(ro.clone(), false), (fallback.clone(), true)]).unwrap();
+        assert_eq!(picked.display_path(), fallback);
+        assert!(
+            !std::fs::read_dir(&ro)
+                .unwrap()
+                .next()
+                .is_some_and(|e| e.is_ok_and(|e| e
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".anolisa-probe-"))),
+            "probe must not leave a file behind in a directory it rejected"
+        );
+    }
+
+    #[test]
+    fn refuses_a_symlinked_fallback_but_honours_a_symlinked_configured_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let good = tmp.path().join("good");
+
+        // A directory we chose has to be a real one, or any local user could
+        // plant the name and redirect every session root.
+        let picked = pick_session_base(&[(link.clone(), true), (good.clone(), true)]).unwrap();
+        assert_eq!(picked.display_path(), good);
+
+        // The operator's own symlink is their decision, not an attack — but
+        // it is still resolved exactly once, into the descriptor the winner
+        // carries, so nothing after this point re-walks the name.
+        let picked = pick_session_base(&[(link.clone(), false), (good, true)]).unwrap();
+        assert_eq!(picked.display_path(), link);
+        assert_eq!(
+            picked.path().canonicalize().unwrap(),
+            real.canonicalize().unwrap(),
+            "the handle must be anchored to the inode the link points at"
+        );
+    }
+
+    #[test]
+    fn creates_a_fallback_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ours = tmp.path().join("fresh").join("anolisa-sessions-1000");
+        let picked = pick_session_base(&[(ours.clone(), true)]).unwrap();
+        assert_eq!(picked.display_path(), ours);
+        assert_eq!(modes(&ours), 0o700, "fallback base must not be listable");
+    }
+
+    #[test]
+    fn reports_every_candidate_when_none_is_usable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let err = pick_session_base(&[(blocker.join("a"), false), (blocker.join("b"), true)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no writable session directory"), "{err}");
+        assert!(err.contains("blocker/a"), "{err}");
+        assert!(err.contains("blocker/b"), "{err}");
+    }
+
+    #[test]
+    fn candidate_chain_starts_with_the_configured_dir_and_ends_in_tmp() {
+        let configured = Path::new("/run/anolisa/sessions");
+        let candidates = session_base_candidates(configured);
+        assert_eq!(candidates[0].0, configured);
+        assert!(
+            !candidates[0].1,
+            "the configured dir is the operator's choice"
+        );
+        let (last, ours) = candidates.last().unwrap();
+        assert!(ours, "fallbacks must be hardened");
+        assert!(
+            last.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("anolisa-sessions-")),
+            "tmp fallback must be uid-suffixed, got {}",
+            last.display()
+        );
+    }
+
+    // ---------- review follow-ups: hardening the probe and the fallback ----------
+
+    #[test]
+    fn fallback_owner_check_has_no_root_exemption() {
+        // `/tmp/anolisa-sessions-0` is a predictable name in a world-writable
+        // directory. Accepting an existing base just because the server
+        // happens to be uid 0 hands any local user control over every session
+        // root the root server builds inside it, so the check compares
+        // against the effective uid and nothing else.
+        assert!(fallback_owner_is_us(0, 0));
+        assert!(fallback_owner_is_us(1000, 1000));
+        assert!(
+            !fallback_owner_is_us(1000, 0),
+            "a root server must reject a user-owned fallback"
+        );
+        assert!(!fallback_owner_is_us(0, 1000));
+    }
+
+    #[test]
+    fn rejects_a_foreign_owned_fallback_even_as_root() {
+        use nix::unistd::{Gid, Uid, chown};
+
+        if !nix::unistd::Uid::current().is_root() {
+            eprintln!("skipped: planting a foreign owner needs root");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("anolisa-sessions-0");
+        std::fs::create_dir_all(&planted).unwrap();
+        // Addressed numerically, so this does not depend on `nobody` existing.
+        chown(
+            &planted,
+            Some(Uid::from_raw(65534)),
+            Some(Gid::from_raw(65534)),
+        )
+        .unwrap();
+        let good = tmp.path().join("next");
+
+        let picked = pick_session_base(&[(planted.clone(), true), (good.clone(), true)]).unwrap();
+
+        assert_eq!(
+            picked.display_path(),
+            good.as_path(),
+            "must fall through instead of using the foreign-owned {}",
+            planted.display()
+        );
+    }
+
+    #[test]
+    fn probe_refuses_to_follow_a_planted_symlink() {
+        // The probe name is predictable (pid + a counter), so on a base
+        // another local user can write to it can be pre-planted. That
+        // includes an operator-configured one: a group-writable
+        // MEMORY_SESSION_DIR is explicitly allowed. `std::fs::write` followed
+        // the link and truncated the target, which made the writability check
+        // itself a file-clobber primitive against anything the server uid can
+        // write; O_CREAT|O_EXCL refuses the name instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let planted = base.join(format!(".anolisa-probe-{}-7", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        let handle = SessionBase::open(&base).unwrap();
+        let err = probe_writable(&handle, 7).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"precious",
+            "the symlink target must survive the probe"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a squatter's file is not ours to unlink"
+        );
+    }
+
+    #[test]
+    fn probe_steps_over_a_stale_file_and_removes_only_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let pid = std::process::id();
+        let stale = base.join(format!(".anolisa-probe-{pid}-3"));
+        std::fs::write(&stale, b"left behind by a killed server").unwrap();
+
+        let handle = SessionBase::open(&base).unwrap();
+        probe_writable(&handle, 3).unwrap();
+
+        assert_eq!(
+            std::fs::read(&stale).unwrap(),
+            b"left behind by a killed server",
+            "a stale probe is not ours to delete"
+        );
+        let probes: Vec<String> = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".anolisa-probe-"))
+            .collect();
+        assert_eq!(
+            probes,
+            vec![stale.file_name().unwrap().to_string_lossy().into_owned()],
+            "our own probe must be cleaned up"
+        );
+    }
+
+    #[test]
+    fn tightens_a_pre_existing_fallback_to_0700() {
+        // A base created before this hardening keeps whatever the umask gave
+        // it. The chmod that fixes that is no longer a `let _ =`, so a
+        // filesystem that refuses it rejects the candidate instead of quietly
+        // holding session data in a directory other users can list.
+        let tmp = tempfile::tempdir().unwrap();
+        let ours = tmp.path().join("anolisa-sessions-1000");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let picked = pick_session_base(&[(ours.clone(), true)]).unwrap();
+
+        assert_eq!(picked.display_path(), ours);
+        assert_eq!(modes(&ours), 0o700);
+    }
+
+    #[test]
+    fn leaves_an_operator_configured_dir_mode_alone() {
+        // The tightening above is for directories *we* chose. An operator who
+        // points MEMORY_SESSION_DIR at a group-shared mount made that call
+        // deliberately, and the probe must not widen or narrow it.
+        let tmp = tempfile::tempdir().unwrap();
+        let configured = tmp.path().join("shared");
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o770)).unwrap();
+
+        let picked = pick_session_base(&[(configured.clone(), false)]).unwrap();
+
+        assert_eq!(picked.display_path(), configured);
+        assert_eq!(modes(&configured), 0o770);
+    }
+
+    // ---- review round 2: one descriptor for validation *and* use ----
+
+    #[test]
+    fn a_symlink_to_a_directory_we_own_is_still_refused() {
+        // `metadata()` would follow this and happily report a directory
+        // owned by us with a mode we chose, which is exactly why the check
+        // is a single `O_NOFOLLOW` open rather than a pair of pathname
+        // lookups that a rename can slip between.
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = tmp.path().join("ours");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = tmp.path().join("anolisa-sessions-1000");
+        std::os::unix::fs::symlink(&owned, &link).unwrap();
+
+        let err = probe_session_base(&link, true).unwrap_err().to_string();
+
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&owned).unwrap().count(),
+            0,
+            "the probe must not have written into the link target"
+        );
+    }
+
+    #[test]
+    fn probe_writes_into_the_validated_directory_not_the_swapped_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let handle = SessionBase::open_nofollow(&base).unwrap();
+
+        // The swap from the review: rename the validated directory away and
+        // leave a symlink to something else in its place.
+        let stolen = tmp.path().join("stolen");
+        std::fs::rename(&base, &stolen).unwrap();
+        std::os::unix::fs::symlink(&target, &base).unwrap();
+
+        // Occupy the probe name *in the swapped-in directory*. A probe that
+        // resolved the pathname would hit this symlink and refuse; anchored
+        // to the descriptor it never sees it.
+        let squat = target.join(format!(".anolisa-probe-{}-11", std::process::id()));
+        std::os::unix::fs::symlink(&target, &squat).unwrap();
+
+        probe_writable(&handle, 11).unwrap();
+
+        assert_eq!(
+            std::fs::read_dir(&target).unwrap().count(),
+            1,
+            "only the squatter's own link may be under the redirect target"
+        );
+    }
+
+    #[test]
+    fn validation_and_use_stay_anchored_when_the_pathname_is_swapped() {
+        // End to end: validate, let a local user swap the pathname, then
+        // build the session. Two pathname lookups passed both the ownership
+        // and the mode check against the wrong inode here and went on to
+        // write the session under the redirect target; one `open` plus
+        // `fstat` on the descriptor cannot be redirected after the fact.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("anolisa-sessions-1000");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = tmp.path().join("already-owned-by-the-server");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let picked = pick_session_base(&[(base.clone(), true)]).unwrap();
+
+        let stolen = tmp.path().join("stolen");
+        std::fs::rename(&base, &stolen).unwrap();
+        std::os::unix::fs::symlink(&target, &base).unwrap();
+
+        let session = SessionLogService::start_in(
+            picked,
+            SessionId::from_string("ses_anchored").unwrap(),
+            "alice",
+            Some("test"),
+            "user-alice",
+            None,
+        )
+        .unwrap();
+
+        let real_root = session.root().canonicalize().unwrap();
+        assert!(
+            real_root.starts_with(stolen.canonicalize().unwrap()),
+            "the session must stay in the validated inode, got {}",
+            real_root.display()
+        );
+        assert_eq!(
+            std::fs::read_dir(&target).unwrap().count(),
+            0,
+            "nothing may be written under the redirect target"
+        );
+        assert!(session.root().join("meta.toml").exists());
+        assert!(session.scratch_root().is_dir());
+        assert!(session.log_path().exists());
+        assert_eq!(
+            session.display_root(),
+            base.join("ses_anchored"),
+            "the reported path stays the one the operator recognises"
+        );
+    }
+
+    // ---- review round 2: the fallback name follows the host uid ----
+
+    #[test]
+    fn tmp_fallback_is_named_after_the_host_uid_not_the_namespace_uid() {
+        // `early_enter_userns` runs before the service is built and maps
+        // `0 <host uid> 1`, so by the time the candidate chain is computed
+        // `geteuid()` is 0 for every user on the box. Naming the tmp
+        // fallback after that makes them all compute
+        // `/tmp/anolisa-sessions-0`; whoever creates it first owns a
+        // directory every other user's namespace reports as foreign-owned,
+        // so the ownership check rejects the last candidate and they lose
+        // the session anyway.
+        let configured = Path::new("/run/anolisa/sessions");
+
+        let alice = candidates_for_host_uid(configured, 1000);
+        let bob = candidates_for_host_uid(configured, 1001);
+
+        assert_eq!(
+            alice.last().unwrap().0.file_name().unwrap(),
+            "anolisa-sessions-1000"
+        );
+        assert_eq!(
+            bob.last().unwrap().0.file_name().unwrap(),
+            "anolisa-sessions-1001"
+        );
+        assert_ne!(
+            alice.last().unwrap().0,
+            bob.last().unwrap().0,
+            "two host users sharing a TMPDIR must not compute one base"
+        );
+    }
+
+    #[test]
+    fn the_live_candidate_chain_uses_the_host_identity() {
+        // `host_uid()` is the captured launching uid (or, if nothing was
+        // captured, the one recovered from `/proc/self/uid_map`), so the
+        // chain the real code builds never depends on which namespace we
+        // happen to be in when it is built.
+        let configured = Path::new("/run/anolisa/sessions");
+        assert_eq!(
+            session_base_candidates(configured),
+            candidates_for_host_uid(configured, crate::host::host_uid())
+        );
+    }
 }

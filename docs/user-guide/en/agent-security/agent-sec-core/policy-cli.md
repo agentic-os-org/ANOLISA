@@ -21,6 +21,29 @@ or grant permissions.
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## Correlate local logs
+
+V2 uses native OpenTelemetry for local request correlation. `--trace-context`
+retains the existing flat Agent metadata input; place it before command names and
+other options' non-option values. Optional `--otel-context` accepts a version 1
+JSON carrier with `traceparent`, `tracestate` and `baggage`. The explicit flat
+Agent fields take precedence when both are supplied.
+
+```bash
+RUST_LOG=info agent-sec-cli --trace-context '{"session_id":"session-123","agent_name":"openclaw"}' \
+  --otel-context '{"version":1,"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}' \
+  --socket "$SOCKET" policy list
+```
+
+`RUST_LOG=info` enables bounded JSON correlation diagnostics on stderr; configure
+the daemon environment separately to see its records. Default warn leaves these
+records disabled. Diagnostics may be dropped under back-pressure; command results
+and errors retain their existing output and exit-code semantics.
+No public OTLP exporter or exporter/sampling/batch configuration is provided.
+`OTEL_*` settings cannot enable export or change the fixed local sampling policy.
+`--otel-context` is incoming context, not an export destination.
+The CLI requires the new daemon with carrier support; upgrade the daemon first.
+
 ## Manage Policies
 
 Create a JSON template file such as `policy.json`:

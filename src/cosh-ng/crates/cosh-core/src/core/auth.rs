@@ -36,13 +36,15 @@ impl CoshCore {
         let resolved = self.config.resolve_provider();
         if resolved.provider_type == "aliyun" {
             if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-                self.provider =
-                    Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role());
+                self.provider = Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role(
+                    &resolved.sysom_endpoint,
+                ));
             } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
                 self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
                     &resolved.access_key_id,
                     &resolved.access_key_secret,
                     resolved.security_token.as_deref(),
+                    &resolved.sysom_endpoint,
                 ));
             } else {
                 tracing::warn!("Aliyun auth response missing AK/SK");

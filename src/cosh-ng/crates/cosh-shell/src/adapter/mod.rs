@@ -24,6 +24,7 @@ mod cosh_core_registry_tests;
 mod cosh_core_service;
 #[cfg(test)]
 mod cosh_core_tests;
+mod ecs_probe;
 mod fake;
 mod process;
 mod prompt;
@@ -43,6 +44,7 @@ pub use cosh_core::{
     SessionRecovery, SessionRecoveryState, SessionRuntimeState, SessionSummary,
 };
 pub(crate) use cosh_core_registry::RegistryQueryError;
+pub use ecs_probe::EcsProbeTask;
 pub use fake::FakeAgentAdapter;
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,

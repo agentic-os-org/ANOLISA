@@ -9,7 +9,7 @@ from agent_sec_cli.skill_ledger.scanner.builtins.cisco_static.scanner import (
     SCANNER_VERSION,
     scan_skill,
 )
-from agent_sec_cli.skill_ledger.scanner.names import canonicalize_scanner_name
+from agent_sec_cli.skill_ledger.scanner.names import validate_scanner_name
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ def run_builtin_scanner(
     options: dict[str, Any] | None = None,
 ) -> BuiltinScanResult:
     """Run a built-in scanner by registry name."""
-    canonical_name = canonicalize_scanner_name(scanner_name)
+    canonical_name = validate_scanner_name(scanner_name)
     if canonical_name == SCANNER_NAME:
         try:
             findings = scan_skill(skill_dir, options=options)

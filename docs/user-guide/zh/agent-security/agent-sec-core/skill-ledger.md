@@ -24,6 +24,10 @@ agent-sec-cli skill-ledger init
 baseline 是批量写操作。由 host 提供的只读已打包系统 Skill 会遵循
 [只读的已打包系统 Skill](#只读的已打包系统-skill) 中的跳过契约；密钥初始化仍会完成。
 
+`init --no-baseline` 只初始化密钥，不扫描 Skill。重复初始化复用密钥，返回
+`keyCreated: false`、`key: null`；新建密钥时返回 `keyCreated: true`，密钥信息位于
+`key`。`init --force-keys` 更换密钥对，并归档原公钥供签名校验。
+
 密钥存放位置：
 
 | 文件 | 路径 | 权限 |
@@ -142,6 +146,14 @@ child.on("close", (code) => {
 跳过项不会写入逐 Skill scanner 结果、manifest、snapshot 或 `.skill-meta` 状态，
 全局密钥初始化行为保持不变。显式 `scan <dir>` 仍保持严格语义：退出码为 `1`，并提示
 调用方使用 `analyze` 获取只读 findings。
+
+同样的批量跳过规则也适用于 `$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）直接子目录中由 host 提供的 Skill：
+当账本状态不可写且未被 `managedSkillDirs` 覆盖时，返回
+`reasonCode=readonly_default_skill`。这包括镜像中对运行用户只读的 raw 用户 Skill。
+可写的 raw 用户 Skill 正常扫描；跳过项不会加入 `managedSkillDirs`。
+显式扫描和已纳管用户 Skill 的写入仍会因权限错误而失败。
+SkillFS backing 和 resolver 的错误仍按错误处理。
 
 `check` 和 `status` 的语义不变。若跳过项此前不存在任何账本 artifact，`check`
 返回 `none`，聚合健康度仍可能为 `unscanned`；这些值不会把批量跳过转化为认证或
@@ -539,6 +551,13 @@ agent-sec-cli skill-ledger decide /path/to/skill --clear
 
 不存在的目录会被静默忽略。此外，对 Skill 执行 `scan` 或 `certify` 时，未收录的目录会自动追加到配置中，方便后续 `--all` 批量操作。`check` 是只读状态检查，不会写入配置。
 
+对于 raw 用户根 `$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）的直接子 Skill，自动记忆仅登记该 Skill
+自身路径，即使存在其它兄弟 Skill 也不扩大为父目录通配符。因此，扫描可写 Skill
+不会把只读兄弟 Skill 一并加入 `managedSkillDirs`。其它根目录保留现有父目录通配符规则。
+已有配置条目不会自动改写：已有通配符覆盖的用户 Skill 仍视为已纳管，写入失败仍会报错。
+若确认 raw 根通配符属于误添加，可将它替换为实际需要纳管的各个 Skill 路径，保留有意配置的覆盖范围。
+
 #### 定时执行默认快速扫描
 
 如果希望定期刷新默认快速扫描结果，可以把 `scan --all` 放入 cron。`scan --all` 会自动跳过文件未变且已有完整扫描结果的 Skill，只补扫新增、变更、缺少扫描结果或 manifest 异常的 Skill。对于由 host 提供的只读已打包系统 Skill，它还会返回 `status=skipped` 和 `reasonCode=readonly_system_skill`；本次运行不会为这些项创建或刷新认证，因此应检查 JSON 结果。
@@ -648,9 +667,11 @@ agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 | `agent-sec-cli skill-ledger audit <dir>` | 深度验证版本链 |
 | `agent-sec-cli skill-ledger list-scanners` | 查看已注册的扫描器列表 |
 
-`decide` 是记录单个 Skill 用户决策的唯一受支持命令。早期隐藏的 `set-policy`
-占位命令从未实现且现已移除；继续调用会得到 unknown-command 用法错误和退出码 2。
-`rotate-keys` 仍是隐藏的预留接口：调用时会在 stderr 报告 `not implemented`，以非零
+`activationPolicy` 和 `show/export --policy` 接受 `pass_warn_only`。通过
+`list-scanners` 查询 `init/scan --scanners`、`certify --scanner` 可用的注册名称；
+自定义扫描器可在 `config.json` 中注册。
+
+`rotate-keys` 在 help 中可见，尚未实现：调用时会在 stderr 报告 `not implemented`，以非零
 退出码结束，且不会修改 `key.enc`、`key.pub` 或 keyring。
 
 ## 关键路径

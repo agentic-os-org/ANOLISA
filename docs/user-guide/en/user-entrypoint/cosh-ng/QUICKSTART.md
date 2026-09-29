@@ -63,17 +63,19 @@ cd your-project
 cosh
 ```
 
-The default Enhanced Assisted mode uses `◇ ` to show that submitted input may
-be classified and routed before Shell execution:
+The default Enhanced Assisted mode keeps the shell's native prompt appearance
+while submitted input may be classified and routed before Shell execution:
 
 ```text
-◇ user@host:~/project$ git status
-◇ user@host:~/project$ investigate the last failed deployment
+user@host:~/project$ git status
+user@host:~/project$ investigate the last failed deployment
 ```
 
-At an empty prompt, `Shift+Tab` switches to Enhanced Shell-only. The prefix
-becomes `◌ `, ordinary input stays with the Shell, and post-command insights
-remain available. Press `Shift+Tab` again to return to Assisted.
+At an empty prompt, `Shift+Tab` switches to Enhanced Shell-only. Ordinary
+input stays with the Shell, and post-command insights remain available. Press
+`Shift+Tab` again to return to Assisted. An optional `◇ `/`◌ ` status line
+above each prompt can be enabled with `shell.status_symbols` or
+`COSH_SHELL_STATUS_SYMBOLS=1`; it is off by default.
 
 Start Native when the session must have no Cosh hooks, observation, or insight:
 

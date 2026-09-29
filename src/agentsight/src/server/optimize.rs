@@ -19,11 +19,10 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
 use super::AppState;
 use super::secret;
-use super::semantic_search;
+use crate::semantic_search;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
-const DB_FILE_NAME: &str = "optimization.db";
 const TRAJECTORIES_DIR_NAME: &str = "opt-trajectories";
 
 /// Directory holding the config file — where the sealing salt lives too.
@@ -45,6 +44,11 @@ pub struct OptLlmConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// LLM ranking budget for semantic session search, in seconds. Separate
+    /// from the analysis path (which has no budget): a slow reasoning model
+    /// should raise this without affecting long-running optimization jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_timeout_secs: Option<u64>,
 }
 
 impl OptLlmConfig {
@@ -121,6 +125,13 @@ impl OptLlmConfig {
             .unwrap_or_else(|| "gpt-4o".into())
     }
 
+    fn search_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.search_timeout_secs
+                .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        )
+    }
+
     /// Mask the API key for display: first 6 and last 4 chars.
     fn masked_api_key(&self) -> Option<String> {
         self.effective_api_key().map(|k| {
@@ -150,8 +161,8 @@ pub struct OptimizeState {
 }
 
 impl OptimizeState {
-    /// Initialize from the storage base directory (where the .db files live).
-    pub fn init(base_dir: &Path) -> Arc<Self> {
+    /// Initializes optimization state with its centrally opened result store.
+    pub fn init(base_dir: &Path, store: Option<OptimizationStore>) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
         let (config, needs_reseal) = OptLlmConfig::load(&config_path);
         if needs_reseal {
@@ -162,13 +173,6 @@ impl OptimizeState {
                 Err(e) => log::warn!("Failed to encrypt stored optimization API key: {e}"),
             }
         }
-        let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("Failed to open optimization store: {e}");
-                None
-            }
-        };
         Arc::new(Self {
             config_path,
             config: RwLock::new(config),
@@ -177,7 +181,29 @@ impl OptimizeState {
         })
     }
 
-    fn snapshot(&self) -> OptLlmConfig {
+    pub(super) fn has_storage(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Applies the configured retention and capacity policy to optimization results.
+    pub(super) fn maintain_storage(
+        &self,
+        policy: crate::config::PeriodicStoragePolicy,
+    ) -> Result<Option<agentsight_opt_store::OptimizationMaintenanceReport>, String> {
+        self.store
+            .as_ref()
+            .map(|store| {
+                store
+                    .maintain(agentsight_opt_store::OptimizationMaintenancePolicy {
+                        retention_days: policy.retention_days,
+                        max_db_size_mb: policy.max_db_size_mb,
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+
+    pub(crate) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
@@ -226,12 +252,42 @@ pub async fn semantic_search_sessions(
     let client = match state.build_client() {
         Ok(c) => c,
         Err(_) => {
+            // Search degrades to empty instead of failing, but an unconfigured
+            // LLM is the most common cause of an empty page — make it
+            // attributable rather than indistinguishable from "no matches".
+            log::warn!(
+                "semantic_search: LLM not configured (missing API key), returning empty results"
+            );
             return HttpResponse::Ok()
                 .json(semantic_search::SemanticSearchResponse { results: vec![] });
         }
     };
+    let timeout = state.snapshot().search_timeout();
     let request = body.into_inner();
-    semantic_search::handle_semantic_search(&client, &request).await
+
+    // Sessions labelled `useless` are out of retrieval scope by design — the
+    // whole trajectory was judged to have nothing worth putting in front of a
+    // future search. Filtering here covers every caller of the endpoint, and
+    // before the minimum-count check so a fully-excluded request reads as
+    // empty rather than shrinking past the LLM threshold.
+    let request = match data.reuse_store.as_deref() {
+        Some(store) => match store.excluded_sessions() {
+            Ok(excluded) => semantic_search::filter_excluded(
+                request,
+                &excluded
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(error) => {
+                // A store failure must not take search down: the labels are a
+                // filter, not a dependency. Search everything rather than nothing.
+                log::warn!("reuse: reading excluded sessions failed, ranking unfiltered: {error}");
+                request
+            }
+        },
+        None => request,
+    };
+    semantic_search::handle_semantic_search(&client, &request, timeout).await
 }
 
 /// Load a session's captured events and build the ATIF trajectory that the
@@ -242,12 +298,13 @@ pub async fn semantic_search_sessions(
 /// log-collected trajectory store (trajectories.db), whose rows already hold
 /// ready-made ATIF v1.7 JSON.
 fn load_trajectory(
-    db_path: &Path,
+    genai_store: Option<&GenAISqliteStore>,
     trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
-    let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
-        HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+    let store = genai_store.ok_or_else(|| {
+        HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "GenAI store unavailable"}))
     })?;
     let events = store.get_events_by_session(session_id).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
@@ -598,8 +655,11 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(&data.storage_path, data.trajectory_store(), &session_id)
-    {
+    let trajectory = match load_trajectory(
+        data.genai_store.as_deref(),
+        data.trajectory_store(),
+        &session_id,
+    ) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -881,12 +941,7 @@ pub async fn get_optimize_config(data: web::Data<AppState>) -> impl Responder {
         Err(resp) => return resp,
     };
     let config = state.snapshot();
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": config.masked_api_key(),
-        "base_url": config.effective_base_url(),
-        "model": config.effective_model(),
-        "configured": config.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&config))
 }
 
 /// Body for POST /api/optimize/config. Omitted fields keep their prior value.
@@ -895,6 +950,42 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub search_timeout_secs: Option<u64>,
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+    if let Some(ref key) = update.api_key {
+        if !key.is_empty() && !key.contains('•') {
+            config.api_key = Some(key.clone());
+        }
+    }
+    if let Some(ref url) = update.base_url {
+        if !url.is_empty() {
+            config.base_url = Some(url.clone());
+        }
+    }
+    if let Some(ref model) = update.model {
+        if !model.is_empty() {
+            config.model = Some(model.clone());
+        }
+    }
+    if let Some(timeout_secs) = update.search_timeout_secs {
+        if timeout_secs > 0 {
+            config.search_timeout_secs = Some(timeout_secs);
+        }
+    }
+}
+
+fn config_response(config: &OptLlmConfig) -> serde_json::Value {
+    serde_json::json!({
+        "api_key": config.masked_api_key(),
+        "base_url": config.effective_base_url(),
+        "model": config.effective_model(),
+        "search_timeout_secs": config
+            .search_timeout_secs
+            .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        "configured": config.effective_api_key().is_some(),
+    })
 }
 
 /// POST /api/optimize/config — update LLM config (persisted to disk).
@@ -916,21 +1007,7 @@ pub async fn update_optimize_config(
                     .json(serde_json::json!({"error": "config lock poisoned"}));
             }
         };
-        if let Some(ref key) = body.api_key {
-            if !key.is_empty() && !key.contains('•') {
-                config.api_key = Some(key.clone());
-            }
-        }
-        if let Some(ref url) = body.base_url {
-            if !url.is_empty() {
-                config.base_url = Some(url.clone());
-            }
-        }
-        if let Some(ref model) = body.model {
-            if !model.is_empty() {
-                config.model = Some(model.clone());
-            }
-        }
+        apply_config_update(&mut config, &body);
         config.clone()
     };
 
@@ -940,17 +1017,90 @@ pub async fn update_optimize_config(
         }));
     }
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": updated.masked_api_key(),
-        "base_url": updated.effective_base_url(),
-        "model": updated.effective_model(),
-        "configured": updated.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&updated))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_test_state(base_dir: &Path) -> actix_web::web::Data<AppState> {
+        use std::sync::{Arc, RwLock};
+        use std::time::Instant;
+
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            base_dir,
+        ));
+        actix_web::web::Data::new(AppState {
+            storage_path: base_dir.join("agentsight.db"),
+            genai_store: None,
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(crate::health::HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                crate::grader::EvaluationStore::new_with_path(&base_dir.join("evaluation.db"))
+                    .unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: crate::server::SecurityObservabilityConfig::default(),
+            auth,
+            optimize: Some(OptimizeState::init(base_dir, None)),
+            reuse_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+        })
+    }
+
+    #[actix_web::test]
+    async fn config_endpoint_persists_and_returns_search_timeout() {
+        use actix_web::{App, test as awtest};
+
+        let dir = tmp_dir("search-timeout-api");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(get_optimize_config)
+                .service(update_optimize_config),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/config")
+            .set_json(serde_json::json!({"search_timeout_secs": 30}))
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert!(response.status().is_success());
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["search_timeout_secs"], 30);
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/optimize/config")
+                .to_request(),
+        )
+        .await;
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["search_timeout_secs"], 30);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_response_uses_default_search_timeout() {
+        assert_eq!(
+            config_response(&OptLlmConfig::default())["search_timeout_secs"],
+            semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS
+        );
+    }
 
     /// The eBPF export feeds the optimizer through JSON, so the shared-schema
     /// document must survive the analyzer's parser with tokens and per-step
@@ -986,6 +1136,7 @@ mod tests {
             api_key: Some("sk-1234567890abcd".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            search_timeout_secs: None,
         };
 
         assert_eq!(
@@ -1003,6 +1154,7 @@ mod tests {
             api_key: Some("short".into()),
             base_url: Some(String::new()),
             model: Some(String::new()),
+            search_timeout_secs: None,
         };
 
         assert_eq!(config.effective_api_key().as_deref(), Some("short"));
@@ -1019,6 +1171,7 @@ mod tests {
             api_key: Some("sk-super-secret-key".into()),
             base_url: Some("http://localhost/v1".into()),
             model: Some("test-model".into()),
+            search_timeout_secs: None,
         };
         config.save(&path).unwrap();
 
@@ -1128,7 +1281,13 @@ mod tests {
             .upsert_trajectory(&collected_record("log-1", atif))
             .unwrap();
 
-        let trajectory = load_trajectory(&db_path, Some(Arc::new(tstore)), "log-1").unwrap();
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        let trajectory =
+            load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "log-1").unwrap();
         assert_eq!(trajectory.session_id, "log-1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1138,14 +1297,19 @@ mod tests {
     fn load_trajectory_returns_not_found_when_both_sources_miss() {
         let dir = tmp_dir("miss");
         let db_path = dir.join("genai.db");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
 
         // Store present but session absent → 404.
-        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "nope").unwrap_err();
+        let resp = load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
-        // No store at all → 404 as well.
-        let resp = load_trajectory(&db_path, None, "nope").unwrap_err();
+        // No collected store at all → 404 as well.
+        let resp = load_trajectory(Some(&genai_store), None, "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1155,12 +1319,18 @@ mod tests {
     fn load_trajectory_rejects_corrupt_collected_atif() {
         let dir = tmp_dir("corrupt");
         let db_path = dir.join("genai.db");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
         tstore
             .upsert_trajectory(&collected_record("bad-1", "not json"))
             .unwrap();
 
-        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "bad-1").unwrap_err();
+        let resp =
+            load_trajectory(Some(&genai_store), Some(Arc::new(tstore)), "bad-1").unwrap_err();
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
@@ -1384,5 +1554,23 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_timeout_defaults_to_shared_default() {
+        assert_eq!(
+            OptLlmConfig::default().search_timeout(),
+            std::time::Duration::from_secs(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn search_timeout_secs_round_trips_and_stays_absent_when_unset() {
+        let config: OptLlmConfig =
+            serde_json::from_str(r#"{"search_timeout_secs": 30}"#).expect("deserialize");
+        assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
+        // Dashboard-managed files must not grow keys the user never set.
+        let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
+        assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
     }
 }

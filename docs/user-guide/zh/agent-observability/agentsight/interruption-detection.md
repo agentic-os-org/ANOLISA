@@ -180,17 +180,22 @@ Agent 可观测页面会在会话和对话旁边显示中断标记，因此在�
 ## 保留与容量
 
 ```json
-"features": {
-  "interruption_detection": {
-    "enabled": true,
-    "retention_days": 30,
-    "max_db_size_mb": 100
+{
+  "features": {
+    "interruption_detection": { "enabled": true }
+  },
+  "storage": {
+    "interruptions": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    }
   }
 }
 ```
 
-事件存放在 `/var/log/sysak/.agentsight/interruption_events.db`。超过 `retention_days` 的事件会被清理，
-数据库超过 `max_db_size_mb` 时会被裁剪。
+事件存放在 `/var/log/sysak/.agentsight/interruption_events.db`。保留时间、容量上限和维护间隔统一在
+`storage.interruptions` 下配置。
 
 ## API 访问
 

@@ -66,6 +66,10 @@ pub struct RuntimeConfig {
     pub compression_enabled: bool,
     /// Whether API search results share consecutive file paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
+    /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
+    pub diff_compression_enabled: bool,
+    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
+    pub html_extraction_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -76,6 +80,8 @@ impl Default for RuntimeConfig {
             sls_enabled: false,
             compression_enabled: true,
             search_path_sharing_enabled: true,
+            diff_compression_enabled: false,
+            html_extraction_enabled: true,
         }
     }
 }
@@ -411,6 +417,8 @@ impl TokenlessRuntime {
         let options = EntryOptions {
             compression_enabled: self.config.compression_enabled,
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
+            diff_compression_enabled: self.config.diff_compression_enabled,
+            html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: None,
@@ -457,6 +465,8 @@ impl TokenlessRuntime {
         let options = EntryOptions {
             compression_enabled: self.config.compression_enabled,
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
+            diff_compression_enabled: self.config.diff_compression_enabled,
+            html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: None,
@@ -817,6 +827,8 @@ pub fn compress_response_with_store(
             min_input_chars: 0,
             compression_enabled,
             search_path_sharing_enabled: false,
+            diff_compression_enabled: false,
+            html_extraction_enabled: false,
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,
             force_json: true,
@@ -1712,6 +1724,146 @@ mod tests {
         assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(result.output, input);
         assert_eq!(store.len(), 0);
+    }
+
+    /// State directory whose `stash.db` exists but is not a SQLite database.
+    ///
+    /// A non-empty file with an invalid header satisfies the shared path
+    /// policy (regular file inside the state directory) yet cannot be opened
+    /// as a database, so construction continues with `stash_store = None`
+    /// while `stats.db` still opens normally. Unlike a read-only directory,
+    /// this also holds for a runtime running as root.
+    fn unopenable_stash_dir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("stash.db"), "not a sqlite database\n").unwrap();
+        directory
+    }
+
+    /// BeforeModel request carrying a declaration long enough to compress.
+    fn long_tool_request() -> BeforeModelRequest {
+        BeforeModelRequest {
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": format!("SCHEMA_SENTINEL {}", "details ".repeat(200)),
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            })],
+            visible_context: serde_json::json!({"messages": []}),
+            capabilities: tokenless_protocol::BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: tokenless_protocol::RecoveryMethod::tool("tokenless_retrieve").unwrap(),
+            },
+        }
+    }
+
+    /// Entry options matching the ones `TokenlessRuntime::before_model` builds
+    /// from a default [`RuntimeConfig`].
+    fn runtime_entry_options() -> EntryOptions {
+        let config = RuntimeConfig::default();
+        EntryOptions {
+            compression_enabled: config.compression_enabled,
+            search_path_sharing_enabled: config.search_path_sharing_enabled,
+            diff_compression_enabled: config.diff_compression_enabled,
+            html_extraction_enabled: config.html_extraction_enabled,
+            stash_enabled: true,
+            rtk_path: None,
+            rtk_data_dir: None,
+        }
+    }
+
+    #[test]
+    fn html_rendering_is_on_and_diff_cropping_off_by_default() {
+        let config = RuntimeConfig::default();
+        assert!(config.html_extraction_enabled);
+        assert!(!config.diff_compression_enabled);
+    }
+
+    #[test]
+    fn before_model_without_a_stash_store_keeps_tools_and_records_nothing() {
+        let directory = unopenable_stash_dir();
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        assert!(!runtime.stash_available());
+        assert!(runtime.stash_error().is_some());
+        assert!(runtime.stats_available());
+
+        let request = long_tool_request();
+        let attribution = ProtocolAttribution {
+            agent_id: "runtime-test".to_string(),
+            session_id: Some("schema-no-stash".to_string()),
+            tool_use_id: None,
+        };
+        let response = runtime.before_model(&request, &attribution).unwrap();
+
+        // Fail-open: the model still sees the original declarations and no
+        // marker advertises a stash that could not be opened.
+        assert_eq!(response.tools, request.tools);
+        assert!(response.visible_markers.is_empty());
+
+        // `BeforeModelResponse` carries no disposition, so read the reason
+        // from the entry router the runtime delegates to: it reports the
+        // candidate as unrecoverable and keeps the measurement at the input,
+        // which is what makes the two token estimates come out equal.
+        let outcome = before_model_with_store(&request, &runtime_entry_options(), None).unwrap();
+        assert_eq!(
+            outcome.stats.disposition,
+            Disposition::RecoverabilityUnavailable
+        );
+        assert_eq!(outcome.stats.measured_output, outcome.stats.input);
+        assert!(outcome.artifact_keys.is_empty());
+
+        // An unmeasured candidate writes no statistics record at all, even
+        // though the statistics database opened successfully.
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        assert_eq!(recorder.count().unwrap(), 0);
+        assert!(
+            recorder
+                .records_by_session("schema-no-stash", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn before_model_dry_run_without_a_stash_store_is_recorded() {
+        let directory = unopenable_stash_dir();
+        // `TOKENLESS_COMPRESSION_ENABLED=0` reaches the runtime as
+        // `compression_enabled: false`.
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            compression_enabled: false,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        assert!(!runtime.stash_available());
+        assert!(runtime.stats_available());
+
+        let request = long_tool_request();
+        let attribution = ProtocolAttribution {
+            agent_id: "runtime-test".to_string(),
+            session_id: Some("schema-no-stash-dry-run".to_string()),
+            tool_use_id: None,
+        };
+        let response = runtime.before_model(&request, &attribution).unwrap();
+        assert_eq!(response.tools, request.tools);
+
+        // Dry run is measured, so the predicted savings are recorded even
+        // without a stash store.
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let records = recorder
+            .records_by_session("schema-no-stash-dry-run", None)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation, OperationType::CompressSchema);
+        assert_eq!(records[0].mode, CompressionMode::DryRun);
+        assert!(records[0].after_tokens < records[0].before_tokens);
     }
 
     #[test]

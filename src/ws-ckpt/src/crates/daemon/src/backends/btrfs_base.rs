@@ -81,12 +81,6 @@ impl BtrfsBaseBackend {
         let orig_gid = orig_meta.gid();
 
         let backup_path = backup_path_for(original_path);
-        // Recover orphan `.pre-init-bak` from an interrupted prior init before
-        // proceeding with Step 3 (rename). If recovery is impossible (ambiguous
-        // state — subvol already exists), recover_orphan_backup returns an
-        // actionable error pointing the user at `ws-ckpt recover`. See
-        // btrfs_common::recover_orphan_backup for the full rationale.
-        recover_orphan_backup(original_path, subvol_path).await?;
 
         tokio::fs::rename(original_path, &backup_path)
             .await
@@ -208,6 +202,8 @@ impl StorageBackend for BtrfsBaseBackend {
         original_path: &str,
         ws_id: &str,
     ) -> anyhow::Result<WorkspaceInfo> {
+        recover_orphan_backup(original_path, &self.data_root.join(ws_id)).await?;
+
         // Resolve symlink to real path to avoid copying the symlink itself
         let resolved = resolve_symlink_path(original_path).await?;
         let resolved_str = resolved.to_string_lossy().to_string();
@@ -232,6 +228,7 @@ impl StorageBackend for BtrfsBaseBackend {
                 &subvol_path,
                 &snap_dir,
                 backup_owned,
+                &self.data_root,
             )
             .await;
             return Err(e);
@@ -280,8 +277,12 @@ impl StorageBackend for BtrfsBaseBackend {
             }
         }
 
-        // Clean up old subvolume (non-fatal)
-        if let Err(e) = btrfs_common::delete_subvolume(&tmp_path).await {
+        // Clean up old subvolume (non-fatal). Space-aware: on a nearly-full
+        // backend the async cleaner may stall (ENOSPC) and leave a DELETED
+        // zombie pinning all space, so the guarded path pushes it synchronously
+        // and warns loudly with recovery guidance when it cannot (#3053).
+        if let Err(e) = btrfs_common::delete_subvolume_space_aware(&tmp_path, &self.data_root).await
+        {
             warn!("failed to delete old subvolume (non-fatal): {}", e);
         }
 
@@ -290,12 +291,22 @@ impl StorageBackend for BtrfsBaseBackend {
 
     async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
-        btrfs_common::delete_subvolume(&snap_path).await
+        btrfs_common::delete_subvolume_space_aware(&snap_path, &self.data_root).await
     }
 
     async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()> {
         let subvol_path = self.data_root.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
+
+        // Record subvolume root permissions before rsync
+        let subvol_meta = tokio::fs::metadata(&subvol_path).await.with_context(|| {
+            format!(
+                "cannot recover: subvolume {:?} is missing or unreadable; no data was restored. \
+                 If it was deleted, use `ws-ckpt unregister -w {:?} --force` to remove only \
+                 the registration while retaining backups and snapshots",
+                subvol_path, original_path
+            )
+        })?;
 
         // 1. Remove symlink; refuse if a non-symlink directory occupies the path
         match tokio::fs::symlink_metadata(original_path).await {
@@ -317,10 +328,6 @@ impl StorageBackend for BtrfsBaseBackend {
         // 2. Rsync subvolume contents back to original path (restore as normal directory)
         let src = format!("{}/", subvol_path.to_string_lossy()); // trailing / is important
 
-        // Record subvolume root permissions before rsync
-        let subvol_meta = tokio::fs::metadata(&subvol_path)
-            .await
-            .context("failed to read subvolume metadata")?;
         let sv_uid = subvol_meta.uid();
         let sv_gid = subvol_meta.gid();
         let sv_mode = subvol_meta.mode();
@@ -356,42 +363,23 @@ impl StorageBackend for BtrfsBaseBackend {
             info!("restored workspace contents to {}", original_path);
         }
 
-        // 3. Delete all snapshot subvolumes by scanning the filesystem directory
-        if let Ok(mut entries) = tokio::fs::read_dir(&snap_base).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Err(e) = btrfs_common::delete_subvolume(&path).await {
-                        warn!("failed to delete snapshot subvolume {:?}: {:#}", path, e);
-                    }
-                }
-            }
-        }
+        // 3. Delete snapshots before the workspace subvolume so a partial
+        //    teardown remains retryable.
+        btrfs_common::delete_recovery_subvolumes(
+            &snap_base,
+            &subvol_path,
+            &self.data_root,
+            original_path,
+        )
+        .await?;
 
-        // 4. Delete workspace subvolume
-        if let Err(e) = btrfs_common::delete_subvolume(&subvol_path).await {
-            warn!("failed to delete workspace subvolume {}: {:#}", ws_id, e);
-        }
-
-        // 5. Remove snapshots/{ws_id} directory
+        // 4. Remove snapshots/{ws_id} directory
         if let Err(e) = tokio::fs::remove_dir_all(&snap_base).await {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
-        // 6. Clean orphan `.pre-init-bak` if it still exists (prior interrupted
-        //    init). Safe to remove at this point — subvol is gone, original_path
-        //    has been restored as a normal directory in steps above.
-        let backup_path = backup_path_for(original_path);
-        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
-            if let Err(e) = tokio::fs::remove_dir_all(&backup_path).await {
-                warn!("failed to clean orphan backup {:?}: {:#}", backup_path, e);
-            } else {
-                info!("cleaned orphan backup {:?} during recover", backup_path);
-            }
-        }
-
-        // NOTE: BtrfsBase does NOT need umount, losetup -d, or img deletion
-        // (that's the key difference from BtrfsLoop)
+        // The backup can contain files absent from an interrupted migration.
+        // Leave it intact; the manager archives it and reports the new location.
 
         Ok(())
     }
@@ -408,7 +396,8 @@ impl StorageBackend for BtrfsBaseBackend {
             Some(id) => btrfs_common::diff_between_snapshots(&snap_from, &snap_base.join(id)).await,
             None => {
                 let live = self.data_root.join(ws_id);
-                btrfs_common::diff_against_live(&snap_from, &live, &snap_base).await
+                btrfs_common::diff_against_live(&snap_from, &live, &snap_base, &self.data_root)
+                    .await
             }
         }
     }
@@ -417,22 +406,11 @@ impl StorageBackend for BtrfsBaseBackend {
         &self,
         ws_id: &str,
         snapshot_ids: &[String],
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<(String, SnapshotDeleteOutcome)>> {
+        // Whole batch shares ONE risk assessment and, at High risk, ONE
+        // bounded cleaner wait (#3053 review P1-c).
         let snap_dir = self.snapshots_dir.join(ws_id);
-        let mut removed = Vec::new();
-        for snap_id in snapshot_ids {
-            let snap_path = snap_dir.join(snap_id);
-            match btrfs_common::delete_subvolume(&snap_path).await {
-                Ok(()) => {
-                    removed.push(snap_id.clone());
-                    info!("cleanup: removed snapshot {}", snap_id);
-                }
-                Err(e) => {
-                    warn!("cleanup: failed to delete snapshot {}: {:#}", snap_id, e);
-                }
-            }
-        }
-        Ok(removed)
+        Ok(btrfs_common::cleanup_snapshots_batch(&snap_dir, &self.data_root, snapshot_ids).await)
     }
 
     async fn fork(&self, ws_id: &str, snapshot_id: &str, new_ws_id: &str) -> anyhow::Result<()> {
@@ -518,6 +496,10 @@ impl StorageBackend for BtrfsBaseBackend {
         btrfs_common::get_filesystem_usage(&self.data_root).await
     }
 
+    async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+        btrfs_common::list_deleted_subvolumes(&self.data_root).await
+    }
+
     /// Ensure data_root and snapshots_dir exist on the already-mounted btrfs partition.
     async fn bootstrap(&self, _config: &DaemonConfig) -> anyhow::Result<()> {
         for dir in [&self.data_root, &self.snapshots_dir] {
@@ -525,6 +507,18 @@ impl StorageBackend for BtrfsBaseBackend {
                 .await
                 .with_context(|| format!("Failed to ensure directory exists: {:?}", dir))?;
         }
+        // Zombie sweep (#3053): a previous run may have deleted subvolumes the
+        // kernel cleaner could not reclaim under ENOSPC. The daemon reuses the
+        // host mount across restarts by design (#2809), so nothing else ever
+        // kicks the cleaner. KickOnly: data_root lives on a host partition
+        // that other tools may use, so `list -d` is filesystem-wide — the
+        // sweep kicks the cleaner but never blocks startup waiting on
+        // subvolumes ws-ckpt does not own (review P1-a).
+        btrfs_common::sweep_zombie_subvolumes(
+            &self.data_root,
+            btrfs_common::ZombieSweepPolicy::KickOnly,
+        )
+        .await;
         // Startup awaits bootstrap before rebuilding workspace watchers.
         self.recover_interrupted_rollbacks().await?;
         Ok(())

@@ -174,33 +174,41 @@ export async function handleListCheckpoints(): Promise<{
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
   }
-  const checkpoints = await pluginState.manager.listCheckpoints();
-  if (checkpoints.length === 0) {
-    return {
-      text: "No checkpoints found. The workspace is active and daemon is responding \u2014 there are simply no snapshots yet.",
-      isError: false,
-    };
+  try {
+    const checkpoints = await pluginState.manager.listCheckpoints();
+    if (checkpoints.length === 0) {
+      return {
+        text: "No checkpoints found. The workspace is active and daemon is responding — there are simply no snapshots yet.",
+        isError: false,
+      };
+    }
+    const header = ["ID", "Created At", "Message", "Metadata", "Detail"];
+    const rows = checkpoints.map((cp) => [
+      cp.snapshot,
+      cp.createdAt,
+      cp.message ?? "",
+      cp.metadata ? JSON.stringify(cp.metadata) : "",
+      cp.detail === "summary"
+        ? `summary (omitted: ${(cp.omittedFields ?? []).join(", ") || "details"})`
+        : "full",
+    ]);
+    const widths = header.map((h, i) =>
+      Math.max(h.length, ...rows.map((r) => r[i].length)),
+    );
+    const fmt = (cols: string[]) =>
+      cols.map((c, i) => c.padEnd(widths[i])).join("  ");
+    const lines: string[] = [
+      `Checkpoints (${checkpoints.length}):`,
+      "",
+      fmt(header),
+      widths.map((w) => "-".repeat(w)).join("  "),
+      ...rows.map(fmt),
+    ];
+    return { text: lines.join("\n"), isError: false };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { text: `List checkpoints error: ${message}`, isError: true };
   }
-  const header = ["ID", "Created At", "Message", "Metadata"];
-  const rows = checkpoints.map((cp) => [
-    cp.snapshot,
-    cp.createdAt,
-    cp.message ?? "",
-    cp.metadata ? JSON.stringify(cp.metadata) : "",
-  ]);
-  const widths = header.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => r[i].length)),
-  );
-  const fmt = (cols: string[]) =>
-    cols.map((c, i) => c.padEnd(widths[i])).join("  ");
-  const lines: string[] = [
-    `Checkpoints (${checkpoints.length}):`,
-    "",
-    fmt(header),
-    widths.map((w) => "-".repeat(w)).join("  "),
-    ...rows.map(fmt),
-  ];
-  return { text: lines.join("\n"), isError: false };
 }
 
 export async function handleDelete(

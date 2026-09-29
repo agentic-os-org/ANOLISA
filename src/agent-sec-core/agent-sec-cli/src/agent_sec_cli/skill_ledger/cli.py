@@ -14,6 +14,10 @@ import typer
 from agent_sec_cli import __version__ as AGENT_SEC_VERSION
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.result import ActionResult
+from agent_sec_cli.skill_ledger.activation_policy import (
+    validate_activation_policy,
+)
+from agent_sec_cli.skill_ledger.scanner.names import validate_scanner_name
 
 app = typer.Typer(
     name="skill-ledger",
@@ -63,7 +67,29 @@ def _forward(result: ActionResult) -> None:
 
 def _parse_scanner_names(scanners: Optional[str]) -> list[str] | None:
     """Parse a comma-separated scanner list."""
-    return [s.strip() for s in scanners.split(",") if s.strip()] if scanners else None
+    names = [s.strip() for s in scanners.split(",") if s.strip()] if scanners else None
+    for name in names or []:
+        try:
+            validate_scanner_name(name)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--scanners") from exc
+    return names
+
+
+def _validate_cli_scanner(value: str) -> str:
+    try:
+        return validate_scanner_name(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _validate_cli_policy(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return validate_activation_policy(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _resolve_new_key_passphrase(use_passphrase: bool) -> str | None:
@@ -116,6 +142,7 @@ def cmd_init(
     ),
 ) -> None:
     """Initialize skill-ledger and baseline covered skills."""
+    scanner_names = _parse_scanner_names(scanners)
     passphrase = _resolve_new_key_passphrase(use_passphrase)
     result = invoke(
         "skill_ledger",
@@ -124,41 +151,7 @@ def cmd_init(
         passphrase=passphrase,
         passphrase_requested=use_passphrase,
         force_keys=force_keys,
-        scanner_names=_parse_scanner_names(scanners),
-    )
-    _forward(result)
-
-
-# ---------------------------------------------------------------------------
-# init-keys (hidden compatibility command)
-# ---------------------------------------------------------------------------
-
-
-@app.command("init-keys", hidden=True)
-def cmd_init_keys(
-    force: bool = typer.Option(
-        False, "--force", help="Overwrite existing keys (old key pair is archived)"
-    ),
-    use_passphrase: bool = typer.Option(
-        False,
-        "--passphrase",
-        help="Protect the private key with an interactive passphrase (or set SKILL_LEDGER_PASSPHRASE env var for CI)",
-    ),
-) -> None:
-    """Generate an Ed25519 signing key pair (one-time setup).
-
-    Creates a key pair used to sign skill manifests. Run this once before
-    using any other skill-ledger command.
-
-    Key storage:
-      ~/.local/share/agent-sec/skill-ledger/key.enc  (encrypted private key, 0600)
-      ~/.local/share/agent-sec/skill-ledger/key.pub  (public key, 0644)
-
-    By default, no passphrase is required — safe for non-interactive use.
-    """
-    passphrase = _resolve_new_key_passphrase(use_passphrase)
-    result = invoke(
-        "skill_ledger", command="init-keys", force=force, passphrase=passphrase
+        scanner_names=scanner_names,
     )
     _forward(result)
 
@@ -339,6 +332,7 @@ def cmd_certify(
     scanner: str = typer.Option(
         "skill-vetter",
         "--scanner",
+        callback=_validate_cli_scanner,
         help="Name of the scanner that produced the findings file",
     ),
     scanner_version: Optional[str] = typer.Option(
@@ -517,6 +511,7 @@ def cmd_show(
     policy: Optional[str] = typer.Option(
         None,
         "--policy",
+        callback=_validate_cli_policy,
         help="Activation policy to use when computing the active version.",
     ),
 ) -> None:
@@ -551,6 +546,7 @@ def cmd_export(
     policy: Optional[str] = typer.Option(
         None,
         "--policy",
+        callback=_validate_cli_policy,
         help="Activation policy to use when --version active is requested.",
     ),
 ) -> None:
@@ -571,7 +567,7 @@ def cmd_export(
 # ---------------------------------------------------------------------------
 
 
-@app.command("rotate-keys", hidden=True)
+@app.command("rotate-keys")
 def cmd_rotate_keys() -> None:
     """Report that signing-key rotation is not implemented.
 

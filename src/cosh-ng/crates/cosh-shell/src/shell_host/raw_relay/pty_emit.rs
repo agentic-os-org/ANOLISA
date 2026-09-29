@@ -216,7 +216,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     prompt_presentation,
                 )?;
             } else {
-                prompt_presentation.write_replayed_prompt(output, prompt)?;
+                prompt_presentation.write_restored_prompt(output, prompt)?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
                 prompt_replay.arm_for_replay(raw_prompt);
             }
@@ -337,7 +337,7 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     if prompt.is_empty() {
         return Ok(());
     }
-    prompt_presentation.write_replayed_prompt(output, prompt)?;
+    prompt_presentation.write_restored_prompt(output, prompt)?;
     output.flush()?;
     mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
     prompt_replay.arm_for_replay(raw_prompt);

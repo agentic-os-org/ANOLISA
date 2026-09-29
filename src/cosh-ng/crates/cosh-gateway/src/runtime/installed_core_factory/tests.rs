@@ -25,7 +25,7 @@ fn executable(directory: &Path, name: &str, marker: &Path) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s|%s' \"$*\" \"$UNTRUSTED_SECRET\" > \"{}\"\nwhile read line; do :; done\n",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"$*\" \"$UNTRUSTED_SECRET\" \"$COSH_SYSOM_ENDPOINT\" \"$COSH_SYSOM_VPC_PROXY_HOST\" \"$COSH_SYSOM_PROBE_TIMEOUT_MS\" > \"{}\"\nwhile read line; do :; done\n",
             marker.display()
         ),
     )
@@ -84,6 +84,18 @@ fn admitted_with_profile(
         BTreeMap::from([
             (OsString::from("HOME"), OsString::from("/tmp/test-home")),
             (
+                OsString::from("COSH_SYSOM_ENDPOINT"),
+                OsString::from("https://sysom.example.com:8443"),
+            ),
+            (
+                OsString::from("COSH_SYSOM_VPC_PROXY_HOST"),
+                OsString::from("probe.example.com:443"),
+            ),
+            (
+                OsString::from("COSH_SYSOM_PROBE_TIMEOUT_MS"),
+                OsString::from("1"),
+            ),
+            (
                 OsString::from("UNTRUSTED_SECRET"),
                 OsString::from("must-not-cross"),
             ),
@@ -137,7 +149,7 @@ fn factory_launches_only_the_exact_profile_with_filtered_environment() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-v1|"
+        "--headless --execution-profile gateway-brokered-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
@@ -218,7 +230,7 @@ fn factory_maps_the_checkpoint_selector_to_the_private_core_launch_profile() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-checkpoint-v1|"
+        "--headless --execution-profile gateway-brokered-checkpoint-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
@@ -259,7 +271,7 @@ fn workspace_write_profile_requires_exact_selector_manifest_and_private_argv() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-workspace-write-v1|"
+        "--headless --execution-profile gateway-brokered-workspace-write-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
@@ -374,4 +386,40 @@ fn factory_rejects_a_non_core_configured_entry() {
         BTreeMap::new(),
     )
     .is_err());
+}
+
+#[test]
+fn factory_launches_in_refreshed_workspace_without_restart() {
+    let root = TempDir::new().unwrap();
+    let script = root.path().join("writer.sh");
+    fs::write(
+        &script,
+        "printf '%s' \"$PWD\" > artifact; while read line; do :; done\n",
+    )
+    .unwrap();
+    let core = root.path().join("cosh-core");
+    fs::copy("/bin/sh", &core).unwrap();
+    let (mut factory, run) = admitted(&root, &core, &script);
+    let binding = factory.workspaces.clone();
+    let workspace = root.path().join("workspace");
+    for _ in 0..2 {
+        let old = root.path().join("workspace.rollback-tmp");
+        fs::rename(&workspace, &old).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::remove_dir_all(&old).unwrap();
+        binding.refresh_after_snapshot_switch().unwrap();
+        let port = factory.create(&run).unwrap();
+        let artifact = workspace.join("artifact");
+        for _ in 0..100 {
+            if artifact.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            workspace.display().to_string()
+        );
+        drop(port);
+    }
 }

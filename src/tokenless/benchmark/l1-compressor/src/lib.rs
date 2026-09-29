@@ -241,7 +241,7 @@ pub fn response_small() -> Value {
             "x-request-id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             "x-ratelimit-remaining": "4999",
             "content-type": "application/json; charset=utf-8",
-            "x-powered-by": "tokenless-engine/0.7.1"
+            "x-powered-by": "tokenless-engine/0.7.4"
         },
         "links": {
             "self": "https://api.example.com/v2/compute/req_12345",

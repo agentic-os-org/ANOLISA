@@ -35,12 +35,14 @@
 //! storage.token().add(token_record)?;
 //! ```
 
+use agentsight_sqlite_lifecycle::{
+    CheckpointOutcome, MaintenanceStatus, SizeBasis, SizePolicy, enforce_size_policy,
+    retention_cutoff_ns,
+};
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::sqlite::connection::default_base_path;
 use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
 
@@ -80,8 +82,6 @@ pub struct SqliteConfig {
     pub token_consumption_table: String,
     /// Data retention period in days (0 = no limit)
     pub retention_days: u64,
-    /// Auto-purge check interval (every N inserts, 0 = disabled)
-    pub purge_interval: u64,
     /// Max database file size in MB (0 = no size-based limit)
     pub max_db_size_mb: u64,
 }
@@ -89,15 +89,14 @@ pub struct SqliteConfig {
 impl Default for SqliteConfig {
     fn default() -> Self {
         Self {
-            base_path: default_base_path(),
-            db_name: "agentsight.db".to_string(),
+            base_path: crate::config::default_base_path(),
+            db_name: crate::config::PRIMARY_DB_NAME.to_string(),
             audit_table: "audit_events".to_string(),
             token_table: "token_records".to_string(),
             http_table: "http_records".to_string(),
             token_consumption_table: "token_consumption".to_string(),
-            retention_days: 30,
-            purge_interval: 100000,
-            max_db_size_mb: 500,
+            retention_days: crate::config::DEFAULT_RETENTION_DAYS,
+            max_db_size_mb: crate::config::DEFAULT_MAX_DB_SIZE_MB,
         }
     }
 }
@@ -132,14 +131,10 @@ pub struct Storage {
     token_consumption_store: TokenConsumptionStore,
     /// Data retention period in days (0 = no limit)
     retention_days: u64,
-    /// Auto-purge check interval (every N inserts, 0 = disabled)
-    purge_interval: u64,
     /// Max database file size in bytes (0 = no size-based limit)
     max_db_size_bytes: u64,
-    /// Path to the SQLite database file (for size checking)
+    #[cfg(test)]
     db_path: PathBuf,
-    /// Insert counter for auto-purge triggering
-    insert_count: AtomicU64,
 }
 
 impl Storage {
@@ -154,7 +149,7 @@ impl Storage {
                 // TODO: Implement SLS storage
                 anyhow::bail!("SLS storage backend is not yet implemented");
             }
-            StorageBackend::Noop => Ok(Self::noop()),
+            StorageBackend::Noop => Self::noop(),
         }
     }
 
@@ -162,50 +157,21 @@ impl Storage {
     pub fn with_sqlite_config(config: &SqliteConfig) -> Result<Self> {
         let db_path = config.db_path();
         let audit_store = AuditStore::with_table(&db_path, &config.audit_table)?;
-        let token_store = TokenStore::with_table(&db_path, &config.token_table);
+        let token_store = TokenStore::with_table(&db_path, &config.token_table)?;
         let http_store = HttpStore::with_table(&db_path, &config.http_table)?;
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, &config.token_consumption_table)?;
-        let storage = Storage {
+        Ok(Storage {
             backend: StorageBackend::Sqlite,
             audit_store,
             token_store,
             http_store,
             token_consumption_store,
             retention_days: config.retention_days,
-            purge_interval: config.purge_interval,
             max_db_size_bytes: config.max_db_size_mb * 1024 * 1024,
+            #[cfg(test)]
             db_path,
-            insert_count: AtomicU64::new(0),
-        };
-
-        // If the database is already oversized on startup (e.g. from a prior
-        // crash or a config change), prune immediately rather than waiting for
-        // the next purge interval.
-        if storage.max_db_size_bytes > 0 {
-            storage.startup_purge_with_retry();
-        }
-
-        Ok(storage)
-    }
-
-    /// Run the startup size-based purge, retrying on transient lock contention.
-    ///
-    /// Reopening a large database right after the previous process exits often
-    /// collides with that process's exit-time WAL checkpoint (see
-    /// [`Drop for Storage`]), which holds the write lock long enough to exceed
-    /// the connection `busy_timeout`; the purge then fails with `SQLITE_BUSY` /
-    /// `SQLITE_LOCKED`. This scenario is most likely on exactly the large
-    /// databases that need the startup purge, so retry with backoff instead of
-    /// giving up on the first collision.
-    ///
-    /// Only lock errors are retried — any other error (e.g. a corrupt
-    /// database) is terminal and must not stall startup for the full backoff.
-    /// When every attempt is locked out, the purge is skipped; the
-    /// insert-count-triggered purge in [`Self::store`] compensates once traffic
-    /// resumes.
-    fn startup_purge_with_retry(&self) {
-        purge_with_backoff(|| self.purge_oversized(), &STARTUP_PURGE_BACKOFF);
+        })
     }
 
     /// Create a new Storage with default SQLite config
@@ -216,30 +182,30 @@ impl Storage {
     /// Create a new no-op Storage that silently drops all writes.
     ///
     /// Used when all persistence features are disabled in `agentsight.json`.
-    pub fn noop() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an in-memory backing store cannot be initialized.
+    pub fn noop() -> Result<Self> {
         // Reuse SQLite stores with an in-memory database so the store API
         // remains available without touching the filesystem.
         let db_path = PathBuf::from(":memory:");
-        let audit_store = AuditStore::with_table(&db_path, "audit_events")
-            .expect("in-memory audit store should always succeed");
-        let token_store = TokenStore::with_table(&db_path, "token_records");
-        let http_store = HttpStore::with_table(&db_path, "http_records")
-            .expect("in-memory http store should always succeed");
+        let audit_store = AuditStore::with_table(&db_path, "audit_events")?;
+        let token_store = TokenStore::with_table(&db_path, "token_records")?;
+        let http_store = HttpStore::with_table(&db_path, "http_records")?;
         let token_consumption_store =
-            TokenConsumptionStore::with_table(&db_path, "token_consumption")
-                .expect("in-memory token_consumption store should always succeed");
-        Storage {
+            TokenConsumptionStore::with_table(&db_path, "token_consumption")?;
+        Ok(Storage {
             backend: StorageBackend::Noop,
             audit_store,
             token_store,
             http_store,
             token_consumption_store,
             retention_days: 0,
-            purge_interval: 0,
             max_db_size_bytes: 0,
+            #[cfg(test)]
             db_path,
-            insert_count: AtomicU64::new(0),
-        }
+        })
     }
 
     /// Returns true if this storage backend is the no-op backend.
@@ -272,11 +238,10 @@ impl Storage {
         &self.token_consumption_store
     }
 
-    /// Store an analysis result (automatically routes to correct store)
+    /// Store an analysis result (automatically routes to correct store).
     ///
-    /// This is the primary method for persisting analysis results.
-    /// It automatically dispatches to the appropriate store based on the result type.
-    /// Periodically triggers data purge based on `purge_interval` configuration.
+    /// This hot path only persists data; lifecycle maintenance is owned by the
+    /// process-wide database worker.
     pub fn store(&self, result: &AnalysisResult) -> Result<i64> {
         if let AnalysisResult::Http(_) = result {
             return Ok(0);
@@ -306,39 +271,19 @@ impl Storage {
             ),
         }?;
 
-        // Auto-purge check: trigger every `purge_interval` inserts
-        if self.purge_interval > 0 {
-            let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.purge_interval) {
-                if self.retention_days > 0 {
-                    if let Err(e) = self.purge_expired() {
-                        log::warn!("Auto-purge (age-based) failed: {e}");
-                    }
-                }
-                if self.max_db_size_bytes > 0 {
-                    if let Err(e) = self.purge_oversized() {
-                        log::warn!("Auto-purge (size-based) failed: {e}");
-                    }
-                }
-            }
-        }
-
         Ok(id)
     }
 
-    /// Purge records older than the configured retention period
+    /// Purge records older than the configured retention period.
     ///
     /// Deletes rows from all tables where `timestamp_ns` is older than
     /// `now - retention_days`. Returns the total number of deleted rows.
-    ///
-    /// This is called automatically by `store()` every `purge_interval` inserts,
-    /// but can also be called manually.
     pub fn purge_expired(&self) -> Result<u64> {
         if self.retention_days == 0 {
             return Ok(0);
         }
 
-        let cutoff_ns = Self::retention_cutoff_ns(self.retention_days);
+        let cutoff_ns = Self::retention_cutoff_ns(self.retention_days)?;
         let mut total_deleted = 0u64;
 
         let audit_deleted = self.audit_store.purge_before(cutoff_ns)?;
@@ -363,204 +308,115 @@ impl Storage {
                 http_deleted,
                 consumption_deleted,
             );
-
-            // Flush and truncate the WAL so freed pages become visible.
-            // Never VACUUM here: rebuilding the file would push its pages
-            // through the page cache, which counts against the service's
-            // cgroup memory limit and can OOM-kill the process on large
-            // databases (#2888). Freed pages are reused by future inserts.
-            if let Err(e) = self.audit_store.checkpoint() {
-                log::warn!("WAL checkpoint after age-based purge failed: {e}");
-            }
         }
 
         Ok(total_deleted)
     }
 
-    /// Purge oldest records when the database exceeds the size limit.
+    /// Applies age retention, gates size cleanup on a successful checkpoint,
+    /// and then enforces the configured size limit.
     ///
-    /// Size accounting includes the main file plus the `-wal` and `-shm`
-    /// companions — in WAL mode a large share of recent data lives in the WAL
-    /// file, so checking the main file alone would under-report.
+    /// # Errors
     ///
-    /// Work is organized in rounds: each round deletes a fraction of every
-    /// table's oldest rows (bigger bites when far over the limit), then runs
-    /// one truncating WAL checkpoint before re-measuring the logical size.
-    ///
-    /// Rounds continue until the logical size (physical minus freelist) is
-    /// within the limit. Deleting rows never shrinks the physical file —
-    /// freed pages stay on the freelist and are reused by future inserts, so
-    /// the file stops growing once the logical size fits. This path never
-    /// runs VACUUM: on a cgroup memory-capped service the full-file rebuild
-    /// can push the page cache over the limit and OOM-kill the process
-    /// (#2888).
-    ///
-    /// Called automatically by `store()` during purge checks and by
-    /// `with_sqlite_config()` on startup.
-    pub fn purge_oversized(&self) -> Result<()> {
-        if self.max_db_size_bytes == 0 {
+    /// Returns an error when retention, checkpoint, measurement, or pruning fails.
+    pub fn maintain(&self) -> Result<()> {
+        let deleted_by_age = self.purge_expired()?;
+        if (deleted_by_age > 0 || self.max_db_size_bytes > 0)
+            && self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy
+        {
+            log::warn!("Primary WAL checkpoint remained busy before size maintenance");
             return Ok(());
         }
+        self.purge_oversized()
+    }
 
-        let mut round = 0u32;
-        let mut reclaim_failures = 0u32;
-        // A round whose checkpoint fails leaves the WAL unflushed, so the
-        // logical size cannot drop; double the bite while the measured size
-        // stands still instead of treating one flat round as a stall.
-        let mut pct_boost = 1.0f64;
+    /// Purge oldest records when the database exceeds the size limit.
+    ///
+    /// The lifecycle crate controls measurement and convergence while each
+    /// business store retains ownership of its deletion query.
+    pub fn purge_oversized(&self) -> Result<()> {
+        let policy = SizePolicy {
+            limit_bytes: self.max_db_size_bytes,
+            trigger_bytes: self.max_db_size_bytes,
+            target_bytes: self.max_db_size_bytes.saturating_mul(9) / 10,
+            trigger_basis: SizeBasis::Physical,
+            target_basis: SizeBasis::Logical,
+            max_rounds: 20,
+            max_stalled_rounds: 20,
+        };
+        let report = enforce_size_policy::<anyhow::Error>(
+            policy,
+            || self.audit_store.size_snapshot(),
+            |fraction| {
+                let mut deleted = 0usize;
+                deleted += self
+                    .audit_store
+                    .delete_oldest_batch(purge_share(self.audit_store.count()?, fraction))?;
+                deleted += self
+                    .token_store
+                    .delete_oldest_batch(purge_share(self.token_store.count(), fraction))?;
+                deleted += self
+                    .http_store
+                    .delete_oldest_batch(purge_share(self.http_store.count()?, fraction))?;
+                deleted += self
+                    .token_consumption_store
+                    .delete_oldest_batch(purge_share(
+                        self.token_consumption_store.count(),
+                        fraction,
+                    ))?;
+                Ok(deleted)
+            },
+            || self.audit_store.checkpoint_outcome(),
+        )?;
 
-        loop {
-            let size = self.effective_db_size();
-            if size <= self.max_db_size_bytes {
-                break;
-            }
-
-            if round >= 20 {
-                log::error!(
-                    "Size-based purge did not converge after {round} rounds: database is \
-                     {size} bytes (limit {}). Size enforcement is suspended — manual \
-                     intervention required (free disk space or remove the database).",
-                    self.max_db_size_bytes
-                );
-                break;
-            }
-            round += 1;
-
-            // Delete a fraction of each table's rows per round and re-measure
-            // after the round's VACUUM+checkpoint. A fixed per-batch row
-            // count without re-measuring between batches wipes any table
-            // smaller than the per-round batch total (#2870). Bigger bites
-            // when far over the limit; mirrors the genai store's prune policy.
-            let overshoot = size as f64 / self.max_db_size_bytes as f64;
-            let base_pct = if overshoot > 5.0 {
-                0.50
-            } else if overshoot > 2.0 {
-                0.25
-            } else {
-                0.10
-            };
-            let pct = (base_pct * pct_boost).min(0.9);
-
-            let mut round_deleted = 0usize;
-            round_deleted += self
-                .audit_store
-                .delete_oldest_batch(purge_share(self.audit_store.count()?, pct))?;
-            round_deleted += self
-                .token_store
-                .delete_oldest_batch(purge_share(self.token_store.count(), pct))?;
-            round_deleted += self
-                .http_store
-                .delete_oldest_batch(purge_share(self.http_store.count()?, pct))?;
-            round_deleted += self
-                .token_consumption_store
-                .delete_oldest_batch(purge_share(self.token_consumption_store.count(), pct))?;
-
-            if round_deleted == 0 {
-                break; // Nothing left to delete
-            }
-
-            // Flush and truncate the WAL so freed pages become visible in
-            // the logical size. A checkpoint failure is the real stall signal
-            // (e.g. disk full); never VACUUM here — the full-file rebuild
-            // would push its pages through the page cache, which counts
-            // against the service's cgroup memory limit (#2888).
-            let mut reclaim_ok = true;
-            match self.audit_store.checkpoint_busy() {
-                Ok(true) => {
-                    // Another connection holds a read snapshot: the statement
-                    // succeeds but the WAL is NOT truncated. Keep deleting and
-                    // the WAL keeps growing, so treat it as a failed reclaim.
-                    log::warn!(
-                        "WAL checkpoint during size-based purge was busy; \
-                         the WAL could not be truncated"
-                    );
-                    reclaim_ok = false;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    log::warn!("WAL checkpoint during size-based purge failed: {e}");
-                    reclaim_ok = false;
-                }
-            }
-            if reclaim_ok {
-                reclaim_failures = 0;
-            } else {
-                reclaim_failures += 1;
-                if reclaim_failures >= 3 {
-                    log::error!(
-                        "Size-based purge suspended after {reclaim_failures} failed \
-                         WAL checkpoint rounds at {size} bytes (limit {}). Freed \
-                         pages remain reusable by future inserts; free disk space or \
-                         remove the database to enforce the cap.",
-                        self.max_db_size_bytes
-                    );
-                    break;
-                }
-            }
-
-            let new_size = self.effective_db_size();
-            log::info!(
-                "Size-based purge round {round}: deleted {round_deleted} rows, \
-                 database now {new_size} bytes (limit {})",
+        match report.status {
+            MaintenanceStatus::CheckpointBusy => log::warn!(
+                "WAL checkpoint during size-based purge was busy after deleting {} rows",
+                report.deleted_rows
+            ),
+            MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => log::error!(
+                "Size-based purge stopped with {:?}: database remains {} bytes (limit {})",
+                report.status,
+                report.after.logical_bytes,
                 self.max_db_size_bytes
-            );
-
-            if new_size < size {
-                pct_boost = 1.0;
-            } else {
-                // The logical size did not drop (unflushed WAL after a failed
-                // checkpoint). Double the bite so subsequent rounds reach the
-                // rows that dominate the file faster.
-                pct_boost = (pct_boost * 2.0).min(9.0);
-            }
+            ),
+            MaintenanceStatus::TargetReached => log::info!(
+                "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
+                report.deleted_rows,
+                report.rounds,
+                report.after.logical_bytes
+            ),
+            MaintenanceStatus::Disabled
+            | MaintenanceStatus::BelowTrigger
+            | MaintenanceStatus::ReusableCapacity
+            | MaintenanceStatus::NoRows => {}
         }
-
         Ok(())
     }
 
-    /// Logical data size: [`Self::total_db_size`] minus freelist pages.
-    ///
-    /// Deletes grow the freelist instead of shrinking the file, so purge
-    /// convergence must be measured on the logical size.
-    ///
-    /// Conservative approximation: WAL pages are pending versions of
-    /// main-file pages (double-counted on the physical side) while the
-    /// freelist only covers main-file pages, so any estimation error is in
-    /// the over-estimating direction — the purge may trim a little further
-    /// than strictly needed, never less. The in-loop checkpoint truncates
-    /// the WAL, so the overlap is transient anyway.
-    fn effective_db_size(&self) -> u64 {
-        self.total_db_size()
-            .saturating_sub(self.audit_store.freelist_bytes().unwrap_or(0))
-    }
-
-    /// Total on-disk size of the database: main file + `-wal` + `-shm`.
-    ///
-    /// A missing companion file is normal (e.g. after a TRUNCATE checkpoint)
-    /// and counts as zero; any other metadata error is logged because it can
-    /// under-report the size and mask an oversized database.
+    #[cfg(test)]
     fn total_db_size(&self) -> u64 {
-        let len = |path: &str| match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(e) => {
-                log::warn!("Cannot stat {path} for size accounting, assuming 0 bytes: {e}");
-                0
-            }
-        };
-        len(&self.db_path.display().to_string())
-            + len(&format!("{}-wal", self.db_path.display()))
-            + len(&format!("{}-shm", self.db_path.display()))
+        self.audit_store
+            .size_snapshot()
+            .map(|snapshot| snapshot.physical_bytes)
+            .unwrap_or(0)
     }
 
-    /// Compute the cutoff timestamp for retention
-    fn retention_cutoff_ns(retention_days: u64) -> u64 {
+    #[cfg(test)]
+    fn effective_db_size(&self) -> u64 {
+        self.audit_store
+            .size_snapshot()
+            .map(|snapshot| snapshot.logical_bytes)
+            .unwrap_or(0)
+    }
+
+    /// Compute the cutoff timestamp for retention.
+    fn retention_cutoff_ns(retention_days: u64) -> Result<u64> {
         let now_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
+            .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        let retention_ns = retention_days * 24 * 3600 * 1_000_000_000;
-        now_ns.saturating_sub(retention_ns)
+        retention_cutoff_ns(now_ns, retention_days).map_err(Into::into)
     }
 
     /// Store multiple analysis results
@@ -612,81 +468,6 @@ fn purge_share(rows: u64, pct: f64) -> usize {
     ((rows as f64 * pct) as usize).max(1)
 }
 
-/// Backoff delays between successive startup size-based purge attempts.
-///
-/// The number of entries is the number of *retries*; total attempts are one
-/// more (the initial try plus one per delay). Capped near 13s so a persistently
-/// locked database does not stall startup indefinitely.
-const STARTUP_PURGE_BACKOFF: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(3),
-    Duration::from_secs(9),
-];
-
-/// Whether a [`Storage::purge_oversized`] error is a transient SQLite lock
-/// (`SQLITE_BUSY` / `SQLITE_LOCKED`) worth retrying, as opposed to a terminal
-/// error (corrupt database, disk failure, …) that a retry cannot fix.
-///
-/// Store methods propagate `rusqlite::Error` unwrapped through `anyhow`, so the
-/// lock code is recoverable via `downcast_ref`.
-fn is_retryable_lock(err: &anyhow::Error) -> bool {
-    matches!(
-        err.downcast_ref::<rusqlite::Error>(),
-        Some(rusqlite::Error::SqliteFailure(e, _))
-            if matches!(
-                e.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    )
-}
-
-/// Terminal outcome of the startup purge retry loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PurgeOutcome {
-    /// The purge succeeded, possibly after retrying transient locks.
-    Purged,
-    /// Every attempt hit a transient lock; the purge was skipped.
-    LockedOut,
-    /// A terminal (non-lock) error aborted the purge without retrying.
-    Failed,
-}
-
-/// Run `purge`, retrying transient SQLite lock errors using `backoff` delays.
-///
-/// Sleeps `backoff[attempt]` between successive lock failures and gives up once
-/// the delays are exhausted; a non-lock error returns immediately. `backoff` is
-/// a parameter (rather than the [`STARTUP_PURGE_BACKOFF`] constant) so tests can
-/// drive the loop with zero-length delays.
-fn purge_with_backoff(mut purge: impl FnMut() -> Result<()>, backoff: &[Duration]) -> PurgeOutcome {
-    let mut attempt = 0usize;
-    loop {
-        let err = match purge() {
-            Ok(()) => return PurgeOutcome::Purged,
-            Err(e) => e,
-        };
-
-        if is_retryable_lock(&err) {
-            if let Some(delay) = backoff.get(attempt) {
-                log::debug!(
-                    "Startup size-based cleanup locked (attempt {}), retrying in {delay:?}: {err}",
-                    attempt + 1,
-                );
-                std::thread::sleep(*delay);
-                attempt += 1;
-                continue;
-            }
-            log::warn!(
-                "Startup size-based cleanup still locked after {} attempts; skipping \
-                 — the insert-triggered purge will compensate once traffic resumes: {err}",
-                backoff.len() + 1,
-            );
-            return PurgeOutcome::LockedOut;
-        }
-        log::warn!("Startup size-based cleanup failed: {err}");
-        return PurgeOutcome::Failed;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,108 +475,13 @@ mod tests {
 
     #[test]
     fn test_noop_storage_is_noop() {
-        let storage = Storage::noop();
+        let storage = Storage::noop().unwrap();
         assert!(storage.is_noop());
     }
 
     #[test]
-    fn retryable_lock_matches_busy_and_locked() {
-        // SQLITE_BUSY = 5, SQLITE_LOCKED = 6.
-        for raw in [5, 6] {
-            let err = anyhow::Error::from(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(raw),
-                None,
-            ));
-            assert!(
-                is_retryable_lock(&err),
-                "raw code {raw} should be retryable"
-            );
-        }
-    }
-
-    #[test]
-    fn retryable_lock_rejects_terminal_errors() {
-        // A non-lock SqliteFailure (SQLITE_CORRUPT = 11) must not be retried.
-        let corrupt = anyhow::Error::from(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(11),
-            None,
-        ));
-        assert!(!is_retryable_lock(&corrupt));
-        // A non-SQLite error must not be retried either.
-        assert!(!is_retryable_lock(&anyhow::anyhow!("unrelated failure")));
-    }
-
-    /// Build an `anyhow::Error` wrapping a transient SQLITE_BUSY, matching how
-    /// the store deletion paths surface a lock through `?` propagation.
-    fn lock_error() -> anyhow::Error {
-        // SQLITE_BUSY = 5.
-        anyhow::Error::from(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(5),
-            None,
-        ))
-    }
-
-    #[test]
-    fn purge_with_backoff_returns_on_first_success() {
-        let mut calls = 0usize;
-        let outcome = purge_with_backoff(
-            || {
-                calls += 1;
-                Ok(())
-            },
-            &[Duration::ZERO, Duration::ZERO],
-        );
-        assert_eq!(outcome, PurgeOutcome::Purged);
-        assert_eq!(calls, 1, "a first-try success must not retry");
-    }
-
-    #[test]
-    fn purge_with_backoff_retries_lock_then_succeeds() {
-        let mut calls = 0usize;
-        let outcome = purge_with_backoff(
-            || {
-                calls += 1;
-                if calls < 3 { Err(lock_error()) } else { Ok(()) }
-            },
-            &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
-        );
-        assert_eq!(outcome, PurgeOutcome::Purged);
-        assert_eq!(calls, 3, "two locked retries then success");
-    }
-
-    #[test]
-    fn purge_with_backoff_gives_up_when_locked_out() {
-        let backoff = [Duration::ZERO, Duration::ZERO];
-        let mut calls = 0usize;
-        let outcome = purge_with_backoff(
-            || {
-                calls += 1;
-                Err(lock_error())
-            },
-            &backoff,
-        );
-        assert_eq!(outcome, PurgeOutcome::LockedOut);
-        // Initial attempt plus one per backoff delay.
-        assert_eq!(calls, backoff.len() + 1);
-    }
-
-    #[test]
-    fn purge_with_backoff_aborts_on_terminal_error() {
-        let mut calls = 0usize;
-        let outcome = purge_with_backoff(
-            || {
-                calls += 1;
-                Err(anyhow::anyhow!("disk failure"))
-            },
-            &[Duration::ZERO, Duration::ZERO],
-        );
-        assert_eq!(outcome, PurgeOutcome::Failed);
-        assert_eq!(calls, 1, "a terminal error must not retry");
-    }
-
-    #[test]
     fn test_noop_storage_store_returns_zero() {
-        let storage = Storage::noop();
+        let storage = Storage::noop().unwrap();
         assert!(storage.is_noop());
         // Call store to verify noop path returns Ok(0) without writing
         let token_record = crate::analyzer::token::TokenRecord {
@@ -822,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_noop_storage_should_persist() {
-        let storage = Storage::noop();
+        let storage = Storage::noop().unwrap();
         // Just verify it doesn't panic
         let _ = storage.is_noop();
         drop(storage);
@@ -845,9 +531,7 @@ mod tests {
     fn test_config(base_path: PathBuf, max_db_size_mb: u64) -> SqliteConfig {
         SqliteConfig {
             base_path,
-            // Disable both auto-purge paths so tests trigger purges explicitly.
             retention_days: 0,
-            purge_interval: 0,
             max_db_size_mb,
             ..Default::default()
         }
@@ -1088,14 +772,18 @@ mod tests {
             .execute_batch("BEGIN; SELECT COUNT(*) FROM token_records;")
             .unwrap();
 
-        // Reopen with the limit enabled; the startup purge runs against the
-        // busy checkpoint.
+        // Reopen with the limit enabled and append a WAL frame newer than the
+        // reader snapshot, making the pre-maintenance truncating checkpoint busy.
         let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+        storage
+            .token_store
+            .insert(&bulky_token_record(300, 10 * 1024))
+            .unwrap();
+        storage.maintain().unwrap();
         let remaining = storage.token_store.count();
-        assert!(
-            remaining >= 100,
-            "purge must stop early while the WAL cannot be truncated, \
-             only a few rounds may delete (got {remaining}/300)"
+        assert_eq!(
+            remaining, 301,
+            "a busy pre-maintenance checkpoint must prevent the first deletion"
         );
         drop(storage);
         drop(reader);
@@ -1103,11 +791,10 @@ mod tests {
     }
 
     #[test]
-    fn test_purge_oversized_runs_on_startup() {
+    fn test_open_does_not_run_synchronous_maintenance() {
         let dir = unique_base_dir("startup");
         let limit_mb = 1u64;
 
-        // Grow the database past the limit with size checks disabled.
         {
             let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
             for i in 0..300 {
@@ -1117,16 +804,12 @@ mod tests {
                     .unwrap();
             }
             storage.checkpoint().unwrap();
-            assert!(storage.total_db_size() > limit_mb * 1024 * 1024);
         }
 
-        // Reopening with a limit must trigger the startup cleanup.
         let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
-        let effective = storage.effective_db_size();
-        assert!(
-            effective <= limit_mb * 1024 * 1024,
-            "startup cleanup must bring the logical size within the limit: {effective}"
-        );
+        assert_eq!(storage.token_store.count(), 300);
+        storage.maintain().unwrap();
+        assert!(storage.token_store.count() < 300);
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1184,33 +867,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `store()` must run both purge paths (age-based and size-based) every
-    /// `purge_interval` inserts, including the VACUUM after an age purge.
     #[test]
-    fn test_store_triggers_auto_purge() {
-        let dir = unique_base_dir("auto_purge");
+    fn test_store_does_not_run_synchronous_maintenance() {
+        let dir = unique_base_dir("background_maintenance");
         let config = SqliteConfig {
             base_path: dir.clone(),
             retention_days: 1,
-            purge_interval: 1, // purge check on every insert
             max_db_size_mb: 500,
             ..Default::default()
         };
         let storage = Storage::with_sqlite_config(&config).unwrap();
 
-        // ts=1ns is far older than the 1-day retention cutoff: the purge
-        // check right after this insert must delete it again.
         let expired = crate::analyzer::AnalysisResult::Token(bulky_token_record(1, 64));
         storage.store(&expired).unwrap();
-        assert_eq!(storage.token_store.count(), 0, "expired row must be purged");
+        assert_eq!(storage.token_store.count(), 1);
 
-        let now_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let fresh = crate::analyzer::AnalysisResult::Token(bulky_token_record(now_ns, 64));
-        storage.store(&fresh).unwrap();
-        assert_eq!(storage.token_store.count(), 1, "fresh row must survive");
+        storage.maintain().unwrap();
+        assert_eq!(storage.token_store.count(), 0);
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -641,7 +641,35 @@ main() {
     if ! command -v tokenless &> /dev/null; then
         echo -e "${RED}ERROR: tokenless not found${NC}"; exit 1
     fi
-    log_info "Testing $(tokenless --version)"
+
+    # Every case below drives the installed release binary on PATH on purpose
+    # (see the note above test 5.0b), while the assertions track this
+    # checkout. A stale install therefore fails in places that have nothing to
+    # do with the change under test: `tokenless compress` only exists from
+    # 0.8.0 on, so an older binary dies with "unrecognized subcommand" and the
+    # run reports a dozen unrelated hook failures. Compare the versions up
+    # front and say so instead.
+    local cli_version workspace_version
+    cli_version=$(tokenless --version 2>/dev/null | awk '{print $2}')
+    workspace_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' \
+        "$TOKENLESS_SOURCE_DIR/Cargo.toml" | head -1)
+    if [ -n "$workspace_version" ] && [ "$cli_version" != "$workspace_version" ]; then
+        if [ "${TOKENLESS_ALLOW_VERSION_SKEW:-0}" = "1" ]; then
+            log_info "WARNING: tokenless on PATH is $cli_version, this checkout is $workspace_version (TOKENLESS_ALLOW_VERSION_SKEW=1)"
+        else
+            echo -e "${RED}ERROR: tokenless on PATH is ${cli_version:-unknown} but this checkout is $workspace_version${NC}"
+            echo "This suite drives the installed release binary, so its assertions"
+            echo "track the checkout while the binary under test does not. Reinstall"
+            echo "the current build over it:"
+            echo ""
+            echo "    make -C src/tokenless build && make -C src/tokenless install"
+            echo ""
+            echo "Set TOKENLESS_ALLOW_VERSION_SKEW=1 to test the installed $cli_version anyway."
+            exit 1
+        fi
+    fi
+
+    log_info "Testing $(tokenless --version) at $(command -v tokenless)"
 
     test_schema_compression
     test_response_compression

@@ -15,7 +15,10 @@ GITHUB = ROOT / ".github"
 errors: list[str] = []
 warnings: list[str] = []
 
-VALID_STATUSES = {"active", "incubating", "internal"}
+VALID_STATUSES = {"active", "deprecated", "incubating", "internal"}
+COMPONENT_PATH_PATTERN = re.compile(
+    r"(?:(?:src|distribution|deprecated)/[a-z0-9][a-z0-9-]*|benchmark)/"
+)
 NON_COMPONENT_SCOPES = {"chore", "ci", "deps", "docs"}
 ISSUE_FORMS = ("bug_report.yml", "feature_request.yml", "question.yml")
 ISSUE_FORM_FALLBACK_OPTIONS = {"project-wide", "not sure", "other"}
@@ -172,12 +175,15 @@ for index, component in enumerate(components):
         errors.append(f"{component_id}: duplicate issue_triager {duplicate!r}")
 
     for prefix in component["path_prefixes"]:
-        require(prefix.startswith("src/") and prefix.endswith("/"), f"{component_id}: invalid path prefix {prefix!r}")
+        require(
+            isinstance(prefix, str) and bool(COMPONENT_PATH_PATTERN.fullmatch(prefix)),
+            f"{component_id}: invalid path prefix {prefix!r}",
+        )
 
-    if component["status"] == "active":
-        require(bool(component["issue_option"]), f"{component_id}: active components need an issue_option")
-        require(bool(component["commit_scope"]), f"{component_id}: active components need a commit_scope")
-        require(bool(component["release_tag_prefix"]), f"{component_id}: active components need a release_tag_prefix")
+    if component["status"] in {"active", "deprecated"}:
+        require(bool(component["issue_option"]), f"{component_id}: {component['status']} components need an issue_option")
+        require(bool(component["commit_scope"]), f"{component_id}: {component['status']} components need a commit_scope")
+        require(bool(component["release_tag_prefix"]), f"{component_id}: {component['status']} components need a release_tag_prefix")
     if component["status"] != "internal":
         require(
             bool(triagers or default_triagers),
@@ -310,7 +316,7 @@ for label in sorted(
 ):
     errors.append(f"maintainers.json: unknown component scope {label}")
 for component in components:
-    if component.get("status") == "active" and component["label"] not in maintainer_labels:
+    if component.get("status") in {"active", "deprecated"} and component["label"] not in maintainer_labels:
         errors.append(f"maintainers.json: missing scope for {component['label']}")
 
 ci_workflow_path = GITHUB / "workflows/ci.yaml"
@@ -441,9 +447,9 @@ if release_workflow_text:
         if not release_prefix:
             continue
         source_directories = {
-            match.group(1)
+            prefix.rstrip("/").rsplit("/", 1)[-1]
             for prefix in component.get("path_prefixes", [])
-            if (match := re.fullmatch(r"src/([^/]+)/", prefix))
+            if isinstance(prefix, str) and COMPONENT_PATH_PATTERN.fullmatch(prefix)
         }
         if len(source_directories) != 1:
             errors.append(

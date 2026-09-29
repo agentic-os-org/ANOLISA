@@ -18,6 +18,25 @@ Policy 描述保护策略，Scope 选择目标，Binding 关联指定版本的 P
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## 关联本地日志
+
+V2 使用原生 OpenTelemetry 关联本地请求日志。`--trace-context` 保留原有扁平 Agent
+metadata 输入，应放在命令名及其它选项的非选项值之前。可选的 `--otel-context` 接收
+version 1 JSON carrier，包含 `traceparent`、`tracestate`、`baggage` 可选字段。
+两者同时提供时，显式扁平 Agent 字段优先。
+
+```bash
+RUST_LOG=info agent-sec-cli --trace-context '{"session_id":"session-123","agent_name":"openclaw"}' \
+  --otel-context '{"version":1,"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}' \
+  --socket "$SOCKET" policy list
+```
+
+`RUST_LOG=info` 开启 stderr 上的有界 JSON 关联诊断；daemon 需要单独设置其进程环境。
+默认 warn 不产生这些记录。背压下允许丢诊断；命令结果、错误及退出码保持原有语义。
+当前不提供公开 OTLP exporter 或导出/采样/batch 配置；`OTEL_*` 设置不能开启导出或
+改变固定的本地采样策略。`--otel-context` 是入站上下文，不是导出目标。
+CLI 要求支持 carrier 的新 daemon，应先升级 daemon。
+
 ## 管理 Policy
 
 准备 JSON 模板文件，例如 `policy.json`：

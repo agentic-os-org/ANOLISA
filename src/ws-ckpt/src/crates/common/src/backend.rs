@@ -25,6 +25,26 @@ pub struct CleanupResult {
     pub kept: usize,          // number of snapshots retained
 }
 
+/// Per-snapshot outcome of a batched [`StorageBackend::cleanup_snapshots`].
+///
+/// The batch shape matters on a nearly-full btrfs backend: the guarded
+/// delete path waits on the kernel cleaner, and paying that bounded wait
+/// PER snapshot would serialize into minutes-long stalls (#3053). Backends
+/// therefore delete the whole batch with ONE cleaner wait and report what
+/// happened to each requested id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotDeleteOutcome {
+    /// Subvolume deleted from the namespace. Space reclaim is best-effort:
+    /// a cleaner that could not drain in time is logged by the backend as a
+    /// zombie WARN with recovery guidance, but the delete itself succeeded.
+    Removed,
+    /// Nothing to delete — the path was already gone before the attempt.
+    /// Callers treat this as an index/no-op mismatch, not a failure.
+    NotFound,
+    /// Delete attempted and failed; the string carries the backend error.
+    Failed(String),
+}
+
 /// GC result (generation cleanup)
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GcResult {
@@ -101,13 +121,19 @@ pub trait StorageBackend: Send + Sync {
         to: Option<&str>,
     ) -> anyhow::Result<Vec<crate::DiffEntry>>;
 
-    /// Clean up old snapshots (retain the most recent `keep` + all pinned ones)
-    /// Returns the list of deleted snapshot IDs
+    /// Delete a batch of snapshots, reporting one outcome per requested id.
+    ///
+    /// Backends SHOULD treat the slice as a single batch: on a nearly-full
+    /// btrfs backend the whole batch shares ONE bounded kernel-cleaner wait
+    /// instead of paying it per snapshot (#3053). Per-item delete failures
+    /// are reported as [`SnapshotDeleteOutcome::Failed`] entries — reserve
+    /// the outer `Err` for catastrophic whole-batch failures so partial
+    /// success survives (callers roll back index detaches per item).
     async fn cleanup_snapshots(
         &self,
         ws_id: &str,
         snapshot_ids: &[String],
-    ) -> anyhow::Result<Vec<String>>;
+    ) -> anyhow::Result<Vec<(String, SnapshotDeleteOutcome)>>;
 
     /// Fork an independent workspace from a snapshot (reserved)
     async fn fork(&self, ws_id: &str, snapshot_id: &str, new_ws_id: &str) -> anyhow::Result<()>;
@@ -120,6 +146,15 @@ pub trait StorageBackend: Send + Sync {
 
     /// Get filesystem usage (total, used) in bytes
     async fn get_usage(&self) -> anyhow::Result<(u64, u64)>;
+
+    /// IDs of subvolumes that were deleted but not yet reclaimed by the
+    /// btrfs cleaner ("zombie" subvolumes). They keep pinning backend space
+    /// until drained — under ENOSPC the cleaner stalls and even daemon
+    /// restarts do not free them, because the mount is reused by design
+    /// (#2809, #3053). Backends without this failure mode return empty.
+    async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+        Ok(Vec::new())
+    }
 
     /// Prepare the backend for workspace operations.
     async fn bootstrap(&self, _config: &crate::DaemonConfig) -> anyhow::Result<()> {

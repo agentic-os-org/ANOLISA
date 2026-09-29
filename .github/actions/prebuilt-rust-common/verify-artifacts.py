@@ -258,7 +258,7 @@ def main() -> int:
         validate_directory(
             directory, args.component, args.version, target_os, target_arch
         )
-    print(f"Verified 12 {args.component} prebuilt release assets under {root}")
+    print(f"Verified {4 * len(component_targets)} {args.component} prebuilt release assets under {root}")
     return 0
 
 

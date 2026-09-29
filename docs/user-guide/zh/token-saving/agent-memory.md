@@ -98,7 +98,7 @@ make remote-test    # 同上 + 跑测试 + clippy
 
 ### OpenClaw
 
-随包附带的插件把 4 个 memory contract 工具（`memory_search`、`memory_get`、`memory_observe`、`memory_get_context`）转发到 agent-memory：
+随包附带的插件把 4 个 memory contract 工具（`anolisa_memory_search`、`anolisa_memory_get`、`memory_observe`、`memory_get_context`）转发到 agent-memory：
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
@@ -130,12 +130,68 @@ anolisa adapter status agent-memory
 
 安装失败时，脚本只报告它自己能核实的部分。`${OPENCLAW_STATE_DIR}/extensions` 不可写会被点名为足以独立导致安装失败的文件系统权限问题——应修目录权限，不要为此去动安全策略。其余情况以脚本提示上方的 `openclaw` 输出为准，`security.installPolicy` 只作为供运维在该输出中确认的条件句出现，绝不会被断言为失败原因：「宿主把该参数标注为 deprecated no-op」本身并不能说明安装为何失败。
 
+OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 ANOLISA
+记忆。`memory_search` 和 `memory_get` 仍属于 OpenClaw 自己的工具，新名称不会与它们
+冲突。`install.sh` 与 `anolisa adapter enable agent-memory openclaw` 安装同一个插件包。
+脚本不再显式禁用或重新启用 `memory-core`；OpenClaw 仍根据自身配置管理 memory slot
+和插件加载。
+
+升级时，请同步修改使用插件旧名称 `memory_search` / `memory_get` 的提示词、skill、
+工具白名单和直接调用方。插件不保留旧名别名；重启 gateway 并开始新会话，让工具列表
+和记忆指引使用新名称。内部 MCP 方法名与已存储的记忆保持不变。
+
+插件在 manifest 的 `toolMetadata` 中声明全部四个契约工具适用于 `coding` profile。
+OpenClaw 2026.9.2 的会话工具解析会采用该声明，因此两种安装入口都能提供搜索、读取、
+记录观察和获取上下文的能力，无需修改用户的工具策略。显式 allow/deny 限制仍然生效。
+`group:memory` 只展开为 OpenClaw 的 `memory_search` 和 `memory_get`，不包含 ANOLISA
+的新名称。
+
+支持 profile 元数据不是安装前提：旧宿主仍可显式授权工具。
+OpenClaw 2026.5.7 不采用 `toolMetadata.profiles`；自动 profile 声明
+在 2026.9.2 上单独验证。对于不采用该元数据的宿主或工具入口，请将
+`anolisa_memory_search`、`anolisa_memory_get`、`memory_observe` 和 `memory_get_context`
+追加到生效的 `tools.alsoAllow`（或对应 agent/provider 策略）。
+请合并到已有列表，不要覆盖它。例如，尚未配置列表时：
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": [
+      "anolisa_memory_search",
+      "anolisa_memory_get",
+      "memory_observe",
+      "memory_get_context"
+    ]
+  }
+}
+```
+
+sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，旧名称也一样。
+若希望允许 sandbox 会话搜索和读取 ANOLISA 记忆，还需将两个新名称追加到
+`tools.sandbox.tools.alsoAllow`（或该 agent 的 sandbox 策略）。已有 sandbox
+`allow: ["group:memory"]` 也需要追加新名称。只有确实需要记录观察和获取上下文时，
+才在该列表中追加 `memory_observe` 和 `memory_get_context`。保留显式 deny 和其他 agent/provider
+限制；`alsoAllow` 不会覆盖 deny。安装器不会自动授予这些权限。
+修改策略后，请重启 gateway 并开始新会话。
+
+如果旧安装脚本留下了
+`${OPENCLAW_STATE_DIR}/.anolisa-memory-anolisa-disabled-memory-core`，新脚本会告警
+并保留记录，供手动恢复。先检查 `plugins.slots.memory` 与
+`plugins.entries.memory-core.enabled`。若希望允许内置 sidecar 加载并保留当前 slot，
+通过 `openclaw config set` 将 `plugins.entries.memory-core.enabled` 设置为 `true`，
+然后重启 gateway；sidecar 是否加载仍由宿主版本和策略决定。若希望卸载本插件后选择
+`memory-core` 为活动后端，可执行 `openclaw plugins enable memory-core`。该命令会
+切换 memory slot，因此需要保留 `memory-anolisa`、其他后端或 `none` 时不要执行。
+确认达到期望状态后再删除记录，包括明确决定让 `memory-core` 继续禁用的情况。
+新工具无需恢复它也能工作。
+
 插件 contract 名 ↔ agent-memory MCP 工具映射：
 
 | OpenClaw contract | agent-memory MCP 工具 |
 |---|---|
-| `memory_search` | `memory_search`（BM25 默认；配置 embedding 后支持 `mode=vector\|hybrid`） |
-| `memory_get` | `mem_read` |
+| `anolisa_memory_search` | `memory_search`（BM25 默认；配置 embedding 后支持 `mode=vector\|hybrid`） |
+| `anolisa_memory_get` | `mem_read` |
 | `memory_observe` | `memory_observe` |
 | `memory_get_context` | `memory_get_context` |
 
@@ -145,7 +201,7 @@ anolisa adapter status agent-memory
 |---|---|---|
 | `binaryPath` | 自动发现：`$PATH` → `/usr/bin/agent-memory` → `/usr/local/bin/agent-memory` → `~/.local/bin/agent-memory` | 二进制绝对路径 |
 | `userId` | env `USER_ID` → OS `uid` → env `$USER` | 命名空间 `user_id`；校验规则与 Rust 侧一致 |
-| `profile` | `advanced` | profile 门控，以 `MEMORY_PROFILE` env 启动子进程 |
+| `profile` | `advanced` | profile 门控，以 `MEMORY_PROFILE` env 启动子进程；仅支持 `basic` 与 `advanced` —— 插件在加载阶段拒绝 `expert`（见下文 Profile 含义） |
 | `maxReadBytes` | `1048576`（1 MiB） | 单次 `mem_read` 上限，以 `MEMORY_MAX_READ_BYTES` env 传入 |
 | `maxWriteBytes` | `16777216`（16 MiB） | 单次 `mem_write` 上限，以 `MEMORY_MAX_WRITE_BYTES` env 传入 |
 | `sessionId` | env `MEMORY_SESSION_ID` → 新生成 `ses_<random>` | 命名空间挂载会话，必须固定 |
@@ -424,6 +480,14 @@ Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` �
 - **advanced**（默认）—— 37 个工具全部展示；强模型应优先使用 Tier A 文件操作。
 - **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
 
+`expert` 面向直连 MCP 的客户端——它们自己驱动 Tier A 文件工具。OpenClaw 适配器在插件加载阶段就会拒绝
+`plugins.entries["memory-anolisa"].config.profile = "expert"`：它为宿主 memory 契约注册的 4 个工具有
+3 个使用 Tier B MCP 方法（`anolisa_memory_search` → `memory_search`、`memory_observe`、
+`memory_get_context`），替 agent 调用
+`memory_search` 的两条路径（每轮 prompt 前的自动召回、`corpus=all` 语料补充）同样属于 Tier B。
+若把该档位透传下去，memory slot 会照常加载，但上述调用全部返回 `METHOD_NOT_FOUND`；因此适配器选择
+在启动时失败并说明原因。
+
 ### Embedding 配置
 
 ```toml
@@ -605,6 +669,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
+| OpenClaw 调用了宿主记忆后端或报告 `plugin tool name conflict` | 插件包、gateway/会话未更新，或提示词仍使用旧工具名 | 更新插件、重启 gateway、开始新会话，并使用 `anolisa_memory_search` / `anolisa_memory_get` 访问 ANOLISA 记忆 |
 | install.sh 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 的能力同意门禁；安装参数探测失败、设置了 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0`，或脚本早于修复版本 | 查看安装输出中的探测 WARNING 或 opt-out 拒绝行；升级 agent-memory、取消该环境变量，或手动执行 `openclaw plugins install <插件目录> --force --accept-capabilities`。被拒绝授予且遭门禁拦截的安装以退出码 3 结束；若 OpenClaw 调整拒绝文案，脚本会退回退出码 1 并附带 opt-out 提示 |
 | install.sh 报安装目标目录不可写 | `${OPENCLAW_STATE_DIR}/extensions`（或其最近的已存在父目录）对运行脚本的用户不可写，OpenClaw 的 `mkdir extensions/memory-anolisa` 因此以 `EACCES` 失败 | 修正该目录的属主/权限——或把 `OPENCLAW_STATE_DIR` 指向可写的 state 目录——后重跑。这是文件系统权限失败，不是策略拒绝：不要为此放宽 `security.installPolicy` |
 | install.sh 在把 `--dangerously-force-unsafe-install` 标注为 deprecated no-op 的宿主上安装失败 | OpenClaw 2026.6.5 及之后已无安装期扫描，脚本没有传递覆盖参数，也就无法影响该宿主的安装期安全；原因在 `openclaw` 自己的输出里 | 阅读脚本提示上方的 CLI 输出。只有当它点名 `security.installPolicy` 时，需要放宽的才是这条运维自有策略——重跑脚本或设置 `AGENT_MEMORY_SAFE_INSTALL` 都无法覆盖它 |

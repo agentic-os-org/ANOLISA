@@ -91,6 +91,10 @@ impl From<CoreSavedProvider> for ExistingProvider {
         let provider_type = provider
             .provider_type
             .unwrap_or_else(|| "openai_compat".to_string());
+        let provider_type = match provider_type.as_str() {
+            "openai" | "generic" => "openai_compat".to_string(),
+            _ => provider_type,
+        };
         let model = provider.model.unwrap_or_default();
         Self {
             name: provider.provider_id,
@@ -253,6 +257,20 @@ impl AuthConfigureFailure {
 mod auth_configure_failure_tests {
     use super::{auth_configure_failure, AuthConfigureFailure};
     use crate::adapter::RegistryQueryError;
+
+    #[test]
+    fn saved_openai_protocol_types_recover_the_auth_template_identity() {
+        for provider_type in ["openai", "generic", "openai_compat"] {
+            let saved: super::CoreSavedProvider = serde_json::from_value(serde_json::json!({
+                "provider_id": "prod",
+                "provider_type": provider_type,
+                "active": false
+            }))
+            .unwrap();
+            let provider = super::ExistingProvider::from(saved);
+            assert_eq!(provider.provider_type, "openai_compat");
+        }
+    }
 
     fn failure(code: &str) -> AuthConfigureFailure {
         AuthConfigureFailure {

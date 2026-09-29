@@ -1,17 +1,69 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
+
+const SERVER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const REGISTRY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "mock server did not receive the expected connection",
+            ));
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(SERVER_IO_TIMEOUT))?;
+                stream.set_write_timeout(Some(SERVER_IO_TIMEOUT))?;
+                return Ok(stream);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+fn mock_server_without_connection_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let result = accept_with_timeout(&listener, Duration::from_millis(50));
+        sender.send(result.map(|_| ())).unwrap();
+    });
+
+    let error = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("mock server did not finish within its deadline")
+        .expect_err("mock server must fail when no client connects");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    server.join().unwrap();
+}
 
 fn model_server() -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let thread = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_timeout(&listener, SERVER_ACCEPT_TIMEOUT).unwrap();
         let mut request = [0_u8; 2048];
-        let _ = stream.read(&mut request);
+        assert!(stream.read(&mut request).unwrap() > 0);
         let body = r#"{"id":"home-model","object":"model"}"#;
         write!(
             stream,
@@ -28,9 +80,9 @@ fn rejecting_model_server(status: u16) -> (String, std::thread::JoinHandle<()>) 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let thread = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_timeout(&listener, SERVER_ACCEPT_TIMEOUT).unwrap();
         let mut request = [0_u8; 2048];
-        let _ = stream.read(&mut request);
+        assert!(stream.read(&mut request).unwrap() > 0);
         let body = r#"{"error":{"code":"invalid_api_key"}}"#;
         write!(
             stream,
@@ -47,7 +99,7 @@ fn aliyun_response_server(body: &'static str) -> (String, std::thread::JoinHandl
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let thread = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_timeout(&listener, SERVER_ACCEPT_TIMEOUT).unwrap();
         let mut request = [0_u8; 4096];
         let count = stream.read(&mut request).unwrap();
         let request = String::from_utf8_lossy(&request[..count]);
@@ -82,7 +134,7 @@ fn aliyun_copilot_rejection_server(
                 body,
             ),
         ] {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, SERVER_ACCEPT_TIMEOUT).unwrap();
             let mut request = [0_u8; 4096];
             let count = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..count]);
@@ -166,6 +218,9 @@ fn run_registry_request_with_args_and_env(
         .env_remove("XDG_DATA_HOME")
         .env_remove("COSH_AI_PROVIDER")
         .env_remove("COSH_MODEL")
+        .env_remove("COSH_SYSOM_ENDPOINT")
+        .env_remove("COSH_SYSOM_VPC_PROXY_HOST")
+        .env_remove("COSH_SYSOM_PROBE_TIMEOUT_MS")
         .env_remove("OPENAI_BASE_URL")
         .env_remove("DASHSCOPE_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -182,17 +237,27 @@ fn run_registry_request_with_args_and_env(
     registry_command_response(command, request)
 }
 
-fn registry_command_response(mut command: Command, request: Value) -> Value {
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn registry command: {e}"));
-
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{}", serde_json::to_string(&request).unwrap()).unwrap();
-    }
-
-    let output = child.wait_with_output().unwrap();
+fn registry_command_response(command: Command, request: Value) -> Value {
+    let output = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut child = tokio::process::Command::from(command)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap_or_else(|e| panic!("Failed to spawn registry command: {e}"));
+            let mut stdin = child.stdin.take().unwrap();
+            let request = format!("{request}\n");
+            tokio::time::timeout(REGISTRY_TIMEOUT, async move {
+                let write_request = async move { stdin.write_all(request.as_bytes()).await };
+                let (written, output) = tokio::join!(write_request, child.wait_with_output());
+                written.expect("failed to write registry request");
+                output.expect("failed to collect registry output")
+            })
+            .await
+            .expect("registry command exceeded its deadline")
+        });
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     stdout
@@ -1124,39 +1189,66 @@ fn registry_auth_preflight_rejection_is_classified_without_writing_config() {
 
 #[test]
 fn registry_auth_rejects_missing_aliyun_role_without_writing_config() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_path = home.path().join(".copilot-shell/config.toml");
-    let (base_url, server) =
-        aliyun_response_server(r#"{"code":"Success","data":{"role_exist":false}}"#);
-    let response = run_registry_request_with_context(
-        "auth",
-        "configure",
-        serde_json::json!({
-            "provider_id": "sysom-not-ready",
-            "provider_type": "aliyun",
-            "values": {
-                "base_url": base_url,
-                "access_key_id": "test-access-key",
-                "access_key_secret": "test-secret",
-                "model": "qwen-test"
-            }
-        }),
-        home.path(),
-        None,
-    );
-    server.join().unwrap();
+    for saved_profile in [true, false] {
+        let home = tempfile::tempdir().expect("temp home");
+        let config_path = home.path().join(".copilot-shell/config.toml");
+        let (sysom_endpoint, server) =
+            aliyun_response_server(r#"{"code":"Success","data":{"role_exist":false}}"#);
+        let original_config =
+            format!("[ai.providers.sysom-not-ready]\nsysom_endpoint = \"{sysom_endpoint}\"\n");
+        let env = if saved_profile {
+            std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+            std::fs::write(&config_path, &original_config).unwrap();
+            vec![]
+        } else {
+            assert!(!config_path.exists());
+            vec![("COSH_SYSOM_ENDPOINT", sysom_endpoint.as_str())]
+        };
+        let response = run_registry_request_with_args_and_env(
+            "auth",
+            "configure",
+            serde_json::json!({
+                "provider_id": "sysom-not-ready",
+                "provider_type": "aliyun",
+                "values": {
+                    "base_url": "http://127.0.0.1:1/unused-openai/v1",
+                    "access_key_id": "test-access-key",
+                    "access_key_secret": "test-secret",
+                    "model": "qwen-test"
+                }
+            }),
+            home.path(),
+            None,
+            &[],
+            &env,
+        );
+        server.join().unwrap();
 
-    assert_eq!(response["success"], false, "{response}");
-    assert_eq!(response["data"]["error_code"], "service_not_ready");
-    assert!(!config_path.exists());
-    assert!(!response.to_string().contains("test-secret"));
+        assert_eq!(response["success"], false, "{response}");
+        assert_eq!(response["data"]["error_code"], "service_not_ready");
+        if saved_profile {
+            assert_eq!(
+                std::fs::read(&config_path).unwrap(),
+                original_config.as_bytes()
+            );
+        } else {
+            assert!(!config_path.exists());
+        }
+        assert!(!response.to_string().contains("test-access-key"));
+        assert!(!response.to_string().contains("test-secret"));
+    }
 }
 
 #[test]
 fn registry_auth_rejects_unusable_aliyun_model_without_writing_config() {
     let home = tempfile::tempdir().expect("temp home");
     let config_path = home.path().join(".copilot-shell/config.toml");
-    let (base_url, server) = aliyun_copilot_rejection_server(400, r#"{"Code":"ModelNotFound"}"#);
+    let (sysom_endpoint, server) =
+        aliyun_copilot_rejection_server(400, r#"{"Code":"ModelNotFound"}"#);
+    let original_config =
+        format!("[ai.providers.sysom-bad-model]\nsysom_endpoint = \"{sysom_endpoint}\"\n");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, &original_config).unwrap();
     let response = run_registry_request_with_context(
         "auth",
         "configure",
@@ -1164,7 +1256,7 @@ fn registry_auth_rejects_unusable_aliyun_model_without_writing_config() {
             "provider_id": "sysom-bad-model",
             "provider_type": "aliyun",
             "values": {
-                "base_url": base_url,
+                "base_url": "http://127.0.0.1:1/unused-openai/v1",
                 "access_key_id": "test-access-key",
                 "access_key_secret": "test-secret",
                 "model": "definitely-not-a-real-sysom-model"
@@ -1177,7 +1269,11 @@ fn registry_auth_rejects_unusable_aliyun_model_without_writing_config() {
 
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["data"]["error_code"], "model_unavailable");
-    assert!(!config_path.exists());
+    assert_eq!(
+        std::fs::read(&config_path).unwrap(),
+        original_config.as_bytes()
+    );
+    assert!(!response.to_string().contains("test-access-key"));
     assert!(!response.to_string().contains("test-secret"));
 }
 

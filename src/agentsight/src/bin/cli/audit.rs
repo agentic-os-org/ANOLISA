@@ -1,5 +1,6 @@
 //! Audit query subcommand
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::{AuditEventType, AuditStore, SqliteConfig};
 use structopt::StructOpt;
 
@@ -42,7 +43,12 @@ impl AuditCommand {
             std::process::exit(1);
         }
 
-        let store = match AuditStore::new(&db_path) {
+        let store = match DatabaseManager::open_query(
+            DatabaseId::Primary,
+            &db_path,
+            DatabaseCoverage::Full,
+            |path| AuditStore::open_read_only_existing(path, "audit_events"),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("Failed to open audit database {db_path:?}: {e}");

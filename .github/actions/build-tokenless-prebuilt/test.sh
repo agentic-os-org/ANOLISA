@@ -130,8 +130,8 @@ CURRENT_RTK_COMMIT="$(
     printf 'ERROR: historical RTK setup has no pinned 40-character commit\n' >&2
     exit 1
 }
-[ "$PINNED_RTK_COMMIT" = "$CURRENT_RTK_COMMIT" ] || {
-    printf 'ERROR: historical and current RTK commits differ\n' >&2
+[ -n "$CURRENT_RTK_COMMIT" ] || {
+    printf 'ERROR: current RTK setup has no pinned 40-character commit\n' >&2
     exit 1
 }
 
@@ -222,6 +222,24 @@ grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
     "$TEMPORARY/historical-drift.log"
 [ ! -e "$HISTORICAL_DRIFT_BUILD/third_party/rtk" ]
 
+# Current sources delegate to their component setup and can pin a newer RTK.
+CURRENT_BUILD="$TEMPORARY/current-source"
+install -d -m 0755 "$CURRENT_BUILD/scripts" "$CURRENT_BUILD/third_party/patches"
+cp "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$CURRENT_BUILD/scripts/"
+cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
+    "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
+    "$CURRENT_BUILD/third_party/patches/"
+PATH="$HISTORICAL_FAKE_BIN:$PATH" \
+    HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
+    HISTORICAL_GIT_LOG="$TEMPORARY/current-git.log" \
+    HISTORICAL_PATCH_LOG="$TEMPORARY/current-patch.log" \
+    bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD"
+grep -Fq "fetch --quiet --depth 1 origin $CURRENT_RTK_COMMIT" \
+    "$TEMPORARY/current-git.log"
+[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq 2 ]
+[ "$(cat "$CURRENT_BUILD/third_party/rtk/.anolisa-rtk-commit")" = \
+    "$CURRENT_RTK_COMMIT" ]
+
 RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"
 printf '[package]\nname = "rtk"\nversion = "0.0.0"\n' > "$RTK_DRIFT/Cargo.toml"
@@ -231,7 +249,7 @@ if bash "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$RTK_DRIFT" \
     printf 'ERROR: mismatched RTK revision marker was accepted\n' >&2
     exit 1
 fi
-grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
+grep -Fq "does not match pinned commit $CURRENT_RTK_COMMIT" \
     "$TEMPORARY/rtk-drift.log"
 
 OPENCLAW_ROOT="$REPO_ROOT/src/tokenless/adapters/tokenless/openclaw"

@@ -72,6 +72,9 @@ const BINARIES = ['tokenless', 'rtk'];
 // The nested dist/* package roots do NOT inherit npm/.npmrc, so without an
 // explicit publishConfig a maintainer's user-level registry would win.
 const NPM_REGISTRY = 'https://registry.npmjs.org/';
+// Floor advertised in engines.node; keep in sync with npm/package.json.
+const NODE_ENGINE_MIN = '16.7.0';
+
 const PUBLISH_CONFIG = { registry: NPM_REGISTRY, access: 'public' };
 const GLIBC_MIN = '2.17';
 
@@ -510,7 +513,11 @@ process.exit(1);
     bin: binMap,
     files: ['bin/', 'scripts/', 'adapters/', 'README.md', 'LICENSE'],
     scripts: { postinstall: 'node scripts/postinstall.js' },
-    engines: { node: '>=16.0.0' },
+    // 16.7.0, not 16.0.0: scripts/postinstall.js imports fs.cpSync, which only
+    // exists from 16.7.0. A lower floor lets npm install the package on a node
+    // that then fails to load the postinstall script at all, before any of its
+    // own platform checks run.
+    engines: { node: `>=${NODE_ENGINE_MIN}` },
     os: osSet,
     cpu: cpuSet,
     optionalDependencies: optionalDeps,

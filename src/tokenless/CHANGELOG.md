@@ -9,6 +9,55 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-22
+
+### Added
+
+- Add a standalone installer and an `install-tokenless` OS Skill entry point alongside npm installation. The installer chooses npm or a Linux-only source build before installation starts, records owned paths for uninstall, and restores the previous installation if replacement fails. Source builds install only the CLI; npm also provides RTK and adapters ([#2322](https://github.com/alibaba/anolisa/pull/2322)).
+
+### Changed
+
+- npm installation now requires Node.js 16.7 or newer and preserves shared adapter resources owned by another installation. Users can explicitly replace them with `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1`; otherwise, the installer reports the bundled adapter location ([#2322](https://github.com/alibaba/anolisa/pull/2322)).
+- Standalone uninstall removes only resources still owned by its install receipt, preserves runtime data unless `--purge` is requested, and retains adapter resources when framework deregistration cannot be verified. Codex plugins listed as `not installed` are recognized as successfully removed, so repeated uninstall can complete ([#2322](https://github.com/alibaba/anolisa/pull/2322), [#3412](https://github.com/alibaba/anolisa/pull/3412)).
+
+### Fixed
+
+- HTML extraction now keeps command output after the page's `</html>` end tag, such as build logs and HTTP status codes, after the rendered page instead of losing it. Text that imitates the page wrapper is escaped, and original recovery remains available ([#3386](https://github.com/alibaba/anolisa/pull/3386)).
+- HTML extraction no longer rejects shallow pages containing many self-closing SVG elements as excessively nested. Depth limits now follow the parsed page, and malformed markup or wide tables no longer trigger repeated scans that can delay tool results ([#3396](https://github.com/alibaba/anolisa/pull/3396)).
+
+## [0.8.3] - 2026-09-20
+
+### Added
+
+- Git diff context cropping can now retain all changed lines and file metadata while reducing surrounding context, with the received original available through recovery. Enable it with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; it is disabled by default and requires text replacement and recovery support ([#3299](https://github.com/alibaba/anolisa/pull/3299)).
+- Complete HTML pages from command or API results can now be rendered as Markdown with original recovery and counts of removed page elements. Enable it with `TOKENLESS_HTML_EXTRACTION_ENABLED=1` or SDK `html_extraction_enabled=True`; it is disabled by default, requires text replacement and recovery support, and preserves file reads, including HTML printed by shell file-reading commands ([#3306](https://github.com/alibaba/anolisa/pull/3306)).
+
+### Changed
+
+- npm installation now automatically enables the Claude Code adapter when the Claude CLI is available, and prints retry instructions when registration cannot finish ([#2193](https://github.com/alibaba/anolisa/pull/2193)).
+- QwenPaw installation now checks the matching SDK wheel before handing over the plugin bundle and reports a confirmed missing asset with its version and URL. Offline or mirrored installations can skip the probe with `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` ([#3289](https://github.com/alibaba/anolisa/pull/3289)).
+
+### Fixed
+
+- Claude Code detection now retries a staged plugin within a bounded settling window with backoff, reducing false “not installed” results while the host registry catches up ([#3272](https://github.com/alibaba/anolisa/pull/3272)).
+- Raw packages now declare and include the OpenCode adapter and adapter manifest, enabling ANOLISA to discover and manage the bundled plugin. Restart OpenCode after enabling or disabling it ([#3324](https://github.com/alibaba/anolisa/pull/3324), [#3346](https://github.com/alibaba/anolisa/pull/3346)).
+
+## [0.8.2] - 2026-09-15
+
+### Added
+
+- Supported search listings, including Claude Code native `Grep` results without context lines, now share consecutive file paths while retaining every received match, line number, and line ending. This lossless optimization is enabled by default and requires a text replacement slot; disable it with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` ([#3173](https://github.com/alibaba/anolisa/pull/3173)).
+
+### Changed
+
+- Bundled RTK is upgraded to 0.49.0, with conservative pipeline rewriting and unchanged `sudo` commands. Direct `rtk grep` users must use `--max-len` and `--max` for RTK display limits: `-l` and `-m` now retain native grep meanings, and file-type filtering moves to `rtk rg -t` ([#3273](https://github.com/alibaba/anolisa/pull/3273)).
+- Supported RTK filters now provide `rtk recall HASH` hints for retained failure or truncated output. Recovery storage is scoped to the host OS user, with limits and expiry; sessions sharing that user can access the same store. RTK recall and Tokenless Stash retrieval remain separate ([#3273](https://github.com/alibaba/anolisa/pull/3273)).
+
+### Fixed
+
+- Cosh-NG and copilot-shell now correctly attribute failures carried inside JSON-encoded shell results under Protocol v2, preserving the original failed output and sending error details for diagnosis ([#2238](https://github.com/alibaba/anolisa/pull/2238)).
+- Bundled RTK preserves pytest startup and fallback diagnostics, including when recovery storage is disabled, and keeps the no-tests summary alongside stderr ([#3273](https://github.com/alibaba/anolisa/pull/3273)).
+
 ## [0.8.1] - 2026-09-09
 
 ### Added

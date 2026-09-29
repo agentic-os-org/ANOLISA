@@ -5,10 +5,9 @@
 //! Linux-only `AppState`. On macOS the collector scans Qoder/QoderWork session
 //! directories and stores ATIF v1.7 documents in `trajectories.db`.
 
-use std::sync::Arc;
-
 use actix_web::{HttpResponse, Responder, get, web};
-use agentsight_trajectory_collector::TrajectoryStore;
+use agentsight_atif::StepCategory;
+use agentsight_trajectory_collector::StepScanFilter;
 use serde::Deserialize;
 
 use super::LocalState;
@@ -23,6 +22,13 @@ pub struct TrajectoryQuery {
     pub source: Option<String>,
     pub agent_name: Option<String>,
     pub limit: Option<i64>,
+    /// Keep only trajectories whose effective reuse label is one of these
+    /// (comma-separated: `good,bad`). Never-triaged sessions match nothing.
+    pub label: Option<String>,
+    /// Drop trajectories whose label is one of these (`useless` by contract).
+    pub exclude_label: Option<String>,
+    /// Keep only trajectories a person settled (`confirm`/`override`).
+    pub human_backed: Option<bool>,
 }
 
 /// GET /api/trajectories
@@ -44,11 +50,75 @@ pub async fn list_trajectories(
         query.agent_name.as_deref(),
         limit,
     ) {
-        Ok(rows) => HttpResponse::Ok().json(rows),
+        Ok(mut rows) => {
+            filter_rows_by_reuse_labels(state.as_ref(), &query, &mut rows);
+            HttpResponse::Ok().json(rows)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Applies the reuse-label query parameters; mirrors the Linux endpoint's
+/// filter so a skill gets the same answer on either platform.
+fn filter_rows_by_reuse_labels(
+    state: &LocalState,
+    query: &TrajectoryQuery,
+    rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
+) {
+    let labels_needed =
+        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
+    if !labels_needed {
+        return;
+    }
+    let Some(labels) = state.reuse_store.as_deref() else {
+        if query.label.is_some() || query.human_backed == Some(true) {
+            rows.clear();
+        }
+        return;
+    };
+    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::reuse::TrajectoryLabel::parse)
+            .collect()
+    };
+    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+        labels
+            .sessions_with_labels(&parse(raw))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    let drop: Option<std::collections::HashSet<String>> =
+        query.exclude_label.as_deref().map(|raw| {
+            labels
+                .sessions_with_labels(&parse(raw))
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        });
+    let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
+        Some(
+            labels
+                .list_labels(&crate::reuse::LabelFilter::default())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    rows.retain(|row| {
+        let id = row.session_id.as_str();
+        keep.as_ref().is_none_or(|set| set.contains(id))
+            && drop.as_ref().is_none_or(|set| !set.contains(id))
+            && backed.as_ref().is_none_or(|set| set.contains(id))
+    });
 }
 
 /// GET /api/trajectories/filters
@@ -111,17 +181,130 @@ pub async fn get_trajectory_detail(
     }
 }
 
+/// Defaults and hard caps for `/api/trajectories/steps`.
+const STEP_DEFAULT_LIMIT: i64 = 50;
+const STEP_MAX_LIMIT: i64 = 500;
+const STEP_DEFAULT_CONTEXT: i64 = 3;
+const STEP_MAX_CONTEXT: i64 = 10;
+const STEP_DEFAULT_MAX_SCAN: i64 = 500;
+const STEP_MAX_MAX_SCAN: i64 = 2000;
+
+#[derive(Deserialize)]
+pub struct TrajectoryStepQuery {
+    /// Comma-separated step categories, matched as OR. Omit for every step.
+    pub category: Option<String>,
+    pub agent_name: Option<String>,
+    pub project: Option<String>,
+    pub source: Option<String>,
+    pub session_id: Option<String>,
+    pub limit: Option<i64>,
+    pub context: Option<i64>,
+    pub max_scan: Option<i64>,
+}
+
+/// GET /api/trajectories/steps
+///
+/// Must be registered before `/api/trajectories/{session_id}`.
+#[get("/api/trajectories/steps")]
+pub async fn list_trajectory_steps(
+    state: web::Data<LocalState>,
+    query: web::Query<TrajectoryStepQuery>,
+) -> impl Responder {
+    // An unknown category is rejected rather than ignored: silently dropping it
+    // would return unrelated steps that look like a legitimate empty result.
+    let mut categories = Vec::new();
+    if let Some(raw) = query.category.as_deref() {
+        for token in raw.split(',').filter(|t| !t.trim().is_empty()) {
+            match StepCategory::parse(token) {
+                Some(c) => categories.push(c),
+                None => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "invalid_category",
+                        "message": format!("Unknown category '{}'", token.trim()),
+                        "valid_categories": StepCategory::ALL
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+
+    let Some(tstore) = state.trajectory_store() else {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "hits": [], "scanned_trajectories": 0,
+            "truncated": false, "skipped_unparsable": 0
+        }));
+    };
+
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(STEP_MAX_LIMIT),
+        _ => STEP_DEFAULT_LIMIT,
+    };
+    let context_radius = match query.context {
+        Some(v) if v >= 0 => v.min(STEP_MAX_CONTEXT),
+        _ => STEP_DEFAULT_CONTEXT,
+    };
+    let max_scan = match query.max_scan {
+        Some(v) if v > 0 => v.min(STEP_MAX_MAX_SCAN),
+        _ => STEP_DEFAULT_MAX_SCAN,
+    };
+
+    let filter = StepScanFilter {
+        project: query.project.clone(),
+        source: query.source.clone(),
+        agent_name: query.agent_name.clone(),
+        session_id: query.session_id.clone(),
+        categories,
+        limit,
+        context_radius,
+        max_scan,
+    };
+    match tstore.scan_steps(&filter) {
+        Ok(outcome) => HttpResponse::Ok().json(outcome),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{App, test};
-    use std::path::PathBuf;
-    use std::sync::RwLock;
+    use agentsight_trajectory_collector::TrajectoryStore;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, RwLock};
+
+    use crate::database::{
+        DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
+    };
+
+    fn manager(db_path: &Path) -> Arc<DatabaseManager> {
+        Arc::new(
+            DatabaseManager::new(
+                DatabaseRole::LocalServer,
+                [DatabaseSpec::new(
+                    DatabaseId::Trajectories,
+                    db_path,
+                    DatabaseAccess::ReadOnly,
+                    DatabaseCoverage::Partial,
+                )],
+            )
+            .unwrap(),
+        )
+    }
 
     fn make_state(store: Option<Arc<TrajectoryStore>>) -> web::Data<LocalState> {
+        let db_path = PathBuf::from("/nonexistent/trajectories.db");
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(store)),
-            db_path: PathBuf::from("/nonexistent/trajectories.db"),
+            database_manager: manager(&db_path),
+            db_path,
+            storage_config: StorageConfig::default(),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
         })
     }
 
@@ -131,7 +314,11 @@ mod tests {
     ) -> web::Data<LocalState> {
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(Some(store))),
+            database_manager: manager(&db_path),
             db_path,
+            storage_config: StorageConfig::default(),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
         })
     }
 

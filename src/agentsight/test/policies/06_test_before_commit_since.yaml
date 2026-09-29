@@ -1,0 +1,7 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule test-before-commit:
+    block exec "git" "commit" if AGENT unless after exec "**/pytest" since write "src/**" or write "tests/**"
+    because "tests are stale after source edits"

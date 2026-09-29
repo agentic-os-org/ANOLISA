@@ -38,6 +38,31 @@ awk '
     END { exit !(a && b && c && a < b && b < c) }
 ' "$SPEC"
 
+# --- %postun must be a swap-safe, metadata-preserving bash scriptlet ---
+# It removes only cosh's own /etc/shells line, and only on final erase when
+# /usr/bin/cosh is gone (a replacement provider keeps it -> the line stays);
+# the rewrite uses a temp copy + atomic rename and preserves mode/ownership/
+# xattrs. The guard tests the file directly (fail-safe) and must NOT run rpm
+# inside the scriptlet -- a nested query can fail under the transaction lock.
+grep -q '^%postun$' "$SPEC"
+if grep -q '^%postun -p <lua>$' "$SPEC"; then
+    echo "ERROR: %postun must be a bash scriptlet, not lua" >&2
+    exit 1
+fi
+grep -Fq '[ ! -x "%{_bindir}/cosh" ]' "$SPEC"
+if awk '/^%postun$/{f=1;next} /^%[a-z]/{f=0} f' "$SPEC" | grep -v '^[[:space:]]*#' | grep -qwE 'rpm|cosh_replacement_ready'; then
+    echo "ERROR: %postun must not run rpm (nested rpm in a scriptlet is unsafe under the tx lock)" >&2
+    exit 1
+fi
+grep -Fq 'cp --attributes-only --preserve=mode,ownership,xattr' "$SPEC"
+grep -Fxq \
+    'Requires(postun): /usr/bin/awk /usr/bin/cp /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm' \
+    "$SPEC"
+if grep -q '^Requires(postun): lua$' "$SPEC"; then
+    echo "ERROR: %postun no longer needs the lua interpreter" >&2
+    exit 1
+fi
+
 # --- %post registration matrix through the real RPM Lua interpreter ---
 SHELLS="$TMP/shells"
 COSH="$TMP/cosh"
@@ -133,12 +158,17 @@ if command -v rpm >/dev/null 2>&1 && rpm --eval '%{lua:print("ok")}' >/dev/null 
         $'/usr/bin/bash\n'"$COSH"$'-backup\n' \
         $'/usr/bin/bash\n'"$COSH"$'-backup\n'"$COSH"$'\n'
 
-    # registration stays fail-open when the shells file cannot be opened
+    # registration stays fail-open when the shells file cannot be opened,
+    # but the failure must be observable (not silent).
     rm -f "$SHELLS"
     rpm --eval "%{lua:io.open = function() return nil, 'Read-only file system' end
-$(post_script)}" >/dev/null
+$(post_script)}" >/dev/null 2>"$TMP/post.warn"
     if [ -e "$SHELLS" ]; then
         echo "ERROR: fail-open %post unexpectedly touched the shells file" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'could not register' "$TMP/post.warn"; then
+        echo "ERROR: fail-open %post did not emit an observable warning" >&2
         exit 1
     fi
 else
@@ -259,5 +289,146 @@ expect_preun "atomic provider swap" 0 0
 
 rm -f "$GUARD_COSH"
 expect_preun "upgrade without launcher" 1 0
+
+# --- %postun /etc/shells removal matrix through fixture-backed bash runs ---
+# %postun uses GNU coreutils (cp --attributes-only); skip the behavioral matrix
+# on non-GNU hosts (e.g. macOS dev) like the %post lua matrix skips without rpm.
+# The structural anchors above already ran on every host.
+if cp --version 2>/dev/null | grep -q 'GNU coreutils'; then
+    POSTUN_ETC="$TMP/postun-etc"
+    install -d -m 0755 "$POSTUN_ETC"
+    POSTUN_SHELLS="$POSTUN_ETC/shells"
+    POSTUN_RAW="$(awk '/^%postun$/{f=1;next} /^%/{f=0} f' "$SPEC")"
+    POSTUN="${POSTUN_RAW//'%{_bindir}'/$STUB}"
+    POSTUN="${POSTUN//'%{_sysconfdir}'/$POSTUN_ETC}"
+    POSTUN="${POSTUN//%%/%}"
+    case "$POSTUN" in
+        *'%{_sysconfdir}'* | *'%{_bindir}'*)
+            echo "ERROR: %postun still references an unexpanded macro" >&2
+            exit 1
+            ;;
+    esac
+
+    run_postun() { PATH="$STUB:/usr/bin:/bin" bash -c "$POSTUN" cosh-postun "$1"; }
+
+    expect_postun_shells() {
+        local name="$1"
+        if ! cmp -s "$TMP/postun.expected" "$POSTUN_SHELLS"; then
+            echo "ERROR: %postun case '$name' produced unexpected bytes:" >&2
+            od -c "$POSTUN_SHELLS" >&2
+            exit 1
+        fi
+    }
+
+    # final erase, no replacement provider: drop only cosh's own line
+    rm -f "$GUARD_COSH"
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh '# admin comment' > "$POSTUN_SHELLS"
+    chmod 0640 "$POSTUN_SHELLS"
+    run_postun 0
+    printf '%s\n' /bin/sh /usr/bin/zsh '# admin comment' > "$TMP/postun.expected"
+    expect_postun_shells "erase drops only cosh line"
+    if [ "$(stat -c '%a' "$POSTUN_SHELLS")" != 640 ]; then
+        echo "ERROR: %postun did not preserve /etc/shells mode" >&2
+        exit 1
+    fi
+
+    # upgrade ($1=1): never touch the shared table
+    printf '%s\n' /bin/sh "$STUB/cosh" > "$POSTUN_SHELLS"
+    run_postun 1
+    printf '%s\n' /bin/sh "$STUB/cosh" > "$TMP/postun.expected"
+    expect_postun_shells "upgrade leaves shells untouched"
+
+    # replacement provider still owns an executable /usr/bin/cosh: keep the line
+    write_stub cosh ":"
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh > "$POSTUN_SHELLS"
+    run_postun 0
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh > "$TMP/postun.expected"
+    expect_postun_shells "replacement present keeps registration"
+
+    # admin edited the cosh line (no longer an exact match): keep it
+    rm -f "$GUARD_COSH"
+    printf '%s\n' /bin/sh "$STUB/cosh --restricted" > "$POSTUN_SHELLS"
+    run_postun 0
+    printf '%s\n' /bin/sh "$STUB/cosh --restricted" > "$TMP/postun.expected"
+    expect_postun_shells "admin-modified line preserved"
+
+    # cp failure mid-rewrite: nonzero exit, /etc/shells untouched, temp cleaned
+    rm -f "$GUARD_COSH"
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh > "$POSTUN_SHELLS"
+    cp "$POSTUN_SHELLS" "$TMP/postun.before-cpfail"
+    write_stub cp 'exit 1'
+    st=0
+    run_postun 0 >/dev/null 2>&1 || st=$?
+    rm -f "$STUB/cp"
+    if [ "$st" -eq 0 ]; then
+        echo "ERROR: %postun cp-failure must exit nonzero" >&2
+        exit 1
+    fi
+    if ! cmp -s "$TMP/postun.before-cpfail" "$POSTUN_SHELLS"; then
+        echo "ERROR: %postun cp-failure must leave /etc/shells untouched" >&2
+        exit 1
+    fi
+    if ls "$POSTUN_ETC"/shells.cosh-ng.* >/dev/null 2>&1; then
+        echo "ERROR: %postun cp-failure left a temp file (trap cleanup failed)" >&2
+        exit 1
+    fi
+    echo "PASS: %postun cp-failure exits nonzero, /etc/shells untouched, temp cleaned"
+
+    # signal (TERM) mid-rewrite must NOT empty /etc/shells: the handler must
+    # exit, not clean-and-resume into cp/mv. awk wrapper TERMs our shell first.
+    rm -f "$GUARD_COSH"
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh > "$POSTUN_SHELLS"
+    cp "$POSTUN_SHELLS" "$TMP/postun.before-sig"
+    # shellcheck disable=SC2016  # $PPID/$@ must stay literal in the written wrapper
+    printf '%s\n' '#!/usr/bin/env bash' 'kill -TERM "$PPID"; exec /usr/bin/awk "$@"' > "$STUB/awk"
+    chmod 0755 "$STUB/awk"
+    st=0
+    run_postun 0 >/dev/null 2>&1 || st=$?
+    rm -f "$STUB/awk"
+    if [ "$st" -eq 0 ]; then
+        echo "ERROR: %postun interrupted by TERM must exit nonzero" >&2
+        exit 1
+    fi
+    if ! cmp -s "$TMP/postun.before-sig" "$POSTUN_SHELLS"; then
+        echo "ERROR: %postun TERM-interrupt emptied/altered /etc/shells" >&2
+        od -c "$POSTUN_SHELLS" >&2
+        exit 1
+    fi
+    if ls "$POSTUN_ETC"/shells.cosh-ng.* >/dev/null 2>&1; then
+        echo "ERROR: %postun TERM-interrupt left a temp file" >&2
+        exit 1
+    fi
+    echo "PASS: %postun TERM-interrupt leaves /etc/shells intact, exits nonzero, temp cleaned"
+
+    # /etc/shells as an admin-managed symlink: keep the link, rewrite its target
+    rm -f "$GUARD_COSH" "$POSTUN_SHELLS"
+    printf '%s\n' /bin/sh "$STUB/cosh" /usr/bin/zsh > "$POSTUN_ETC/managed-shells"
+    ln -s "$POSTUN_ETC/managed-shells" "$POSTUN_SHELLS"
+    run_postun 0
+    if [ ! -L "$POSTUN_SHELLS" ]; then
+        echo "ERROR: %postun replaced the /etc/shells symlink with a regular file" >&2
+        exit 1
+    fi
+    printf '%s\n' /bin/sh /usr/bin/zsh > "$TMP/postun.expected"
+    if ! cmp -s "$TMP/postun.expected" "$POSTUN_ETC/managed-shells"; then
+        echo "ERROR: %postun did not rewrite the symlink target" >&2
+        od -c "$POSTUN_ETC/managed-shells" >&2
+        exit 1
+    fi
+    echo "PASS: %postun preserves an admin /etc/shells symlink and rewrites its target"
+    rm -f "$POSTUN_SHELLS" "$POSTUN_ETC/managed-shells"
+
+    # missing /etc/shells is a no-op, not a crash or recreation
+    rm -f "$POSTUN_SHELLS" "$GUARD_COSH"
+    run_postun 0
+    if [ -e "$POSTUN_SHELLS" ]; then
+        echo "ERROR: %postun recreated a missing /etc/shells" >&2
+        exit 1
+    fi
+
+    echo "cosh-ng %postun matrix passed"
+else
+    echo "SKIP: GNU coreutils unavailable; %postun matrix not exercised" >&2
+fi
 
 echo "cosh-ng rpm scriptlet tests passed"

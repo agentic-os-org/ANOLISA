@@ -6,12 +6,15 @@ Hooks 在 Agent 事件前后运行命令，可用于策略检查、通知或补�
 
 ## 启用和管理 Hooks
 
+对于 `cosh-core`，声明 Hook 即默认启用，`hooks.enabled = true` 可省略。
+显式设置 `hooks.enabled = false` 会禁用配置 Hook；存在 Hook 定义时会输出警告。
+系统或用户配置中的禁用还会阻止 Extension Hook 自动启用。项目配置中的禁用仅影响
+配置 Hook，已安装的 Extension 不会重新启用这些已禁用的配置 Hook。
+`--bare` 仍会禁用所有 Hook。
+
 在 `~/.copilot-shell/config.toml` 或受信任的项目配置中定义：
 
 ```toml
-[hooks]
-enabled = true
-
 [[hooks.PreToolUse]]
 name = "security-check"
 command = "/usr/local/bin/my-security-hook"
@@ -57,7 +60,12 @@ timeout = 60000
 }
 ```
 
-`allow` 表示继续，`block`/`deny` 表示停止操作，`ask` 请求用户确认，空响应表示透传。退出码 `2` 也会拦截；其他非零退出码只作为警告。默认超时为 60 秒；需要快速完成的检查可以设置更短的 `timeout`。同一事件的多个 Hook 需要按顺序运行时，设置 `sequential = true`。
+`allow` 表示继续，`block`/`deny` 表示停止操作，`ask` 请求用户确认。退出码 `2` 也会拦截。
+在 `cosh-core` 中，配置 `PreToolUse` Hook 遇到空输出、非法 JSON、超时或非预期的非零
+退出码时默认阻断，除非该 Hook 显式设置 `fail_open = true`。Extension Hook 成功时
+允许空输出，但执行错误仍默认阻断。配置 Hook 可返回 `{}` 显式透传。
+默认超时为 60 秒；需要快速完成的检查可以设置更短的 `timeout`。
+同一事件的多个 Hook 需要按顺序运行时，设置 `sequential = true`。
 
 ## 添加上下文或子进程变量
 

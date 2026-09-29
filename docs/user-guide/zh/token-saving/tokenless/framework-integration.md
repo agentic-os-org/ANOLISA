@@ -41,7 +41,12 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 |------|--------------------|
 | JSON | 无损结构清理；文本替换槽还会考虑 TOON |
 | 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
-| 构建/测试/包管理日志、长纯文本、Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
+| 来自命令输出的构建/测试/包管理日志 | 终端输出清理与常规进度缩减；每段省略都带有就地取回标记 |
+| 宿主支持文本替换时的 CSV/TSV 表格 | 整表压紧；数据行超过 32 行的表格在 Stash 支持的恢复可用时可做行缩减 |
+| 路径共享开启且宿主支持文本替换时的 API 搜索结果列表 | 无损搜索路径共享；保留全部已收到命中 |
+| 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
 Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
@@ -135,6 +140,8 @@ Plugin 把 DSH 内置的读取/搜索工具映射为 `file_content`，命令工�
 Core 决定。即使压缩关闭，DSH 原始失败和结构化命令失败仍会交给 Core 做环境诊断。
 后续 Waterfall Listener 替换 Canonical `value` 后，Tokenless 只检查该替换值，且不会对其
 应用内容压缩。
+
+完整触发条件（压缩开关、最小响应长度、受支持的压缩域、严格变小保护）与阈值含义见[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 
 ## 通过 anolisa 管理（推荐）
 
@@ -313,17 +320,45 @@ receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 ### OpenCode
 
-OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenless 生命周期脚本
-完成安装或卸载后，请重启 OpenCode。重启后执行一次工具调用，再运行
-`tokenless stats list`，确认已生成统计记录。
+OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 
-脚本会优先使用 `TOKENLESS_OPENCODE_CONFIG_DIR`，其次使用
-`OPENCODE_CONFIG_DIR`。如果两者均未设置，则使用
-`${XDG_CONFIG_HOME}/opencode`；如果 `XDG_CONFIG_HOME` 也未设置，则回退到
-`~/.config/opencode`。
+```bash
+anolisa adapter enable tokenless opencode
+anolisa adapter status tokenless
+anolisa adapter disable tokenless opencode
+```
 
-安装过程中，脚本只会创建由 Tokenless 管理的 `plugins/tokenless.js` 符号链接。
-如果目标路径已经存在但不由 Tokenless 管理，安装会停止，原有内容不会被覆盖。
+内置 driver 按 `OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`
+的顺序解析配置目录。它不读取 `TOKENLESS_OPENCODE_CONFIG_DIR`；如需与独立脚本共用自定义目录，
+请设置 `OPENCODE_CONFIG_DIR`，禁用时也保持相同的目录设置。
+
+上述 Bundle 生命周期脚本仍可用于 npm 和手工安装，源码构建可使用 `make opencode-install`。
+这些脚本额外支持 `TOKENLESS_OPENCODE_CONFIG_DIR`，其优先级最高。两种方式都会创建
+`plugins/tokenless.js`，并拒绝覆盖冲突的文件或链接。ANOLISA enable 会将已存在且指向同一
+插件源文件的链接纳入 receipt 管理，之后 disable 会删除该链接。链接按原目录展开相对路径后，
+必须与记录的源路径一致；通过目录别名或不同安装前缀指向源文件的链接会作为冲突保留。
+这样可以确保源目录删除后仍能清理。
+
+通过 ANOLISA 启用前，请使用原安装 profile 以及原有的 `PREFIX` 或 `SHARE_DIR` 覆盖值
+卸载冲突的独立链接。例如，在 Tokenless 源码目录中移除使用默认 system 前缀安装的链接：
+
+```bash
+make opencode-uninstall INSTALL_PROFILE=system PREFIX=/usr
+anolisa adapter enable tokenless opencode
+```
+
+两条命令都应保持原配置目录设置。如果使用 Bundle 中的 `scripts/uninstall.sh`，请运行
+原 adapter Bundle 内的脚本；若设置了 `ANOLISA_ADAPTER_DIR`，它也必须与原目录匹配。
+从其他前缀卸载会保留链接，输出 warning 并以 0 退出；启用前请确认链接已移除。如果原 Bundle
+已不可用，请用 `readlink` 检查 `plugins/tokenless.js`，仅手动移除确认过的旧符号链接，
+保留无关文件和目录。
+
+若要恢复独立脚本管理，请先完成 `anolisa adapter disable tokenless opencode`，包括所有
+待恢复的操作。清理成功前应保留错误中报告的恢复目录；独立脚本不会恢复 ANOLISA 的 receipt
+或 journal。之后再运行 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
+
+启用或禁用后请重启 OpenCode：已有进程会保留加载的插件及其工具输出替换行为，直到重启。
+启用并重启后，执行一次工具调用，再运行 `tokenless stats list` 检查统计记录。
 
 ### Qwen Code
 

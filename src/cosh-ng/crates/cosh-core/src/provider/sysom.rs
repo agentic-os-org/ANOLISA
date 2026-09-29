@@ -3,8 +3,6 @@
 //! Uses ACS3-HMAC-SHA256 signing and parses the cumulative SSE stream format
 //! into incremental `GenerateEvent`s compatible with `ContentGenerator` trait.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -15,17 +13,21 @@ use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use super::{ContentGenerator, GenerateConfig, GenerateStream, Message, ToolDeclaration};
 
 use self::stream::sysom_event_stream;
 
+pub use self::ecs_metadata::{probe_ecs_ram_role, CredentialStatus, NotReadyReason, ProbeError};
+
+mod ecs_metadata;
+pub mod endpoint;
 mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const DEFAULT_ENDPOINT: &str = "sysom.cn-hangzhou.aliyuncs.com";
 const API_PATH: &str = "/api/v1/copilot/generate_copilot_stream_response";
 const API_VERSION: &str = "2023-12-30";
 const API_ACTION: &str = "GenerateCopilotStreamResponse";
@@ -38,8 +40,43 @@ const CONSOLE_URL_TEMPLATE: &str =
 const INSTANCE_ID_CACHE_TTL_SECS: u64 = 3 * 3600;
 /// Connect timeout for ECS metadata service.
 const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-/// Read timeout for ECS metadata service.
-const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connect timeout for the SysOM API.
+///
+/// Bounds connection setup so an unreachable endpoint surfaces as a prompt
+/// error instead of stalling on the protocol stack's own timeout, which was
+/// measured at 61 seconds from an ECS with no public egress.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Inactivity timeout for the SysOM API response.
+///
+/// A *total* request timeout is the wrong instrument: the response is a
+/// Server-Sent Events stream whose length belongs to the model, so a deadline
+/// would truncate healthy long completions. A read timeout applies per read and
+/// resets after each successful one, so it bounds a server that accepts the
+/// connection and then goes silent while leaving a steadily streaming response
+/// untouched.
+///
+/// Deliberately generous: the largest legitimate gap is time-to-first-token
+/// while the model is queued, and the goal is to turn an unbounded hang into a
+/// bounded failure rather than to police latency.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Build the HTTP client for the streaming API.
+///
+/// Both bounds are parameters so a test can assert the stalled-connection
+/// behaviour without waiting the production read timeout.
+fn build_streaming_client(
+    endpoint: &endpoint::ResolvedEndpoint,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    endpoint
+        .configure_client(reqwest::Client::builder())
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {err}"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcsAuthChallenge {
@@ -57,19 +94,31 @@ struct SysomCredentials {
 
 /// SysOM Provider that connects to Aliyun SysOM API with ACS3-HMAC-SHA256 signing.
 pub struct SysomProvider {
-    endpoint: String,
+    /// Explicit endpoint override from configuration; empty when unset.
+    ///
+    /// The effective host is resolved per request rather than here because
+    /// these constructors are synchronous yet run inside the tokio runtime: a
+    /// blocking reachability probe would occupy a worker thread. Resolution is
+    /// cached process-wide, so the probe still runs at most once.
+    configured_endpoint: String,
     credentials: RwLock<SysomCredentials>,
     is_sts: bool,
     cancelled: Arc<AtomicBool>,
-    instance_id: Option<String>,
+    /// Resolved once per provider instance, including a negative result; only the
+    /// on-disk cache honours [`INSTANCE_ID_CACHE_TTL_SECS`].
+    instance_id: OnceCell<Option<String>>,
 }
 
 impl SysomProvider {
-    pub fn new(access_key_id: &str, access_key_secret: &str, security_token: Option<&str>) -> Self {
+    pub fn new(
+        access_key_id: &str,
+        access_key_secret: &str,
+        security_token: Option<&str>,
+        configured_endpoint: &str,
+    ) -> Self {
         let is_sts = security_token.is_some();
-        let instance_id = resolve_instance_id();
         Self {
-            endpoint: DEFAULT_ENDPOINT.to_string(),
+            configured_endpoint: configured_endpoint.to_string(),
             credentials: RwLock::new(SysomCredentials {
                 access_key_id: access_key_id.to_string(),
                 access_key_secret: access_key_secret.to_string(),
@@ -77,14 +126,13 @@ impl SysomProvider {
             }),
             is_sts,
             cancelled: Arc::new(AtomicBool::new(false)),
-            instance_id,
+            instance_id: OnceCell::new(),
         }
     }
 
-    pub fn from_ecs_ram_role() -> Self {
-        let instance_id = resolve_instance_id();
+    pub fn from_ecs_ram_role(configured_endpoint: &str) -> Self {
         Self {
-            endpoint: DEFAULT_ENDPOINT.to_string(),
+            configured_endpoint: configured_endpoint.to_string(),
             credentials: RwLock::new(SysomCredentials {
                 access_key_id: String::new(),
                 access_key_secret: String::new(),
@@ -92,13 +140,8 @@ impl SysomProvider {
             }),
             is_sts: true,
             cancelled: Arc::new(AtomicBool::new(false)),
-            instance_id,
+            instance_id: OnceCell::new(),
         }
-    }
-
-    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
-        self.endpoint = endpoint.to_string();
-        self
     }
 
     /// Build the JSON request body for the SysOM API.
@@ -147,7 +190,7 @@ impl SysomProvider {
             }
         }
 
-        if let Some(ref id) = self.instance_id {
+        if let Some(Some(id)) = self.instance_id.get() {
             inner["instance_id"] = serde_json::json!(id);
         }
 
@@ -226,6 +269,7 @@ impl ContentGenerator for SysomProvider {
         config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
         self.cancelled.store(false, Ordering::SeqCst);
+        self.instance_id.get_or_init(resolve_instance_id).await;
 
         let body = self.build_request_body(messages, tools, config);
         let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("JSON serialize: {e}"))?;
@@ -263,14 +307,24 @@ impl SysomProvider {
     /// Send a streaming request using current credentials.
     async fn do_streaming_request(&self, body_bytes: &[u8]) -> Result<GenerateStream, String> {
         let creds = self.credentials.read().unwrap().clone();
-        let url = format!("https://{}{}", self.endpoint, API_PATH);
+        let resolved = endpoint::resolve(&self.configured_endpoint).await;
+        tracing::debug!(
+            host = %resolved.host,
+            origin = resolved.origin.as_str(),
+            "sysom endpoint"
+        );
+        let url = format!("{}{}", resolved.base_url(), API_PATH);
+        let client = build_streaming_client(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT)?;
+        let host = resolved.host;
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = Uuid::new_v4().to_string();
         let hashed_payload = hex_sha256(body_bytes);
 
-        // Build headers for signing
+        // `host` feeds the signature, the URL and the wire header alike: the
+        // gateway recomputes the signature from the Host it receives, so the
+        // three must not diverge.
         let mut sign_headers: Vec<(String, String)> = vec![
-            ("host".to_string(), self.endpoint.clone()),
+            ("host".to_string(), host.clone()),
             ("x-acs-version".to_string(), API_VERSION.to_string()),
             ("x-acs-action".to_string(), API_ACTION.to_string()),
             ("x-acs-date".to_string(), timestamp.clone()),
@@ -293,11 +347,9 @@ impl SysomProvider {
         let authorization =
             self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
 
-        // Build reqwest request
-        let client = reqwest::Client::new();
         let mut req = client
             .post(&url)
-            .header("host", &self.endpoint)
+            .header("host", &host)
             .header("x-acs-version", API_VERSION)
             .header("x-acs-action", API_ACTION)
             .header("x-acs-date", &timestamp)
@@ -358,47 +410,21 @@ impl SysomProvider {
         Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
     }
 
-    /// Check if an error indicates STS credential expiration.
-    /// Refresh STS credentials from ECS metadata service.
+    /// Refresh only with credentials accepted by the same validator as auth preflight.
     async fn refresh_sts_credentials(&self) -> bool {
-        let url = format!(
-            "{}/latest/meta-data/ram/security-credentials/{}",
-            ECS_METADATA_ENDPOINT, ECS_RAM_ROLE_NAME
-        );
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_default();
-
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("STS refresh failed: {e}");
-                return false;
+        match ecs_metadata::load_role_credentials().await {
+            Ok(ecs_metadata::RoleCredentials::Ready(credentials)) => {
+                *self.credentials.write().unwrap() = credentials;
+                true
             }
-        };
-        let body: Value = match resp.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("STS refresh parse failed: {e}");
-                return false;
+            Ok(ecs_metadata::RoleCredentials::NotReady(reason)) => {
+                tracing::debug!(reason = reason.as_str(), "STS credentials not ready");
+                false
             }
-        };
-
-        let ak = body.get("AccessKeyId").and_then(|v| v.as_str());
-        let sk = body.get("AccessKeySecret").and_then(|v| v.as_str());
-        let token = body.get("SecurityToken").and_then(|v| v.as_str());
-
-        if let (Some(ak), Some(sk), Some(token)) = (ak, sk, token) {
-            let mut creds = self.credentials.write().unwrap();
-            creds.access_key_id = ak.to_string();
-            creds.access_key_secret = sk.to_string();
-            creds.security_token = Some(token.to_string());
-            true
-        } else {
-            tracing::warn!("STS refresh: missing fields in response");
-            false
+            Err(error) => {
+                tracing::warn!(error_code = error.code(), "STS metadata refresh failed");
+                false
+            }
         }
     }
 }
@@ -416,19 +442,26 @@ fn is_sts_error(error: &str) -> bool {
 
 /// Resolve instance_id: read from local cache if valid, otherwise fetch from
 /// ECS metadata service and update the cache.
-fn resolve_instance_id() -> Option<String> {
+async fn resolve_instance_id() -> Option<String> {
     let config_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".copilot-shell");
     let cache_path = config_dir.join("instance_id");
+    #[cfg(test)]
+    let cache_path = metadata_tests::TEST_CACHE_PATH
+        .try_with(Clone::clone)
+        .unwrap_or(cache_path);
+    resolve_instance_id_cached(&cache_path).await
+}
 
+async fn resolve_instance_id_cached(cache_path: &std::path::Path) -> Option<String> {
     // Try reading from cache
-    if let Ok(metadata) = std::fs::metadata(&cache_path) {
+    if let Ok(metadata) = std::fs::metadata(cache_path) {
         if let Ok(modified) = metadata.modified() {
             let age = modified.elapsed().unwrap_or(Duration::from_secs(u64::MAX));
             if age < Duration::from_secs(INSTANCE_ID_CACHE_TTL_SECS) {
                 // Cache is still valid
-                let content = std::fs::read_to_string(&cache_path).unwrap_or_default();
+                let content = std::fs::read_to_string(cache_path).unwrap_or_default();
                 let trimmed = content.trim();
                 if trimmed.is_empty() {
                     // Empty file = previously failed to fetch
@@ -440,55 +473,32 @@ fn resolve_instance_id() -> Option<String> {
     }
 
     // Cache miss or expired — fetch from metadata service
-    let instance_id = fetch_instance_id_from_metadata();
+    let instance_id = ecs_metadata::fetch_instance_id().await.ok();
 
     // Write cache (create parent dir if needed)
     if let Some(parent) = cache_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let content = instance_id.as_deref().unwrap_or("");
-    if let Err(e) = std::fs::write(&cache_path, content) {
+    if let Err(e) = std::fs::write(cache_path, content) {
         tracing::debug!("failed to write instance_id cache: {e}");
     }
 
     instance_id
 }
 
-/// Fetch instance-id from ECS metadata service via raw TCP.
-/// Returns None if not running on ECS or if the request fails.
-fn fetch_instance_id_from_metadata() -> Option<String> {
-    fetch_ecs_metadata_text("/latest/meta-data/instance-id").and_then(|body| {
-        let instance_id = body.trim();
-        if instance_id.starts_with("i-") {
-            Some(instance_id.to_string())
-        } else {
-            None
-        }
-    })
-}
-
-pub fn detect_ecs_auth_challenge() -> Option<EcsAuthChallenge> {
-    let instance_id = fetch_instance_id_from_metadata()?;
-    let region_id = fetch_ecs_region_id().unwrap_or_else(|| "cn-hangzhou".to_string());
-    Some(EcsAuthChallenge {
+/// Detect ECS identity without treating denied or malformed metadata as non-ECS.
+///
+/// # Errors
+/// Returns a safe error for HTTP rejection, invalid metadata, or any identity fetch
+/// failure after acquiring a valid token. Only an unreachable or timed-out session
+/// start is treated as non-ECS so manual authentication remains available.
+pub async fn detect_ecs_auth_challenge() -> Result<Option<EcsAuthChallenge>, ProbeError> {
+    let identity = ecs_metadata::fetch_identity().await?;
+    Ok(identity.map(|(instance_id, region_id)| EcsAuthChallenge {
         console_url: generate_console_url(&instance_id, &region_id),
         instance_id,
-    })
-}
-
-pub fn ecs_ram_role_credentials_available() -> bool {
-    let path = format!(
-        "/latest/meta-data/ram/security-credentials/{}",
-        ECS_RAM_ROLE_NAME
-    );
-    fetch_ecs_metadata_text(&path)
-        .map(|body| body.contains("AccessKeyId") && body.contains("SecurityToken"))
-        .unwrap_or(false)
-}
-
-fn fetch_ecs_region_id() -> Option<String> {
-    let zone_id = fetch_ecs_metadata_text("/latest/meta-data/zone-id")?;
-    region_id_from_zone_id(zone_id.trim())
+    }))
 }
 
 fn region_id_from_zone_id(zone_id: &str) -> Option<String> {
@@ -510,23 +520,6 @@ fn generate_console_url(instance_id: &str, region_id: &str) -> String {
         .replace("{instanceId}", instance_id)
 }
 
-fn fetch_ecs_metadata_text(path: &str) -> Option<String> {
-    let addr: SocketAddr = "100.100.100.200:80".parse().ok()?;
-    let mut stream = TcpStream::connect_timeout(&addr, METADATA_CONNECT_TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(METADATA_READ_TIMEOUT)).ok()?;
-    stream
-        .set_write_timeout(Some(METADATA_CONNECT_TIMEOUT))
-        .ok()?;
-
-    let request = format!("GET {path} HTTP/1.0\r\nHost: 100.100.100.200\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-
-    response.split("\r\n\r\n").nth(1).map(str::to_string)
-}
-
 // ---------------------------------------------------------------------------
 // Crypto helpers
 // ---------------------------------------------------------------------------
@@ -546,3 +539,7 @@ fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
 #[cfg(test)]
 #[path = "sysom/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sysom/metadata_tests.rs"]
+mod metadata_tests;

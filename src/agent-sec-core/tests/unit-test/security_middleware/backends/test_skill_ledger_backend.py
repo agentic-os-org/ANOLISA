@@ -9,6 +9,7 @@ from agent_sec_cli.security_middleware.backends import (
 from agent_sec_cli.security_middleware.backends.skill_ledger import (
     SkillLedgerBackend,
 )
+from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
 
 
@@ -450,13 +451,16 @@ def test_non_scan_commands_normalize_names_without_changing_business_meaning():
             ],
         }
     )
-    init_keys_result = _event_result(
+    init_result = _event_result(
         {
-            "command": "init-keys",
-            "fingerprint": "sha256:key",
-            "publicKeyPath": "/keys/pub",
-            "privateKeyPath": "/keys/private",
-            "encrypted": True,
+            "command": "init",
+            "keyCreated": True,
+            "key": {
+                "fingerprint": "sha256:key",
+                "publicKeyPath": "/keys/pub",
+                "privateKeyPath": "/keys/private",
+                "encrypted": True,
+            },
         }
     )
     status_result = _event_result(
@@ -500,12 +504,15 @@ def test_non_scan_commands_normalize_names_without_changing_business_meaning():
             }
         ],
     }
-    assert init_keys_result == {
-        "command": "init-keys",
-        "fingerprint": "sha256:key",
-        "public_key_path": "/keys/pub",
-        "private_key_path": "/keys/private",
-        "encrypted": True,
+    assert init_result == {
+        "command": "init",
+        "key_created": True,
+        "key": {
+            "fingerprint": "sha256:key",
+            "public_key_path": "/keys/pub",
+            "private_key_path": "/keys/private",
+            "encrypted": True,
+        },
     }
     assert status_result == {
         "command": "status",
@@ -705,3 +712,20 @@ def test_export_backend_success_and_failure(monkeypatch):
     assert failed.success is False
     assert failed.exit_code == 1
     assert failed.error == "export failed"
+
+
+def test_backend_rejects_invalid_policy_before_dispatch(monkeypatch):
+    monkeypatch.setattr(backend_module, "load_config", lambda: {})
+    backend = SkillLedgerBackend()
+    calls = []
+    monkeypatch.setattr(
+        backend, "_do_show", lambda *args, **kwargs: calls.append("show")
+    )
+    result = backend.execute(
+        RequestContext(action="skill_ledger"), command="show", policy="invalid"
+    )
+    assert result.success is False
+    assert result.exit_code == 1
+    assert result.error_type == "ValueError"
+    assert "invalid" in result.error and "pass_warn_only" in result.error
+    assert calls == []

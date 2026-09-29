@@ -204,3 +204,10 @@ macro_rules! managed_task_ids {
         );
     };
 }
+
+// Append submission status separately to preserve existing MessageId values.
+macro_rules! composer_control_submit_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!($remaining, $($ids,)* PromptDraftFooterControlSubmitted,);
+    };
+}

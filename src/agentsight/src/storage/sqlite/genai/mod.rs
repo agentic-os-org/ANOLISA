@@ -3,11 +3,10 @@
 //! Stores GenAI events (LLM calls, tool uses, etc.) to SQLite when SLS is not configured.
 //! Implements the GenAIExporter trait for pluggable integration.
 //!
-//! # Size Limit
+//! # Lifecycle policy
 //!
-//! The database size can be configured via `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB` environment
-//! variable (default: 200 MB). When approaching 90% of the limit, old records are pruned
-//! automatically. The size check includes the main database file plus WAL and SHM files.
+//! Retention and capacity are supplied explicitly by the caller. Maintenance
+//! checkpoints WAL data and deletes oldest rows without running `VACUUM`.
 
 mod events;
 mod pending;
@@ -19,13 +18,13 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
+use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::connection::{create_connection, default_base_path};
-use crate::config::BatchConfig;
+use crate::config::{BatchConfig, PeriodicStoragePolicy};
 
 /// SQL mirror of [`TokenRecord::billed_input_tokens`], as a `CASE` expression
 /// over the raw columns.
@@ -79,26 +78,58 @@ pub struct GenAISqliteStore {
     pending: Mutex<Vec<crate::genai::semantic::GenAISemanticEvent>>,
     /// Timestamp of the last successful flush.
     last_flush: Mutex<Instant>,
+    /// Retention and capacity settings supplied by the owning runtime.
+    storage_policy: PeriodicStoragePolicy,
 }
 
 impl GenAISqliteStore {
-    /// Create a new GenAI SQLite store at the default path
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create a new GenAI SQLite store at the default path.
+    pub fn new(storage_policy: PeriodicStoragePolicy) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::default_path();
-        Self::new_with_path(&path)
+        Self::new_with_path(&path, storage_policy)
     }
 
     /// Create a new GenAI SQLite store at an arbitrary path with default batch config.
-    pub fn new_with_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_path_and_batch(path, None)
+    pub fn new_with_path(
+        path: &std::path::Path,
+        storage_policy: PeriodicStoragePolicy,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_path_and_batch(path, None, storage_policy)
     }
 
-    /// Create a new GenAI SQLite store with explicit batch configuration.
+    /// Opens an existing GenAI database without creating or modifying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database does not exist or cannot be opened read-only.
+    pub fn open_read_only_existing(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadOnlyExisting,
+                enable_wal: false,
+                ..ConnectionOptions::default()
+            },
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+            batch_config: BatchConfig::default(),
+            pending: Mutex::new(Vec::new()),
+            last_flush: Mutex::new(Instant::now()),
+            storage_policy: PeriodicStoragePolicy::default(),
+        })
+    }
+
+    /// Create a new GenAI SQLite store with explicit batch and lifecycle configuration.
     pub fn new_with_path_and_batch(
         path: &std::path::Path,
         batch: Option<BatchConfig>,
+        storage_policy: PeriodicStoragePolicy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let conn = create_connection(path)?;
+        let conn = open_connection(path, ConnectionOptions::default())?;
         let batch_config = batch.unwrap_or_default();
         let store = GenAISqliteStore {
             conn: Mutex::new(conn),
@@ -106,31 +137,21 @@ impl GenAISqliteStore {
             batch_config,
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
+            storage_policy,
         };
         store.init_tables()?;
 
-        // Log current database size on startup
-        let current_size = store.get_total_db_size();
-        let max_size = schema::get_max_db_size();
-        let threshold = schema::get_prune_threshold();
+        let current_size = store.size_snapshot()?.physical_bytes;
+        let max_size = storage_policy.max_db_size_mb.saturating_mul(1024 * 1024);
+        let target = max_size.saturating_mul(9) / 10;
         log::info!(
-            "GenAISqliteStore initialized: db_size={}MB, threshold={}MB, max={}MB, batch_max_size={}, batch_flush_ms={}",
+            "GenAISqliteStore initialized: db_size={}MB, target={}MB, max={}MB, batch_max_size={}, batch_flush_ms={}",
             current_size / 1024 / 1024,
-            threshold / 1024 / 1024,
+            target / 1024 / 1024,
             max_size / 1024 / 1024,
             store.batch_config.max_size,
             store.batch_config.flush_ms,
         );
-
-        // If the database is already oversized on startup (e.g. from a prior
-        // crash or a config change), prune immediately rather than waiting for
-        // the first write to trigger cleanup.
-        if current_size >= threshold {
-            log::info!("Database oversized on startup, triggering cleanup");
-            if let Err(e) = store.check_and_prune_if_needed() {
-                log::warn!("Startup cleanup failed: {e}");
-            }
-        }
 
         Ok(store)
     }
@@ -178,7 +199,7 @@ impl GenAISqliteStore {
 
     /// Default database path
     pub fn default_path() -> PathBuf {
-        default_base_path().join("genai_events.db")
+        crate::config::default_base_path().join("genai_events.db")
     }
 }
 

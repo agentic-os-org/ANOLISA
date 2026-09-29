@@ -1,6 +1,6 @@
 [package]
 name = "asc-cli"
-description = "Daemon-only AgentSecCore CLI with Policy, Scope and Binding CRUD"
+description = "Daemon-only AgentSecCore CLI with Policy, Scope, Binding, and code scanning"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,8 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+asc-observability = { workspace = true, features = ["runtime"] }
+tracing.workspace = true
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
@@ -21,8 +23,11 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+unicode-properties = { workspace = true }
 
 [dev-dependencies]
+asc-action-runtime = { workspace = true, features = ["testing"] }
+asc-capability-pii-scan = { workspace = true }
 tokio = { workspace = true }
 asc-daemon = { workspace = true }
 asc-daemon-core = { workspace = true }

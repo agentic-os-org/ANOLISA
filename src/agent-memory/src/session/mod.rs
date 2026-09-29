@@ -9,10 +9,12 @@
 //! Tests set `MEMORY_SESSION_DIR` to a tempdir to avoid colliding with
 //! `/run/anolisa/sessions/` in the host.
 
+pub mod base;
 pub mod id;
 pub mod paths;
 pub mod service;
 
+pub use base::SessionBase;
 pub use id::SessionId;
 pub use paths::resolve_in_scratch;
 pub use service::{EndAction, SessionLogService};

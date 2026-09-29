@@ -65,7 +65,9 @@ fn detect_capabilities(
     if enforcement {
         caps.push("enforcement");
     }
-    caps.extend(["atif", "settings", "agent_health"]);
+    // Unconditional like `atif`: `reuse.db` degrades gracefully, and the page
+    // reports why labels are unavailable rather than vanishing from the menu.
+    caps.extend(["reuse_labels", "atif", "settings", "agent_health"]);
     caps
 }
 
@@ -141,6 +143,7 @@ mod tests {
                 "sessions",
                 "optimization",
                 "skills",
+                "reuse_labels",
                 "atif",
                 "settings",
                 "agent_health",
@@ -162,6 +165,7 @@ mod tests {
                 "security",
                 "system_audit",
                 "enforcement",
+                "reuse_labels",
                 "atif",
                 "settings",
                 "agent_health",

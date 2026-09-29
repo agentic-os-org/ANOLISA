@@ -42,7 +42,6 @@ export interface SessionSummary {
 }
 
 export interface TraceSummary {
-  trace_id: string;
   conversation_id: string;
   call_count: number;
   total_input_tokens: number;
@@ -136,6 +135,103 @@ async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
     throw new ApiRequestError(url, res.status, text, body);
   }
   return res.json() as Promise<T>;
+}
+
+// ─── Trajectory reuse labels ────────────────────────────────────────────────
+
+/**
+ * Runs the deterministic labelling pass.
+ *
+ * Safe to call repeatedly: unchanged content under unchanged rules is skipped,
+ * so this is a refresh rather than a rebuild.
+ */
+export async function runReuseTriage(limit?: number): Promise<TriageReport> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`;
+  return apiFetch<TriageReport>(`${API_BASE}/api/reuse/triage${qs}`, { method: 'POST' });
+}
+
+/** Lists labelled trajectories, newest decision first. */
+export async function fetchReuseSessions(filter: {
+  label?: TrajectoryLabel;
+  confirmState?: ConfirmState;
+  limit?: number;
+} = {}): Promise<SessionsResponse> {
+  const params = new URLSearchParams();
+  if (filter.label) params.set('label', filter.label);
+  if (filter.confirmState) params.set('confirm_state', filter.confirmState);
+  if (filter.limit !== undefined) params.set('limit', String(filter.limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch<SessionsResponse>(`${API_BASE}/api/reuse/sessions${qs}`);
+}
+
+/**
+ * Records a human decision on one label.
+ *
+ * `confirm` endorses the automatic verdict; `override` replaces it. Both count
+ * as a person having spoken.
+ */
+export async function decideReuseLabel(
+  sessionId: string,
+  decision: {
+    action: 'confirm' | 'override';
+    label?: TrajectoryLabel;
+    reason?: string;
+    decidedBy?: string;
+  },
+): Promise<SessionLabelView> {
+  return apiFetch<SessionLabelView>(
+    `${API_BASE}/api/reuse/sessions/${encodeURIComponent(sessionId)}/label`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: decision.action,
+        label: decision.label,
+        reason: decision.reason,
+        decided_by: decision.decidedBy,
+      }),
+    },
+  );
+}
+
+/** Endorses several automatic verdicts at once; ids that are not there are skipped. */
+export async function confirmReuseLabels(
+  sessionIds: string[],
+  decidedBy?: string,
+): Promise<{ confirmed: number; session_ids: string[] }> {
+  return apiFetch<{ confirmed: number; session_ids: string[] }>(
+    `${API_BASE}/api/reuse/sessions/labels:batch-confirm`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_ids: sessionIds, decided_by: decidedBy }),
+    },
+  );
+}
+
+/**
+ * Per-rule counts of how often a person accepted or overturned the verdict it
+ * contributed to — the only continuously available measure of which rules
+ * misfire.
+ */
+export async function fetchReuseLabelStats(): Promise<LabelStatsResponse> {
+  return apiFetch<LabelStatsResponse>(`${API_BASE}/api/reuse/label-stats`);
+}
+
+/**
+ * Asks the model to label trajectories the rules could not place.
+ *
+ * Every judgement is a paid request, so this is off unless the server was
+ * configured for it, and answers 503 when it is not.
+ */
+export async function runReuseJudgements(
+  input: { sessionIds?: string[]; limit?: number } = {},
+): Promise<JudgeReport> {
+  return apiFetch<JudgeReport>(`${API_BASE}/api/reuse/judge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: input.sessionIds, limit: input.limit }),
+  });
 }
 
 // ─── Enforcement APIs ───────────────────────────────────────────────────────
@@ -430,15 +526,6 @@ export async function fetchSessionResources(
   );
 }
 
-/**
- * Fetch detailed LLM call events for a single trace.
- */
-export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetail[]> {
-  return apiFetch<TraceEventDetail[]>(
-    `${API_BASE}/api/traces/${encodeURIComponent(traceId)}`
-  );
-}
-
 // ─── Collected trajectory APIs ───────────────────────────────────────────────
 
 /** Summary row from trajectories.db (log-collected sessions). */
@@ -702,6 +789,15 @@ export async function fetchTimeseries(
 // ─── ATIF export APIs ────────────────────────────────────────────────────────
 
 import type { AtifDocument, AgentHealthResponse, AgentProcessHealthResponse } from '../types';
+import type {
+  ConfirmState,
+  JudgeReport,
+  LabelStatsResponse,
+  SessionLabelView,
+  SessionsResponse,
+  TrajectoryLabel,
+  TriageReport,
+} from '../types/reuse';
 
 // ─── Token Savings types ─────────────────────────────────────────────────────
 
@@ -1895,6 +1991,7 @@ export async function fetchSkillMetrics(
 export type AppCapability =
   | 'agent_observability'
   | 'sessions'
+  | 'reuse_labels'
   | 'token_savings'
   | 'optimization'
   | 'skills'
@@ -1944,6 +2041,80 @@ export async function login(token: string): Promise<boolean> {
     body: JSON.stringify({ token }),
   });
   return res.ok;
+}
+
+// ─── Storage status API ─────────────────────────────────────────────────────
+
+export type StorageAvailability = 'present' | 'missing' | 'error' | 'external';
+export type StorageCoverage = 'full' | 'partial' | 'row_bounded' | 'unmanaged' | 'external';
+export type StorageSizeState =
+  | 'within_policy'
+  | 'cleanup_due'
+  | 'reusable_capacity'
+  | 'disabled'
+  | 'unknown';
+export type StorageStoreId =
+  | 'primary'
+  | 'genai'
+  | 'interruptions'
+  | 'trajectories'
+  | 'optimization'
+  | 'reuse'
+  | 'causal'
+  | 'security_audit'
+  | 'enforcement'
+  | 'tokenless';
+export type StorageMaintenanceResult = 'success' | 'error' | 'lock_busy' | 'panicked';
+
+export interface StorageSizeStatus {
+  database_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  freelist_bytes: number;
+  physical_bytes: number;
+  logical_bytes: number;
+}
+
+export interface StoragePolicyStatus {
+  retention_days: number;
+  size_limit_bytes: number;
+  cleanup_trigger_bytes: number;
+  cleanup_target_bytes: number;
+  check_interval: number;
+  check_interval_unit: 'seconds' | 'none' | 'external';
+  enforced_by: string;
+}
+
+export interface StorageMaintenanceStatus {
+  scheduled: boolean;
+  worker_running: boolean;
+  worker_heartbeat_unix_ms: number | null;
+  last_attempt_unix_ms: number | null;
+  last_success_unix_ms: number | null;
+  last_result: StorageMaintenanceResult | null;
+  consecutive_failures: number;
+  next_run_unix_ms: number | null;
+}
+
+export interface StorageStoreStatus {
+  id: StorageStoreId;
+  availability: StorageAvailability;
+  size: StorageSizeStatus | null;
+  policy: StoragePolicyStatus;
+  coverage: StorageCoverage;
+  size_state: StorageSizeState;
+  maintenance: StorageMaintenanceStatus;
+}
+
+export interface StorageStatusResponse {
+  schema_version: 2;
+  observed_at_unix_ms: number;
+  stores: StorageStoreStatus[];
+}
+
+/** Read effective SQLite policies and current disk allocation. */
+export async function fetchStorageStatus(): Promise<StorageStatusResponse> {
+  return apiFetch<StorageStatusResponse>(`${API_BASE}/api/storage/status`);
 }
 
 // ─── Optimization analysis API ───────────────────────────────────────────────
@@ -2017,6 +2188,7 @@ export async function saveOptimizeConfig(body: {
   api_key?: string;
   base_url?: string;
   model?: string;
+  search_timeout_secs?: number;
 }): Promise<OptimizeLlmConfig> {
   return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`, {
     method: 'POST',

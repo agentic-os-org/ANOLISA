@@ -238,6 +238,13 @@ describe("handlers — validation", () => {
     expect(r.text).toContain("No checkpoints");
   });
 
+  it("handleListCheckpoints reports list failure", async () => {
+    mockManager.listCheckpoints.mockRejectedValue(new Error("page two failed"));
+    const r = await handleListCheckpoints();
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("page two failed");
+  });
+
   it("handleListCheckpoints with data", async () => {
     mockManager.listCheckpoints.mockResolvedValue([
       { snapshot: "s1", createdAt: "2024-01-01T00:00:00Z", message: "first" },

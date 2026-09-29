@@ -2,14 +2,14 @@ use super::*;
 
 /// Fake cosh-core exposing a single OpenAI Compatible template and logging registry traffic.
 ///
-/// The template omits `provider_id` because slash auth injects it as the first field.
+/// Slash auth asks for `provider_id` only when the same template is already configured.
 const AUTH_REGISTRY_CORE: &str = r#"#!/bin/sh
 if [ "$1" = "--registry" ]; then
   read -r request
   printf '%s\n' "$request" >> "$AUTH_REGISTRY_LOG"
   case "$request" in
     *'"action":"state"'*)
-      printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"templates":[{"id":"openai_compat","label":"OpenAI Compatible","fields":[{"name":"base_url","label":"Base URL","hint":null,"secret":false,"required":true,"placeholder":null},{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":true,"placeholder":null}]}],"saved_providers":[]}}'
+      printf '%s%s%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"templates":[{"id":"openai_compat","label":"OpenAI Compatible","fields":[{"name":"base_url","label":"Base URL","hint":null,"secret":false,"required":true,"placeholder":null},{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":true,"placeholder":null}]}],"saved_providers":' "${AUTH_SAVED_PROVIDERS:-[]}" '}}'
       ;;
     *'"action":"configure"'*)
       if [ -n "$AUTH_CONFIGURE_ERROR" ]; then
@@ -54,8 +54,7 @@ fn raw_cli_auth_failure_keeps_panel_and_never_claims_success() {
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("Left/Right move | Enter send", b"\n".as_slice()),
-            ("Enter Provider ID", b"test-provider\n".as_slice()),
+            ("Select your AI provider:", b"\n".as_slice()),
             ("Enter Base URL", b"http://127.0.0.1:1/v1\n".as_slice()),
             ("Enter API Key", b"sk-rejected\n".as_slice()),
             ("Enter Model", b"test-model\n".as_slice()),
@@ -78,7 +77,16 @@ fn raw_cli_auth_failure_keeps_panel_and_never_claims_success() {
     assert!(compact[failure..].contains("Enter API Key"), "{output}");
     assert!(!compact.contains("Auth configured"), "{output}");
     assert!(!compact.contains("credentials saved"), "{output}");
+    assert!(!compact.contains("Provider ID"), "{output}");
     assert_eq!(action_count(&requests, "configure"), 1, "{requests}");
+    let configure = requests
+        .lines()
+        .find(|line| line.contains(r#""action":"configure""#))
+        .unwrap_or_else(|| panic!("expected configure request: {requests}"));
+    assert!(
+        configure.contains(r#""provider_id":"openai_compat""#),
+        "{configure}"
+    );
 }
 
 /// A dotted Provider ID must be rejected on the spot instead of at the final `configure`.
@@ -101,11 +109,13 @@ fn raw_cli_auth_dotted_provider_id_can_be_corrected() {
             ("HOME", &home_str),
             ("COSH_CORE_PATH", &core_str),
             ("AUTH_REGISTRY_LOG", &log_str),
+            ("AUTH_SAVED_PROVIDERS", SAVED_OPENAI_COMPAT),
         ],
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("Left/Right move | Enter send", b"\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
+            ("Authentication Required", b"\n".as_slice()),
             ("Type answer | Enter send", b"qwen3.7-max\n".as_slice()),
             ("Provider ID allows letters", b"\x7f".as_slice()),
             ("> qwen3.7-ma", b"\x7f".as_slice()),
@@ -172,17 +182,27 @@ const AUTH_MENU_CORE: &str = r#"#!/bin/sh
 if [ "$1" = "--registry" ]; then
   read -r request
   printf '%s\n' "$request" >> "$AUTH_REGISTRY_LOG"
+  request_id=${request#*'"request_id":"'}
+  request_id=${request_id%%'"'*}
   case "$request" in
     *'"action":"state"'*)
-      printf '%s\n' "$AUTH_STATE"
+      response=$AUTH_STATE
       ;;
     *'"action":"prepare"'*)
-      printf '%s\n' "$AUTH_PREPARE"
+      response=$AUTH_PREPARE
+      ;;
+    *'"action":"verify"'*)
+      response='{"type":"registry_response","request_id":"reg","success":true,"data":{"status":"ready"}}'
       ;;
     *)
-      printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"authorized":true,"model":"main-model","configured":true}}'
+      response='{"type":"registry_response","request_id":"reg","success":true,"data":{"model":"main-model","configured":true}}'
       ;;
   esac
+  # Async probes require the caller's correlation ID, not the fixture's placeholder.
+  prefix=${response%%'"request_id":"'*}
+  suffix=${response#*'"request_id":"'}
+  suffix=${suffix#*'"'}
+  printf '%s"request_id":"%s"%s\n' "$prefix" "$request_id" "$suffix"
   exit 0
 fi
 read -r init
@@ -194,6 +214,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"auth-inline","
 const AUTH_TEMPLATES: &str = r#"[{"id":"aliyun","label":"Aliyun Authentication","description":"Free with limited quota","fields":[{"name":"access_key_id","label":"Access Key ID","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"access_key_secret","label":"Access Key Secret","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]},{"id":"coding_plan","label":"Coding Plan","description":"For individual developers • Weekly quota included","builtin_base_url":"https://coding.dashscope.aliyuncs.com/v1","fields":[{"name":"api_key","label":"API Key","hint":"Plan keys start with sk-sp-.","secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]},{"id":"token_plan","label":"Token Plan","description":"For teams and companies • Usage-based billing with dedicated capacity","builtin_base_url":"https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1","fields":[{"name":"api_key","label":"API Key","hint":"Plan keys start with sk-sp-.","secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]},{"id":"dashscope","label":"DashScope (百炼)","description":"Connect with an existing Bailian API key","builtin_base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","fields":[{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]},{"id":"openai_compat","label":"OpenAI Compatible","description":"Use an existing OpenAI-compatible Base URL and API key","fields":[{"name":"base_url","label":"Base URL","hint":null,"secret":false,"required":true,"placeholder":null},{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":true,"placeholder":null}]}]"#;
 
 const SAVED_NONE: &str = "[]";
+
+const SAVED_OPENAI_COMPAT: &str = r#"[{"provider_id":"prod","provider_type":"openai_compat","source":"user","editable":true,"auth_source":null,"model":"test-model","base_url":"https://example.invalid/v1","api_key_len":8,"active":true}]"#;
+
+const SAVED_ALIYUN_MANUAL: &str = r#"[{"provider_id":"aliyun-manual","provider_type":"aliyun","source":"user","editable":true,"auth_source":"manual","model":"qwen3.7-plus","base_url":null,"active":true}]"#;
 
 const SAVED_DASHSCOPE: &str = r#"[{"provider_id":"qwen-prod","provider_type":"dashscope","source":"user","editable":true,"auth_source":null,"model":"qwen3.7-plus","base_url":null,"api_key_len":8,"active":true}]"#;
 
@@ -426,7 +450,7 @@ fn raw_cli_auth_edits_coding_plan_with_its_original_template() {
 fn raw_cli_auth_sysom_shortcut_still_validates_provider_id() {
     let (output, requests) = run_auth_menu_flow(
         "auth-sysom-bad-id",
-        SAVED_NONE,
+        SAVED_ALIYUN_MANUAL,
         ECS_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
@@ -441,10 +465,11 @@ fn raw_cli_auth_sysom_shortcut_still_validates_provider_id() {
         compact.contains("Provider ID allows letters, digits, '-' and '_' only (no '.')"),
         "{output}"
     );
-    // A rejected id must not reach the challenge or the registry.
+    // A rejected id must not reach the challenge or start verification/configuration.
     assert!(!compact.contains("ECS Instance ID"), "{output}");
     assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
+    assert_eq!(action_count(&requests, "verify"), 0, "{requests}");
 }
 
 /// The shortcut reuses the challenge `/auth` prefetched and configures aliyun + RAM role.
@@ -457,17 +482,22 @@ fn raw_cli_auth_sysom_shortcut_reuses_prefetched_challenge() {
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
             ("+ Add new provider", b"\n".as_slice()),
-            ("Enter Provider ID", b"sysom-trial\n".as_slice()),
-            ("ECS Instance ID", b"\n".as_slice()),
             ("Auth configured", b"".as_slice()),
         ],
     );
 
     let compact = compact_terminal_words(&output);
-    assert!(compact.contains("i-fake-ecs-1"), "{output}");
+    // The first verification is ready, so no naming or authorization instructions are shown.
+    assert!(!compact.contains("Provider ID"), "{output}");
+    assert!(!compact.contains("ECS Instance ID"), "{output}");
+    assert!(!compact.contains("i-fake-ecs-1"), "{output}");
+    assert!(!compact.contains("alinux.console.aliyun.com"), "{output}");
+    assert!(!compact.contains("QR"), "{output}");
     assert!(compact.contains("Auth configured"), "{output}");
     // The ECS metadata service is probed once, when `/auth` builds the menu.
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
+    assert_eq!(action_count(&requests, "verify"), 1, "{requests}");
+    assert_eq!(action_count(&requests, "configure"), 1, "{requests}");
     let configure = requests
         .lines()
         .find(|line| line.contains(r#""action":"configure""#))
@@ -477,7 +507,7 @@ fn raw_cli_auth_sysom_shortcut_reuses_prefetched_challenge() {
         "{configure}"
     );
     assert!(
-        configure.contains(r#""provider_id":"sysom-trial""#),
+        configure.contains(r#""provider_id":"aliyun""#),
         "{configure}"
     );
     assert!(
@@ -525,12 +555,10 @@ fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
                 "Authentication Required",
                 b"\x1b[C\x1b[C\x1b[C\x1b[C\n".as_slice(),
             ),
-            ("Enter Provider ID", b"qwen-prod\n".as_slice()),
             ("Enter Base URL", b"https://example.invalid/v1\n".as_slice()),
             // ESC on API Key returns to Base URL, which still carries the value just submitted.
             ("Enter API Key", b"\x1b".as_slice()),
             ("Enter Base URL", b"\x1b".as_slice()),
-            ("Enter Provider ID", b"\x1b".as_slice()),
             // Back at the picker a further ESC is the one that ends the flow.
             ("Authentication Required", b"\x1b".as_slice()),
             ("Auth cancelled", b"".as_slice()),
@@ -544,12 +572,12 @@ fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
         "stepping back lost the submitted Base URL: {output}"
     );
     assert!(
-        compact.contains("> qwen-prod"),
-        "stepping back lost the submitted Provider ID: {output}"
+        !compact.contains("Provider ID"),
+        "first-time setup must not step back onto the hidden Provider ID: {output}"
     );
     // The picker reopens on the template the form belonged to.
     assert!(compact.contains("> [5] OpenAI Compatible"), "{output}");
-    // Only the last ESC cancels; the three before it are back-navigation.
+    // Only the last ESC cancels; the two before it are back-navigation.
     assert_eq!(
         count_occurrences(&compact, "Auth cancelled"),
         1,
@@ -567,7 +595,7 @@ fn raw_cli_auth_esc_preserves_picker_focus_for_the_next_arrow() {
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
             ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
-            ("Enter Provider ID", b"\x1b".as_slice()),
+            ("Enter API Key", b"\x1b".as_slice()),
             ("Authentication Required", b"\x1b[B".as_slice()),
             ("> [4] DashScope", b"\x1b".as_slice()),
             ("Auth cancelled", b"".as_slice()),
@@ -577,11 +605,12 @@ fn raw_cli_auth_esc_preserves_picker_focus_for_the_next_arrow() {
     let compact = compact_terminal_words(&output);
     assert!(compact.contains("> [3] Token Plan"), "{output}");
     assert!(compact.contains("> [4] DashScope"), "{output}");
+    assert!(!compact.contains("Provider ID"), "{output}");
     assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
 }
 
 /// Teaching ESC to step back must not take away the interrupt: Ctrl+C still abandons the form in
-/// one keystroke, from a field the user is several prompts into.
+/// one keystroke without advancing to the next field.
 #[test]
 fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
     let (output, requests) = run_auth_menu_flow(
@@ -594,7 +623,6 @@ fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
                 "Authentication Required",
                 b"\x1b[C\x1b[C\x1b[C\x1b[C\n".as_slice(),
             ),
-            ("Enter Provider ID", b"qwen-prod\n".as_slice()),
             ("Enter Base URL", b"\x03".as_slice()),
             ("Auth cancelled", b"".as_slice()),
         ],
@@ -602,6 +630,8 @@ fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
 
     let compact = compact_terminal_words(&output);
     assert!(compact.contains("Auth cancelled"), "{output}");
+    assert_eq!(count_occurrences(&compact, "Auth cancelled"), 1, "{output}");
+    assert!(!compact.contains("Provider ID"), "{output}");
     // A single Ctrl+C is enough: the form is gone, not one prompt further back.
     assert!(
         !compact.contains("Enter API Key"),
@@ -653,7 +683,6 @@ fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
             ("Authentication Required", b"\n".as_slice()),
-            ("Enter Provider ID", b"aliyun-manual\n".as_slice()),
             ("Enter Access Key ID", b"AK-TEST-VALUE\n".as_slice()),
             ("Enter Access Key Secret", b"".as_slice()),
         ],
@@ -663,9 +692,10 @@ fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {
     assert!(compact.contains("Enter Access Key ID"), "{output}");
     assert!(compact.contains("Enter Access Key Secret"), "{output}");
     assert!(!compact.contains("ECS Instance ID"), "{output}");
+    assert!(!compact.contains("Provider ID"), "{output}");
     // Secret fields are echoed as bullets, never as the typed key.
     assert!(!compact.contains("AK-TEST-VALUE"), "{output}");
     assert!(compact.contains('\u{2022}'), "{output}");
-    // The successful startup result is reused after the Provider ID is accepted.
+    // The successful startup result is reused after selecting the template.
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
 }

@@ -9,6 +9,55 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.4] - 2026-09-22
+
+### 新增
+
+- 在 npm 安装之外新增独立安装脚本及 `install-tokenless` OS Skill 入口。安装脚本在开始安装前选择 npm 或仅限 Linux 的源码构建，记录安装路径归属以供卸载，并在替换失败时恢复原有安装。源码构建仅安装 CLI；npm 还提供 RTK 和适配器（[#2322](https://github.com/alibaba/anolisa/pull/2322)）。
+
+### 变更
+
+- npm 安装现在要求 Node.js 16.7 或更新版本，并保留属于其他安装的共享适配器资源。用户可通过 `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` 显式替换；否则安装程序会报告包内适配器的位置（[#2322](https://github.com/alibaba/anolisa/pull/2322)）。
+- 独立卸载仅移除安装记录中仍归本次安装所有的资源，除非指定 `--purge`，否则保留运行数据；无法确认框架注册已移除时保留适配器资源。Codex 插件显示为 `not installed` 时视为已成功移除，使重复卸载可以正常完成（[#2322](https://github.com/alibaba/anolisa/pull/2322)、[#3412](https://github.com/alibaba/anolisa/pull/3412)）。
+
+### 修复
+
+- HTML 提取现在将页面 `</html>` 结束标签后的命令输出（如构建日志和 HTTP 状态码）保留在渲染后的页面之后，避免内容丢失。模仿页面边界标记的文本会被转义，并继续支持恢复原文（[#3386](https://github.com/alibaba/anolisa/pull/3386)）。
+- HTML 提取不再将包含大量自闭合 SVG 元素的浅层页面误判为嵌套过深。深度限制现在依据解析后的页面结构，异常标记和宽表格也不会再触发可能拖慢工具结果返回的重复扫描（[#3396](https://github.com/alibaba/anolisa/pull/3396)）。
+
+## [0.8.3] - 2026-09-20
+
+### 新增
+
+- Git diff 上下文裁剪可在保留全部变更行和文件元数据的同时缩减周边上下文，并支持恢复收到的原始内容。通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；默认关闭，要求宿主支持文本替换和原文恢复（[#3299](https://github.com/alibaba/anolisa/pull/3299)）。
+- 命令或 API 返回的完整 HTML 页面可渲染为 Markdown，提供原文恢复及被移除页面元素的计数。通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=1` 或 SDK `html_extraction_enabled=True` 启用；默认关闭，要求宿主支持文本替换和原文恢复，文件读取保持原样，包括通过 Shell 文件读取命令输出的 HTML（[#3306](https://github.com/alibaba/anolisa/pull/3306)）。
+
+### 变更
+
+- npm 安装在 Claude CLI 可用时自动启用 Claude Code 适配器，注册未完成时给出重试指引（[#2193](https://github.com/alibaba/anolisa/pull/2193)）。
+- QwenPaw 安装在交付插件包前检查对应 SDK wheel，确认资源缺失时报告版本和 URL。离线或镜像环境可通过 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测（[#3289](https://github.com/alibaba/anolisa/pull/3289)）。
+
+### 修复
+
+- Claude Code 检测在有界等待窗口内退避重试已部署插件，减少宿主注册表尚未更新时误报“未安装”的情况（[#3272](https://github.com/alibaba/anolisa/pull/3272)）。
+- Raw 包现在声明并包含 OpenCode 适配器和适配器清单，使 ANOLISA 能发现并管理随包提供的插件。启用或禁用后需重启 OpenCode（[#3324](https://github.com/alibaba/anolisa/pull/3324)、[#3346](https://github.com/alibaba/anolisa/pull/3346)）。
+
+## [0.8.2] - 2026-09-15
+
+### 新增
+
+- 支持的搜索结果列表（包括不带上下文行的 Claude Code 原生 `Grep` 结果）现在会共享连续重复的文件路径，同时保留每条已接收的匹配、行号和行尾。这项无损优化默认开启，要求宿主支持文本替换；可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭（[#3173](https://github.com/alibaba/anolisa/pull/3173)）。
+
+### 变更
+
+- 内置 RTK 升级至 0.49.0，采用保守的管道改写规则，并保持 `sudo` 命令不变。直接使用 `rtk grep` 时，须改用 `--max-len` 和 `--max` 设置 RTK 显示限制：`-l` 和 `-m` 现在保留原生 grep 含义，文件类型过滤改用 `rtk rg -t`（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+- 支持的 RTK 过滤器现在会通过 `rtk recall HASH` 提示恢复已保留的失败或截断输出。恢复存储以宿主 OS 用户为范围，受容量和过期限制；共用该用户的会话可以访问同一存储。RTK recall 与 Tokenless Stash 检索仍相互独立（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+
+### 修复
+
+- Cosh-NG 和 copilot-shell 在 Protocol v2 下现在能正确归因 JSON 编码的 shell 结果中的失败，保留原始失败输出，并将错误详情送交诊断（[#2238](https://github.com/alibaba/anolisa/pull/2238)）。
+- 内置 RTK 保留 pytest 启动和回退诊断，即使关闭恢复存储也不会丢失这些信息，并在 stderr 旁保留未发现测试的摘要（[#3273](https://github.com/alibaba/anolisa/pull/3273)）。
+
 ## [0.8.1] - 2026-09-09
 
 ### 新增

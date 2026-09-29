@@ -153,10 +153,7 @@ impl SessionRuntimeState {
     /// Records validation failure while making every in-flight attempt stale.
     pub(super) fn fail_selection(&mut self, error: SessionErrorInfo) {
         self.supersede_current_attempt();
-        self.recovery.state = SessionRecoveryState::Failed;
-        self.recovery.selected_session_id = None;
-        self.recovery.selected_workspace_scope = None;
-        self.recovery.last_error = Some(error);
+        transition_recovery_to_failed(&mut self.recovery, error, "selection validation failed");
     }
 
     fn owns_attempt(&self, attempt: &SessionResumeAttempt) -> bool {
@@ -465,6 +462,11 @@ pub(in crate::adapter) fn invalidate_resume_on_session_failure(
                 format!("provider session load failed [{code}]")
             }
         });
+    let reason = if is_persistence_failure {
+        "session persistence failed"
+    } else {
+        "session load failed"
+    };
     let error = SessionErrorInfo {
         code: code.to_string(),
         message,
@@ -482,21 +484,19 @@ pub(in crate::adapter) fn invalidate_resume_on_session_failure(
         SessionResumeAttempt::Active { .. } if state.owns_active_attempt(attempt) => {
             state.active = None;
             if state.recovery.selected_session_id.is_none() {
-                state.recovery.state = SessionRecoveryState::Failed;
-                state.recovery.selected_workspace_scope = None;
+                transition_recovery_to_failed(&mut state.recovery, error, reason);
+            } else {
+                state.recovery.last_error = Some(error);
             }
         }
         SessionResumeAttempt::Selected { .. } if state.owns_selected_attempt(attempt) => {
-            state.recovery.state = SessionRecoveryState::Failed;
-            state.recovery.selected_session_id = None;
-            state.recovery.selected_workspace_scope = None;
+            transition_recovery_to_failed(&mut state.recovery, error, reason);
             state.selected_attempt_generation = None;
         }
         SessionResumeAttempt::Fresh { .. }
         | SessionResumeAttempt::Selected { .. }
-        | SessionResumeAttempt::Active { .. } => return,
+        | SessionResumeAttempt::Active { .. } => {}
     }
-    state.recovery.last_error = Some(error);
 }
 
 fn reject_resume_identity_mismatch(
@@ -515,25 +515,52 @@ fn reject_resume_identity_mismatch(
     };
     match attempt {
         SessionResumeAttempt::Selected { .. } if state.owns_selected_attempt(attempt) => {
-            state.recovery.state = SessionRecoveryState::Failed;
-            state.recovery.selected_session_id = None;
-            state.recovery.selected_workspace_scope = None;
+            transition_recovery_to_failed(&mut state.recovery, error.clone(), "identity mismatch");
             state.selected_attempt_generation = None;
         }
         SessionResumeAttempt::Active { .. } if state.owns_active_attempt(attempt) => {
             state.active = None;
             if state.recovery.selected_session_id.is_none() {
-                state.recovery.state = SessionRecoveryState::Failed;
-                state.recovery.selected_workspace_scope = None;
+                transition_recovery_to_failed(
+                    &mut state.recovery,
+                    error.clone(),
+                    "identity mismatch",
+                );
+            } else {
+                state.recovery.last_error = Some(error.clone());
             }
         }
-        SessionResumeAttempt::Fresh { .. } => {}
+        SessionResumeAttempt::Fresh { .. } => {
+            state.recovery.last_error = Some(error.clone());
+        }
         SessionResumeAttempt::Selected { .. } | SessionResumeAttempt::Active { .. } => {
             return SessionCommitOutcome::StaleAttempt;
         }
     }
-    state.recovery.last_error = Some(error.clone());
     SessionCommitOutcome::RestoreFailed(error)
+}
+
+/// Centralizes recovery failure logging and state cleanup.
+///
+/// Callers must still clear active sessions, generations, and any other
+/// non-recovery fields that are specific to the failure path.
+fn transition_recovery_to_failed(
+    recovery: &mut SessionRecovery,
+    error: SessionErrorInfo,
+    reason: &str,
+) {
+    recovery.state = SessionRecoveryState::Failed;
+    recovery.selected_session_id = None;
+    recovery.selected_workspace_scope = None;
+    recovery.last_error = Some(error.clone());
+    // Session lifecycle event: recovery state transitions are key diagnostic
+    // nodes (the /health live probe reports them from recovery_snapshot).
+    tracing::warn!(
+        code = %error.code,
+        error = %error.message,
+        reason,
+        "session recovery failed"
+    );
 }
 
 pub(in crate::adapter) fn mark_recovery_failure(
@@ -555,10 +582,7 @@ pub(in crate::adapter) fn mark_recovery_failure(
         recoverable: true,
         hint: Some("Refresh the session list and retry.".to_string()),
     };
-    state.recovery.state = SessionRecoveryState::Failed;
-    state.recovery.selected_session_id = None;
-    state.recovery.selected_workspace_scope = None;
-    state.recovery.last_error = Some(error.clone());
+    transition_recovery_to_failed(&mut state.recovery, error.clone(), "restore failed");
     state.selected_attempt_generation = None;
     Some(error)
 }
@@ -599,10 +623,11 @@ fn discard_non_resumable_session(
                 recoverable: true,
                 hint: Some("Start a new session or enable session persistence.".to_string()),
             };
-            state.recovery.state = SessionRecoveryState::Failed;
-            state.recovery.selected_session_id = None;
-            state.recovery.selected_workspace_scope = None;
-            state.recovery.last_error = Some(error.clone());
+            transition_recovery_to_failed(
+                &mut state.recovery,
+                error.clone(),
+                "session not resumable",
+            );
             state.selected_attempt_generation = None;
             SessionCommitOutcome::RestoreFailed(error)
         }

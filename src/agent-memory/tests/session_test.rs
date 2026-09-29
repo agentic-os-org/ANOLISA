@@ -85,8 +85,11 @@ fn end_discard_removes_dir() {
         None,
     )
     .unwrap();
-    let root = svc.root().to_path_buf();
+    // `end` consumes the service, which closes the descriptor the anchored
+    // `root()` path is built on — assert on the operator-facing pathname.
+    let root = svc.display_root().to_path_buf();
     assert!(root.exists());
+    assert!(svc.root().exists());
     svc.end(EndAction::Discard).unwrap();
     assert!(!root.exists());
 }
@@ -130,9 +133,10 @@ fn end_keep_preserves_dir() {
         None,
     )
     .unwrap();
-    let root = svc.root().to_path_buf();
+    let root = svc.display_root().to_path_buf();
     svc.end(EndAction::Keep).unwrap();
     assert!(root.exists());
+    assert!(root.join("meta.toml").exists());
 }
 
 // ---------- mem_promote integration ----------
@@ -218,33 +222,165 @@ fn session_log_includes_promote_and_prior_session_log_call() {
     );
 }
 
+// ---------- session-dir fallback ----------
+//
+// This case runs in a child process, and that is not stylistic. The fallback
+// chain is built from the *inherited* `XDG_RUNTIME_DIR` / `TMPDIR`, and
+// `start_session` reads the inherited `MEMORY_SESSION_ID`, so exercising it
+// in-process would probe — and chmod `0700` — the real per-user runtime dir,
+// and, if the id it happened to inherit already had a session there, reopen
+// that live session, write `scratch/draft.md` into it and let cleanup
+// recursively delete the lot, unrelated scratch data included. The child
+// gets a runtime dir, a tmp dir and a session id that are all this test's
+// own, and the parent plants a decoy session next to it so the assertion
+// covers what cleanup is allowed to reach.
+
+const FALLBACK_CHILD_ENV: &str = "ANOLISA_TEST_SESSION_FALLBACK_CHILD";
+const FALLBACK_CHILD_STORE: &str = "ANOLISA_TEST_STORE";
+const FALLBACK_CHILD_BLOCKER: &str = "ANOLISA_TEST_BLOCKER";
+const FALLBACK_CHILD_BASE: &str = "ANOLISA_TEST_FALLBACK_BASE";
+const FALLBACK_SID: &str = "ses_fallback_child";
+const DECOY_SID: &str = "ses_fallback_decoy";
+
 #[test]
-fn session_log_degrades_gracefully_when_session_dir_unavailable() {
-    // Make the session base dir a regular file → create_dir_all fails →
-    // service still constructs but svc.session == None; session-dependent
-    // tools return NotImplemented.
-    let store_tmp = tempdir().unwrap();
+fn unusable_session_dir_falls_back_instead_of_losing_the_session() {
+    if std::env::var_os(FALLBACK_CHILD_ENV).is_some() {
+        fallback_child();
+        return;
+    }
+    fallback_parent();
+}
+
+fn fallback_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Every directory the child can reach is one we hand it.
+    let runtime = tempdir().unwrap();
+    let child_tmp = tempdir().unwrap();
+    let store = tempdir().unwrap();
     let blocker = tempdir().unwrap();
+
+    // Make the configured session base a regular file so `create_dir_all` can
+    // never succeed — the same failure a non-root server gets from the
+    // shipped default /run/anolisa/sessions, whose parent the RPM creates
+    // 0700 root:root and which make install / containers do not create at
+    // all (/run is drwxr-xr-x root root).
     let blocking_file = blocker.path().join("not-a-dir");
-    std::fs::write(&blocking_file, "").unwrap();
+    std::fs::write(&blocking_file, b"").unwrap();
+
+    // A live session already sitting in the fallback base. The child must
+    // neither write into it nor let its cleanup reach it.
+    let fallback_base = runtime.path().join("anolisa").join("sessions");
+    let decoy_root = fallback_base.join(DECOY_SID);
+    std::fs::create_dir_all(decoy_root.join("scratch")).unwrap();
+    for d in [&fallback_base, &decoy_root] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let decoy_file = decoy_root.join("scratch").join("keep.md");
+    std::fs::write(&decoy_file, b"someone else's session").unwrap();
+
+    let exe = std::env::current_exe().expect("path to this test binary");
+    let out = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("unusable_session_dir_falls_back_instead_of_losing_the_session")
+        .arg("--nocapture")
+        .env(FALLBACK_CHILD_ENV, "1")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("TMPDIR", child_tmp.path())
+        .env("MEMORY_SESSION_ID", FALLBACK_SID)
+        .env(FALLBACK_CHILD_STORE, store.path())
+        .env(FALLBACK_CHILD_BLOCKER, &blocking_file)
+        .env(FALLBACK_CHILD_BASE, &fallback_base)
+        .output()
+        .expect("spawn the isolated child");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "child exited with {:?}\n--- stdout ---\n{stdout}--- stderr ---\n{stderr}",
+        out.status
+    );
+    assert!(
+        stdout.contains("fallback child ok:"),
+        "the child body did not run to completion\n--- stdout ---\n{stdout}--- stderr ---\n{stderr}"
+    );
+
+    // The child's cleanup was scoped to its own session id.
+    assert!(
+        !fallback_base.join(FALLBACK_SID).exists(),
+        "the child's own session must be gone after Discard"
+    );
+    assert_eq!(
+        std::fs::read(&decoy_file).unwrap(),
+        b"someone else's session",
+        "cleanup must not reach a live session sharing the fallback base"
+    );
+
+    // The fallback it landed on was the runtime dir we gave it, so the tmp
+    // candidate was never needed — and, because both were test-owned, the
+    // real per-user directories were never probed or chmod'ed at all.
+    let leaked: Vec<String> = std::fs::read_dir(child_tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("anolisa-sessions-"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "the tmp fallback must not be reached once the runtime dir works: {leaked:?}"
+    );
+}
+
+fn fallback_child() {
+    use std::path::Path;
+
+    let store = std::env::var(FALLBACK_CHILD_STORE).expect("store dir");
+    let blocker = std::env::var(FALLBACK_CHILD_BLOCKER).expect("blocking file");
+    let fallback_base = std::env::var(FALLBACK_CHILD_BASE).expect("fallback base");
+    let sid = std::env::var("MEMORY_SESSION_ID").expect("session id");
 
     let mut cfg = AppConfig::default();
     cfg.global.user_id = "carol".into();
-    cfg.memory.paths.base_dir = store_tmp.path().to_string_lossy().into();
-    cfg.memory.session.base_dir = blocking_file.to_string_lossy().into();
+    cfg.memory.paths.base_dir = store;
+    cfg.memory.session.base_dir = blocker;
     cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
 
     let svc = MemoryService::new(cfg).expect("service should still build");
-    assert!(
-        svc.session.is_none(),
-        "session should be None when base unwritable"
+
+    // Before the fallback existed this degraded to `session == None` behind
+    // a single `warn!`, so every `mem_promote` / `mem_session_log` call
+    // errored on a stock install.
+    let session = svc
+        .session
+        .as_ref()
+        .expect("session must be recovered from a fallback dir, not lost");
+
+    assert_eq!(session.sid().as_str(), sid, "must honour the pinned id");
+
+    let expected = Path::new(&fallback_base).canonicalize().unwrap().join(&sid);
+    assert_eq!(
+        session.root().canonicalize().unwrap(),
+        expected,
+        "the fallback must be the test-owned runtime dir"
     );
+    assert_eq!(session.display_root().canonicalize().unwrap(), expected);
 
-    let err = svc.session_log().unwrap_err();
-    assert!(matches!(err, MemoryError::NotImplemented(_)));
+    // Both session-dependent tools work end to end through the fallback.
+    std::fs::write(session.scratch_root().join("draft.md"), b"fallback scratch").unwrap();
+    let n = svc.promote("draft.md", "notes/from-fallback.md").unwrap();
+    assert!(n > 0);
+    assert!(svc.mount.root.join("notes/from-fallback.md").exists());
+    svc.session_log().unwrap();
 
-    let err = svc.promote("x.md", "y.md").unwrap_err();
-    assert!(matches!(err, MemoryError::NotImplemented(_)));
+    // Go through the real shutdown path so the parent can inspect exactly
+    // what cleanup touched.
+    let action = svc.config.memory.session.end_action;
+    svc.try_end_session(action);
+
+    // Proof for the parent that this body really ran to completion — a child
+    // that silently matched no test would also exit 0.
+    println!("fallback child ok: {}", expected.display());
 }
 
 // ---------- audit double-write ----------

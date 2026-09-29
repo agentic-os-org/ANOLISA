@@ -18,7 +18,11 @@ pub(super) fn auth_capture_id(auth: &RuntimeAuthState) -> String {
             "field-{}-{}",
             auth.current_field, auth.field_capture_revision
         ),
-        AuthPhase::AliyunEcsChallenge { .. } => "aliyun-challenge".to_string(),
+        AuthPhase::PreparingMenu
+        | AuthPhase::AliyunEcsPreparing
+        | AuthPhase::AliyunEcsChallenge { .. } => {
+            format!("aliyun-challenge-{}", auth.field_capture_revision)
+        }
     };
     format!("{}@{scope}", auth.id)
 }
@@ -83,9 +87,11 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
                 secret,
             })
         }
-        AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
+        AuthPhase::PreparingMenu
+        | AuthPhase::AliyunEcsPreparing
+        | AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
-            option_count: 1,
+            option_count: super::ecs_poll::option_count(state),
             selected: 0,
             allow_free_text: false,
             multiple: false,

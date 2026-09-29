@@ -59,6 +59,22 @@ model = "qwen3.7-plus"
 
 使用 ECS RAM role 时，设置 `type = "aliyun"` 和 `auth_source = "ecs_ram_role"`，无需保存静态 AK/SK。
 
+`aliyun` provider 会自动选择 SysOM API 主机：在能连通 VPC 内网代理的 ECS 上走内网，因此不通公网的实例也能使用；否则走公网主机。只有需要固定到某个主机时才设置 `sysom_endpoint`：
+
+```toml
+[ai.providers.aliyun]
+type = "aliyun"
+auth_source = "ecs_ram_role"
+sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
+model = "qwen3.7-plus"
+```
+
+`sysom_endpoint` 与 `base_url` 是刻意分开的两个设置：`base_url` 属于 OpenAI 兼容语义，`aliyun` provider 不读取它。
+
+优先级依次为 `COSH_SYSOM_ENDPOINT`、`sysom_endpoint`、VPC 探测、公网端点。覆盖值支持裸主机名（可带端口）或 HTTP(S) URL；URL 路径会被丢弃，非法覆盖值按未设置处理。仅自动选中的 VPC 路由直连，与探针保持一致；显式覆盖（包括显式配置的 VPC 主机）和公网回退仍遵守系统代理。需要让显式端点绕过代理时，请设置 `NO_PROXY`。
+
+推理请求的建连超时为 3 秒，读取空闲超时为 120 秒；成功读取会重置空闲计时，持续正常输出的流没有总时长限制。
+
 | `type` | 用途 |
 |---|---|
 | `dashscope` | 支持 Qwen reasoning 的 DashScope OpenAI-compatible endpoint |

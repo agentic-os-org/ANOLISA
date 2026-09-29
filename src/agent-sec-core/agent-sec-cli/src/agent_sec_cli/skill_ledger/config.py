@@ -9,12 +9,6 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICIES as ACTIVATION_POLICIES,
 )
 from agent_sec_cli.skill_ledger.activation_policy import (
-    ACTIVATION_POLICY_LATEST_SCANNED as ACTIVATION_POLICY_LATEST_SCANNED,
-)
-from agent_sec_cli.skill_ledger.activation_policy import (
-    ACTIVATION_POLICY_PASS_ONLY as ACTIVATION_POLICY_PASS_ONLY,
-)
-from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICY_PASS_WARN_ONLY as ACTIVATION_POLICY_PASS_WARN_ONLY,
 )
 from agent_sec_cli.skill_ledger.activation_policy import (
@@ -35,7 +29,7 @@ from agent_sec_cli.skill_ledger.paths import (
 from agent_sec_cli.skill_ledger.scanner.names import (
     CODE_SCANNER_NAME,
     STATIC_SCANNER_NAME,
-    canonicalize_scanner_name,
+    validate_scanner_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,12 +118,12 @@ def _deep_merge_config(
             by_name: dict[str, dict[str, Any]] = {}
             for s in defaults.get("scanners", []):
                 if isinstance(s, dict) and "name" in s:
-                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    canonical = validate_scanner_name(str(s["name"]))
                     by_name[canonical] = {**s, "name": canonical}
             # User entries override by name
             for s in user_val:
                 if isinstance(s, dict) and "name" in s:
-                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    canonical = validate_scanner_name(str(s["name"]))
                     by_name[canonical] = {**s, "name": canonical}
             merged["scanners"] = list(by_name.values())
         elif key == "parsers" and isinstance(user_val, dict):
@@ -198,6 +192,17 @@ def load_config() -> dict[str, Any]:
             raise ConfigError(
                 f"config.json must be a JSON object, got {type(cfg).__name__}"
             )
+        try:
+            resolve_activation_policy(cfg)
+        except ConfigError as exc:
+            raise ConfigError(f"{path}: {exc.reason}") from exc
+        scanners = cfg.get("scanners", [])
+        for index, scanner in enumerate(scanners if isinstance(scanners, list) else []):
+            if isinstance(scanner, dict) and "name" in scanner:
+                try:
+                    validate_scanner_name(str(scanner["name"]))
+                except ValueError as exc:
+                    raise ConfigError(f"{path}: scanners[{index}].name: {exc}") from exc
         if _DEPRECATED_SKILL_DIRS_KEY in cfg:
             logger.warning(
                 "Ignoring deprecated skill-ledger config key %r in %s; use "
@@ -371,6 +376,12 @@ def is_default_system_skill_dir(skill_dir: str | Path) -> bool:
     return canonical_dir.parent in DEFAULT_SYSTEM_SKILL_ROOTS
 
 
+def is_default_user_skill_dir(skill_dir: str | Path) -> bool:
+    """Return whether *skill_dir* is an immediate child of the raw user root."""
+    canonical_dir = _lexical_path(Path(skill_dir).expanduser())
+    return canonical_dir.parent == get_anolisa_skill_dir()
+
+
 def _is_path_covered_by_entries(skill_dir: Path, entries: list[str]) -> bool:
     """Match a canonical path against config entries without filesystem access."""
     target = _lexical_path(skill_dir)
@@ -401,8 +412,10 @@ def remember_skill_dir(
     """Append *skill_dir* (or its parent glob) to ``managedSkillDirs`` if not covered.
 
     Heuristic for entry format:
+    - Raw user default Skills keep individual paths so auto-remember does not
+      turn read-only siblings into explicitly managed Skills.
     - If the parent directory contains **at least two** sibling sub-directories
-      that each contain ``SKILL.md``, add ``"parent/*"`` (glob pattern).
+      that each contain ``SKILL.md``, other roots use ``"parent/*"``.
     - Otherwise, add the specific directory path.
 
     After appending, runs :func:`_compact_skill_dirs` to prune entries that
@@ -430,7 +443,7 @@ def remember_skill_dir(
     except OSError:
         sibling_skills = []
 
-    if len(sibling_skills) >= 2:
+    if not is_default_user_skill_dir(skill_dir) and len(sibling_skills) >= 2:
         entry = str(parent) + "/*"
     else:
         entry = str(skill_dir)

@@ -7,6 +7,18 @@ use crate::types::CoshApprovalMode;
 pub struct CoshConfig {
     pub shell_default: String,
     pub shell_integration: String,
+    /// Shows the `◇ `/`◌ ` input-ownership status line above each Enhanced
+    /// prompt. Off by default so the child shell keeps its native prompt
+    /// appearance; `COSH_SHELL_STATUS_SYMBOLS` overrides per session.
+    pub status_symbols: bool,
+    /// #R2: `shell.login_identity` — when enabled, a login + Enhanced +
+    /// non-isolated interactive session launches Bash with a real login
+    /// identity (`argv0="-bash" --posix` + `$ENV` inject) instead of the
+    /// interactive-but-non-login `--rcfile <marker>`. Default is `true`: the
+    /// ECS/real-sshd flip-on gate passed (H group incl. H1 PAM-chage and H3
+    /// x86_64 dual-arch, both == oracle). Set `shell.login_identity = false`
+    /// to fall back to the non-login `--rcfile` behaviour.
+    pub login_identity: bool,
     pub analysis_mode: String,
     pub approval_mode: CoshApprovalMode,
     pub adapter_default: String,
@@ -91,6 +103,8 @@ impl Default for CoshConfig {
         Self {
             shell_default: "auto".into(),
             shell_integration: "enhanced".into(),
+            status_symbols: false,
+            login_identity: true,
             analysis_mode: "smart".into(),
             approval_mode: CoshApprovalMode::Auto,
             adapter_default: "cosh-core".into(),
@@ -98,7 +112,7 @@ impl Default for CoshConfig {
             startup_banner: true,
             startup_hooks: false,
             debug: false,
-            log_level: "warn".into(),
+            log_level: "info".into(),
             ai_enabled: true,
             input_wait_timeout_secs: 120,
             health: HealthConfig::default(),

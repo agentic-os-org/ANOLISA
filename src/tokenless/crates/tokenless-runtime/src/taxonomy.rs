@@ -107,15 +107,16 @@ fn taxonomy() -> &'static Taxonomy {
     )
 }
 
-/// Truncation thresholds: layer 2 limits for command output, layer 3
-/// zero-truncation limits for everything else.
+/// Truncation thresholds: layer 2 limits for command output, including
+/// local files printed by a shell command, layer 3 zero-truncation limits
+/// for everything else.
 ///
 /// The required origin decides the threshold family without tool-name
 /// fallback.
 pub(crate) fn thresholds_for(origin: ContentOrigin) -> ToolThresholds {
     let tax = taxonomy();
     match origin {
-        ContentOrigin::CommandOutput => tax.shell_thresholds,
+        ContentOrigin::CommandOutput | ContentOrigin::FileRead => tax.shell_thresholds,
         ContentOrigin::FileContent | ContentOrigin::ApiResponse => tax.api_thresholds,
     }
 }
@@ -142,6 +143,7 @@ mod tests {
         );
         assert_eq!(thresholds_for(ContentOrigin::ApiResponse), API_THRESHOLDS);
         assert_eq!(thresholds_for(ContentOrigin::FileContent), API_THRESHOLDS);
+        assert_eq!(thresholds_for(ContentOrigin::FileRead), SHELL_THRESHOLDS);
     }
 
     #[test]

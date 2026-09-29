@@ -14,7 +14,7 @@
       ],
       "issue_option": "anolisa",
       "path_prefixes": [
-        "src/anolisa/"
+        "distribution/anolisa/"
       ],
       "label": "component:anolisa",
       "commit_scope": "anolisa",
@@ -35,7 +35,7 @@
       ],
       "issue_option": "cosh",
       "path_prefixes": [
-        "src/copilot-shell/"
+        "deprecated/copilot-shell/"
       ],
       "label": "component:cosh",
       "commit_scope": "cosh",
@@ -48,7 +48,7 @@
         "kongche-jbw",
         "samchu-zsl"
       ],
-      "status": "active"
+      "status": "deprecated"
     },
     {
       "id": "cosh-ng",
@@ -134,7 +134,8 @@
       "ci_key": "agentsight",
       "issue_triagers": [
         "chengshuyi",
-        "jfeng18"
+        "jfeng18",
+        "viron-xiao"
       ],
       "status": "active"
     },

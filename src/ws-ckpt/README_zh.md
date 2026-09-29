@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-基于 btrfs 文件系统的 AI 工作区快照管理系统，支持秒级创建检查点和回滚，专为 AI Agent 场景设计。
+基于 btrfs 文件系统的 AI 工作区快照管理系统，为 AI Agent 提供检查点和回滚能力；实际耗时取决于文件系统、工作负载和运行环境。
 
 ## 特性
 
-- **毫秒级快照创建和回滚** — 利用 btrfs COW 特性，微秒级完成快照操作
+- **写时复制快照** — 利用 btrfs COW 高效创建和回滚快照；实际耗时取决于文件系统与工作负载
 - **守护进程架构** — 特权操作封装在 daemon 中，上层调用无需 root 权限
 - **Unix Socket IPC** — Bincode 二进制协议，高效通信
 - **systemd 服务化** — RPM 一键部署，开机自启
@@ -99,6 +99,12 @@ ws-ckpt list --workspace ~/my-workspace
 # 以 JSON 格式输出
 ws-ckpt list --workspace ~/my-workspace --format json
 
+# 读取单页（按创建时间升序），输出包含 next_cursor
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --format json
+
+# 使用不透明游标继续读取
+ws-ckpt list --workspace ~/my-workspace --limit 1000 --cursor '<next_cursor>' --format json
+
 # 查看两个快照间的差异
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 
@@ -108,6 +114,24 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 # 清理旧快照，保留最近 5 个
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```
+
+cleanup 中断后，重启会清除普通缺失快照记录，并将恢复孤儿设为 pinned，等待显式删除。
+用 `ws-ckpt list -w <workspace> --orphans --format json` 查询，再用
+`ws-ckpt delete -w <workspace> -s <complete-id> --force` 删除确认不再需要的快照。
+delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 unavailable 状态；
+删除缺失目标返回 `SnapshotNotFound`。请同步升级 CLI 和 daemon。详见[快照恢复](../../docs/user-guide/zh/runtime/ws-ckpt.md#cleanup-中断后的快照恢复)。
+
+### 恢复中断的初始化
+
+恢复确认使用 daemon 解析的工作区和快照数量。若执行前恢复目标或快照集合发生变化，
+需要重新确认。使用此确认协议时，请同步更新 CLI 和 daemon。
+
+`ws-ckpt recover -w <workspace> --force` 也能恢复尚未注册的工作区：还原
+`.pre-init-bak`，并保留迁移中的子卷供检查。已注册工作区恢复成功时会归档遗留备份，
+避免阻断下一次 `init`。若已注册工作区的子卷被外部删除，使用
+`ws-ckpt unregister -w <workspace> --force` 解除悬空注册；该操作不恢复数据，
+会保留快照和备份。两条命令的 `--force` 都仅跳过交互确认。
+详见[恢复说明](../../docs/user-guide/zh/runtime/ws-ckpt.md#恢复中断的初始化与悬空注册)。
 
 ### 状态与配置
 
@@ -157,7 +181,11 @@ ws-ckpt reload
 | `status` | 查看守护进程和工作区状态 |
 | `config` | 查看或修改 daemon 配置（写入 `/etc/ws-ckpt/config.toml`） |
 | `reload` | 通知 daemon 重新加载 `config.toml` |
+| `recover` | 将工作区恢复为普通目录，或还原中断初始化的备份 |
+| `unregister` | 仅在子卷丢失时解除注册，保留快照和备份 |
 | `plugin` | 安装/卸载 ws-ckpt Agent runtime（openclaw/hermes）插件 |
+
+OpenClaw adapter 要求 OpenClaw >= 2026.2.13。若检测到的版本或配置能力无法安全更新工具 allowlist，安装会中止，避免留下不完整的集成。
 
 ## 组件
 

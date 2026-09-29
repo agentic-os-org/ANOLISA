@@ -43,7 +43,7 @@ fn reconstructed_prompt_publishes_virtual_presentation_start() {
         .write_range(&parser, 0, parser.display.position(), &mut output)
         .expect("present reconstructed prompt");
 
-    assert_eq!(output, b"\r\x1b[K\r\xe2\x97\x87 prompt$ /cancel\r\n");
+    assert_eq!(output, b"\r\x1b[K\rprompt$ /cancel\r\n");
 }
 
 #[test]
@@ -82,10 +82,7 @@ fn bash44_wrapped_guard_reconstructs_owned_prompt_without_internal_text() {
             .write_range(&parser, 0, parser.display.position(), &mut output)
             .expect("present Bash 4.4 reconstructed prompt");
 
-        assert_eq!(
-            output, b"\r\x1b[K\r\xe2\x97\x87 prompt$ /cancel\r\n",
-            "{name}"
-        );
+        assert_eq!(output, b"\r\x1b[K\rprompt$ /cancel\r\n", "{name}");
         assert!(
             !output
                 .windows(b"__cosh_slash_guard__".len())
@@ -208,4 +205,51 @@ fn slash_guard_bounds_prompt_snapshot_without_rendering_it() {
     assert_eq!(pending.prompt_before_input, snapshot[17..]);
     assert!(pending.before_arm.is_empty());
     assert!(pending.line.is_empty());
+}
+
+#[test]
+fn direct_suffix_proof_controls_authenticated_command_insertion() {
+    let resolve = |pending: &mut Option<PendingSlashGuardEcho>| {
+        PendingSlashGuardEcho::resolve(pending, b"/mode").expect("suppressed guard redraw")
+    };
+    let guard = b"guard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n";
+
+    let mut exact = Some(PendingSlashGuardEcho::new(b"guard$ /mode\r\n"));
+    assert!(PendingSlashGuardEcho::filter(&mut exact, guard).is_empty());
+    assert!(!resolve(&mut exact).insert_command);
+
+    let mut private_rewrite = Some(PendingSlashGuardEcho::new(
+        b"guard$ /mode\x08\x08\x08\x08\x08 /mode\x08\x08\x08\x08\x08/mode\r\n",
+    ));
+    assert!(PendingSlashGuardEcho::filter(&mut private_rewrite, guard).is_empty());
+    assert!(!resolve(&mut private_rewrite).insert_command);
+
+    let mut rewrite_mismatch = Some(PendingSlashGuardEcho::new(
+        b"guard$ /mode\x08\x08\x08\x08 /mode\x08\x08\x08\x08\x08/mode\r\n",
+    ));
+    assert!(PendingSlashGuardEcho::filter(&mut rewrite_mismatch, guard).is_empty());
+    assert!(resolve(&mut rewrite_mismatch).insert_command);
+
+    let mut dirty = Some(PendingSlashGuardEcho::new(b"guard$ /mo\x1b[?2004hde\r\n"));
+    assert!(PendingSlashGuardEcho::filter(&mut dirty, guard).is_empty());
+    assert!(resolve(&mut dirty).insert_command);
+}
+
+#[test]
+fn private_prompt_repaint_requires_exact_carriage_return_boundary() {
+    assert!(PendingSlashGuardEcho::proves_painted_command(
+        b"previous bytes\rguard$  /mode",
+        b"/mode",
+        b"guard$ ",
+    ));
+    for unproven in [
+        b"previous bytesguard$  /mode".as_slice(),
+        b"previous bytes\rother$  /mode",
+        b"previous bytes\rguard$   /mode",
+        b"previous bytes\rguard$  /mode extra",
+    ] {
+        assert!(!PendingSlashGuardEcho::proves_painted_command(
+            unproven, b"/mode", b"guard$ ",
+        ));
+    }
 }

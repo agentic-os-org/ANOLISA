@@ -117,26 +117,17 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
             .join(&args.workspace)
     };
     let configured_workspace = normalize_absolute_workspace(&configured_workspace)?;
-    let core_workspace = TrustedWorkspaceResolver::new_for_targets(
+    let workspaces = TrustedWorkspaceResolver::new_for_targets(
         [
             GatewayCapabilityProfile::task_only_v1().governed_target(),
             GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target(),
             GatewayCapabilityProfile::workspace_write_v1().governed_target(),
+            GatewayCapabilityProfile::delegated_acp_v1().governed_target(),
         ],
         &configured_workspace,
     )
     .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
-    let codex_workspace = TrustedWorkspaceResolver::new(
-        GatewayCapabilityProfile::delegated_acp_v1().governed_target(),
-        &configured_workspace,
-    )
-    .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
-    if core_workspace.workspace_ref() != codex_workspace.workspace_ref() {
-        return Err(CliError::Profile(
-            "Runtime workspace identities did not converge".to_owned(),
-        ));
-    }
-    let default_workspace = core_workspace.workspace_ref().clone();
+    let default_workspace = workspaces.workspace_ref().clone();
     if let Some(unit) = args.systemd_unit.as_deref() {
         LinuxSystemdContainmentVerifier::validate_unit(unit)
             .map_err(|error| CliError::Containment(error.to_string()))?;
@@ -210,7 +201,7 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
                     let snapshot = TaskSnapshotAdapter::admit(
                         checkpoint_socket.clone(),
                         &configured_workspace,
-                        default_workspace.clone(),
+                        workspaces.clone(),
                         owner_uid,
                     )
                     .map_err(|error| CliError::Profile(error.to_string()))?;
@@ -274,7 +265,7 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
             InstalledBrokeredCoreRuntimePortFactory::from_resolved(
                 daemon.installation_id().clone(),
                 actor_resolver.clone(),
-                core_workspace,
+                workspaces.clone(),
                 profile,
             )
             .map(|factory| {
@@ -290,7 +281,7 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
             InstalledAcpRuntimePortFactory::from_resolved_profiles(
                 daemon.installation_id().clone(),
                 actor_resolver.clone(),
-                codex_workspace,
+                workspaces,
                 profiles,
             )
             .map(|factory| {

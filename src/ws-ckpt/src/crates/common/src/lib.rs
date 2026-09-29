@@ -56,7 +56,7 @@ pub enum WsCkptError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("frame too large: {size} bytes (max {max})")]
-    FrameTooLarge { size: u32, max: u32 },
+    FrameTooLarge { size: u64, max: u32 },
     #[error("config error: {0}")]
     Config(String),
 }
@@ -186,6 +186,35 @@ pub enum Request {
         ws_id: String,
         operation_id: String,
         operation_digest: [u8; 32],
+    },
+    /// Remove a registration only when its live subvolume is missing.
+    Unregister {
+        /// Registered workspace path or ID.
+        workspace: String,
+    },
+    /// Resolve recovery's exact target and deletion scope before confirmation.
+    RecoverPreview {
+        workspace: String,
+    },
+    /// Recover only if the daemon's preview still describes the same target.
+    RecoverConfirmed {
+        preview: RecoveryPreview,
+    },
+    /// List snapshots recovered without their original metadata.
+    ListOrphans {
+        /// Omit to query all registered workspaces.
+        workspace: Option<String>,
+    },
+    /// Read a page in ascending (created_at, workspace ID, snapshot ID) order.
+    ListPage {
+        /// Restrict the page to recovered orphan snapshots.
+        orphans_only: bool,
+        /// Workspace path or ID; absent means all registered workspaces.
+        workspace: Option<String>,
+        /// Maximum entries to return; must be greater than zero.
+        limit: u32,
+        /// Opaque continuation token returned by the previous page.
+        cursor: Option<String>,
     },
 }
 
@@ -342,6 +371,42 @@ pub enum Response {
         code: GuardedRollbackRejectionCodeV2,
         message: String,
     },
+    /// Recovery succeeded while additional user data remains for inspection.
+    RecoverWithWarning {
+        /// Restored workspace path.
+        workspace: String,
+        /// Locations and reason for retaining additional data.
+        warning: String,
+    },
+    /// Registration removed without restoring data or deleting snapshots.
+    UnregisterOk {
+        /// Original workspace path.
+        workspace: String,
+        /// Locations intentionally retained for manual recovery.
+        retained_paths: Vec<String>,
+    },
+    /// Recovery identity and snapshot scope to display before confirmation.
+    RecoverPreviewOk {
+        preview: RecoveryPreview,
+    },
+    /// Byte-bounded snapshot page with an opaque continuation token.
+    ListPageOk {
+        snapshots: Vec<SnapshotListItem>,
+        next_cursor: Option<String>,
+    },
+}
+
+/// Daemon-resolved recovery target; execution revalidates it under lifecycle locks.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPreview {
+    /// Registered workspace ID, or `None` for an interrupted, unregistered init.
+    pub ws_id: Option<String>,
+    /// User-visible restoration destination, never a managed storage alias.
+    pub registration_path: String,
+    /// Number of on-disk snapshot directories that recovery will delete.
+    pub snapshot_count: u32,
+    /// Fingerprint of the target and snapshot set; stale confirmation is refused.
+    pub confirmation_digest: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -613,6 +678,26 @@ pub struct SnapshotEntry {
     pub meta: SnapshotMeta,
 }
 
+/// One result in a paged snapshot listing.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SnapshotListItem {
+    /// Complete snapshot metadata.
+    Full(SnapshotEntry),
+    /// Identity-only fallback when complete metadata cannot fit in one frame.
+    Summary(SnapshotSummary),
+}
+
+/// Identity fields preserved when a snapshot's optional detail is too large.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SnapshotSummary {
+    pub id: String,
+    pub workspace: String,
+    pub created_at: DateTime<Utc>,
+    pub pinned: bool,
+    pub missing: bool,
+    pub omitted_fields: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SnapshotIndex {
     pub workspace_path: PathBuf,
@@ -625,6 +710,9 @@ pub struct SnapshotIndex {
     /// Durable guarded rollback receipts keyed by caller idempotency identifier.
     #[serde(default)]
     pub guarded_rollbacks: HashMap<String, GuardedRollbackEvidenceV2>,
+    /// Snapshot IDs adopted from disk without their original metadata.
+    #[serde(default)]
+    pub recovered_orphans: HashSet<String>,
 }
 
 impl SnapshotIndex {
@@ -635,6 +723,7 @@ impl SnapshotIndex {
             head: None,
             governed_evidence: HashMap::new(),
             guarded_rollbacks: HashMap::new(),
+            recovered_orphans: HashSet::new(),
         }
     }
 }
@@ -1226,18 +1315,26 @@ impl Default for DaemonConfig {
 /// sides to prevent OOM from a malformed length prefix.
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 
+/// Maximum number of records accepted in one list-page request.
+pub const MAX_LIST_PAGE_ITEMS: u32 = 10_000;
+
+/// Return the encoded payload size without allocating the payload.
+pub fn encoded_size<T: Serialize>(msg: &T) -> Result<u64, WsCkptError> {
+    Ok(bincode::serialized_size(msg)?)
+}
+
 /// Serialize a message into a length-prefixed frame: [4-byte LE length][bincode payload]
 pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, WsCkptError> {
-    let payload = bincode::serialize(msg)?;
-    let len = payload.len() as u32;
-    if len > MAX_FRAME_SIZE {
+    let len = encoded_size(msg)?;
+    if len > u64::from(MAX_FRAME_SIZE) {
         return Err(WsCkptError::FrameTooLarge {
             size: len,
             max: MAX_FRAME_SIZE,
         });
     }
+    let payload = bincode::serialize(msg)?;
     let mut frame = Vec::with_capacity(4 + payload.len());
-    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&(len as u32).to_le_bytes());
     frame.extend(payload);
     Ok(frame)
 }
@@ -2137,6 +2234,48 @@ mod tests {
     // ── Phase 2 Request round-trip tests ──
 
     #[test]
+    fn list_wire_compatibility_and_frame_boundary() {
+        // Existing bincode discriminants and layouts must not change.
+        let request = Request::List {
+            workspace: None,
+            format: None,
+        };
+        assert_eq!(
+            bincode::serialize(&request).unwrap(),
+            vec![4, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            bincode::serialize(&Response::ListOk { snapshots: vec![] }).unwrap(),
+            vec![5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let request = Request::ListPage {
+            orphans_only: false,
+            workspace: Some("/ws".into()),
+            limit: 10,
+            cursor: Some("opaque".into()),
+        };
+        assert_eq!(
+            bincode::serialize(&request).unwrap(),
+            bincode::serialize(&(29_u32, false, Some("/ws"), 10_u32, Some("opaque"))).unwrap()
+        );
+        assert!(matches!(round_trip_request(&request), Request::ListPage {
+            orphans_only: false,
+            workspace: Some(ws), limit: 10, cursor: Some(cursor),
+        } if ws == "/ws" && cursor == "opaque"));
+
+        // A bincode string has an eight-byte length prefix.
+        let mut payload = "x".repeat(MAX_FRAME_SIZE as usize - 8);
+        let frame = encode_frame(&payload).unwrap();
+        assert_eq!(frame.len(), MAX_FRAME_SIZE as usize + 4);
+        payload.push('x');
+        assert!(
+            matches!(encode_frame(&payload), Err(WsCkptError::FrameTooLarge {
+            size, max: MAX_FRAME_SIZE,
+        }) if size == u64::from(MAX_FRAME_SIZE) + 1)
+        );
+    }
+
+    #[test]
     fn request_list_round_trip() {
         let req = Request::List {
             workspace: Some("/tmp/ws".to_string()),
@@ -2763,7 +2902,7 @@ mod tests {
         };
         let decoded = round_trip_response(&resp);
         match decoded {
-            Response::RecoverOk { workspace } => assert_eq!(workspace, "/home/user/project"),
+            Response::RecoverOk { workspace, .. } => assert_eq!(workspace, "/home/user/project"),
             _ => panic!("expected RecoverOk variant"),
         }
     }
@@ -3279,6 +3418,80 @@ mod tests {
     }
 
     #[test]
+    fn orphan_query_preserves_legacy_list_wire_layout() {
+        let old = Request::List {
+            workspace: Some("/ws".into()),
+            format: Some("json".into()),
+        };
+        assert_eq!(
+            bincode::serialize(&old).unwrap(),
+            bincode::serialize(&(4_u32, Some("/ws"), Some("json"))).unwrap()
+        );
+        let request = Request::ListOrphans {
+            workspace: Some("/ws".into()),
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        assert_eq!(encoded, bincode::serialize(&(28_u32, Some("/ws"))).unwrap());
+        assert!(matches!(bincode::deserialize::<Request>(&encoded).unwrap(),
+            Request::ListOrphans { workspace: Some(ws) } if ws == "/ws"));
+    }
+
+    #[test]
+    fn recovery_protocol_extensions_preserve_existing_wire_layout() {
+        let preview = RecoveryPreview {
+            ws_id: Some("ws-preview".into()),
+            registration_path: "/ws".into(),
+            snapshot_count: 7,
+            confirmation_digest: [9; 32],
+        };
+        let requests = [
+            Request::Recover {
+                workspace: "/ws".into(),
+            },
+            Request::Unregister {
+                workspace: "/ws".into(),
+            },
+            Request::RecoverPreview {
+                workspace: "/alias/ws".into(),
+            },
+            Request::RecoverConfirmed {
+                preview: preview.clone(),
+            },
+        ];
+        for (request, tag) in requests.iter().zip([13_u32, 25, 26, 27]) {
+            let encoded = bincode::serialize(request).unwrap();
+            assert_eq!(&encoded[..4], &tag.to_le_bytes());
+            let decoded: Request = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(encoded, bincode::serialize(&decoded).unwrap());
+        }
+        let responses = [
+            Response::RecoverOk {
+                workspace: "/ws".into(),
+            },
+            Response::RecoverWithWarning {
+                workspace: "/ws".into(),
+                warning: "retained".into(),
+            },
+            Response::UnregisterOk {
+                workspace: "/ws".into(),
+                retained_paths: vec!["/backup".into()],
+            },
+            Response::RecoverPreviewOk { preview },
+        ];
+        for (response, tag) in responses.iter().zip([12_u32, 26, 27, 28]) {
+            let encoded = bincode::serialize(response).unwrap();
+            assert_eq!(&encoded[..4], &tag.to_le_bytes());
+            let decoded: Response = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(encoded, bincode::serialize(&decoded).unwrap());
+        }
+        // A pre-extension RecoverOk payload is exactly its tag and string.
+        assert_eq!(
+            bincode::serialize(&responses[0]).unwrap(),
+            bincode::serialize(&(12_u32, "/ws")).unwrap()
+        );
+    }
+
+    #[test]
     fn v2_request_discriminants_are_append_only_and_round_trip() {
         let generation = WorkspaceGenerationTokenV2::from_bytes([0x11; 32]);
         let requests = [
@@ -3508,6 +3721,7 @@ mod tests {
         assert_eq!(index.workspace_path, PathBuf::from("/workspace"));
         assert!(index.governed_evidence.is_empty());
         assert!(index.guarded_rollbacks.is_empty());
+        assert!(index.recovered_orphans.is_empty());
     }
 
     #[test]

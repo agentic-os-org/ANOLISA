@@ -228,71 +228,6 @@
       42
     ]
   },
-  "retry.three-attempts": {
-    "maxAttempts": 3,
-    "baseDelayMs": 100,
-    "maxDelayMs": 150
-  },
-  "saved.create-binding-id.rev-7": {
-    "revision": 7,
-    "isUpdate": false,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.binding-id"
-    }
-  },
-  "saved.create-new-b.rev-7": {
-    "revision": 7,
-    "isUpdate": false,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.new-b"
-    }
-  },
-  "saved.create-new-b.rev-8": {
-    "revision": 8,
-    "isUpdate": false,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.new-b"
-    }
-  },
-  "saved.create-non-uuid.rev-7": {
-    "revision": 7,
-    "isUpdate": false,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.non-uuid"
-    }
-  },
-  "saved.update-new-b.rev-7": {
-    "revision": 7,
-    "isUpdate": true,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.new-b"
-    }
-  },
-  "saved.update-old-a.rev-7": {
-    "revision": 7,
-    "isUpdate": true,
-    "plan": {
-      "$ref": "plan.opaque"
-    },
-    "prepared": {
-      "$ref": "prepared.old-a"
-    }
-  },
   "adapter.fault": {
     "kind": "fault",
     "code": "ADAPTER_FAULT"
@@ -647,19 +582,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 3,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
     },
     "deployments": []
   },
@@ -668,19 +597,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
     },
     "deployments": []
   },
@@ -689,19 +612,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": 250,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
     },
     "deployments": []
   },
@@ -710,17 +627,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-binding-id.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -739,16 +647,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLYING"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "APPLYING"
+      }
     },
     "deployments": []
   },
@@ -757,20 +658,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 3,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
       }
     },
     "deployments": [
@@ -789,20 +682,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "RECONCILE_INVALID_REPORT"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_INVALID_REPORT"
+        }
       }
     },
     "deployments": [
@@ -821,14 +706,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
     },
     "deployments": []
   },
@@ -837,17 +717,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -866,17 +737,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -895,17 +757,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLYING"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "APPLYING"
       }
     },
     "deployments": [
@@ -919,46 +772,17 @@
       }
     ]
   },
-  "record.create.registration-failed-retry": {
-    "binding": {
-      "spec": {
-        "$ref": "binding.rev-7"
-      },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "RECONCILE_STORAGE_ERROR"
-      },
-      "prepared": null
-    },
-    "deployments": []
-  },
   "record.create.retry-attempt-1": {
     "binding": {
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
       }
     },
     "deployments": [
@@ -977,20 +801,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": 250,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
       }
     },
     "deployments": [
@@ -1009,20 +825,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "RECONCILE_UNCONFIRMED"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_UNCONFIRMED"
+        }
       }
     },
     "deployments": [
@@ -1041,14 +849,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": []
   },
@@ -1057,14 +860,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1082,14 +880,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1107,14 +900,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1140,19 +928,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "DELETE_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 3,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
     },
     "deployments": [
       {
@@ -1170,14 +952,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1195,14 +972,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1228,19 +1000,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
     },
     "deployments": [
       {
@@ -1258,19 +1024,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": 250,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
     },
     "deployments": [
       {
@@ -1288,19 +1048,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "DELETE_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 3,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1318,19 +1072,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "DELETE_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "REJECTED",
-        "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "DELETE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1348,19 +1096,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1378,19 +1120,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": 250,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1408,14 +1144,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
     },
     "deployments": [
       {
@@ -1433,19 +1164,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_DELETE"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "RECONCILE_TARGET_UNAVAILABLE"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_TARGET_UNAVAILABLE"
+        }
+      }
     },
     "deployments": [
       {
@@ -1463,17 +1188,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-non-uuid.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -1492,14 +1208,9 @@
       "spec": {
         "$ref": "binding.rev-8"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
     },
     "deployments": []
   },
@@ -1508,17 +1219,8 @@
       "spec": {
         "$ref": "binding.rev-8"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-8"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -1537,14 +1239,9 @@
       "spec": {
         "$ref": "binding.rev-8"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
     },
     "deployments": [
       {
@@ -1562,19 +1259,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "REJECTED",
-        "code": "UNSUPPORTED_POLICY"
-      },
-      "prepared": null
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "UNSUPPORTED_POLICY"
+        }
+      }
     },
     "deployments": [
       {
@@ -1592,16 +1283,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLYING"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "APPLYING"
+      }
     },
     "deployments": [
       {
@@ -1619,20 +1303,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "REJECTED",
-        "code": "UPDATE_ERROR"
-      },
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "UPDATE_ERROR"
+        }
       }
     },
     "deployments": [
@@ -1651,20 +1327,12 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "UPDATE_ERROR"
-      },
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "UPDATE_ERROR"
+        }
       }
     },
     "deployments": [
@@ -1683,14 +1351,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
     },
     "deployments": [
       {
@@ -1708,19 +1371,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "PREPARE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "PREPARE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1738,19 +1395,13 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "REJECTED",
-        "code": "PREPARE_ERROR"
-      },
-      "prepared": null
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "PREPARE_ERROR"
+        }
+      }
     },
     "deployments": [
       {
@@ -1768,17 +1419,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -1797,17 +1439,8 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 2,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -1821,52 +1454,13 @@
       }
     ]
   },
-  "record.replace.registration-failed-retry": {
-    "binding": {
-      "spec": {
-        "$ref": "binding.rev-7"
-      },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": 100,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": {
-        "kind": "RETRYABLE",
-        "code": "RECONCILE_STORAGE_ERROR"
-      },
-      "prepared": null
-    },
-    "deployments": [
-      {
-        "target": {
-          "$ref": "target.old-a"
-        },
-        "revision": 6,
-        "presence": "PRESENT",
-        "lastConfirmed": "PRESENT"
-      }
-    ]
-  },
   "record.reuse-old-a.ready": {
     "binding": {
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "$ref": "retry.three-attempts"
-      },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-old-a.rev-7"
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [
@@ -1885,14 +1479,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLY_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "APPLY_FAILED"
+      }
     },
     "deployments": []
   },
@@ -1901,14 +1490,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "APPLYING"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "APPLYING"
+      }
     },
     "deployments": []
   },
@@ -1917,14 +1501,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "DELETE_FAILED"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "DELETE_FAILED"
+      }
     },
     "deployments": []
   },
@@ -1933,14 +1512,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "DELETING"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "DELETING"
+      }
     },
     "deployments": []
   },
@@ -1949,14 +1523,9 @@
       "spec": {
         "$ref": "binding.rev-7"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "READY"
+      }
     },
     "deployments": []
   },
@@ -1975,14 +1544,9 @@
       "spec": {
         "$ref": "binding.fresh"
       },
-      "status": "PENDING_APPLY"
-    },
-    "runtime": {
-      "attemptsStarted": 0,
-      "nextAttemptAt": null,
-      "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
     },
     "deployments": []
   },
@@ -1991,46 +1555,8 @@
       "spec": {
         "$ref": "binding.fresh"
       },
-      "status": "READY"
-    },
-    "runtime": {
-      "attemptsStarted": 1,
-      "nextAttemptAt": null,
-      "retryPolicy": {
-        "maxAttempts": 3,
-        "baseDelayMs": 100,
-        "maxDelayMs": 150
-      },
-      "lastError": null,
-      "prepared": {
-        "revision": 1,
-        "isUpdate": false,
-        "plan": {
-          "format": "test.plan.v1",
-          "content": [
-            0,
-            255,
-            65
-          ]
-        },
-        "prepared": {
-          "target": {
-            "route": "test",
-            "id": "opaque-B",
-            "cleanup": [
-              255,
-              0,
-              7
-            ]
-          },
-          "format": "test.request.v1",
-          "content": [
-            0,
-            255,
-            128,
-            42
-          ]
-        }
+      "status": {
+        "phase": "READY"
       }
     },
     "deployments": [

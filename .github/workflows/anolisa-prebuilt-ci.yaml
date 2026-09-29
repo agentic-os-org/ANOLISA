@@ -9,7 +9,7 @@ on:
       - '.github/workflows/anolisa-prebuilt-ci.yaml'
       - '.github/workflows/release.yaml'
       - '.github/workflows/release-preview.yaml'
-      - 'src/anolisa/**'
+      - 'distribution/anolisa/**'
   pull_request:
     branches: [main, 'release/**']
     paths:
@@ -18,7 +18,7 @@ on:
       - '.github/workflows/anolisa-prebuilt-ci.yaml'
       - '.github/workflows/release.yaml'
       - '.github/workflows/release-preview.yaml'
-      - 'src/anolisa/**'
+      - 'distribution/anolisa/**'
   workflow_dispatch:
 
 permissions:
@@ -50,4 +50,4 @@ jobs:
         run: python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
 
       - name: Run ANOLISA CLI prebuilt package tests
-        run: src/anolisa/tests/test-package-prebuilt.sh
+        run: distribution/anolisa/tests/test-package-prebuilt.sh

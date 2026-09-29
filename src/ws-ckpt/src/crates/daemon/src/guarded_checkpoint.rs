@@ -44,7 +44,7 @@ pub(crate) async fn workspace_identity(
     if !state.exact_registration_is_current(path, &candidate, &workspace) {
         return workspace_not_found(registration_path);
     }
-    if !registration_resolves_to_live(state, path, &candidate).await {
+    if !state.registration_is_live(&candidate, path).await {
         return workspace_not_found(registration_path);
     }
 
@@ -127,7 +127,7 @@ pub(crate) async fn checkpoint(
     if workspace.ws_id != ws_id {
         return workspace_not_found(ws_id);
     }
-    if !registration_resolves_to_live(state, &workspace.path, ws_id).await {
+    if !state.registration_is_live(ws_id, &workspace.path).await {
         return rejected(
             GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
             "registered workspace path no longer resolves to the live subvolume",
@@ -719,7 +719,7 @@ async fn validate_rollback_workspace(
     if workspace.ws_id != ws_id
         || workspace.path.to_str() != Some(registered_path)
         || !state.exact_registration_is_current(Path::new(registered_path), ws_id, workspace_arc)
-        || !registration_resolves_to_live(state, &workspace.path, ws_id).await
+        || !state.registration_is_live(ws_id, &workspace.path).await
     {
         return Err(Box::new(rollback_rejected(
             GuardedRollbackRejectionCodeV2::InvalidRegistrationPath,
@@ -922,21 +922,6 @@ fn validate_registration_path(value: &str) -> Result<(), String> {
         return Err("registration path must not contain '.' or '..' components".to_string());
     }
     Ok(())
-}
-
-async fn registration_resolves_to_live(
-    state: &DaemonState,
-    registration_path: &Path,
-    ws_id: &str,
-) -> bool {
-    let live_path = state.backend.data_root().join(ws_id);
-    match tokio::try_join!(
-        tokio::fs::canonicalize(registration_path),
-        tokio::fs::canonicalize(live_path)
-    ) {
-        Ok((registration_target, live_target)) => registration_target == live_target,
-        Err(_) => false,
-    }
 }
 
 fn index_with_evidence_slot(

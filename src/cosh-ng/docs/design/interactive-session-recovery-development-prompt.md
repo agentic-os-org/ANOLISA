@@ -31,12 +31,12 @@ Before editing:
    - `src/cosh-ng/crates/cosh-shell/src/raw_input/`
    - `src/cosh-ng/crates/cosh-shell/src/slash/`
 6. Use these copilot-shell files only as behavioral references:
-   - `src/copilot-shell/packages/core/src/services/chatRecordingService.ts`
-   - `src/copilot-shell/packages/core/src/services/sessionService.ts`
-   - `src/copilot-shell/packages/cli/src/ui/components/SessionPicker.tsx`
-   - `src/copilot-shell/packages/cli/src/ui/hooks/useSessionPicker.ts`
-   - `src/copilot-shell/packages/cli/src/ui/hooks/useResumeCommand.ts`
-   - `src/copilot-shell/packages/cli/src/config/config.ts`
+   - `deprecated/copilot-shell/packages/core/src/services/chatRecordingService.ts`
+   - `deprecated/copilot-shell/packages/core/src/services/sessionService.ts`
+   - `deprecated/copilot-shell/packages/cli/src/ui/components/SessionPicker.tsx`
+   - `deprecated/copilot-shell/packages/cli/src/ui/hooks/useSessionPicker.ts`
+   - `deprecated/copilot-shell/packages/cli/src/ui/hooks/useResumeCommand.ts`
+   - `deprecated/copilot-shell/packages/cli/src/config/config.ts`
 
 Verify current code instead of assuming the issue statement reflects runtime
 behavior.

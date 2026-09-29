@@ -145,11 +145,13 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 text,
                 viewport,
                 line_count,
+                selected_completion,
             } => {
                 let payload = serde_json::json!({
                     "id": id,
                     "text": text,
                     "line_count": line_count,
+                    "selected_completion": selected_completion,
                     "first_row": viewport.first_row,
                     "hidden_above": viewport.hidden_above,
                     "hidden_below": viewport.hidden_below,
@@ -160,18 +162,28 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 .to_string();
                 parser.push_prompt_draft_event("changed", Some(&payload));
             }
-            RawInputEvent::PromptDraftSubmit { id, text } => {
-                let payload = serde_json::json!({ "id": id, "text": text }).to_string();
+            RawInputEvent::PromptDraftSubmit {
+                id,
+                text,
+                slash,
+                workspace_cwd,
+            } => {
+                let payload =
+                    serde_json::json!({ "id": id, "text": text, "slash": slash }).to_string();
                 parser.push_prompt_draft_event("submit", Some(&payload));
-                // The submitted draft rides the existing intercept path into
-                // the agent turn (D10 reason rules: `??` keeps AgentMarker).
+                // Preserve the owning capture's decision: controls use the same
+                // consumers as shell slash commands; other drafts stay Agent input.
                 let session_id = parser.session_id.clone();
-                let reason = if text.trim_start().starts_with("??") {
+                let reason = if slash {
+                    "slash"
+                } else if text.trim_start().starts_with("??") {
                     "agent_marker"
                 } else {
                     "natural_language"
                 };
-                parser.push_intercept_event(&session_id, text, None, reason);
+                let text = if slash { text.trim().to_string() } else { text };
+                let cwd = if slash { workspace_cwd } else { None };
+                parser.push_intercept_event(&session_id, text, cwd, reason);
             }
             RawInputEvent::PromptDraftCancel { id } => {
                 let payload = serde_json::json!({ "id": id }).to_string();
@@ -241,7 +253,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::AssistanceToggled => {
                 write!(output, "\r\x1b[2K")?;
-                prompt_presentation.write_replayed_prompt(output, parser.last_prompt_display())?;
+                prompt_presentation.write_restored_prompt(output, parser.last_prompt_display())?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostIntercept {

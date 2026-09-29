@@ -96,10 +96,17 @@ assert_output_contains() {
 
 # ── build ─────────────────────────────────────────────────────────────────────
 
-echo "=== Building ws-ckpt ==="
-cd "$CARGO_ROOT"
-cargo build --release --workspace
-BIN="$CARGO_ROOT/target/release/ws-ckpt"
+# WS_CKPT_E2E_BIN lets local reruns skip the cargo build by pointing at an
+# already-built binary (it must contain the changes under test).
+if [ -n "${WS_CKPT_E2E_BIN:-}" ]; then
+    BIN="${WS_CKPT_E2E_BIN%/}"
+    echo "=== Using prebuilt binary: $BIN ==="
+else
+    echo "=== Building ws-ckpt ==="
+    cd "$CARGO_ROOT"
+    cargo build --release --workspace
+    BIN="$CARGO_ROOT/target/release/ws-ckpt"
+fi
 [ -x "$BIN" ] || { echo "FATAL: binary not found at $BIN"; exit 1; }
 
 # ── setup btrfs loop ──────────────────────────────────────────────────────────
@@ -194,6 +201,110 @@ assert_ok "cleanup" "$BIN" cleanup -w "$WORKSPACE"
 # error paths
 assert_fail "init nonexistent" "$BIN" init -w /nonexistent/path/should/fail
 assert_fail "checkpoint without init" "$BIN" checkpoint -w /tmp -i bad
+
+# ── detached registration (issue #3059 regression) ────────────────────────────
+# The workspace symlink is externally deleted and the path recreated as a
+# plain directory. Every path-addressed operation must fail loudly (pointing
+# at recover) instead of snapshotting the stale subvolume, and the user's
+# replacement directory must stay untouched.
+
+DETACHED="$TMPBASE/detached-ws"
+mkdir -p "$DETACHED"
+echo "seed" > "$DETACHED/seed.txt"
+assert_ok "detached: init workspace" "$BIN" init -w "$DETACHED"
+assert_ok "detached: pre-detach checkpoint" "$BIN" checkpoint -w "$DETACHED" -i pre-detach
+
+# External removal of the symlink + plain-directory replacement.
+rm -rf "$DETACHED"
+mkdir -p "$DETACHED"
+echo "user-data" > "$DETACHED/f.txt"
+
+assert_fail "detached: checkpoint refuses" "$BIN" checkpoint -w "$DETACHED" -i post-detach
+assert_output_contains "detached: checkpoint error points at recover" "ws-ckpt recover" \
+    "$BIN" checkpoint -w "$DETACHED" -i post-detach
+assert_fail "detached: rollback refuses" "$BIN" rollback -w "$DETACHED" -s pre-detach
+assert_fail "detached: list refuses" "$BIN" list -w "$DETACHED"
+
+DETACHED_CONTENT=$(cat "$DETACHED/f.txt")
+if [ "$DETACHED_CONTENT" = "user-data" ]; then
+    echo "  PASS  detached: refused ops leave user directory untouched"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  detached: user directory changed: '$DETACHED_CONTENT'"
+    FAIL=$((FAIL + 1))
+fi
+
+# ── recover -w on detached registration (issue #3059 review follow-up) ────────
+# The CLI gathers confirm metadata from status before sending Recover; the
+# single-workspace status form now refuses detached registrations, so using
+# it here would abort the flow and make the suggested remediation
+# ("ws-ckpt recover -w <path>") impossible to run. Recover must still repair
+# a registration whose symlink was deleted without replacement.
+
+MISSING_WS="$TMPBASE/missing-ws"
+mkdir -p "$MISSING_WS"
+echo "seed" > "$MISSING_WS/seed.txt"
+assert_ok "recover -w: init workspace" "$BIN" init -w "$MISSING_WS"
+rm "$MISSING_WS"  # symlink deleted externally, no replacement directory
+assert_ok "recover -w repairs deleted-symlink registration" "$BIN" recover -w "$MISSING_WS" --force
+MISSING_CONTENT=$(cat "$MISSING_WS/seed.txt" 2>/dev/null || true)
+if [ "$MISSING_CONTENT" = "seed" ] && [ ! -L "$MISSING_WS" ]; then
+    echo "  PASS  recover -w restored subvolume contents at the path"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  recover -w content mismatch: '$MISSING_CONTENT'"
+    FAIL=$((FAIL + 1))
+fi
+
+# ── recover -w by workspace ID shows the real snapshot count ──────────────────
+# The confirm prompt's snapshot count is filtered from the global status
+# report; the filter must match the ws_id form too, not only the path form.
+# A count of 0 would understate what the user is about to confirm deleting.
+
+BYID_WS="$TMPBASE/byid-ws"
+mkdir -p "$BYID_WS"
+echo "seed" > "$BYID_WS/seed.txt"
+assert_ok "recover by id: init workspace" "$BIN" init -w "$BYID_WS"
+assert_ok "recover by id: checkpoint one" "$BIN" checkpoint -w "$BYID_WS" -i byid-snap1
+assert_ok "recover by id: checkpoint two" "$BIN" checkpoint -w "$BYID_WS" -i byid-snap2
+BYID_WS_ID=$("$BIN" status | grep "$BYID_WS" | awk '{print $1}')
+BYID_OUTPUT=$(echo y | "$BIN" recover -w "$BYID_WS_ID" 2>&1)
+if echo "$BYID_OUTPUT" | grep -q "2 snapshots"; then
+    echo "  PASS  recover by id: confirm prompt shows real snapshot count"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  recover by id: prompt snapshot count wrong in: $BYID_OUTPUT"
+    FAIL=$((FAIL + 1))
+fi
+BYID_CONTENT=$(cat "$BYID_WS/seed.txt" 2>/dev/null || true)
+if [ "$BYID_CONTENT" = "seed" ] && [ ! -L "$BYID_WS" ]; then
+    echo "  PASS  recover by id: workspace restored to plain directory"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  recover by id: workspace not recovered: '$BYID_CONTENT'"
+    FAIL=$((FAIL + 1))
+fi
+
+# ── recover --all exit code (issue #3059 follow-up, links #3069) ──────────────
+# One healthy workspace ($WORKSPACE) plus one detached registration
+# ($DETACHED): the batch must exit non-zero and report the failure instead
+# of printing "All workspaces recovered." while the detached workspace was
+# never actually repaired.
+
+# NOTE: order matters — the output assertion must run first: each invocation
+# recovers the healthy workspace, so a second run would see 1/1 instead of 1/2.
+assert_output_contains "recover --all reports failed count" "Recover failed for 1/2" \
+    "$BIN" recover --all --force
+assert_fail "recover --all nonzero when a workspace fails" "$BIN" recover --all --force
+# The healthy workspace was still recovered by the batch: plain directory again.
+if [ -d "$WORKSPACE" ] && [ ! -L "$WORKSPACE" ]; then
+    echo "  PASS  recover --all still recovers healthy workspaces"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  recover --all left healthy workspace as symlink"
+    FAIL=$((FAIL + 1))
+fi
+
 
 # ── summary ───────────────────────────────────────────────────────────────────
 

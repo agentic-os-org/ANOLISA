@@ -124,7 +124,7 @@ make install
 ### Prerequisites
 
 - **Linux** host (glibc-based distribution)
-- **Rust** toolchain >= 1.91 (required by rtk v0.43.0)
+- **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
 - **just** — build runner for rtk setup
 - **Git** — for rtk source download
 

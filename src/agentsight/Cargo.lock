@@ -216,7 +216,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsight"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -226,6 +226,7 @@ dependencies = [
  "agentsight-enforcer",
  "agentsight-opt",
  "agentsight-opt-store",
+ "agentsight-sqlite-lifecycle",
  "agentsight-trajectory-collector",
  "anyhow",
  "async-stream",
@@ -304,6 +305,7 @@ name = "agentsight-audit"
 version = "0.1.0"
 dependencies = [
  "agentsight-enforcement-protocol",
+ "agentsight-sqlite-lifecycle",
  "libc",
  "log 0.4.33",
  "rusqlite",
@@ -360,8 +362,20 @@ dependencies = [
 name = "agentsight-opt-store"
 version = "0.1.0"
 dependencies = [
+ "agentsight-sqlite-lifecycle",
  "rusqlite",
  "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "agentsight-sqlite-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "libc",
+ "log 0.4.33",
+ "rusqlite",
  "thiserror 1.0.69",
 ]
 
@@ -370,6 +384,7 @@ name = "agentsight-trajectory-collector"
 version = "0.1.0"
 dependencies = [
  "agentsight-atif",
+ "agentsight-sqlite-lifecycle",
  "anyhow",
  "dirs",
  "log 0.4.33",
@@ -1577,6 +1592,7 @@ dependencies = [
  "aya",
  "libbpf-sys",
  "libc",
+ "log 0.4.33",
 ]
 
 [[package]]
@@ -1741,6 +1757,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

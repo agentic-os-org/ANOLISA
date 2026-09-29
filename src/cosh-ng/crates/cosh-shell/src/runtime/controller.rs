@@ -218,14 +218,7 @@ pub(crate) fn render_inline_guidance<W: Write>(
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
     // #1721 D13: an open draft card owns every keystroke until submit/cancel.
     if let Some(draft) = state.prompt_draft.as_ref() {
-        return Some(RawInputCapture::PromptDraft {
-            id: draft.id.clone(),
-            initial_text: draft.text.clone(),
-            completion: draft
-                .completions
-                .first()
-                .map(|completion| completion.replacement.clone().into_boxed_str()),
-        });
+        return Some(draft.capture());
     }
     if let Some(capture) = crate::slash::pending_task_form_capture(state) {
         return Some(capture);

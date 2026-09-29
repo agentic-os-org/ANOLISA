@@ -1,8 +1,30 @@
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
 use super::marker::{bash_marker_script, zsh_marker_script};
 use super::model::ShellHostConfig;
+
+/// #R2: the Bash launch shape when a marker is present. Pure decision extracted
+/// from `configure_command` so it is unit-testable without constructing a
+/// `Command` (keeps the argv contract out of the source-heavy test inventory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BashMarkerLaunch {
+    /// R2 real login identity: `argv0="-bash" --posix -i`, marker via `$ENV`.
+    LoginIdentity,
+    /// Interactive non-login: `[--noprofile] --rcfile <marker> -i`.
+    Rcfile { noprofile: bool },
+}
+
+pub(super) fn bash_marker_launch(uses_login_identity: bool, native_mode: bool) -> BashMarkerLaunch {
+    if uses_login_identity {
+        BashMarkerLaunch::LoginIdentity
+    } else {
+        BashMarkerLaunch::Rcfile {
+            noprofile: !native_mode,
+        }
+    }
+}
 
 pub(super) trait ShellAdapter {
     fn executable<'a>(&self, config: &'a ShellHostConfig) -> &'a str;
@@ -18,6 +40,17 @@ pub(super) trait ShellAdapter {
         marker_path: Option<&Path>,
         config: &ShellHostConfig,
     );
+
+    /// #R2: whether this adapter launches its login session with a real login
+    /// identity delivered through a `$ENV` inject file (Bash only) instead of
+    /// the interactive-but-non-login `--rcfile <marker>`. When true, the caller
+    /// (`start_shell_session`) writes the inject file and sets `$ENV`, and
+    /// `configure_command` emits `argv0="-bash" --posix -i`. Kept as one shared
+    /// predicate so the two sites never drift. Default false (Zsh keeps its own
+    /// `-l` path; see R2-SDD §2.2, zsh regression H7).
+    fn uses_login_identity_inject(&self, _config: &ShellHostConfig) -> bool {
+        false
+    }
 }
 
 pub(super) struct BashAdapter;
@@ -39,6 +72,19 @@ impl ShellAdapter for BashAdapter {
         true
     }
 
+    fn uses_login_identity_inject(&self, config: &ShellHostConfig) -> bool {
+        // Full R2 condition: Enhanced (marker present) + non-isolated
+        // (native_mode) + login + gate on + the inner bash actually sources
+        // `$ENV` in posix mode (bash >= 4; macOS system bash 3.2 does not, so
+        // R2 would strand a marker-less shell there). The Enhanced leg is
+        // included so this predicate alone is authoritative.
+        config.integration.uses_markers()
+            && config.native_mode
+            && config.login_shell
+            && config.login_identity
+            && config.bash_login_env_posix
+    }
+
     fn configure_command(
         &self,
         command: &mut Command,
@@ -46,13 +92,23 @@ impl ShellAdapter for BashAdapter {
         config: &ShellHostConfig,
     ) {
         if let Some(marker_path) = marker_path {
-            if config.native_mode {
-                command.args(["--rcfile"]).arg(marker_path).arg("-i");
-            } else {
-                command
-                    .args(["--noprofile", "--rcfile"])
-                    .arg(marker_path)
-                    .arg("-i");
+            match bash_marker_launch(self.uses_login_identity_inject(config), config.native_mode) {
+                BashMarkerLaunch::LoginIdentity => {
+                    // R2: real login identity. argv0="-bash" gives the inner
+                    // Bash a genuine login shell (shopt -q login_shell == yes);
+                    // --posix makes $ENV the sole startup-injection point. The
+                    // marker is delivered via $ENV=<inject> set by the caller
+                    // (start_shell_session), not --rcfile. marker_path unused here.
+                    command.arg0("-bash").args(["--posix", "-i"]);
+                }
+                BashMarkerLaunch::Rcfile { noprofile } => {
+                    if noprofile {
+                        command.args(["--noprofile", "--rcfile"]);
+                    } else {
+                        command.arg("--rcfile");
+                    }
+                    command.arg(marker_path).arg("-i");
+                }
             }
             if config.login_shell {
                 command.env("COSH_LOGIN_SHELL", "1");
@@ -234,5 +290,73 @@ mod tests {
         let marker = PathBuf::from("/tmp/marker.zsh");
         ZshAdapter.configure_command(&mut cmd, Some(&marker), &config);
         assert!(!has_env(&cmd, "COSH_ZDOTDIR_ORIG"));
+    }
+
+    // --- S1: R2 real-login-identity argv assembly (issue: R2 SDD §2.2-A) ---
+
+    #[test]
+    fn bash_r2_predicate_requires_all_legs() {
+        // R2 fires only when every leg holds: Enhanced (marker) + native +
+        // login + gate on + inner bash sources $ENV in posix. test_config sets
+        // Enhanced + native/login; struct defaults give login_identity=false,
+        // bash_login_env_posix=true. Dropping any leg must disable R2.
+        let mut all = test_config(true, true);
+        all.login_identity = true;
+        assert!(
+            BashAdapter.uses_login_identity_inject(&all),
+            "all legs present => R2"
+        );
+
+        let mut gate_off = all.clone();
+        gate_off.login_identity = false;
+        assert!(
+            !BashAdapter.uses_login_identity_inject(&gate_off),
+            "gate off => not R2"
+        );
+
+        let mut non_login = test_config(true, false);
+        non_login.login_identity = true;
+        assert!(
+            !BashAdapter.uses_login_identity_inject(&non_login),
+            "non-login => not R2"
+        );
+
+        let mut isolated = test_config(false, true);
+        isolated.login_identity = true;
+        assert!(
+            !BashAdapter.uses_login_identity_inject(&isolated),
+            "isolated (not native) => not R2"
+        );
+
+        let mut old_bash = all.clone();
+        old_bash.bash_login_env_posix = false;
+        assert!(
+            !BashAdapter.uses_login_identity_inject(&old_bash),
+            "inner bash without posix $ENV (e.g. bash 3.2) => not R2"
+        );
+    }
+
+    #[test]
+    fn bash_marker_launch_maps_gate_to_argv_shape() {
+        // Pure argv decision (no Command constructed): R2 login identity when
+        // the predicate holds; otherwise --rcfile, with --noprofile only when
+        // isolated (not native). argv0="-bash" / --posix effect is verified at
+        // the S3 PTY / L4 container layer (std exposes no arg0 getter).
+        assert_eq!(
+            bash_marker_launch(true, true),
+            BashMarkerLaunch::LoginIdentity
+        );
+        assert_eq!(
+            bash_marker_launch(true, false),
+            BashMarkerLaunch::LoginIdentity
+        );
+        assert_eq!(
+            bash_marker_launch(false, true),
+            BashMarkerLaunch::Rcfile { noprofile: false }
+        );
+        assert_eq!(
+            bash_marker_launch(false, false),
+            BashMarkerLaunch::Rcfile { noprofile: true }
+        );
     }
 }

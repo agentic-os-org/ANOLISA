@@ -9,3 +9,4 @@ __pycache__/
 .probe_cache.json
 *_REPORT.md
 report.json
+*_REPORT_zh.md

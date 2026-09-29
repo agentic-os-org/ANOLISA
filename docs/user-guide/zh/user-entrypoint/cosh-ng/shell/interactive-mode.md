@@ -8,7 +8,7 @@
 
 | 命令 | 用途 |
 |---|---|
-| `cosh` | 启动 Enhanced Assisted（`◇ `），提供 Agent 和斜杠命令路由。 |
+| `cosh` | 启动 Enhanced Assisted，提供 Agent 和斜杠命令路由。 |
 | `COSH_SHELL_INTEGRATION=native cosh` | 启动不加载 Cosh Hook、不观察也不提供洞察的 Native。 |
 | `cosh --shell zsh` | 明确选择zsh。 |
 | `cosh --isolated` | 跳过用户rcfile。 |
@@ -34,11 +34,12 @@
 ## 输入和编辑
 
 - 原生集成把每个输入字节交给前台 bash 或 zsh。
-- Enhanced Assisted（`◇ `）把 Shell 语法交给前台 Shell，并可以把自然语言
+- Enhanced Assisted 把 Shell 语法交给前台 Shell，并可以把自然语言
   请求转为 Agent 请求。
-- 在 Enhanced 的空提示符按 `Shift+Tab` 可切换到 Shell-only（`◌ `）。此时
+- 在 Enhanced 的空提示符按 `Shift+Tab` 可切换到 Shell-only。此时
   包括行首 `/` 在内的普通输入都交给 Shell，但仍可获得命令执行后的洞察。
-  再次按下即可恢复 Assisted。
+  再次按下即可恢复 Assisted。开启 `shell.status_symbols`（默认关闭）后，
+  可选的 `◇ `/`◌ ` 状态行会在每个提示符上方标记当前模式。
 - 行首 `/` 只在 Enhanced Assisted 中运行 Cosh 控制命令。Native 和 Enhanced
   Shell-only 都把它留给 Shell。
 - 终端支持时，`Shift+Enter`插入换行；多行粘贴仍作为一次提交。
@@ -71,6 +72,22 @@
 配置使用 cosh-core runtime 时，可以运行 `/agent`。Agent Composer 会打开多行
 编辑器，但不会改变后续 Shell 输入的路由方式。按 Enter 发送请求，按
 `Shift+Enter`插入换行，按`Esc`取消并恢复 Shell prompt。
+
+在第一个 token 输入 `/` 可浏览公开的 slash 命令。继续输入按前缀筛选（`/ho`
+会提示 `/hooks`）；上/下键选择候选并滚动六行列表。Tab 替换命令 token，追加一个
+空格以便输入参数。单行草稿只有命令 token 时，Enter 接受并执行选中的候选
+（默认第一项）；带参数或多行的草稿按原文提交。即使列表已打开，Esc 也会取消
+Composer。Slash 命令复用 Shell prompt 中的本地处理器和确认卡片。
+提交命令后 Composer 结束：交互卡片接管输入，或在命令完成后恢复 Shell prompt。
+未知命令名会显示本地错误，不会启动 Agent turn。
+
+`/skill:<name>` 仍为 Agent 请求选择 Skill，`/skills` 用于管理 Skill。已存在的绝对
+路径（如 `/tmp`、`/etc`），以及包含另一个斜杠的路径（如 `/tmp/file`）仍作为
+Agent 文本。单独的 `/` 打开命令菜单；完整的已注册命令名优先于同名路径。
+要在请求中讨论 slash 命令，
+可显式添加 `??` 前缀，例如 `?? /help explain this command`。后续 token 中的命令
+不会激活候选列表。括号粘贴中的 Tab 和换行仍为文本。普通 Shell prompt 保留原生
+路径补全。
 
 第一个 token 可以选择一个 Skill，后续任何以`@`开头、由空白分隔的 token 都可以
 引用当前工作空间内的文件或目录。

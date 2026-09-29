@@ -20,6 +20,11 @@ TARGETS = {
             "target-arch": "aarch64",
             "profile": "darwin11-aarch64",
         },
+        {
+            "target-os": "macos",
+            "target-arch": "x86_64",
+            "profile": "darwin11-x86_64",
+        },
     ),
     "cosh-ng": (
         {
@@ -36,6 +41,11 @@ TARGETS = {
             "target-os": "macos",
             "target-arch": "aarch64",
             "profile": "darwin11-aarch64",
+        },
+        {
+            "target-os": "macos",
+            "target-arch": "x86_64",
+            "profile": "darwin11-x86_64",
         },
     ),
     "tokenless": (

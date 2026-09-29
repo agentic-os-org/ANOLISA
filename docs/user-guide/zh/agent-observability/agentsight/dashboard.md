@@ -57,12 +57,16 @@ sudo systemctl reload agentsight.service
 
 | 页面 | 出现条件 |
 |---|---|
-| Agent 看板、Agent 可观测、会话列表、优化分析、Skill 指标、轨迹查看、设置 | 始终显示 |
+| Agent 看板、Agent 可观测、会话列表、复用标签、优化分析、Skill 指标、轨迹查看、设置 | 始终显示 |
 | Token 节省 | 装了 `tokenless`，或其统计数据库已存在 |
 | 安全可观测、系统审计 | 装了 `agent-sec-core`（daemon 或 CLI 均可） |
 | 风险拦截 | 装了 `agentsight-enforcer` 或其 socket 存在 |
 
 所以看到的导航项比本文少并不是坏了——只是对应组件没装。
+
+新访问 `http://<host>:7396/` 会落在 Agent 看板（`#/health`）。根路径本身不渲染页面，而是重定向到
+导航顺序中第一个「能力已广播」的页面，因此没有上报 `agent_health` 的主机会落在 Agent 可观测页。
+无论是否为落地页，Agent 可观测都可以通过 `#/observability` 访问。
 
 大多数页面共用同一个查询头：起止时间 + `最近 1 小时 / 6 小时 / 24 小时 / 7 天` 快捷按钮、Agent 过滤
 和**查询**按钮。展示成本与节省数字的页面需要你先点**查询**；可观测类页面会直接加载最近 24 小时。
@@ -101,6 +105,12 @@ Session 资源消耗。
 ![会话列表页：来源筛选与语义搜索](../../../../images/agentsight/zh/dashboard-sessions.png)
 
 **分析**按钮会把该会话送到优化分析页。
+
+## 复用标签
+
+对已采集轨迹做复用分诊的审阅页：先跑确定性规则分诊，再逐条或批量确认、改写 `good`、`bad`、`useless`、`unknown` 标签。规则永远不会自动标 `bad`；该结论只能来自人工决定，或附带引用轨迹步骤的 LLM 判定。
+
+可选的模型判定需要先开启 `features.reuse_llm_judge` 并在设置页配置优化 LLM 才会启用；判定会产生付费请求，批量执行时会展示进度。该页面通过始终存在的 `reuse_labels` 能力上报；`reuse.db` 不可用时页面仍然可见，并说明标签暂时无法读取。
 
 ## Token 节省
 
@@ -144,10 +154,20 @@ Skill 数量分布，以及按周的热度排行。统计单位是一次 LLM 调
 
 ## 设置
 
-配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key）。Key 回读时会脱敏，保存在数据
-库旁边的 `optimization_config.json`。
+SQLite 存储卡片读取需要认证的 `GET /api/storage/status` schema v2。在 Linux 上，它包含所有 AgentSight
+自有存储和外部 Tokenless 目标，也包含新增的复用与因果项。每张卡片展示当前生效的保留与容量策略、物理/逻辑占用、清理
+状态和覆盖范围（`full`、`partial` 或 external）。轨迹、安全审计、复用、因果与拦截库显示为部分覆盖，
+因为维护会刻意保护记账信息、活动案例图、最新缓存、人工决定或活动控制状态。
 
-![设置页面](../../../../images/agentsight/zh/dashboard-settings.png)
+卡片还会展示 `scheduled`、`worker_running`、worker heartbeat、最近尝试、最近成功、`last_result`、连续
+失败次数与下次运行时间。这些运行态字段只描述提供当前接口的进程；trace 负责的库显示未调度，并不能证明
+另一个 trace 进程没有运行。`lock_busy` 表示另一个进程持有该数据库的维护锁。不要从 `within_policy` 推断
+worker 健康：逻辑占用符合上限时，任务仍可能未调度、worker 已停止或最近尝试失败。逻辑占用会扣除可复用
+的 freelist 页面，因此物理文件较大时也可能正常。接口不会返回文件路径。
+
+本页也用于配置优化分析与语义搜索所使用的 LLM（供应商、Base URL、模型、API Key 以及语义搜索排序超时）。
+排序超时时会返回空结果，并在服务端记录警告日志。Key 回读时会脱敏，保存在数据库旁边的
+`optimization_config.json`。
 
 ## 语言
 

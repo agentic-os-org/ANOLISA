@@ -6,6 +6,42 @@
 
 ## [未发布]
 
+## [0.26.0] — 2026-09-23
+
+### 新增
+- Enhanced Bash 宿主启动的登录会话在 Bash 4+ 上具备真实 login 身份：`shopt -q login_shell` 返回 yes、`$0` 为 `-bash`，并读取 `/etc/profile` 与 `~/.bash_profile`，与原生 `bash -l` 登录一致；设置 `shell.login_identity = false` 可回退旧行为，Bash 3.2 或能力探测失败时也会自动回退 (#3358)
+- cosh-ng 现可在 Intel Mac 上安装：raw 后端新增 macOS x86_64 预编译产物（最低支持 macOS 11.0），公开安装脚本可识别 Intel Mac，不再直接报错或回退到 ARM 包 (#3448, #3449)
+- `cosh-cli checkpoint recover` 现在支持在原始工作区路径已不存在的情况下恢复被中断的初始化，恢复提示通过 `meta.warning` 返回 (#3356)
+
+### 变更
+- 诊断日志默认级别由 `warn` 调整为 `info`：`~/.copilot-shell/logs/cosh-{shell,core}.log.<date>` 默认记录 shell/core 启动、core 派生与错误收敛点等此前仅在界面中可见的事件；显式设置的 `COSH_LOG`、`RUST_LOG` 或 `[logging] level` 依然优先生效，`debug: true` 会把有效级别提升到 `debug` (#3331)
+
+### 修复
+- 修复 auto 模式下经 rtk 包装的只读命令（如 `find /tmp -name '*x*' 2>/dev/null` 被包装为 `env TOKENLESS_* /usr/bin/rtk …`）被误判为需要审批的问题：判定时剥离包装层、执行时仍使用包装形式以保留 RTK 输出压缩，行为出现偏差时回到审批卡片 (#3436)
+- 修复在空工作区创建 `checkpoint = on` 任务并对接旧版 daemon 时失败却没有任何说明的问题：现在会说明未生成快照的原因，并给出升级 ws-ckpt、添加文件后重新提交或改用 `checkpoint = off` 的明确指引 (#3437)
+- 修复切换任务快照成功后新启动的 Core 与 Codex 任务仍使用旧工作区视图、需要重启 Gateway 的问题：现在刷新后的工作区立即生效，刷新失败时新启动按 fail-closed 拒绝执行 (#3438)
+
+## [0.25.0] — 2026-09-20
+
+### 新增
+- 托管任务（Managed Tasks）现已贯通端到端流程：通过引导式 `/task` 表单提交持久化的 Core 或 Codex 任务、选择 checkpoint 策略、断线重连后查看进度，并经由 Gateway 受控的恢复流程安全地预览、对比与切换任务自有快照 (#2911)
+- `/agent` 内新增 slash 命令发现：在 Composer 中输入 `/` 可按前缀过滤候选命令、上下浏览并 Tab 补全，提交的命令经由既有处理器执行并保留确认卡片 (#3224)
+- Provider 首次配置现已自动化：根据模板类型与已有配置推导出无冲突的默认名称；ECS RAM Role 凭据通过有界、可取消的探测自动检测并提交，无需人工确认 (#3298)
+- 仅将 stderr 抑制到 /dev/null 的只读命令（如 `find /tmp -name '*x*' 2>/dev/null`）在 auto 模式下不再需要审批 (#3208)
+
+### 变更
+- 已声明的 `[[hooks.PreToolUse]]` 配置 Hook 现在默认生效，不再需要设置 `hooks.enabled`；显式禁用的 Hook 会给出警告并在扩展注册前移除；Hook 空输出仍默认阻断工具调用 (#3330)
+- Enhanced 会话默认不再在提示符上方打印所有权状态行（`◇`/`◌`），保持 shell 原生提示符外观；如需恢复可设置 `shell.status_symbols = true` 或 `COSH_SHELL_STATUS_SYMBOLS=1`。开启后符号单独占一行发布，窄终端编辑不再丢失 CJK 字符或光标错位 (#3345, #3254)
+
+### 修复
+- 修复指向 /proc、/dev、/sys 的字面路径穿越拼写（如 /../proc/version）可绕过 readonly 安全检查的问题：路径先做词法归一化再匹配拦截清单，合法路径不受影响 (#2708)
+- 修复带引号的 /dev/null 重定向目标（如 2>"/dev/null"）被误分类为文件写入、导致审批卡片理由显示错误的问题：现在按空重定向分类，与无引号形式行为一致 (#2710)
+- SysOM 端点解析现在优先选择可达的 VPC 内代理，无公网出口的 ECS 实例因此可以访问 SysOM；通过 `COSH_SYSOM_ENDPOINT` 或 `sysom_endpoint` 配置的显式覆盖保留系统代理 (#3188)
+- 修复名称中仅包含 `HOOK:` 子串的中风险工具请求被误分类为 Hook 请求的问题：审批卡片现在提供标准操作而非 Hook 操作集 (#3248)
+- 修复 token-plan 网关在模型查询路由返回 HTTP 400 时，有效凭据无法通过 `/auth` 保存的问题；仅提供模型列表的 provider 仍按原路径拒绝无法验证的凭据 (#3276)
+- 修复 zh-CN `/help` 面板两处文案：Registry 分组标题已汉化，`/agent` 摘要措辞更正；en-US 输出不变 (#3363)
+- 修复 RPM 安装/擦除脚本对 `/etc/shells` 的管理不安全问题：`cosh-ng` 与 `copilot-shell` 互换（yum swap）时不再丢失替代方仍需要的登录 shell 注册行；更新改为原子操作并保留文件元数据；安装期失败不再静默 (#3367)
+
 ## [0.24.1] — 2026-09-09
 
 ### 修复

@@ -3,13 +3,13 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use agentsight_sqlite_lifecycle::{ConnectionOptions, open_connection};
 use rusqlite::{Connection, params};
 
 use super::types::{
     EvaluationResult, EvaluationRunRecord, EvaluationStatus, GraderError, GraderType, RootCause,
     TargetType, Verdict,
 };
-use crate::storage::sqlite::create_connection;
 
 /// SQLite-backed persistence for evaluation runs.
 pub struct EvaluationStore {
@@ -18,12 +18,9 @@ pub struct EvaluationStore {
 
 impl EvaluationStore {
     /// Open an evaluation store using the given SQLite path.
-    ///
-    /// The MVP stores `evaluation_runs` beside GenAI events so `serve --db`
-    /// controls both conversation evidence and evaluation results.
     pub fn new_with_path(path: &Path) -> Result<Self, GraderError> {
-        let conn =
-            create_connection(path).map_err(|error| GraderError::Storage(error.to_string()))?;
+        let conn = open_connection(path, ConnectionOptions::default())
+            .map_err(|error| GraderError::Storage(error.to_string()))?;
         let store = EvaluationStore {
             conn: Mutex::new(conn),
         };
@@ -124,17 +121,17 @@ impl EvaluationStore {
     /// Returns `false` when an equivalent completed run already exists.
     pub fn insert_completed(&self, result: &EvaluationResult) -> Result<bool, GraderError> {
         let result_json = serde_json::to_string(result)?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let inserted = conn
-            .execute(
+        let inserted = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            conn.execute(
                 "INSERT OR IGNORE INTO evaluation_runs (
-                run_id, target_type, target_id, input_hash, grader_type, grader_version,
-                rubric_version, judge_model, prompt_hash, confidence, status, verdict,
-                score, root_cause, completed_at, result_json
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,CURRENT_TIMESTAMP,?15)",
+                    run_id, target_type, target_id, input_hash, grader_type, grader_version,
+                    rubric_version, judge_model, prompt_hash, confidence, status, verdict,
+                    score, root_cause, completed_at, result_json
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,CURRENT_TIMESTAMP,?15)",
                 params![
                     &result.run_id,
                     result.target_type.as_str(),
@@ -153,7 +150,8 @@ impl EvaluationStore {
                     result_json,
                 ],
             )
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
+            .map_err(|error| GraderError::Storage(error.to_string()))?
+        };
         Ok(inserted > 0)
     }
 
@@ -357,6 +355,60 @@ mod tests {
             "run-first"
         );
 
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn evaluation_writes_leave_maintenance_to_genai_target() {
+        let path = temp_db_path("grader_store_retention");
+        let store = EvaluationStore::new_with_path(&path).unwrap();
+        let expired = evaluation_result("run-expired", "expired-hash");
+        assert!(store.insert_completed(&expired).unwrap());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE evaluation_runs SET created_at = '2000-01-01 00:00:00' WHERE run_id = ?1",
+                params!["run-expired"],
+            )
+            .unwrap();
+
+        let current = evaluation_result("run-current", "current-hash");
+        assert!(store.insert_completed(&current).unwrap());
+        assert!(
+            store
+                .find_completed(
+                    TargetType::Conversation,
+                    "conv-1",
+                    "expired-hash",
+                    GraderType::Rule,
+                    RULE_GRADER_VERSION,
+                )
+                .unwrap()
+                .is_some(),
+            "evaluation writes must not run synchronous cleanup"
+        );
+
+        let genai = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::PeriodicStoragePolicy::new(1, 0, 60),
+        )
+        .unwrap();
+        genai.maintain().unwrap();
+        assert!(
+            store
+                .find_completed(
+                    TargetType::Conversation,
+                    "conv-1",
+                    "expired-hash",
+                    GraderType::Rule,
+                    RULE_GRADER_VERSION,
+                )
+                .unwrap()
+                .is_none(),
+            "the GenAI physical target must maintain evaluation rows"
+        );
         cleanup_db(&path);
     }
 

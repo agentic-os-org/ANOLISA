@@ -19,7 +19,7 @@ const DEPLOY_SCRIPT = resolve("scripts/deploy.sh");
 type DeployOptions = {
   inspectStdoutPrefixLogs?: boolean;
   inspectHasRuntime?: boolean;
-  installHelpMode?: "has-unsafe" | "no-force" | "no-unsafe";
+  installHelpMode?: "has-unsafe" | "no-force" | "no-unsafe" | "capabilities";
   openclawVersionEnv?: string;
   precreateUserInspectTmpdir?: boolean;
   runtimeStatus?: string;
@@ -114,6 +114,8 @@ fi
 if [[ "\${1:-}" == "plugins" && "\${2:-}" == "install" && "\${3:-}" == "--help" ]]; then
     if [[ "\${OPENCLAW_FAKE_INSTALL_HELP:-has-unsafe}" == "no-force" ]]; then
         echo "Usage: openclaw plugins install <package>"
+    elif [[ "\${OPENCLAW_FAKE_INSTALL_HELP:-has-unsafe}" == "capabilities" ]]; then
+        echo "Usage: openclaw plugins install <package> --force --accept-capabilities --dangerously-force-unsafe-install"
     elif [[ "\${OPENCLAW_FAKE_INSTALL_HELP:-has-unsafe}" == "no-unsafe" ]]; then
         echo "Usage: openclaw plugins install <package> --force"
     else
@@ -123,6 +125,10 @@ if [[ "\${1:-}" == "plugins" && "\${2:-}" == "install" && "\${3:-}" == "--help" 
 fi
 
 if [[ "\${1:-}" == "plugins" && "\${2:-}" == "install" ]]; then
+    if [[ "\${OPENCLAW_FAKE_INSTALL_HELP:-has-unsafe}" == "capabilities" && "$*" != *"--accept-capabilities"* ]]; then
+        echo "Plugin requires capability consent" >&2
+        exit 1
+    fi
     echo "installed"
     echo "install stderr detail" >&2
     exit 0
@@ -287,7 +293,20 @@ describe("deploy.sh", () => {
     assert.match(result.log, /plugins install .* --force --dangerously-force-unsafe-install/);
   });
 
-  it("uses the unsafe flag whenever OpenClaw install help exposes it", () => {
+  it("accepts capabilities on modern hosts without the deprecated unsafe flag", () => {
+    const result = runDeploy({
+      installHelpMode: "capabilities",
+      inspectHasRuntime: true,
+      version: "2026.8.1",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.log, /plugins install .* --force --accept-capabilities/);
+    assert.doesNotMatch(result.log, /plugins install .* --dangerously-force-unsafe-install/);
+    assert.match(result.log, /plugins inspect agent-sec --runtime --json/);
+  });
+
+  it("uses the unsafe flag on legacy hosts whose install help exposes it", () => {
     const result = runDeploy({
       installHelpMode: "has-unsafe",
       inspectHasRuntime: true,

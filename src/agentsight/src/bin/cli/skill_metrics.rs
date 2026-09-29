@@ -22,6 +22,7 @@
 //! agentsight skill-metrics all --last 168 --agent Cosh
 //! ```
 
+use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::skill_metrics::{MetricOptions, compute_skill_metrics};
 use agentsight::storage::sqlite::GenAISqliteStore;
 use structopt::StructOpt;
@@ -228,7 +229,12 @@ impl SkillMetricsCommand {
         };
 
         // Open store
-        let store = GenAISqliteStore::new_with_path(&db_path)?;
+        let store = DatabaseManager::open_query(
+            DatabaseId::GenAi,
+            &db_path,
+            DatabaseCoverage::Full,
+            GenAISqliteStore::open_read_only_existing,
+        )?;
 
         // Compute time range
         let start_ns = hours_ago_ns(last) as i64;

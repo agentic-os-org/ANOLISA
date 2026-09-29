@@ -415,3 +415,88 @@ fn generic_normalizer_never_copies_agent_labels_into_authority_fields() {
     );
     assert_eq!(normalized.requested_scope.access.as_str(), "execute");
 }
+
+#[test]
+fn factory_launches_in_refreshed_workspace_without_restart() {
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let adapter = executable(root.path(), "codex-acp");
+    fs::write(
+        &adapter,
+        "#!/bin/sh\nprintf '%s' \"$PWD\" > artifact; while read line; do :; done\n",
+    )
+    .unwrap();
+    let expected_target = target("local");
+    let (installation, actors, actor) = actor_resolver();
+    let workspaces = TrustedWorkspaceResolver::new(expected_target.clone(), &workspace).unwrap();
+    let workspace_ref = workspaces.workspace_ref().clone();
+    let mut factory = InstalledAcpRuntimePortFactory::new(
+        installation,
+        actors,
+        workspaces.clone(),
+        BTreeMap::from([(AcpRuntimeProfileId::Codex, adapter)]),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let run = ScheduledRun {
+        actor,
+        task_id: TaskId::new(),
+        run_id: RunId::new(),
+        runtime: RuntimeSelector {
+            runtime: BoundedName::new("acp").unwrap(),
+            profile: Some(BoundedName::new("codex").unwrap()),
+        },
+        intent: BoundedText::new("read status").unwrap(),
+        target: expected_target,
+        workspace: workspace_ref.clone(),
+        capability_profile:
+            cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1().identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("read status").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Codex,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
+        lease_generation: 7,
+    };
+
+    for _ in 0..2 {
+        let old = root.path().join("workspace.rollback-tmp");
+        fs::rename(&workspace, &old).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::remove_dir_all(&old).unwrap();
+        workspaces.refresh_after_snapshot_switch().unwrap();
+        let port = factory.create(&run).unwrap();
+        let artifact = workspace.join("artifact");
+        for _ in 0..100 {
+            if artifact.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            workspace.display().to_string()
+        );
+        drop(port);
+    }
+}
+
+#[test]
+fn workspace_refresh_rejects_symlink_substitution_and_invalidates_all_clones() {
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    let replacement = root.path().join("replacement");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&replacement).unwrap();
+    let expected_target = target("primary");
+    let workspaces = TrustedWorkspaceResolver::new(expected_target.clone(), &workspace).unwrap();
+    let clone = workspaces.clone();
+    fs::remove_dir(&workspace).unwrap();
+    symlink(&replacement, &workspace).unwrap();
+    assert!(workspaces.refresh_after_snapshot_switch().is_err());
+    assert!(workspaces.resolve(&expected_target).is_err());
+    assert!(clone.resolve(&expected_target).is_err());
+}
