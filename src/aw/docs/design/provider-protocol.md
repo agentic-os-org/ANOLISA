@@ -16,7 +16,7 @@ Hermes; this delivery uses synthetic fixtures, not new native integration eviden
 | `aw-config` | Parse one configuration and check its structure and static references |
 | `aw-provider` | Validate protocol messages, correlate responses and check configured steps against supplied Provider and Adapter evidence |
 | `aw-contracts` / `aw-core` | Validate and execute their existing capability profiles through a trusted Host and Journal |
-| Future bounded Host | Execute Provider commands, enforce deadlines and output limits, handle cancellation and collect execution evidence |
+| `aw-host` | Execute Provider commands, enforce deadlines and output limits, handle cancellation and return correlated call reports |
 | Future Adapter and service | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
 
 Configuration fields are unchanged. A named object under `spec.providers`
@@ -34,8 +34,8 @@ narrower admission checks described here.
 The execution contract is one process per method: the caller launches the
 configured argv, writes one UTF-8 JSON object to stdin and closes stdin. The
 Provider returns exactly one JSON object on stdout; diagnostic text belongs on
-stderr. There is no implicit shell expansion. D1b specifies and validates the
-messages; the process runner is a later delivery.
+stderr. There is no implicit shell expansion. `aw-provider` specifies and validates
+the messages; the [local Provider Host](provider-host.md) executes them through `aw-exec`.
 
 A policy block is a successful result and requires exit status zero. A nonzero
 exit means execution failed, regardless of stdout. Invalid JSON, oversized
@@ -149,6 +149,12 @@ display omits untrusted codes and payloads; callers control any diagnostic use.
 
 ## Offline admission
 
+`admission::preflight(config, target, capabilities)` checks enabled configuration
+requirements against the supported profile and trusted Adapter capabilities
+without discovery or process execution. The Host runs it before starting any
+Provider. Its returned steps remain candidates; preflight does not establish
+Provider support.
+
 `admission::admit` accepts a statically checked `aw_config::Configuration`, a
 target ID, caller-trusted `AdapterCapabilities` and Provider evidence keyed by
 the configured Provider IDs. Each Provider entry includes a checked description
@@ -164,7 +170,7 @@ The current transport profile requires `stdio` at location `agent`. Disabled
 events and steps need no discovery evidence. Step order within an event is
 preserved; admission does not schedule distinct events or choose parallelism.
 
-| Request | D1b result |
+| Request | Admission result |
 | --- | --- |
 | `tool.before`: `observe`, `block` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
@@ -183,10 +189,10 @@ Provider can inspect tool names and arguments in its own operation. The presence
 of `permission.request` in the vocabulary does not imply support for an
 interactive approval UI in any particular framework or entrypoint.
 
-Timeout, event budget and output-limit fields remain obligations for the future
-Host. Offline admission cannot enforce elapsed time, process cleanup, native
-serial/parallel scheduling, failure handling or an event-wide deadline. Passing
-admission is therefore only one prerequisite for a runnable binding.
+`aw-host` enforces timeout, event budget and output-limit fields during local
+execution. Offline admission itself cannot enforce elapsed time, process cleanup,
+native scheduling or failure handling. Passing admission is therefore only one
+prerequisite for a runnable native binding.
 
 ## Relationship to Core and security enforcement
 
@@ -205,10 +211,10 @@ or denied capability execution, not a successful security verdict: a successful
 security inspection that rejects a command produces an output with `verdict:
 "deny"` and receipt disposition `produced`.
 
-D2 must introduce an explicitly reviewed, versioned native-Hook profile before
-wiring these generic operations into Core. Its Host must authenticate Provider
-identity, execute the transport, validate candidate effects, translate the
-selected profile and create correlated execution evidence for Core and Journal.
+Wiring these generic operations into Core still requires an explicitly reviewed,
+versioned native-Hook profile and authenticated Provider identity. `aw-host`
+executes transport and validates candidate effects; it does not translate a Core
+profile or create evidence for Core and Journal.
 The existing security profile retains its stronger final-dispatch requirements.
 Native readback is still required to establish that the framework adopted a
 returned effect. Neither a Provider response nor a journaled call proves that.
@@ -246,14 +252,14 @@ the example does not start an Agent or cause the AW library to execute commands.
 ## Joint delivery with sec-core
 
 sec-core can implement the three protocol methods and private policy schema
-against these schemas before the AW process runner exists. It owns built-in
+against these schemas and use the local Host for protocol integration. It owns built-in
 rules, custom policy evaluation and the meaning of a tool-specific safety
 verdict. A CLI wrapper may connect to a separately managed sec-core service.
 The wrapper must translate scanner outcomes into declared Provider effects and
 separate scanner failure from a successful policy block.
 
-AW owns protocol validation and admission now. Later deliveries add the bounded
-Host, service lifecycle, authenticated Adapter capabilities, native Hook
+AW provides protocol validation, admission and the local bounded Host. Later
+deliveries add service lifecycle, authenticated Adapter capabilities, native Hook
 translation and audit integration. Final `security.violation` composition and
 its relation to sec-core are part of that later enforcement design; this slice
 does not claim to supply a last, non-bypassable security check.
