@@ -64,6 +64,10 @@ V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
 [上下文示例与日志限制](v2/README.md#native-opentelemetry-tracing)。
 
+源码构建的 Rust `agent-sec-cli aw-provider` 通过 `aw-provider/v1alpha1` 向 AW
+提供代码扫描。AW 负责 Agent 适配与 Provider 调用审计，扫描使用已有 sec daemon。
+配置、显式阻断与当前覆盖范围见 [AW Provider 指南](../../docs/user-guide/zh/agent-security/agent-sec-core/aw-provider.md)。
+
 ## 安全防护架构
 
 ```

@@ -100,6 +100,15 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
                 )
                 .map_err(RunError::Output);
         }
+        Plan::Provider { socket } => {
+            asc_cli::provider::run(
+                &mut io::stdin().lock(),
+                &mut io::stdout().lock(),
+                socket,
+                cli.timeout(),
+            )?;
+            return Ok(0);
+        }
         Plan::Daemon { socket } => socket,
     };
     let request = cli.request().map_err(RunError::Input)?;
@@ -140,6 +149,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
 
 #[derive(Debug, thiserror::Error)]
 enum RunError {
+    #[error(transparent)]
+    Provider(#[from] asc_cli::provider::Error),
     #[error(transparent)]
     Input(#[from] InputError),
     #[error(transparent)]
