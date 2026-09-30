@@ -2,35 +2,56 @@
 
 [中文版](README_zh.md)
 
-AW provides unified configuration, versioned capability contracts and embeddable execution libraries. `aw-config` validates configuration; `aw-provider` checks Provider messages and admission offline; `aw-host` prepares and invokes local Providers through bounded command transport. `aw-contracts` checks record relationships, while `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
+AW provides a shared configuration and local service for Agent policies. The Linux
+service prepares external Providers, executes tool-event steps and keeps durable
+audit metadata independently of an Agent or shell. Adapters supply native
+capabilities, schedule callbacks and apply the returned effects. The interfaces
+are experimental; QwenPaw, Qoder CLI, OpenClaw and Hermes integration is still
+being built.
 
-The interfaces are experimental. Contract tests use synthetic records; command
-transport tests use local child processes. Neither certifies Agent integration.
+## Available today
 
-## Validate a configuration
+| Capability | Availability |
+| --- | --- |
+| Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
+| Run a standalone Linux service and query local execution records | ✅ Source build |
+| Execute Provider steps for `tool.before` (`observe`/`block`) and `tool.after` (`observe`) | ✅ Local client API and synthetic-event example |
+| Start an Agent, install its Hooks or verify native effect adoption | ❌ |
+| Install a published AW package or start the service on demand | ❌ |
+| Ask for approval, replace tool results or enforce policy below native Hooks | ❌ |
 
-From the repository root, use the offline example to check a configuration:
+Service status and Provider admission do not establish that an Agent is protected.
+The service returns candidate effects; the future Adapter must prove adoption.
+
+## Run from source
+
+AW is not yet available through `anolisa install` or an RPM. On Linux, install
+rustup and build from the repository root:
 
 ```bash
 cd src/aw
-cargo run --locked -p aw-config --example validate -- crates/aw-config/examples/aw.minimal.yaml
+cargo build --locked -p aw-service --bin aw
+target/debug/aw validate --config crates/aw-config/examples/aw.minimal.yaml
+AW_DEMO_ROOT="$(mktemp -d "$PWD/target/aw-demo.XXXXXX")"
+printf 'Socket: %s\n' "$AW_DEMO_ROOT/state/aw.sock"
+target/debug/aw serve --config crates/aw-config/examples/aw.minimal.yaml \
+  --state-dir "$AW_DEMO_ROOT/state"
 ```
 
-A successful result confirms configuration syntax and static references. It does
-not start an Agent or enable a policy. See the [configuration guide](../../docs/developer-guide/en/aw/configuration.md)
-for fields and examples, and [Contributing to AW](CONTRIBUTING.md) for development
-setup, tests and CI.
+`serve` runs in the foreground. The starter configuration contains no Providers.
+From a second terminal in `src/aw`, set `AW_DEMO_SOCKET` to the absolute path
+printed above, then inspect or stop this service:
 
-## Local Provider Host
+```bash
+AW_DEMO_SOCKET=/absolute/socket/path/printed/above
+target/debug/aw status --socket "$AW_DEMO_SOCKET"
+target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+```
 
-`aw-host` runs real `describe`, `validate_config` and `invoke` exchanges on Linux.
-It retains configuration and process context, enforces shared event deadlines,
-and returns candidate effects separately from execution failures. The caller
-supplies trusted Adapter capabilities and owns scheduling and effect adoption.
-
-Try the [local Host example](docs/design/provider-host.md#local-example) with the
-sample policy. It uses synthetic tool events and does not launch an Agent,
-install Hooks or persist audit records.
+The foreground command exits after cleanup. Audit records remain in the state
+directory. After the foreground command exits, `rm -r -- "$AW_DEMO_ROOT"`
+in its terminal removes only this demo directory and its audit history. The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md)
+includes a runnable Provider demo, command reference and restart guidance.
 
 ## sec-core Provider
 
@@ -41,54 +62,23 @@ existing sec-core CLI and daemon; no AW code is installed inside sec-core.
 See the [sec-core Provider guide](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md)
 for source builds, configuration and a local Host example.
 
-## Core embedding
+## Integration and development
 
-`aw-core` provides `Core::prepare` and `Core::execute`, trusted Host/Clock/Journal
-ports, and a durable Linux `FileJournal`. Preparation checks the complete plan
-before any provider call. Execution records each call before dispatch and returns
-terminal results only after the journal acknowledges them. Failed or interrupted
-events remain reserved; there is no automatic retry or recovery.
+The reusable `aw-service::Client` binds to one service generation and configuration
+revision. An Adapter opens one event, invokes its steps serially or concurrently,
+then closes it. All steps share the event deadline and may be attempted once.
+The service persists execution metadata before returning results; it never
+retries an uncertain call automatically.
 
-See [Core execution and storage](docs/design/core-execution.md) for ownership,
-cancellation, failure and embedding contracts. Core tests use synthetic Hosts;
-native Agent integration and effect adoption require separate runtime validation.
+`aw-host` also remains available for direct embedding. `aw-core` provides a
+separate pinned-plan execution API and the durable `FileJournal` storage reused
+by the service. Neither interface grants native permission or certifies adoption.
 
-## Command execution
-
-`aw-exec` runs individual commands on Linux with an absolute deadline, byte limits,
-cancellation and owned process-group cleanup. Native stdout, stderr and exit status
-remain for the caller to interpret. `aw-host` adds the Provider JSON protocol;
-native command callers keep using the raw byte interface. Daemon and Agent
-adapters remain separate work.
-See [bounded command execution](docs/design/bounded-execution.md) for its API,
-ownership and validation boundaries.
-
-## Source reference
-
-- [User guide and availability](../../docs/user-guide/en/user-entrypoint/aw.md),
-  [configuration reference](../../docs/developer-guide/en/aw/configuration.md),
-  [starter configuration](crates/aw-config/examples/aw.minimal.yaml),
-  [full example](crates/aw-config/examples/aw.yaml) and
-  [configuration API](crates/aw-config/src/lib.rs)
-- [Registered schemas](schemas/) and [synthetic payload examples](tests/fixtures/contracts.json)
-- [Public API](src/lib.rs), [record validation](src/validation.rs) and [plan validation](src/orchestration.rs)
-- [External Provider protocol and admission](docs/design/provider-protocol.md)
-  and [Provider API](crates/aw-provider/src/lib.rs)
-- [Encoding tests](tests/canonical.rs), [schema tests](tests/schemas.rs),
-  [record tests](tests/contracts.rs) and [plan tests](tests/orchestration.rs)
-
-The Registry includes 21 schema resources. The eight v1 resources in `crates/aw-contracts/schemas/` are reference copies and are not registered. Callers must use matching schema IDs and digests; no automatic version conversion is provided.
-
-Parse incoming wire records with `canonical::parse` before schema validation. Shape checks alone do not validate record relationships or grant authorization. Follow the public API documentation for plan-level checks; callers remain responsible for authenticating evidence and enforcing actions.
-
-User configuration uses the separate `aw-config` crate and its bundled
-`aw/v1alpha1` schema. It accepts one `AWConfiguration` object with
-`apiVersion`, `kind`, `metadata` and `spec`; Provider instances are named objects
-under `spec.providers`. The schema recognizes QwenPaw, Qoder CLI, OpenClaw,
-Hermes and all 16 event names, without claiming adapters are implemented.
-Configuration has no runtime `status`. `aw-provider` validates externally supplied
-operation/private-config responses and admits tool steps against caller-trusted
-Adapter capabilities. It does not execute discovery or establish native adoption.
-`aw-host` executes those exchanges; native binding installation remains subsequent work.
-See the [configuration design](docs/design/configuration.md) for the separation
-from the existing wire contracts.
+- [User guide](../../docs/user-guide/en/user-entrypoint/aw.md) and
+  [configuration reference](../../docs/developer-guide/en/aw/configuration.md)
+- [Local service and client contract](docs/design/local-service.md)
+- [Provider protocol](docs/design/provider-protocol.md),
+  [Provider Host](docs/design/provider-host.md) and
+  [bounded command execution](docs/design/bounded-execution.md)
+- [Core execution and storage](docs/design/core-execution.md)
+- [Development setup, crate boundaries and tests](CONTRIBUTING.md)

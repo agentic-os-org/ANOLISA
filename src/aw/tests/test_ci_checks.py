@@ -135,6 +135,8 @@ class GateTests(GateFixture):
             "    mode = 'empty' if 'aw-host' in sys.argv else 'valid'\n"
             "if mode == 'sec-core-empty':\n"
             "    mode = 'empty' if 'aw-provider-sec-core' in sys.argv else 'valid'\n"
+            "if mode == 'service-empty':\n"
+            "    mode = 'empty' if 'aw-service' in sys.argv else 'valid'\n"
             "if mode.startswith('contract-empty-'):\n"
             "    target = mode.removeprefix('contract-empty-')\n"
             "    mode = 'empty' if target in sys.argv else 'valid'\n"
@@ -146,7 +148,7 @@ class GateTests(GateFixture):
         )
         cargo.chmod(0o755)
         for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty", "sec-core-empty",
+            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty", "sec-core-empty", "service-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
             "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
@@ -199,6 +201,10 @@ class GateTests(GateFixture):
                 "aw-provider-sec-core", self.root / "crates/aw-provider-sec-core",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"],
             ),
+            (
+                "aw-service", self.root / "crates/aw-service",
+                ["aw-config", "aw-core", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -227,6 +233,7 @@ class GateTests(GateFixture):
             (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"), (6, "asc-daemon-client"), (6, "aw-core"),
+            (7, "aw-exec"), (7, "aw-contracts"), (7, "tokio"),
         ):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})

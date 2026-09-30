@@ -146,6 +146,7 @@ def check_inventory() -> None:
         ("aw-exec", "execution"),
         ("aw-host", "host"),
         ("aw-provider-sec-core", "provider"),
+        ("aw-service", "service"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -165,6 +166,7 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-exec": {"libc", "thiserror"},
         "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
+        "aw-service": {"aw-config", "aw-core", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"},
     }
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]

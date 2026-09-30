@@ -17,14 +17,14 @@ python3 src/aw/scripts/check.py
 The entry runs CI behavior tests, formatting, Clippy, all locked workspace tests,
 the Python/JavaScript digest vectors and rustdoc. Missing tools, empty or fully
 ignored configuration, Provider protocol/admission, Provider Host, contract, plan,
-Core execution, command execution or journal test targets,
+Core execution, command execution, local service or journal test targets,
 invalid vectors and command failures return nonzero. Each command has a timeout and its child process group is cleaned up on
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
 These checks run as a regular user without an Agent or service login. Cargo
 downloads uncached dependencies; schema validation reads only bundled resources.
-The runner requires Linux. Provider Host execution, command execution and FileJournal require Linux;
+The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
 this gate does not certify other operating systems or minimum supported versions.
 
 [AW CI](../../.github/workflows/aw-ci.yml) runs on branch pushes, pull requests,
@@ -64,8 +64,9 @@ Local validation also uses Linux ARM64.
 | `aw-exec` | Bounded Linux command transport and owned process-group cleanup; independent of Provider protocols |
 | `aw-host` | Compose configuration, Provider admission and bounded transport into local preparation and invocation; depends on `aw-config`, `aw-provider` and `aw-exec` |
 | `aw-provider-sec-core` | Concrete Provider binary; calls public sec-core CLI through `aw-exec`, with no sec-core crate dependency |
+| `aw-service` | Standalone local service, reusable client and developer CLI; executes through `aw-host` and reuses the `aw-core` Journal for metadata |
 
-Keep framework integration outside these libraries; process execution belongs in `aw-exec`.
+Keep native framework integration outside these libraries and service; process execution belongs in `aw-exec`.
 Keep Provider message parsing and offline admission in `aw-provider`; `aw-host`
 owns their execution boundary without adding Provider semantics to raw command
 transport or replacing the Core Host/Journal contracts.
@@ -73,7 +74,35 @@ Dependency and source-layout checks live in [scripts/check.py](scripts/check.py)
 with regression tests in [tests/test_ci_checks.py](tests/test_ci_checks.py).
 Changes to a crate boundary must update both the checks and their tests.
 
+## Build the service
+
+Build the CLI and sample Provider from `src/aw` on Linux:
+
+```bash
+cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-provider --example policy
+```
+
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md#run-the-local-service-demo)
+walks through a foreground service and separate client, including state-directory
+and audit-history cleanup. The service uses the local `aw-service/v1alpha1`
+protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately.
+
 ## Runtime validation
+
+For focused local service checks:
+
+```bash
+cargo test --locked -p aw-service
+```
+
+Service tests use real Unix sockets, fixture Provider processes and private
+temporary state directories. They need no model, Agent installation or cloud key.
+They check shared event budgets, binding and once-only invocation, cancellation
+and shutdown, durable audit, stale handles and endpoint ownership. Fixtures wait
+for owned processes and remove temporary directories; build artifacts stay in
+`target/`. See the [local service contract](docs/design/local-service.md) for the
+validation boundary.
 
 For focused Provider Host checks, run from `src/aw` on Linux:
 
