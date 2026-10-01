@@ -2,7 +2,7 @@
 
 [中文版](../../../zh/agent-observability/agentsight/cli-reference.md)
 
-All flags on this page are taken from `agentsight 0.11.x --help` on Linux. The sample output keeps
+All flags on this page are taken from `agentsight 0.13.0 --help` on Linux. The sample output keeps
 the real layout, but every identifier is a placeholder and every count is a round number — none of
 it is a real capture.
 
@@ -13,8 +13,8 @@ it is a real capture.
 | Privileges | `trace` needs root (or `CAP_BPF` + `CAP_PERFMON`). Query commands need read access to `/var/log/sysak/.agentsight`, which the packaged service owns — use `sudo`. |
 | Config file | Commands that read rules accept `--config`, default `/etc/agentsight/config.json`. `discover` reads the same file `trace` does, so it reflects your custom rules. |
 | Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, and `skill-metrics` accept `--db` to point at a different database file. |
-| Machine output | `--json` is available on `token`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
-| Output language | `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text — note `discover` has no such flag. |
+| Machine output | `--json` is available on `discover`, `token`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
+| Output language | `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
 | Platform | On macOS only `trace` (trajectory collector) and `serve` exist. |
 | Sample IDs | Session, conversation, trace, and interruption IDs in the examples are placeholders — substitute the ones from your own output. |
 
