@@ -1462,9 +1462,9 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
         bail!("btrfs receive --dump failed: {}", stderr.trim());
     }
 
-    let stdout = String::from_utf8_lossy(&receiver_output.stdout);
-    let entries = parse_btrfs_diff_output(&stdout);
-    Ok(entries)
+    let stdout = String::from_utf8(receiver_output.stdout)
+        .context("btrfs receive --dump output is not valid UTF-8")?;
+    parse_btrfs_diff_output(&stdout)
 }
 
 /// Parse `btrfs receive --dump` output into deduplicated DiffEntry items.
@@ -1473,31 +1473,32 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
 /// unlinks. A `link new dest=old` paired with `unlink old` encodes an `mv`
 /// (btrfs send emits no `rename` line for cross-snapshot mv).
 /// Phase 2 emits entries with precedence dedup (Renamed > Added > Deleted > Modified).
-fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
+fn parse_btrfs_diff_output(output: &str) -> Result<Vec<DiffEntry>> {
     let mut snapshot_prefix = String::new();
     let mut rename_map: HashMap<String, String> = HashMap::new();
     let mut link_pairs: Vec<(String, String)> = Vec::new();
     let mut unlinked: HashSet<String> = HashSet::new();
 
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_start();
         if line.is_empty() {
             continue;
         }
         if let Some(rest) = line.strip_prefix("snapshot") {
-            if let Some(name) = rest.split_whitespace().next() {
+            let name = first_token(rest)?;
+            if !name.is_empty() {
                 snapshot_prefix = format!("{}/", name);
             }
         } else if let Some(rest) = line.strip_prefix("rename") {
-            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix)? {
                 rename_map.insert(src, dst);
             }
         } else if let Some(rest) = line.strip_prefix("link") {
-            if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix)? {
                 link_pairs.push((new_real, dest_path));
             }
         } else if let Some(rest) = line.strip_prefix("unlink") {
-            unlinked.insert(strip_snap_prefix(&first_token(rest), &snapshot_prefix));
+            unlinked.insert(strip_snap_prefix(&first_token(rest)?, &snapshot_prefix));
         }
     }
 
@@ -1518,16 +1519,16 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
     let mut entries: Vec<DiffEntry> = Vec::new();
 
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_start();
         if line.is_empty() {
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("mkfile") {
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map)?;
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Added, None);
         } else if let Some(rest) = line.strip_prefix("mkdir") {
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map)?;
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1538,7 +1539,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
         } else if let Some(rest) = line.strip_prefix("symlink") {
             // First token is the new symlink path (often a temp inode renamed
             // later); `dest=` is the link target string and isn't used.
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map)?;
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1547,7 +1548,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 Some("symlink".to_string()),
             );
         } else if let Some(rest) = line.strip_prefix("link") {
-            if let Some((new_real, _)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((new_real, _)) = parse_dest_pair(rest, &snapshot_prefix)? {
                 if let Some(old) = mv_renames.get(&new_real).cloned() {
                     insert_dedup(
                         &mut seen,
@@ -1567,12 +1568,12 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("unlink") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest)?, &snapshot_prefix);
             if !suppressed_unlinks.contains(&path) {
                 insert_dedup(&mut seen, &mut entries, path, ChangeType::Deleted, None);
             }
         } else if let Some(rest) = line.strip_prefix("rmdir") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest)?, &snapshot_prefix);
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1582,7 +1583,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             );
         } else if let Some(rest) = line.strip_prefix("rename") {
             // temp→real renames are folded via rename_map; only emit the rest.
-            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix)? {
                 if !is_btrfs_temp_ref(&src) {
                     insert_dedup(
                         &mut seen,
@@ -1595,37 +1596,43 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             }
         } else if let Some(rest) = line.strip_prefix("update_extent") {
             // `btrfs send --no-data` emits update_extent instead of write.
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map)?;
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("write") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest)?, &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("truncate") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest)?, &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         }
         // Skip metadata-only ops: utimes, chown, chmod, set_xattr, remove_xattr, clone.
     }
 
-    entries
+    Ok(entries)
 }
 
 /// Strip the snapshot prefix from the first token of `rest`, then resolve
 /// through `rename_map` (temp → real) when applicable.
-fn resolve_path(rest: &str, snapshot_prefix: &str, rename_map: &HashMap<String, String>) -> String {
-    let path = strip_snap_prefix(&first_token(rest), snapshot_prefix);
-    rename_map.get(&path).cloned().unwrap_or(path)
+fn resolve_path(
+    rest: &str,
+    snapshot_prefix: &str,
+    rename_map: &HashMap<String, String>,
+) -> Result<String> {
+    let path = strip_snap_prefix(&first_token(rest)?, snapshot_prefix);
+    Ok(rename_map.get(&path).cloned().unwrap_or(path))
 }
 
 /// Parse a `<src>  dest=<dst>` line tail into `(src, dst)`, both with the
 /// snapshot prefix stripped. `dest=` for `link`/mvs may carry a bare relative
 /// path (no prefix), which `strip_snap_prefix` no-ops cleanly.
-fn parse_dest_pair(rest: &str, snapshot_prefix: &str) -> Option<(String, String)> {
-    let rest = rest.trim();
-    let dest_pos = rest.find("dest=")?;
-    let src = strip_snap_prefix(&first_token(&rest[..dest_pos]), snapshot_prefix);
-    let dst = strip_snap_prefix(&first_token(&rest[dest_pos + 5..]), snapshot_prefix);
-    Some((src, dst))
+fn parse_dest_pair(rest: &str, snapshot_prefix: &str) -> Result<Option<(String, String)>> {
+    let (src, attributes) = dump_path_token(rest)?;
+    let Some(destination) = attributes.trim_start().strip_prefix("dest=") else {
+        return Ok(None);
+    };
+    let src = strip_snap_prefix(&src, snapshot_prefix);
+    let dst = strip_snap_prefix(&first_token(destination)?, snapshot_prefix);
+    Ok(Some((src, dst)))
 }
 
 /// Insert a DiffEntry, dedup'd by path. Higher-precedence change_type wins
@@ -1668,9 +1675,63 @@ fn change_precedence(c: &ChangeType) -> u8 {
     }
 }
 
-/// Extract the first whitespace-delimited token from a string.
-fn first_token(s: &str) -> String {
-    s.split_whitespace().next().unwrap_or("").to_string()
+/// Decode the first path using btrfs-progs' dump escaping.
+fn first_token(s: &str) -> Result<String> {
+    dump_path_token(s).map(|(path, _)| path)
+}
+
+fn dump_path_token(s: &str) -> Result<(String, &str)> {
+    let s = s.trim_start();
+    let bytes = s.as_bytes();
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        if bytes[index] != b'\\' || index + 1 == bytes.len() {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let escaped = bytes[index + 1];
+        let value = match escaped {
+            b'a' => Some(7),
+            b'b' => Some(8),
+            b'e' => Some(27),
+            b'f' => Some(12),
+            b'n' => Some(b'\n'),
+            b'r' => Some(b'\r'),
+            b't' => Some(b'\t'),
+            b'v' => Some(11),
+            b' ' | b'\\' => Some(escaped),
+            _ => None,
+        };
+        if let Some(value) = value {
+            decoded.push(value);
+            index += 2;
+        } else if index + 3 < bytes.len()
+            && bytes[index + 1..index + 4]
+                .iter()
+                .all(|byte| (b'0'..=b'7').contains(byte))
+            && escaped <= b'3'
+        {
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            decoded.push(value);
+            index += 4;
+        } else {
+            decoded.push(b'\\');
+            index += 1;
+        }
+    }
+    // Decode after unescaping so octal-encoded UTF-8 bytes form one path.
+    // Replacement characters would merge distinct byte names during dedup.
+    let path = String::from_utf8(decoded).with_context(|| {
+        format!(
+            "btrfs dump filename cannot be represented as UTF-8: {:?}",
+            &s[..index]
+        )
+    })?;
+    Ok((path, &s[index..]))
 }
 
 /// Strip the snapshot name prefix (e.g. `./msg1-step1/`) from a path.
@@ -2059,7 +2120,7 @@ mod tests {
     fn parse_btrfs_diff_output_handles_common_ops() {
         // Use real `btrfs receive --dump` format: rename uses "dest=" syntax
         let output = "snapshot  ./snap  uuid=abc transid=42\nmkfile  ./snap/src/main.rs\nunlink  ./snap/old.txt\nrename  ./snap/old_name  dest=./snap/new_name\nwrite   ./snap/src/lib.rs\nmkdir   ./snap/new_dir\nrmdir   ./snap/old_dir\ntruncate  ./snap/data.bin\nupdate_extent  ./snap/src/config.rs  offset=0 len=128\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 8);
         assert_eq!(entries[0].change_type, ChangeType::Added); // mkfile
         assert_eq!(entries[0].path, "src/main.rs");
@@ -2083,7 +2144,7 @@ mod tests {
                        mkfile    ./msg1-step1/o262-119-0\n\
                        rename    ./msg1-step1/o262-119-0  dest=./msg1-step1/.gitignore\n\
                        utimes    ./msg1-step1/\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
 
         assert_eq!(entries.len(), 3, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "src/lib.rs");
@@ -2095,8 +2156,158 @@ mod tests {
     }
 
     #[test]
+    fn parse_btrfs_diff_preserves_dump_escaped_paths() {
+        // Captured from btrfs-progs 7.1 receive --dump using a synthetic v1 stream.
+        let output: String =
+            serde_json::from_str(include_str!("../../tests/fixtures/escaped-paths.json")).unwrap();
+        let entries = parse_btrfs_diff_output(&output).unwrap();
+        assert_eq!(
+            entries.len(),
+            8,
+            "distinct paths must not collapse: {entries:?}"
+        );
+        for path in [
+            "report one.txt",
+            "report two.txt",
+            "trailing ",
+            "tab\tline\n",
+            "slash\\name",
+            "中文.txt",
+        ] {
+            let entry = entries.iter().find(|entry| entry.path == path).unwrap();
+            assert_eq!(entry.change_type, ChangeType::Added);
+        }
+        let renamed = entries
+            .iter()
+            .find(|entry| entry.path == "new name")
+            .unwrap();
+        assert_eq!(renamed.change_type, ChangeType::Renamed);
+        assert_eq!(
+            renamed.detail.as_deref(),
+            Some("hasdest=name old → new name")
+        );
+        let moved = entries
+            .iter()
+            .find(|entry| entry.path == "moved name")
+            .unwrap();
+        assert_eq!(moved.change_type, ChangeType::Renamed);
+        assert_eq!(moved.detail.as_deref(), Some("old name → moved name"));
+    }
+
+    #[test]
+    fn parse_btrfs_diff_resolves_escaped_temp_renames_and_operations() {
+        let output = concat!(
+            "snapshot ./snap uuid=abc transid=1\n",
+            "mkfile ./snap/o261-118-0\n",
+            "rename ./snap/o261-118-0 dest=./snap/new\\ file\n",
+            "update_extent ./snap/new\\ file offset=0 len=2\n",
+            "write ./snap/modified\\ file offset=0 len=2\n",
+            "truncate ./snap/modified\\ file size=2\n",
+            "unlink ./snap/deleted\\ file\n",
+            "rmdir ./snap/deleted\\ dir\n",
+            "mkdir ./snap/added\\ dir\n",
+            "symlink ./snap/added\\ link dest=target\\ path\n",
+        );
+        let entries = parse_btrfs_diff_output(output).unwrap();
+        assert_eq!(entries.len(), 6);
+        for (path, kind) in [
+            ("new file", ChangeType::Added),
+            ("modified file", ChangeType::Modified),
+            ("deleted file", ChangeType::Deleted),
+            ("deleted dir", ChangeType::Deleted),
+            ("added dir", ChangeType::Added),
+            ("added link", ChangeType::Added),
+        ] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap()
+                    .change_type,
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn dump_path_tokens_decode_controls_and_keep_unknown_escapes() {
+        assert_eq!(
+            first_token(r"  a\ab\bc\ed\fe\nf\rg\th\vi\ j\\k\001\177  size=1").unwrap(),
+            "a\x07b\x08c\x1bd\x0ce\nf\rg\th\x0bi j\\k\x01\x7f"
+        );
+        assert_eq!(first_token("name\\ ").unwrap(), "name ");
+        assert_eq!(
+            first_token(r"literal\q\04\400").unwrap(),
+            r"literal\q\04\400"
+        );
+        assert_eq!(first_token("name\\").unwrap(), "name\\");
+        assert_eq!(first_token("\t \n").unwrap(), "");
+    }
+
+    #[test]
+    fn parse_btrfs_diff_rejects_non_utf8_paths_instead_of_merging() {
+        // Real dump: distinct invalid bytes and a valid replacement character.
+        let output: String =
+            serde_json::from_str(include_str!("../../tests/fixtures/non-utf8-paths.json")).unwrap();
+        let error = parse_btrfs_diff_output(&output).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be represented as UTF-8"),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains(r"bad\\377"), "{error:#}");
+    }
+
+    #[test]
+    fn parse_btrfs_diff_preserves_valid_replacement_and_literal_escapes() {
+        let output = concat!(
+            "snapshot ./snap uuid=abc transid=1\n",
+            "mkfile ./snap/bad\\357\\277\\275\n",
+            "mkfile ./snap/bad\\\\377\n",
+            "mkfile ./snap/bad\\\\376\n",
+        );
+        let entries = parse_btrfs_diff_output(output).unwrap();
+        assert_eq!(entries.len(), 3);
+        for path in ["bad�", r"bad\377", r"bad\376"] {
+            assert!(
+                entries.iter().any(|entry| entry.path == path),
+                "{entries:?}"
+            );
+        }
+        for escaped_byte in [r"\377", r"\376"] {
+            let invalid = format!("{output}mkfile ./snap/bad{escaped_byte}\n");
+            assert!(parse_btrfs_diff_output(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_btrfs_diff_propagates_non_utf8_errors_from_all_path_slots() {
+        for operation in [
+            r"snapshot ./bad\377 uuid=abc transid=1",
+            r"mkfile ./snap/bad\377",
+            r"mkdir ./snap/bad\377",
+            r"symlink ./snap/bad\377 dest=valid",
+            r"rename ./snap/bad\377 dest=./snap/valid",
+            r"rename ./snap/valid dest=./snap/bad\377",
+            r"link ./snap/bad\377 dest=valid",
+            r"link ./snap/valid dest=bad\377",
+            r"unlink ./snap/bad\377",
+            r"rmdir ./snap/bad\377",
+            r"update_extent ./snap/bad\377 offset=0 len=1",
+            r"write ./snap/bad\377 offset=0 len=1",
+            r"truncate ./snap/bad\377 size=1",
+        ] {
+            let output = format!("snapshot ./snap uuid=abc transid=1\n{operation}\n");
+            let error = parse_btrfs_diff_output(&output).unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be represented as UTF-8"),
+                "{operation}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_btrfs_diff_output_empty() {
-        let entries = parse_btrfs_diff_output("");
+        let entries = parse_btrfs_diff_output("").unwrap();
         assert!(entries.is_empty());
     }
 
@@ -2457,7 +2668,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
     #[test]
     fn parse_btrfs_diff_output_unknown_ops_are_skipped() {
         let output = "mkfile  new.txt\nchown  foo.txt\nxattr  bar.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].change_type, ChangeType::Added);
     }
@@ -2469,7 +2680,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       mkfile          ./snap_a_ro/o257-34321-0\n\
                       rename          ./snap_a_ro/o257-34321-0  dest=./snap_a_ro/foo.txt\n\
                       update_extent   ./snap_a_ro/foo.txt  offset=0 len=6\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2481,7 +2692,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
         let output = "snapshot  ./snap_a_ro  uuid=abc transid=1\n\
                       symlink         ./snap_a_ro/o258-34321-0  dest=/etc/passwd\n\
                       rename          ./snap_a_ro/o258-34321-0  dest=./snap_a_ro/mylink\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "mylink");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2495,7 +2706,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       mkfile          ./snap_a_ro/o259-34321-0\n\
                       rename          ./snap_a_ro/o259-34321-0  dest=./snap_a_ro/target.txt\n\
                       link            ./snap_a_ro/hardlink_to_target  dest=target.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 2, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "target.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2511,7 +2722,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
         let output = "snapshot  ./snap_b_ro  uuid=abc transid=2\n\
                       link            ./snap_b_ro/bar.txt  dest=foo.txt\n\
                       unlink          ./snap_b_ro/foo.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "bar.txt");
         assert_eq!(entries[0].change_type, ChangeType::Renamed);
@@ -2526,7 +2737,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       rmdir   ./snap/foo\n\
                       mkfile  ./snap/o100-1-0\n\
                       rename  ./snap/o100-1-0  dest=./snap/foo\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2541,7 +2752,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       link    ./snap/bar  dest=foo\n\
                       link    ./snap/baz  dest=foo\n\
                       unlink  ./snap/foo\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 2, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "bar");
         assert_eq!(entries[0].change_type, ChangeType::Renamed);
@@ -2559,7 +2770,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       update_extent   ./snap/foo.txt  offset=0 len=6\n\
                       mkfile          ./snap/o100-1-0\n\
                       rename          ./snap/o100-1-0  dest=./snap/foo.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);

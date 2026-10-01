@@ -1317,20 +1317,42 @@ fn print_diff_entries(changes: &[ws_ckpt_common::DiffEntry]) {
     }
 
     for entry in changes {
-        let marker = match entry.change_type {
-            ChangeType::Added => "\x1b[32m+",
-            ChangeType::Deleted => "\x1b[31m-",
-            ChangeType::Modified => "\x1b[33mM",
-            ChangeType::Renamed => "\x1b[36mR",
-        };
-        let detail = entry
-            .detail
-            .as_deref()
-            .map(|d| format!(" ({})", d))
-            .unwrap_or_default();
-        println!("{}  {}{}\x1b[0m", marker, entry.path, detail);
+        println!("{}", format_diff_entry(entry));
     }
     println!("\n{} change(s)", changes.len());
+}
+
+fn format_diff_entry(entry: &ws_ckpt_common::DiffEntry) -> String {
+    let marker = match entry.change_type {
+        ChangeType::Added => "\x1b[32m+",
+        ChangeType::Deleted => "\x1b[31m-",
+        ChangeType::Modified => "\x1b[33mM",
+        ChangeType::Renamed => "\x1b[36mR",
+    };
+    let detail = entry
+        .detail
+        .as_deref()
+        .map(|detail| format!(" ({})", escape_diff_text(detail)))
+        .unwrap_or_default();
+    format!(
+        "{}  {}{}\x1b[0m",
+        marker,
+        escape_diff_text(&entry.path),
+        detail
+    )
+}
+
+fn escape_diff_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        // Backslashes distinguish literal escape text from encoded controls.
+        if character.is_control() || character == '\\' {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Handle StatusOk response, formatting the status report.
@@ -2332,6 +2354,54 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn diff_display_escapes_path_and_rename_detail_controls() {
+        let entry = ws_ckpt_common::DiffEntry {
+            path: "new\nline\t\r\x1b[2J".into(),
+            change_type: ChangeType::Renamed,
+            detail: Some("old\x1b]0;title\x07\nline → new\nline\t\r\x1b[2J".into()),
+        };
+        assert_eq!(
+            format_diff_entry(&entry),
+            "\x1b[36mR  new\\nline\\t\\r\\u{1b}[2J (old\\u{1b}]0;title\\u{7}\\nline → new\\nline\\t\\r\\u{1b}[2J)\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn diff_display_preserves_spaces_unicode_and_change_markers() {
+        for (change_type, marker) in [
+            (ChangeType::Added, "\x1b[32m+"),
+            (ChangeType::Deleted, "\x1b[31m-"),
+            (ChangeType::Modified, "\x1b[33mM"),
+            (ChangeType::Renamed, "\x1b[36mR"),
+        ] {
+            let entry = ws_ckpt_common::DiffEntry {
+                path: "目录/file with spaces.txt".into(),
+                change_type,
+                detail: Some("old name → new name".into()),
+            };
+            assert_eq!(
+                format_diff_entry(&entry),
+                format!("{marker}  目录/file with spaces.txt (old name → new name)\x1b[0m")
+            );
+        }
+    }
+
+    #[test]
+    fn diff_display_distinguishes_literal_escape_names() {
+        let literal = ws_ckpt_common::DiffEntry {
+            path: r"file\n".into(),
+            change_type: ChangeType::Added,
+            detail: None,
+        };
+        let control = ws_ckpt_common::DiffEntry {
+            path: "file\n".into(),
+            change_type: ChangeType::Added,
+            detail: None,
+        };
+        assert_eq!(format_diff_entry(&literal), "\x1b[32m+  file\\\\n\x1b[0m");
+        assert_eq!(format_diff_entry(&control), "\x1b[32m+  file\\n\x1b[0m");
+    }
     fn assert_existing_plugin_install_behavior(
         runtime: PluginRuntime,
         runtime_dir: &str,
