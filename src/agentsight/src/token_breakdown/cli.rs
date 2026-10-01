@@ -52,7 +52,9 @@ impl AnalyzeChatmlCommand {
     /// Process trace events - each http.request and http.response is an independent event
     fn process_trace_events(&self, events: &[ChromeTraceEvent]) -> anyhow::Result<()> {
         // Get global tokenizer for the specified model
-        let tokenizer = get_global_tokenizer(&self.model).unwrap();
+        let tokenizer = get_global_tokenizer(&self.model).map_err(|e| {
+            anyhow::anyhow!("tokenizer for model '{}' unavailable: {e}", self.model)
+        })?;
         let chat_template = tokenizer.clone();
 
         // Sort events by timestamp to ensure correct order
@@ -103,11 +105,15 @@ impl AnalyzeChatmlCommand {
                                         }
                                     }
                                 }
-                                let chatml_text = if let Some(tools_arr) = tools {
-                                    chat_template.apply_chat_template_with_tools(&msgs, Some(&tools_arr), false)?
-                                } else {
-                                    panic!("No tools provided");
-                                };
+                                // Requests without a tools array are ordinary
+                                // LLM traffic; the template accepts None and
+                                // renders without tool definitions.
+                                let chatml_text =
+                                    chat_template.apply_chat_template_with_tools(
+                                        &msgs,
+                                        tools.as_deref(),
+                                        false,
+                                    )?;
                                 let doc = parse_chatml(&chatml_text)?;
                                 Some(classify_document(&doc.blocks, None))
                             } else {
