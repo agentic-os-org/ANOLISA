@@ -307,6 +307,60 @@ fn diff_missing_file_errors() {
 // (promote_copies_scratch_to_store, promote_missing_scratch_file_returns_not_found,
 //  session_log_degrades_gracefully_when_session_dir_unavailable).
 
+#[test]
+fn diff_output_round_trips_as_a_unified_patch() {
+    let (_tmp, svc) = setup();
+    let original = "first\noriginal\nlast\n";
+    let modified = "first\nmodified\nlast\n";
+    svc.write("notes/original.md", original, false).unwrap();
+    svc.write("notes/modified.md", modified, false).unwrap();
+    let output = svc.diff("notes/original.md", "notes/modified.md").unwrap();
+    let patch =
+        diffy::Patch::from_str(&output).expect("mem_diff must return a valid unified patch");
+    assert_eq!(patch.original(), Some("notes/original.md"));
+    assert_eq!(patch.modified(), Some("notes/modified.md"));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_preserves_escaped_relative_filenames() {
+    let (_tmp, svc) = setup();
+    let original_path = "笔记/旧 \"名\"\t行\n.md";
+    let modified_path = "笔记/新\\名\r.md";
+    let original = "keep \\\n\t\r\nold\n";
+    let modified = "keep \\\n\t\r\nnew\n";
+    svc.write(original_path, original, false).unwrap();
+    svc.write(modified_path, modified, false).unwrap();
+    let output = svc.diff(original_path, modified_path).unwrap();
+    let patch = diffy::Patch::from_str(&output).expect("escaped filenames must remain parseable");
+    assert_eq!(patch.original(), Some(original_path));
+    assert_eq!(patch.modified(), Some(modified_path));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_preserves_identical_and_unterminated_contents() {
+    let (_tmp, svc) = setup();
+    for (index, (original, modified)) in [
+        ("same\n", "same\n"),
+        ("before", "after"),
+        ("", "first"),
+        ("second", ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let original_path = format!("original-{index}.md");
+        let modified_path = format!("modified-{index}.md");
+        svc.write(&original_path, original, false).unwrap();
+        svc.write(&modified_path, modified, false).unwrap();
+        let output = svc.diff(&original_path, &modified_path).unwrap();
+        let patch = diffy::Patch::from_str(&output).expect("mem_diff output must be parseable");
+        assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+        assert_eq!(patch.hunks().is_empty(), original == modified);
+    }
+}
+
 // ---------- audit log smoke ----------
 
 #[test]
