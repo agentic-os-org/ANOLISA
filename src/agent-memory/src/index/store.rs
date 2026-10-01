@@ -850,14 +850,25 @@ impl BM25Store {
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+    }
+
+    fn search_vec_with_cold(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_cold: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
         let mut stmt = self.conn.prepare(
             "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+             FROM files_vec v LEFT JOIN files f ON f.path = v.path \
+             WHERE COALESCE(f.is_superseded, 0) = 0 \
+               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0)",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![exclude_cold], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -927,7 +938,7 @@ impl BM25Store {
     ) -> Result<Vec<SearchHit>> {
         // Run both search strategies.
         let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
