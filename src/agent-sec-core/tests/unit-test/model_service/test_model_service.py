@@ -263,5 +263,53 @@ class TestCreateClient(unittest.TestCase):
             self.assertEqual(client._timeout, 10)
 
 
+# ---------------------------------------------------------------------------
+# Non-object response bodies (appended)
+# ---------------------------------------------------------------------------
+
+
+class TestNonObjectResponseBodies(unittest.TestCase):
+    """A 200 body that is not a JSON object must raise RuntimeError."""
+
+    @staticmethod
+    def _mock_raw_body(raw: bytes):
+        cm = MagicMock()
+        cm.return_value.__enter__.return_value.read.return_value = raw
+        return cm
+
+    def test_generate_rejects_array_body(self) -> None:
+        client = OllamaClient("http://localhost:11434")
+        with patch("urllib.request.urlopen", self._mock_raw_body(b"[1, 2]")):
+            with self.assertRaisesRegex(RuntimeError, "non-object JSON body"):
+                client.generate("m", "hello")
+
+    def test_generate_rejects_null_body(self) -> None:
+        client = OllamaClient("http://localhost:11434")
+        with patch("urllib.request.urlopen", self._mock_raw_body(b"null")):
+            with self.assertRaisesRegex(RuntimeError, "non-object JSON body"):
+                client.generate("m", "hello")
+
+    def test_generate_rejects_scalar_body(self) -> None:
+        client = OllamaClient("http://localhost:11434")
+        with patch("urllib.request.urlopen", self._mock_raw_body(b"42")):
+            with self.assertRaisesRegex(RuntimeError, "non-object JSON body"):
+                client.generate("m", "hello")
+
+    def test_chat_rejects_array_body(self) -> None:
+        client = OllamaClient("http://localhost:11434")
+        with patch("urllib.request.urlopen", self._mock_raw_body(b'["ok"]')):
+            with self.assertRaisesRegex(RuntimeError, "non-object JSON body"):
+                client.chat("m", [{"role": "user", "content": "hi"}])
+
+    def test_chat_accepts_object_body(self) -> None:
+        client = OllamaClient("http://localhost:11434")
+        with patch(
+            "urllib.request.urlopen",
+            self._mock_raw_body(b'{"message": {"content": "hi"}}'),
+        ):
+            result = client.chat("m", [{"role": "user", "content": "hi"}])
+        self.assertEqual(result["message"]["content"], "hi")
+
+
 if __name__ == "__main__":
     unittest.main()

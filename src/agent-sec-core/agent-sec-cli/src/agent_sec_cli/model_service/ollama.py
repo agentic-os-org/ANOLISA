@@ -85,13 +85,21 @@ class OllamaClient:
 
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return json.loads(resp.read())
+                body = json.loads(resp.read())
         except urllib.error.URLError as exc:
             raise RuntimeError(
                 f"Ollama request failed (url={self._base_url}): {exc}"
             ) from exc
         except Exception as exc:
             raise RuntimeError(f"Ollama request error: {exc}") from exc
+        if not isinstance(body, dict):
+            # A 200 body that is not a JSON object (proxy greeting page,
+            # scalar, array) must fail like any other backend error rather
+            # than break callers with AttributeError on the declared dict.
+            raise RuntimeError(
+                f"Ollama request returned a non-object JSON body (url={self._base_url}): {type(body).__name__}"
+            )
+        return body
 
     def chat(
         self,
@@ -127,10 +135,15 @@ class OllamaClient:
 
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return json.loads(resp.read())
+                body = json.loads(resp.read())
         except urllib.error.URLError as exc:
             raise RuntimeError(
                 f"Ollama chat request failed (url={self._base_url}): {exc}"
             ) from exc
         except Exception as exc:
             raise RuntimeError(f"Ollama chat request error: {exc}") from exc
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                f"Ollama chat request returned a non-object JSON body (url={self._base_url}): {type(body).__name__}"
+            )
+        return body
