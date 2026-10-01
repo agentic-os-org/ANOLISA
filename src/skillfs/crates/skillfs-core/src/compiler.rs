@@ -284,6 +284,177 @@ fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> Str
     output
 }
 
+/// Shell tokens that may precede the command being invoked without changing
+/// what it is.
+const TRANSPARENT_PREFIXES: &[&str] = &["sudo", "doas", "env", "nohup", "exec", "command"];
+
+/// Options of transparent prefixes that consume a separate value token
+/// (`sudo -u root cmd`), so the value is not mistaken for the command word.
+/// The table is per prefix: `command -p`, for example, takes no value while
+/// `env -C /tmp` consumes `/tmp`.
+fn prefix_option_consumes_value(prefix: &str, option: &str) -> bool {
+    matches!(
+        (prefix, option),
+        (
+            "sudo",
+            "-u" | "-g" | "-p" | "-C" | "-R" | "-T" | "-U" | "-h"
+        ) | ("doas" | "env", "-u" | "-C")
+            | ("exec", "-a")
+    )
+}
+
+/// Options known to take no separate value (`env -i cmd`, `command -p cmd`).
+fn prefix_option_is_valueless(prefix: &str, option: &str) -> bool {
+    matches!(
+        (prefix, option),
+        (
+            "sudo",
+            "-b" | "-e" | "-H" | "-i" | "-k" | "-K" | "-l" | "-n" | "-P" | "-s" | "-v"
+        ) | ("doas", "-n" | "-s" | "-L")
+            | ("env", "-i" | "-0" | "-v")
+            | ("exec", "-c" | "-l")
+            | ("command", "-p")
+    )
+}
+
+/// `NAME=VALUE` environment assignment. Option-like tokens (`--key=value`)
+/// are not assignments.
+fn is_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((name, _)) => !name.is_empty() && !name.starts_with('-'),
+        None => false,
+    }
+}
+
+/// Whether the word starting at byte `pos` is the command being invoked on
+/// this line. It must begin at an independent shell token, and everything
+/// before it — back to the nearest unquoted command boundary (`&&`, `|`,
+/// `;`, `$(`, backtick) — may only be environment assignments (`FOO=1`),
+/// transparent execution prefixes (`sudo`, `env`, ...), possibly chained
+/// (`sudo env FOO=1`, `env nohup`), and their options/value tokens
+/// (`sudo -u root`). An argument or subcommand of another command
+/// (`echo sudo virtualenv`, `pip install virtualenv`, `pyenv virtualenv`) is
+/// not; a match inside a larger token (`VENV_TOOL=virtualenv`) or an option
+/// value with no following token (`sudo -u virtualenv id`) is not either.
+///
+/// Quote- and escape-aware: separators inside quotes (`LABEL='a; b'`) are
+/// not boundaries, and quoted runs stay inside their token. When the prefix
+/// ends inside an unterminated quote or escape, or hits an unrecognized
+/// option, the position cannot be determined and the caller keeps the
+/// original text.
+fn is_command_position(line: &str, pos: usize) -> bool {
+    let prefix = &line[..pos];
+    if let Some(last_char) = prefix.chars().next_back() {
+        let boundary =
+            last_char.is_whitespace() || matches!(last_char, ';' | '|' | '&' | '(' | '`');
+        if !boundary {
+            return false;
+        }
+    }
+    let Some(tokens) = last_command_segment_tokens(prefix) else {
+        return false; // unterminated quote/escape: position unknowable
+    };
+    let mut chain: Option<&str> = None; // None: waiting for the command word
+    let mut tokens = tokens.into_iter();
+    while let Some(token) = tokens.next() {
+        match chain {
+            None => {
+                if is_assignment(token) {
+                    continue; // another env assignment before the command
+                }
+                if TRANSPARENT_PREFIXES.contains(&token) {
+                    chain = Some(token);
+                    continue;
+                }
+                return false; // the command word is already present; the match is its argument
+            }
+            Some(current) => {
+                if is_assignment(token) {
+                    continue; // `env FOO=1 cmd`
+                }
+                if token.starts_with('-') {
+                    let self_contained_long = token.starts_with("--") && token.contains('=');
+                    if prefix_option_consumes_value(current, token) {
+                        if tokens.next().is_none() {
+                            // No value token left in the prefix: the match
+                            // itself is the option's value
+                            // (`sudo -u virtualenv id`).
+                            return false;
+                        }
+                    } else if !self_contained_long && !prefix_option_is_valueless(current, token) {
+                        // Unrecognized option: it may or may not consume the
+                        // match as its value, so the position is unknowable.
+                        return false;
+                    }
+                    continue;
+                }
+                if TRANSPARENT_PREFIXES.contains(&token) {
+                    chain = Some(token); // `sudo env ...`, `env FOO=1 nohup ...`
+                    continue;
+                }
+                return false; // a bare word ends the prefix chain: it is the command
+            }
+        }
+    }
+    true
+}
+
+/// Tokenize `prefix` into shell-ish words, honoring single quotes, double
+/// quotes, backslash escapes, and command boundaries (`;`, `|`, `&`, `(`,
+/// backtick). Tokens before the last unquoted boundary are dropped so the
+/// walk sees only the final command segment; a quoted run stays inside its
+/// token (`FOO='a; b'`). Returns `None` when the prefix ends inside an
+/// unterminated quote or escape — the match position cannot be determined
+/// and the caller keeps the original text.
+fn last_command_segment_tokens(prefix: &str) -> Option<Vec<&str>> {
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut token_start: Option<usize> = None;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (i, ch) in prefix.char_indices() {
+        if escaped {
+            escaped = false; // the escaped character stays inside its token
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escaped = true;
+                token_start.get_or_insert(i);
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                token_start.get_or_insert(i);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                token_start.get_or_insert(i);
+            }
+            ';' | '|' | '&' | '(' | '`' if !in_single && !in_double => {
+                if let Some(ts) = token_start.take() {
+                    tokens.push(&prefix[ts..i]);
+                }
+                tokens.clear(); // command boundary: earlier tokens are another command
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if let Some(ts) = token_start.take() {
+                    tokens.push(&prefix[ts..i]);
+                }
+            }
+            _ => {
+                token_start.get_or_insert(i);
+            }
+        }
+    }
+    if in_single || in_double || escaped {
+        return None;
+    }
+    if let Some(ts) = token_start.take() {
+        tokens.push(&prefix[ts..]);
+    }
+    Some(tokens)
+}
+
 /// Apply heuristic substitutions to a single line.
 fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
     let mut result = line.to_string();
@@ -305,9 +476,28 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
             }
         }
 
-        // virtualenv <name> → uv venv <name>
+        // virtualenv <name> → uv venv <name> — only when `virtualenv` is the
+        // command being invoked: mkvirtualenv, pyenv virtualenv, and
+        // `pip install virtualenv` are different words or argument positions
+        // and must pass through untouched. Position checks always run against
+        // the full (pre-substitution) line with absolute offsets, so a later
+        // match on the same line — an argument of an earlier `virtualenv` —
+        // keeps its original context.
         if result.contains("virtualenv ") && !result.contains("uv venv") {
-            result = result.replace("virtualenv ", "uv venv ");
+            let mut out = String::with_capacity(result.len());
+            let mut copied = 0; // bytes of `result` already emitted
+            let mut search = 0; // search offset within the original line
+            while let Some(rel) = result[search..].find("virtualenv ") {
+                let abs = search + rel;
+                if is_command_position(&result, abs) {
+                    out.push_str(&result[copied..abs]);
+                    out.push_str("uv venv ");
+                    copied = abs + "virtualenv ".len();
+                }
+                search = abs + "virtualenv ".len();
+            }
+            out.push_str(&result[copied..]);
+            result = out;
         }
     }
 
@@ -542,6 +732,129 @@ mod tests {
         let content = "virtualenv myenv\n";
         let result = compile(content, &env);
         assert!(result.contains("uv venv myenv"));
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_command_position_boundaries() {
+        let env = env_darwin_uv();
+        // Boundary cases from the #3525 review: a bare word in front of the
+        // prefix chain (`echo sudo`), an assignment whose value contains the
+        // match, and a prefix option consuming a separate value token.
+        let content = "echo sudo virtualenv myenv\nVENV_TOOL=virtualenv make\nsudo -u root virtualenv myenv\nenv FOO=1 virtualenv myenv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "echo sudo virtualenv myenv");
+        assert_eq!(lines[1], "VENV_TOOL=virtualenv make");
+        assert_eq!(
+            lines[2], "sudo -u root uv venv myenv",
+            "prefix option values are walked past"
+        );
+        assert_eq!(
+            lines[3], "env FOO=1 uv venv myenv",
+            "env assignments keep the chain"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_option_values_vs_command_position() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up: an option value with no following token is
+        // the match itself (`sudo -u virtualenv id` — virtualenv is the
+        // username), and `command -p` consumes no value, so `python` stays
+        // the command word and `virtualenv` its argument.
+        let content = "sudo -u virtualenv id\ncommand -p python virtualenv myenv\nsudo env FOO=1 virtualenv .venv\nenv FOO=1 nohup virtualenv .venv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "sudo -u virtualenv id");
+        assert_eq!(lines[1], "command -p python virtualenv myenv");
+        assert_eq!(
+            lines[2], "sudo env FOO=1 uv venv .venv",
+            "chained prefixes rewrite"
+        );
+        assert_eq!(
+            lines[3], "env FOO=1 nohup uv venv .venv",
+            "assignment then chained prefix rewrite"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_multiple_matches_keep_argument() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up: the second `virtualenv` is an argument of
+        // the first; position checks must run against the full line.
+        let content = "virtualenv virtualenv --python=python3\n";
+        assert_eq!(
+            compile(content, &env),
+            "uv venv virtualenv --python=python3\n"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_quotes_escapes_and_unknown_options() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up 2: quoted separators and escaped separators
+        // are not command boundaries (the match sits inside a quoted value or
+        // after an escaped one — keep the original); unrecognized options
+        // fail closed (position unknowable — keep the original); known value
+        // options consume their value and the real command after them is
+        // rewritten.
+        let content = concat!(
+            "env LABEL='example; virtualenv myenv' python app.py\n",
+            "echo a\\; virtualenv x\n",
+            "cd /tmp; virtualenv .venv\n",
+            "env -C virtualenv python app.py\n",
+            "exec -a virtualenv python app.py\n",
+            "env -C /tmp virtualenv .venv\n",
+            "sudo --preserve-env virtualenv x\n",
+        );
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(
+            lines[0], "env LABEL='example; virtualenv myenv' python app.py",
+            "a semicolon inside quotes is not a command boundary"
+        );
+        assert_eq!(
+            lines[1], "echo a\\; virtualenv x",
+            "an escaped separator is not a command boundary"
+        );
+        assert_eq!(
+            lines[2], "cd /tmp; uv venv .venv",
+            "a real command separator is honored"
+        );
+        assert_eq!(
+            lines[3], "env -C virtualenv python app.py",
+            "-C consumes the match as its value"
+        );
+        assert_eq!(
+            lines[4], "exec -a virtualenv python app.py",
+            "-a consumes the match as its argv[0]"
+        );
+        assert_eq!(
+            lines[5], "env -C /tmp uv venv .venv",
+            "after a known value option the real command is rewritten"
+        );
+        assert_eq!(
+            lines[6], "sudo --preserve-env virtualenv x",
+            "an unrecognized option fails closed"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_only_as_invoked_command() {
+        let env = env_darwin_uv();
+        // mkvirtualenv / pyenv subcommand / package argument must not be
+        // rewritten — substring replacement corrupted all three.
+        let content = "mkvirtualenv myenv\npyenv virtualenv myenv\npip install virtualenv\nsudo virtualenv myenv\nvirtualenv myenv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "mkvirtualenv myenv");
+        assert_eq!(lines[1], "pyenv virtualenv myenv");
+        assert_eq!(lines[2], "uv pip install virtualenv");
+        assert_eq!(
+            lines[3], "sudo uv venv myenv",
+            "sudo-prefixed command is rewritten in place"
+        );
+        assert_eq!(lines[4], "uv venv myenv");
     }
 
     #[test]
