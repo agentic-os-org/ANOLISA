@@ -969,6 +969,12 @@ fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
     1
 }
 
+/// Module file suffixes kmod can load. Distributions ship compressed modules
+/// (`.ko.zst` since kmod 29 — Ubuntu 24.04, Fedora, Arch; `.ko.xz` on older
+/// Fedora/Alinux; `.ko.gz` legacy), and modprobe accepts every suffix, so the
+/// probe must accept them all or an available qdisc looks unavailable.
+const MODULE_SUFFIXES: [&str; 4] = [".ko", ".ko.zst", ".ko.xz", ".ko.gz"];
+
 fn is_qdisc_module_available(module: &str) -> bool {
     // Non-destructive checks only. A previous version probed availability by
     // writing the candidate qdisc to net.core.default_qdisc and reading it
@@ -985,12 +991,20 @@ fn is_qdisc_module_available(module: &str) -> bool {
         return false;
     }
     let uname = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
-    let ko_path = format!(
-        "/lib/modules/{}/kernel/net/sched/{}.ko",
-        uname.trim(),
-        module
-    );
-    std::path::Path::new(&ko_path).exists()
+    let sched_dir = std::path::Path::new("/lib/modules")
+        .join(uname.trim())
+        .join("kernel/net/sched");
+    qdisc_module_in(&sched_dir, module)
+}
+
+/// Whether `module` is present in a `kernel/net/sched`-style directory under
+/// any loadable suffix. Pure filesystem lookup over a caller-supplied
+/// directory so tests can exercise the suffix set without a real
+/// `/lib/modules` tree.
+fn qdisc_module_in(sched_dir: &std::path::Path, module: &str) -> bool {
+    MODULE_SUFFIXES
+        .iter()
+        .any(|suffix| sched_dir.join(format!("{module}{suffix}")).exists())
 }
 
 fn eval_tcp_tw_reuse(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5467,6 +5481,62 @@ mod tests {
         let out = dedupe_recommendations(input);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].confidence, Confidence::High);
+    }
+
+    /// Synthetic `/lib/modules/<release>/kernel/net/sched`-style directory
+    /// (std-only, no tempfile dependency). Removed when the guard is dropped.
+    struct SchedDir(std::path::PathBuf);
+
+    impl SchedDir {
+        fn new(files: &[&str]) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner-qdisc-module-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in files {
+                std::fs::write(dir.join(name), b"").unwrap();
+            }
+            Self(dir)
+        }
+    }
+
+    impl Drop for SchedDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn qdisc_probe_accepts_plain_and_compressed_modules() {
+        // Plain uncompressed module, as shipped by older distributions.
+        let plain = SchedDir::new(&["sch_fq.ko"]);
+        assert!(qdisc_module_in(&plain.0, "sch_fq"));
+
+        // One directory per compression format: kmod loads any of them, so
+        // the probe must accept each suffix as the only evidence present.
+        for suffix in [".ko.zst", ".ko.xz", ".ko.gz"] {
+            let dir = SchedDir::new(&[format!("sch_fq{suffix}").as_str()]);
+            assert!(
+                qdisc_module_in(&dir.0, "sch_fq"),
+                "compressed module {suffix} must be detected as available"
+            );
+        }
+    }
+
+    #[test]
+    fn qdisc_probe_rejects_absent_and_unrelated_modules() {
+        // Empty directory: nothing is available.
+        let empty = SchedDir::new(&[]);
+        assert!(!qdisc_module_in(&empty.0, "sch_fq"));
+
+        // A different qdisc's module does not make sch_fq available.
+        let other = SchedDir::new(&["sch_fq_codel.ko.zst"]);
+        assert!(!qdisc_module_in(&other.0, "sch_fq"));
     }
 
     #[test]
