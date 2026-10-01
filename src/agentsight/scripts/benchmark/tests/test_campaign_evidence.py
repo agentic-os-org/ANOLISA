@@ -182,6 +182,73 @@ def test_runtime_log_capture_detects_fatal_patterns_and_rotation(
     assert campaign.capture_runtime_log(None, None, destination) == (None, [])
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to store GenAI event in batch flush: database is locked",
+        "Failed to store analysis result: Failed to insert token record: database or disk is full",
+        "Failed to insert pending call bench-1: database is locked",
+        "Failed to insert deferred pending call bench-1: disk I/O error",
+        "Failed to complete pending call: UNIQUE constraint failed: genai_events.call_id",
+        "Failed to complete deferred pending call: disk I/O error",
+        "[CrashDetect] Failed to persist pending call: disk I/O error",
+        "[IdleDrain] Failed to persist pending call: disk I/O error",
+        "[DrainCheck] FAIL persist: database is locked",
+        "[DrainCheck] FAIL update session_id: database is locked",
+        "Failed to store interruption event: database or disk is full",
+        "Failed to store tool_failure interruption: database is locked",
+        "Failed to persist Agent resource samples: disk I/O error",
+        "[CrashDetect] Failed to record exit status for pid=123: database is locked",
+        "[CrashDetect] Failed to clear stale exit status for pid=123: disk I/O error",
+        "[CrashDetect] Failed to record agent_crash for pid=123: database is locked",
+        "[DrainCheck] Failed to record OOM agent_crash for pid=123: disk I/O error",
+        "[CrashDetect] Failed to mark pending interrupted for pid=123: database is locked",
+        "Failed to mark pending calls as interrupted for pid=123: database is locked",
+        "database insert failed: database is locked",
+    ],
+)
+def test_runtime_log_storage_failures_reject_campaign(
+    tmp_path: Path, message: str
+) -> None:
+    source = tmp_path / "agentsight.log"
+    destination = tmp_path / "captured.log"
+    source.write_text(message + "\n", encoding="utf-8")
+
+    clean, errors = campaign.capture_runtime_log(source, 0, destination)
+    assert clean is False
+    assert errors == ["database_write"]
+    assert destination.read_text(encoding="utf-8") == message + "\n"
+
+    measured = summary()
+    measured["runtime_clean"] = clean
+    evaluation = campaign.evaluate(measured, thresholds())
+    assert evaluation["verdict"] == "FAIL"
+    assert evaluation["failed"] == ["runtime_clean"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "GenAISqliteStore initialized: db_size=0MB",
+        "Analysis result saved",
+        "database maintenance completed",
+        "Failed to attach optional probe",
+        "Failed to store GenAI events to JSONL: disk I/O error",
+        "Database full (SQLITE_FULL), pruning old records (attempt 1/3)",
+        "[DrainCheck] FAIL lookup session: database is locked",
+    ],
+)
+def test_runtime_log_ignores_unrelated_storage_messages(
+    tmp_path: Path, message: str
+) -> None:
+    source = tmp_path / "agentsight.log"
+    source.write_text(message + "\n", encoding="utf-8")
+    assert campaign.capture_runtime_log(source, 0, tmp_path / "captured.log") == (
+        True,
+        [],
+    )
+
+
 def test_campaign_validation_rejects_unsafe_formal_inputs(tmp_path: Path) -> None:
     from test_benchmark import campaign_data
 

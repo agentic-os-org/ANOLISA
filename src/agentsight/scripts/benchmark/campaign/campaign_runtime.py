@@ -10,7 +10,13 @@ RUNTIME_ERROR_PATTERNS = {
     "panic": re.compile(r"\bpanicked at\b", re.IGNORECASE),
     "oom": re.compile(r"\b(?:out of memory|oom[-_ ]kill(?:er|ed)?)\b", re.IGNORECASE),
     "database_write": re.compile(
-        r"\bdatabase\b.*\b(?:write|insert|commit)\b.*\b(?:error|failed)\b",
+        r"\bdatabase\b.*\b(?:write|insert|commit)\b.*\b(?:error|failed)\b"
+        r"|\bFailed to (?:store|insert|persist|complete) "
+        r"(?:GenAI event in batch flush|analysis result|(?:deferred )?pending call|"
+        r"(?:tool_failure )?interruption(?: event)?|Agent resource samples)\b"
+        r"|\bFailed to (?:record (?:exit status|(?:OOM )?agent_crash)|"
+        r"clear stale exit status|mark pending(?: calls as)? interrupted)\b"
+        r"|\[DrainCheck\] FAIL (?:persist|update session_id)\b",
         re.IGNORECASE,
     ),
 }
