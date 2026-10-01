@@ -261,8 +261,13 @@ def main() -> None:
             end_row = int(re.search(r"(\d+)", end_ref).group(1))
             end_col = re.match(r"([A-Z]+)", end_ref).group(1)
             # Dimension was already shifted by shift_rows, just verify
-            max_col = max(col_number(end_col), max(col_number(c) for c in all_cols))
-            max_col_letter = end_col if col_number(end_col) >= max_col else col
+            # (all_cols is empty for blank/style-only inserts)
+            max_col = max([col_number(end_col)] + [col_number(c) for c in all_cols])
+            max_col_letter = (
+                end_col
+                if col_number(end_col) >= max_col
+                else max(all_cols, key=col_number)
+            )
             new_ref = f"{start_ref}:{max_col_letter}{end_row}"
             if new_ref != old_ref:
                 dim.set("ref", new_ref)
