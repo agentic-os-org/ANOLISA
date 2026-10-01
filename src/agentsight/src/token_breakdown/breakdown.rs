@@ -308,19 +308,22 @@ pub fn compute_breakdown(
         });
     }
     
-    // 历史消息和实时消息
+    // 历史消息和实时消息 — reuse the per-message token counts already
+    // computed for the request children instead of re-running the
+    // tokenizer over every message a second time.
     let mut history_tokens = 0usize;
     let mut history_count = 0usize;
     let mut realtime_tokens = 0usize;
     let mut realtime_count = 0usize;
-    
-    for turn in doc.messages.iter() {
-        let tokens = tokenizer.count_with_special_tokens(&turn.content)?;
-        if turn.is_history {
-            history_tokens += tokens;
+
+    for node in request_children.iter().skip(1) {
+        // skip(1) drops the system_prompt node; the rest are message
+        // nodes carrying is_history and their token counts.
+        if node.is_history.unwrap_or(false) {
+            history_tokens += node.tokens;
             history_count += 1;
         } else {
-            realtime_tokens += tokens;
+            realtime_tokens += node.tokens;
             realtime_count += 1;
         }
     }
