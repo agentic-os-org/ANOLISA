@@ -172,6 +172,7 @@ Local rendering and original recovery have been verified on finite samples.
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | Switch search-path sharing for API search lists (including Claude-native Grep); when enabled, consecutively recorded file paths are shared and all received hits are kept, with command output staying on its original route | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables |
 
 ### Adapter and diagnostic variables
 
@@ -192,8 +193,8 @@ Tool Ready is hard-disabled in this build. Its specification and repair-script o
 
 Database path priority is:
 
-- Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
-- Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
+- Stats: `TOKENLESS_STATS_DB` > `DSH_TOKENLESS_STATS_DB` (only while `DSH_SHELL=1`) > `stats.db` under `TOKENLESS_DATA_DIR` or `DSH_TOKENLESS_DATA_DIR` > `~/.tokenless/stats.db`
+- Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `DSH_TOKENLESS_STASH_DB` (only while `DSH_SHELL=1`) > `stash.db` under `TOKENLESS_DATA_DIR` or `DSH_TOKENLESS_DATA_DIR` > `~/.tokenless/stash.db`
 
 `TOKENLESS_DATA_DIR` is an explicit directory-level relocation and may point outside the real user home, including to a managed service directory under `/var/lib`. Both the CLI and bundled RTK writer reject filesystem root, relative paths, parent traversal, and existing non-directory targets. Without a valid higher-priority file override, an invalid explicit data directory disables that operation's SQLite state instead of silently falling back to home.
 
@@ -208,6 +209,22 @@ workspace directory contains a `.gitignore` with `*`, so complete tool text,
 Stash payloads, and SQLite sidecars are not staged by `git add -A`. Custom paths
 are not modified; make them accessible to the DSH shell sandbox and exclude
 them from source control or backups as required by your data policy.
+
+The DSH sandbox sets a sentinel variable, and the adapter publishes
+overrides for the managed shell environment within the sandbox:
+
+| Variable | Purpose | Constraint |
+|----------|---------|------------|
+| `DSH_SHELL` | Sentinel set by the DeepSeek Harness sandbox; the `DSH_TOKENLESS_*` overrides below take effect only while its value is `1` | Set by the DSH host, not published by the adapter |
+| `DSH_TOKENLESS_DATA_DIR` | Override the data directory the managed shell environment uses | Only takes effect while `DSH_SHELL=1` |
+| `DSH_TOKENLESS_STATS_DB` | Override the statistics database the managed shell environment uses | Only takes effect while `DSH_SHELL=1` |
+| `DSH_TOKENLESS_STASH_DB` | Override the Stash database the managed shell environment uses | Only takes effect while `DSH_SHELL=1` |
+
+The DSH sandbox strips inherited `TOKENLESS_*` variables, so the adapter
+publishes the `DSH_TOKENLESS_*` overrides into the managed shell
+environment; the Tokenless CLI reads them on every invocation, and only
+while `DSH_SHELL=1`. `DSH_SHELL` itself comes from the DSH host and is not
+published by the adapter.
 
 ## Local and external data
 
@@ -304,7 +321,7 @@ This clears records from the statistics database resolved in the current environ
 env | grep -E '^TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-The statistics path resolves in this order: `TOKENLESS_STATS_DB`, `TOKENLESS_DATA_DIR/stats.db`, then `~/.tokenless/stats.db`. The Stash path resolves in this order: command-line `--stash-db`, `TOKENLESS_STASH_DB`, `TOKENLESS_DATA_DIR/stash.db`, then `~/.tokenless/stash.db`. Write the final values as verified absolute paths; do not expand untrusted environment values directly into a removal command.
+The statistics path resolves in this order: `TOKENLESS_STATS_DB`, `DSH_TOKENLESS_STATS_DB` (only while `DSH_SHELL=1`), `stats.db` under `TOKENLESS_DATA_DIR` or `DSH_TOKENLESS_DATA_DIR`, then `~/.tokenless/stats.db`. The Stash path resolves in this order: command-line `--stash-db`, `TOKENLESS_STASH_DB`, `DSH_TOKENLESS_STASH_DB` (only while `DSH_SHELL=1`), `stash.db` under `TOKENLESS_DATA_DIR` or `DSH_TOKENLESS_DATA_DIR`, then `~/.tokenless/stash.db`. Write the final values as verified absolute paths; do not expand untrusted environment values directly into a removal command.
 
 The following command works for default and custom paths. Replace and print both paths first, then confirm that they are the Tokenless databases to remove:
 
