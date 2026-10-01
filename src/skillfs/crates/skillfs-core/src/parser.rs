@@ -289,8 +289,12 @@ fn parse_returns(section: Option<&String>, issues: &mut Vec<String>) -> Vec<Retu
 }
 
 /// Parse lines like: - `name` (type, required|optional): description
+///
+/// Names are kebab-case per `validate_name` (`[a-z0-9-]`), so the name group
+/// admits hyphens (`max-results`); `\w+` alone would flag those lines as
+/// malformed and drop the parameter.
 fn parse_typed_list(section: &str, issues: &mut Vec<String>) -> Vec<Parameter> {
-    let re_pattern = r"^-\s+`(\w+)`\s+\((\w+)(?:,\s*(required|optional))?\):\s*(.*)$";
+    let re_pattern = r"^-\s+`([\w-]+)`\s+\((\w+)(?:,\s*(required|optional))?\):\s*(.*)$";
     let re = regex::Regex::new(re_pattern).expect("valid regex");
 
     let mut result = Vec::new();
@@ -579,6 +583,29 @@ description: Test skill
         assert_eq!(entry.parameters.len(), 1);
         assert_eq!(entry.parameters[0].name, "valid");
         assert!(entry.parse_status.is_degraded());
+    }
+
+    #[test]
+    fn test_parse_parameters_kebab_case_names() {
+        let content = r#"---
+name: test
+description: Test skill
+---
+
+## Parameters
+
+- `max-results` (integer, optional): Cap on results
+- `dry-run` (boolean, required): Run without side effects
+"#;
+
+        let entry = parse_skill_md(content, "test");
+
+        // kebab-case is the naming convention validate_name enforces; such
+        // parameters must parse instead of being flagged malformed.
+        assert_eq!(entry.parameters.len(), 2);
+        assert_eq!(entry.parameters[0].name, "max-results");
+        assert_eq!(entry.parameters[1].name, "dry-run");
+        assert!(entry.parse_status.is_ok());
     }
 
     #[test]
