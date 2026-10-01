@@ -246,7 +246,10 @@ class CommandClassifier:
 
         # 4. sed 特殊处理：无 -i 时为只读
         if cmd == "sed":
-            if not any(a == "-i" or a.startswith("-i") for a in args):
+            if not any(
+                a.startswith("-i") or a == "--in-place" or a.startswith("--in-place=")
+                for a in args
+            ):
                 return True, "sed 只读模式"
             return False, ""
 
