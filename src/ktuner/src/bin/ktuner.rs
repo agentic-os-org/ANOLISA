@@ -184,16 +184,42 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
     Ok(0)
 }
 
+/// Normalize a user-supplied parameter name for lookup: sysfs names
+/// (`block/...`, `transparent_hugepage/...`) are filesystem identities and
+/// must stay verbatim, while sysctl names accept slash/dot and case
+/// variants.
+fn normalize_param(param: &str) -> String {
+    if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
+        param.to_string()
+    } else {
+        param.replace('/', ".").to_lowercase()
+    }
+}
+
+/// Find the recommendation for a user-supplied parameter name, accepting the
+/// same aliases in every consumer (why / fix): the verbatim form first, then
+/// the normalized form. Returns `None` when no recommendation matches.
+fn find_recommendation<'a>(
+    eval: &'a rules::EvalResult,
+    param: &str,
+) -> Option<&'a rules::Recommendation> {
+    let normalized = normalize_param(param);
+    eval.recommendations
+        .iter()
+        .find(|r| r.param == param || r.param == normalized)
+}
+
 fn cmd_fix(param: &str) -> Result<i32> {
     let is_root = unsafe { libc::geteuid() } == 0;
     if !is_root {
         anyhow::bail!("fix requires root (sudo ktuner fix {param})");
     }
     let (_, eval) = gather()?;
-    let rec = eval
-        .recommendations
-        .iter()
-        .find(|r| r.param == param)
+    // Same alias policy as why_with: sysfs names are filesystem identities,
+    // while sysctl names accept slash/dot and case variants. Without this,
+    // `ktuner why vm/swappiness` succeeds but `ktuner fix vm/swappiness`
+    // reports "parameter not found".
+    let rec = find_recommendation(&eval, param)
         .ok_or_else(|| anyhow::anyhow!("parameter not found or already optimal: {param}"))?;
     if !rec.writable {
         anyhow::bail!("parameter {param} is read-only in this environment");
@@ -233,16 +259,8 @@ fn why_with(
     read_current: impl FnOnce(&str) -> Option<String>,
 ) -> Result<(serde_json::Value, i32)> {
     // sysfs names are filesystem identities, while sysctl names accept aliases.
-    let normalized = if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
-        param.to_string()
-    } else {
-        param.replace('/', ".").to_lowercase()
-    };
-    if let Some(rec) = eval
-        .recommendations
-        .iter()
-        .find(|r| r.param == param || r.param == normalized)
-    {
+    let normalized = normalize_param(param);
+    if let Some(rec) = find_recommendation(eval, param) {
         let output = json!({
             "param": rec.param,
             "current": rec.current_value,
@@ -341,6 +359,49 @@ mod tests {
             recommendations,
             total_checked: 1,
         }
+    }
+
+    #[test]
+    fn fix_and_why_share_alias_lookup() {
+        // The lookup helper must accept the sysctl alias forms in every
+        // consumer: without this, `ktuner why vm/swappiness` found the
+        // recommendation while `ktuner fix vm/swappiness` reported
+        // "parameter not found".
+        let rec = Recommendation {
+            param: "vm.swappiness".to_string(),
+            current_value: "60".to_string(),
+            recommended_value: "1".to_string(),
+            writable: true,
+            ..Default::default()
+        };
+        let eval = evaluation(vec![rec]);
+        for alias in [
+            "vm.swappiness",
+            "vm/swappiness",
+            "VM.Swappiness",
+            "vm/swappiness",
+        ] {
+            assert!(
+                find_recommendation(&eval, alias).is_some(),
+                "alias {alias} must resolve to the vm.swappiness recommendation"
+            );
+        }
+        // Sysfs identities are not rewritten: no dot/case folding.
+        let sysfs = Recommendation {
+            param: "block/sda/scheduler".to_string(),
+            current_value: "noop".to_string(),
+            recommended_value: "none".to_string(),
+            writable: true,
+            ..Default::default()
+        };
+        let eval = evaluation(vec![sysfs]);
+        assert!(find_recommendation(&eval, "block/sda/scheduler").is_some());
+        assert!(
+            find_recommendation(&eval, "block.sda.scheduler").is_none(),
+            "sysfs names must not be dot-folded into a match"
+        );
+        // Unknown params resolve to nothing.
+        assert!(find_recommendation(&eval, "no/such/param").is_none());
     }
 
     #[test]
