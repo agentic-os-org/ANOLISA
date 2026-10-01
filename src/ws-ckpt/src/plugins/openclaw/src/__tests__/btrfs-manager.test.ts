@@ -195,6 +195,32 @@ describe("BtrfsManager with mocked executor", () => {
     expect(r.snapshot).toBe("snap1");
   });
 
+  it("createCheckpoint reports the ID actually sent to the CLI", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(ok("[]"));
+    await mgr.initialize("/ws");
+
+    // The CLI roundtrip crosses a millisecond boundary; recomputing the
+    // fallback ID after the await would report a snapshot name that was
+    // never sent to the daemon.
+    let sentId = "";
+    exec.checkpoint = vi.fn().mockImplementation(
+      async (_ws: string, id: string) => {
+        sentId = id;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return ok("done");
+      },
+    );
+
+    const r = await mgr.createCheckpoint({ message: "no explicit id" });
+    expect(r.success).toBe(true);
+    expect(sentId).toMatch(/^snap-\d+$/);
+    expect(r.snapshot).toBe(sentId);
+    expect(mgr.getStore().getAll().some((s) => s.snapshot === sentId)).toBe(true);
+  });
+
   it("createCheckpoint handles error exit", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
