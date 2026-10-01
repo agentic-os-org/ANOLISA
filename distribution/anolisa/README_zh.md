@@ -55,8 +55,9 @@ anolisa update all
 | `env` | 显示环境检测结果 |
 | `bug` | 生成 bug 报告（`--component cosh-ng` 时附加 cosh-shell 诊断包摘要；`COSH_SHELL_BIN` 可覆盖二进制路径） |
 
-执行 `anolisa adapter enable <component> openclaw` 即同意插件声明的能力，
-CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
+默认情况下，`anolisa adapter enable <component> openclaw` 会在宿主的各条命令
+支持 capability consent 时同意插件声明的能力。添加 `--no-accept-capabilities`
+可在安装和激活两个阶段拒绝自动授予同意。此选项不撤销宿主已有的授权，也不授予
 unsafe-install 覆盖权限。
 
 通过 `anolisa adapter enable tokenless opencode` 启用 Tokenless 本地插件。
