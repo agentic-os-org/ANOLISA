@@ -222,6 +222,29 @@ fn list_hides_meta_dir() {
     assert!(!entries.iter().any(|e| e.path.starts_with(".anolisa")));
 }
 
+#[test]
+fn list_caps_entries_at_max() {
+    // Regression: a listing over the cap must return exactly the cap and
+    // not silently look complete at an arbitrary count.
+    let (_t, svc) = setup();
+    let mount_root = _t.path().join("user-tester");
+    let bulk = mount_root.join("bulk");
+    std::fs::create_dir_all(&bulk).unwrap();
+    for i in 0..(5000 + 10) {
+        std::fs::File::create(bulk.join(format!("f{i:05}.md"))).unwrap();
+    }
+    let entries = svc
+        .list(
+            "",
+            ListOptions {
+                recursive: true,
+                glob: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(entries.len(), 5000, "listing must stop at the cap");
+}
+
 // ---------- mem_grep ----------
 
 #[test]
