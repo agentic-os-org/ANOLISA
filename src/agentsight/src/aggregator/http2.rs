@@ -637,10 +637,13 @@ impl Http2StreamAggregator {
 
     /// Create a new aggregator with custom capacity
     pub fn with_capacity(capacity: usize) -> Self {
+        // A zero capacity has no meaningful LRU; clamp to one so a
+        // misconfigured caller gets maximum eviction instead of a panic.
+        let cap = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
         Http2StreamAggregator {
-            streams: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
+            streams: LruCache::new(cap),
             completed_streams: Vec::new(),
-            hpack_states: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
+            hpack_states: LruCache::new(cap),
             continuation_buffers: HashMap::new(),
             decoded_headers_store: HashMap::new(),
         }
@@ -1226,6 +1229,14 @@ mod tests {
     use crate::probes::sslsniff::SslEvent;
     use hpack::Encoder;
     use std::rc::Rc;
+
+    #[test]
+    fn with_capacity_zero_does_not_panic() {
+        // Regression: capacity 0 used to unwrap on NonZeroUsize::new and
+        // panic; it must clamp to one instead.
+        let mut aggregator = Http2StreamAggregator::with_capacity(0);
+        assert!(aggregator.process_frames(Vec::new()).is_empty());
+    }
 
     fn create_test_event(pid: u32, ssl_ptr: u64, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {
         Rc::new(SslEvent {

@@ -166,7 +166,10 @@ impl HttpConnectionAggregator {
 
     /// Create a new aggregator with explicit capacity and memory/time limits.
     pub fn with_limits(capacity: usize, max_body_bytes: usize, idle_timeout: Duration) -> Self {
-        let cap = NonZeroUsize::new(capacity).unwrap();
+        // A zero capacity has no meaningful LRU; clamp to one so a
+        // misconfigured caller gets maximum eviction instead of a panic —
+        // the same graceful handling max_body_bytes receives below.
+        let cap = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
         HttpConnectionAggregator {
             connections: LruCache::new(cap),
             sse_continuation_buffers: LruCache::new(cap),
@@ -2863,6 +2866,15 @@ mod tests {
         // max_body_bytes should be at least 1024
         let agg = HttpConnectionAggregator::with_limits(10, 100, Duration::from_secs(60));
         assert_eq!(agg.max_body_bytes(), 1024);
+    }
+
+    #[test]
+    fn test_with_limits_zero_capacity_does_not_panic() {
+        // Regression: capacity 0 used to unwrap on NonZeroUsize::new and
+        // panic; it must clamp like max_body_bytes does.
+        let agg = HttpConnectionAggregator::with_limits(0, 4096, Duration::from_secs(30));
+        assert_eq!(agg.max_body_bytes(), 4096);
+        assert_eq!(agg.active_connections(), 0);
     }
 
     #[test]
