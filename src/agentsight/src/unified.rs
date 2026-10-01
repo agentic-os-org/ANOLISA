@@ -97,13 +97,11 @@ pub struct AgentSight {
     /// ResponseId → SessionId mapper for FileWrite events
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
-    pending_genai: Vec<PendingGenAI>,
+    pending_genai: PendingGenAiQueue,
     /// Calls exported with a fallback session_id after the deferral window
     /// timed out, keyed by pid, awaiting a late FileWrite mapping for
     /// retroactive session fix-up (issue #2059).
     retro_session_fixup: lru::LruCache<u32, Vec<RetroFixupEntry>>,
-    /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
-    pending_genai_bytes: usize,
     /// Runtime limits for bounded buffers and eviction policies.
     runtime_limits: crate::config::RuntimeLimits,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
@@ -151,6 +149,173 @@ impl PendingGenAI {
     /// Rough byte estimate for memory budget enforcement.
     fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.response_id.len() + self.events.len() * 512 // conservative per-event estimate
+    }
+}
+
+/// The deferred-GenAI queue with its byte-accounting counter. The counter is
+/// an invariant (always the sum of the queued entries' estimates) maintained
+/// inside the queue rather than by the callers: every drain path resyncs it,
+/// so the memory gauge and the eviction gate can never disagree with the
+/// queue. (Pre-fix, the counter only ever grew because its sole decrement
+/// lived in the forced-eviction loop.)
+#[derive(Default)]
+struct PendingGenAiQueue {
+    entries: Vec<PendingGenAI>,
+    /// Total estimated bytes of `entries` (memory budget enforcement).
+    bytes: usize,
+}
+
+/// One drained batch plus the pid whose retroactive session fix-up the
+/// caller should register (timeout exports only).
+struct DrainedGenAi {
+    events: Vec<GenAISemanticEvent>,
+    fixup_pid: Option<u32>,
+}
+
+impl PendingGenAiQueue {
+    fn push(&mut self, pending: PendingGenAI) {
+        self.bytes += pending.estimated_bytes();
+        self.entries.push(pending);
+    }
+
+    /// Re-derive the counter from the queue contents.
+    fn resync(&mut self) {
+        self.bytes = self.entries.iter().map(|p| p.estimated_bytes()).sum();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Drain entries whose session_id can now be resolved, or that timed out
+    /// and must fall back; the rest stay queued.
+    fn resolve(&mut self, mapper: &ResponseSessionMapper) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for mut pending in pending_items {
+            if let Some(session_id) = mapper
+                .get_session_by_response_id(&pending.response_id)
+                .or_else(|| mapper.get_session_by_pid(pending.pid))
+                .map(|s| s.to_string())
+            {
+                log::debug!(
+                    "Deferred session_id resolved: response_id={} → session_id={}",
+                    pending.response_id,
+                    session_id
+                );
+                for event in &mut pending.events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        call.metadata
+                            .insert("session_id".to_string(), session_id.clone());
+                    }
+                }
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: None,
+                });
+            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id timed out for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain entries whose deferral window has expired.
+    fn flush_expired(&mut self) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for pending in pending_items {
+            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id expired for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain everything (shutdown): no fix-ups — the process is exiting, so
+    /// no further FileWrite can arrive to repair a fallback session_id.
+    fn flush_all(&mut self) -> Vec<Vec<GenAISemanticEvent>> {
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        self.bytes = 0;
+        pending_items
+            .into_iter()
+            .map(|pending| {
+                log::debug!(
+                    "Flushing pending GenAI event on shutdown: response_id={}",
+                    pending.response_id
+                );
+                pending.events
+            })
+            .collect()
+    }
+
+    /// Drain only the given (exited) pid's entries; other pids keep waiting.
+    fn flush_for_pid(&mut self, pid: u32) -> Vec<Vec<GenAISemanticEvent>> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
+        self.entries = still_pending;
+        self.resync();
+        to_export
+    }
+
+    /// Evict oldest entries while count or bytes exceed the limits; returns
+    /// the evicted batches for export.
+    fn enforce_limits(
+        &mut self,
+        limits: &crate::config::RuntimeLimits,
+    ) -> Vec<Vec<GenAISemanticEvent>> {
+        let max_count = limits.pending_genai_max_count.max(1);
+        let max_bytes = limits.pending_genai_max_bytes.max(1);
+        let mut evicted = Vec::new();
+        while !self.entries.is_empty()
+            && (self.entries.len() >= max_count || self.bytes >= max_bytes)
+        {
+            let oldest = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(oldest.estimated_bytes());
+            log::warn!(
+                "pending_genai limit exceeded (count={}/{}, bytes={}/{}),                  flushing oldest response_id={}",
+                self.entries.len() + 1,
+                max_count,
+                self.bytes + oldest.estimated_bytes(),
+                max_bytes,
+                oldest.response_id
+            );
+            evicted.push(oldest.events);
+        }
+        evicted
     }
 }
 
@@ -759,13 +924,12 @@ impl AgentSight {
             } else {
                 ResponseSessionMapper::disabled()
             },
-            pending_genai: Vec::new(),
+            pending_genai: PendingGenAiQueue::default(),
             // RETRO_FIXUP_CAPACITY is a non-zero constant, so the unwrap is
             // guaranteed unreachable.
             retro_session_fixup: lru::LruCache::new(
                 std::num::NonZeroUsize::new(RETRO_FIXUP_CAPACITY).unwrap(),
             ),
-            pending_genai_bytes: 0,
             runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
@@ -1183,8 +1347,6 @@ impl AgentSight {
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
-                    self.pending_genai_bytes +=
-                        self.pending_genai.last().map_or(0, |p| p.estimated_bytes());
                     self.enforce_pending_genai_limits();
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
@@ -2178,85 +2340,30 @@ impl AgentSight {
     /// Try to resolve pending GenAI events whose session_id can now be looked up.
     /// Called after FileWrite events update the ResponseSessionMapper.
     fn resolve_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for mut pending in pending_items {
-            if let Some(session_id) = self
-                .response_mapper
-                .get_session_by_response_id(&pending.response_id)
-                .or_else(|| self.response_mapper.get_session_by_pid(pending.pid))
-                .map(|s| s.to_string())
-            {
-                // Resolved — update session_id in all event metadata
-                log::debug!(
-                    "Deferred session_id resolved: response_id={} → session_id={}",
-                    pending.response_id,
-                    session_id
-                );
-                for event in &mut pending.events {
-                    if let GenAISemanticEvent::LLMCall(call) = event {
-                        call.metadata
-                            .insert("session_id".to_string(), session_id.clone());
-                    }
-                }
-                to_export.push(pending.events);
-            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                // Timed out — export with fallback session_id
-                log::debug!(
-                    "Deferred session_id timed out for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                // Still waiting
-                still_pending.push(pending);
+        let drained = self.pending_genai.resolve(&self.response_mapper);
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
     pub fn flush_expired_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for pending in pending_items {
-            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                log::debug!(
-                    "Deferred session_id expired for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                still_pending.push(pending);
+        let drained = self.pending_genai.flush_expired();
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
@@ -2268,16 +2375,9 @@ impl AgentSight {
     /// `apply_retro_session_fixup`; the remaining pendings are persisted with
     /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        for pending in &pending_items {
-            log::debug!(
-                "Flushing pending GenAI event on shutdown: response_id={}",
-                pending.response_id
-            );
-        }
-        for pending in pending_items {
-            self.complete_and_export_deferred_genai(&pending.events);
-            self.detect_and_store_interruptions(&pending.events);
+        for events in self.pending_genai.flush_all() {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2293,19 +2393,11 @@ impl AgentSight {
     /// Falling back to the response_id-based session_id therefore loses
     /// nothing. Deferred events of other (still-live) pids keep waiting.
     fn flush_deferred_genai_for_pid(&mut self, pid: u32) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
-        self.pending_genai = still_pending;
-
         // No retro fix-up registration here: the pid is dead, so the FileWrite
         // that would reveal its session mapping can never arrive anymore.
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for events in self.pending_genai.flush_for_pid(pid) {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2383,26 +2475,7 @@ impl AgentSight {
     /// If pending GenAI queue exceeds count or byte limits, flush the oldest
     /// entries with the fallback session_id to prevent unbounded memory growth.
     fn enforce_pending_genai_limits(&mut self) {
-        let max_count = self.runtime_limits.pending_genai_max_count.max(1);
-        let max_bytes = self.runtime_limits.pending_genai_max_bytes.max(1);
-
-        while !self.pending_genai.is_empty()
-            && (self.pending_genai.len() >= max_count || self.pending_genai_bytes >= max_bytes)
-        {
-            let oldest = self.pending_genai.remove(0);
-            self.pending_genai_bytes = self
-                .pending_genai_bytes
-                .saturating_sub(oldest.estimated_bytes());
-            log::warn!(
-                "pending_genai limit exceeded (count={}/{}, bytes={}/{}), \
-                 flushing oldest response_id={}",
-                self.pending_genai.len() + 1,
-                max_count,
-                self.pending_genai_bytes + oldest.estimated_bytes(),
-                max_bytes,
-                oldest.response_id
-            );
-            let events = oldest.events;
+        for events in self.pending_genai.enforce_limits(&self.runtime_limits) {
             self.complete_and_export_deferred_genai(&events);
             self.detect_and_store_interruptions(&events);
         }
@@ -2455,7 +2528,7 @@ impl AgentSight {
             ring_buffer_dropped: self.probes.ring_buffer_dropped()?,
             connection_cache_bytes: connections.connection_cache_bytes as u64,
             pending_genai_count: self.pending_genai.len() as u64,
-            pending_genai_bytes: self.pending_genai_bytes as u64,
+            pending_genai_bytes: self.pending_genai.bytes as u64,
             pending_connection_count: connections.pending_connection_count as u64,
             pending_connection_bytes: connections.pending_connection_bytes as u64,
             eviction_count: connections.eviction_count,
@@ -3502,6 +3575,93 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    #[test]
+    fn pending_genai_byte_counter_resyncs_on_every_flush_path() {
+        // The counter is a queue invariant: after every drain path it must
+        // equal the sum of the surviving entries' estimates. Pre-fix it only
+        // ever grew (the sole decrement lived in the eviction loop), so the
+        // gauge reported stale values and the eviction gate stayed tripped.
+        let expired_at =
+            std::time::Instant::now() - PENDING_SESSION_TIMEOUT - std::time::Duration::from_secs(1);
+        let pending = |id: &str, pid: u32, at: std::time::Instant| PendingGenAI {
+            events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(id))],
+            response_id: id.to_string(),
+            pid,
+            created_at: at,
+        };
+        let sum_bytes = |queue: &PendingGenAiQueue| -> usize {
+            queue.entries.iter().map(|p| p.estimated_bytes()).sum()
+        };
+
+        // 1) resolve: the expired entry drains, the fresh one stays.
+        let mut queue = PendingGenAiQueue::default();
+        queue.push(pending("resolve-expired", 11, expired_at));
+        queue.push(pending("resolve-fresh", 11, std::time::Instant::now()));
+        let mapper = ResponseSessionMapper::disabled();
+        let drained = queue.resolve(&mapper);
+        assert_eq!(drained.len(), 1, "the expired entry must drain");
+        assert_eq!(queue.len(), 1, "the fresh entry must survive");
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+        assert!(queue.bytes > 0);
+
+        // 2) flush_expired: age the survivor, flush it, counter reaches 0.
+        queue.entries[0].created_at = expired_at;
+        let drained = queue.flush_expired();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0, "counter must reach 0 with the queue");
+
+        // 3) flush_for_pid: the dead pid drains, the other stays.
+        queue.push(pending("dead-pid", 42, std::time::Instant::now()));
+        queue.push(pending("live-pid", 43, std::time::Instant::now()));
+        let exported = queue.flush_for_pid(42);
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+
+        // 4) flush_all: everything drains, counter goes to 0.
+        let exported = queue.flush_all();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0);
+    }
+
+    #[test]
+    fn pending_genai_eviction_keeps_counter_in_sync() {
+        // The count limit evicts oldest-first until the queue is below the
+        // limit, and the counter must match whatever survives.
+        let mut queue = PendingGenAiQueue::default();
+        for i in 0..4 {
+            queue.push(PendingGenAI {
+                events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(&format!(
+                    "evict-{i}"
+                )))],
+                response_id: format!("r{i}"),
+                pid: 1,
+                created_at: std::time::Instant::now(),
+            });
+        }
+        let limits = crate::config::RuntimeLimits {
+            pending_genai_max_count: 2,
+            ..Default::default()
+        };
+        let evicted = queue.enforce_limits(&limits);
+        assert_eq!(
+            evicted.len(),
+            3,
+            "4 entries at count-limit 2 evict down to 1"
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.bytes,
+            queue
+                .entries
+                .iter()
+                .map(|p| p.estimated_bytes())
+                .sum::<usize>()
+        );
     }
 
     // ── Test for exit-time deferred flush (issue #2032) ──
