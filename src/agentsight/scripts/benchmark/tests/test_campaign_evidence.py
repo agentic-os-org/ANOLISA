@@ -393,6 +393,7 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
         run = {
             "summary": summary(),
             "evaluation": {"verdict": "FAIL" if label == "overload" else "PASS"},
+            "started_at_unix": 0,
         }
         phases[label] = (run_path, run)
         if label == "recover":
@@ -439,6 +440,123 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     )
     assert fault["verdict"] == "FAIL"
     assert fault["failed"] == ["token_accuracy"]
+
+
+@pytest.mark.parametrize("delay", [0, 5, 30])
+def test_recovery_deadline_includes_initial_stall(tmp_path: Path, delay: int) -> None:
+    run_path = tmp_path / "recover" / "run-result.json"
+    measurement = run_path.parent / "measurement"
+    measurement.mkdir(parents=True)
+    started = 100
+    duration = 900
+    rows = []
+    for second in range(started + delay, started + duration):
+        for _ in range(2):
+            for metric, value in (
+                ("benchmark_requests", 1),
+                ("benchmark_http_success", 1),
+                ("benchmark_latency", 30000 if second == started + delay else 10),
+            ):
+                rows.append(
+                    {"metric": metric, "data": {"time": second, "value": value}}
+                )
+    load_path = measurement / "k6.jsonl"
+    load_path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+    metrics_path = measurement / "metrics.csv"
+    metrics_path.write_text(
+        "timestamp,process_alive,rss_mb\n"
+        + "".join(f"{second},1,100\n" for second in range(started, started + duration)),
+        encoding="utf-8",
+    )
+    load = render_report.summarize_load(load_path)
+    measured = render_report.build_summary(
+        protocol="sse",
+        qps="2",
+        duration=str(duration),
+        load=load,
+        resources=render_report.summarize_resources(metrics_path),
+        drops=render_report.summarize_drops(metrics_path, load["requests"]),
+        validation={
+            "completeness_ratio": 1.0,
+            "match_ratio": 1.0,
+            "token_accuracy": 1.0,
+        },
+    )
+    measured["runtime_clean"] = True
+    evaluation = campaign.evaluate(measured, thresholds())
+    assert evaluation["verdict"] == "PASS"
+    phases = {
+        "stable": (
+            tmp_path / "stable" / "run-result.json",
+            {"summary": summary(), "evaluation": {"verdict": "PASS"}},
+        ),
+        "overload": (
+            tmp_path / "overload" / "run-result.json",
+            {"summary": summary(), "evaluation": {"verdict": "FAIL"}},
+        ),
+        "recover": (
+            run_path,
+            {
+                "summary": measured,
+                "evaluation": evaluation,
+                "started_at_unix": started,
+                "ended_at_unix": started + duration,
+            },
+        ),
+    }
+
+    result = campaign_evidence.recovery_outcome(
+        phases, {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}, thresholds()
+    )
+    assert result["seconds"] == {
+        "effective_qps": float(delay),
+        "latency_p99_ms": float(delay + 1),
+        "rss_mb": 0.0,
+    }
+    assert result["verdict"] == ("FAIL" if delay > 10 else "PASS")
+    assert result["failed"] == (
+        ["effective_qps", "latency_p99_ms"] if delay > 10 else []
+    )
+
+
+@pytest.mark.parametrize("started", [None, True, "invalid", float("nan"), float("inf")])
+def test_recovery_requires_recorded_phase_start(
+    tmp_path: Path, started: object
+) -> None:
+    phases = {}
+    for label in campaign_evidence.RECOVERY_PHASES:
+        run_path = tmp_path / label / "run-result.json"
+        run = {"summary": summary(), "evaluation": {"verdict": "PASS"}}
+        if started is not None:
+            run["started_at_unix"] = started
+        phases[label] = (run_path, run)
+    write_recovery_artifacts(phases["recover"][0])
+
+    result = campaign_evidence.recovery_outcome(
+        phases, {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}, thresholds()
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["missing"] == ["recover.started_at_unix"]
+    assert result["seconds"] == {}
+
+
+def test_recovery_window_starts_after_fractional_phase_origin() -> None:
+    samples = [(100.0, 2.0), (101.0, 2.0), (102.0, 2.0)]
+    assert (
+        campaign_evidence.continuous_recovery(
+            samples, 2.0, 0.1, 2, higher_is_better=True, started_at=100.5
+        )
+        is None
+    )
+    samples.append((103.0, 2.0))
+    assert (
+        campaign_evidence.continuous_recovery(
+            samples, 2.0, 0.1, 2, higher_is_better=True, started_at=100.5
+        )
+        == 0.0
+    )
 
 
 def test_campaign_audit_rejects_partial_evidence() -> None:

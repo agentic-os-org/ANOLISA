@@ -13,7 +13,7 @@ from typing import Any
 
 # Campaign evidence uses the same percentile calculation as a single run.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
-from benchmark_stats import percentile
+from benchmark_stats import numeric, percentile
 
 VERSIONS = ("baseline", "optimized")
 RECOVERY_PHASES = ("stable", "overload", "recover")
@@ -77,11 +77,13 @@ def continuous_recovery(
     *,
     higher_is_better: bool,
     max_gap_seconds: float = 2.5,
+    started_at: float | None = None,
 ) -> float | None:
     """Return time to the first uninterrupted recovered window."""
     if reference is None or not samples:
         return None
     ordered = sorted(samples)
+    origin = ordered[0][0] if started_at is None else started_at
     threshold = reference * (1 - tolerance if higher_is_better else 1 + tolerance)
     recovered_at: float | None = None
     previous: float | None = None
@@ -92,9 +94,10 @@ def continuous_recovery(
         ):
             recovered_at = None
         if passes and recovered_at is None:
-            recovered_at = sample_time
+            # k6 buckets may start just before the fractional phase timestamp.
+            recovered_at = max(sample_time, origin)
         if passes and sample_time - recovered_at >= window_seconds:
-            return recovered_at - ordered[0][0]
+            return recovered_at - origin
         previous = sample_time
     return None
 
@@ -172,6 +175,14 @@ def recovery_outcome(
         }
     stable = phases["stable"][1]["summary"]
     recover_path, recover_run = phases["recover"]
+    started_at = numeric(recover_run.get("started_at_unix"))
+    if started_at is None:
+        return {
+            "verdict": "INCONCLUSIVE",
+            "missing": ["recover.started_at_unix"],
+            "failed": [],
+            "seconds": {},
+        }
     recover = recover_run["summary"]
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
@@ -219,6 +230,7 @@ def recovery_outcome(
             tolerance,
             window,
             higher_is_better=higher_is_better,
+            started_at=started_at,
         )
         for name, (reference, samples, higher_is_better) in specifications.items()
     }

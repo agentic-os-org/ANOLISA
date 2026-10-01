@@ -2308,6 +2308,7 @@ def test_full_scenario_reports_use_raw_artifacts(tmp_path: Path) -> None:
             "label": label,
             "version": "baseline",
             "repetition": 1,
+            "started_at_unix": 0,
             "summary": summary,
         }
         items.append((path, run))
