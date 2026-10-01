@@ -130,6 +130,12 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer: risk enforcement
 
+Pre-operation `block` rules for exec without argv conditions, file open/write, and connect require
+an active BPF LSM and the matching loaded hooks. Without that support, initial policies and runtime
+policy updates are rejected with a missing-hook error. A full hook profile alone cannot enable
+blocking on a kernel without BPF LSM; supported `notify` and `kill` rules remain available through
+tracepoints.
+
 `agentsight-enforcer` is the privileged daemon that can block risky Agent actions. It ships with the
 package and is started by `agentsight-enforcer.service`. When its socket
 (`/run/agentsight/enforcer.sock`) is missing, `serve` logs:
@@ -160,9 +166,10 @@ for prerequisites, the mutually exclusive capability, maintenance window, and re
 
 Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
 the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
-(`bpf` listed in `/sys/kernel/security/lsm`). When a `block` rule matches on a backend that cannot
-deny that operation — for example a `block connect` rule while the `enforce_socket_connect` hook is
-not attached — the engine still reports the match as a violation with `effect=block` and
+(`bpf` listed in `/sys/kernel/security/lsm`). Plain-exec, file open/write, and connect rules with
+missing support are rejected as described above. Rules without a dedicated block feature bit retain
+degraded reporting: for example, when a `block recv` rule matches without an active
+`enforce_socket_recvmsg` hook, the engine reports the match as a violation with `effect=block` and
 `blocked=false`. Treat such degraded reports as a signal that the policy cannot actually deny;
 check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
 configuration.
