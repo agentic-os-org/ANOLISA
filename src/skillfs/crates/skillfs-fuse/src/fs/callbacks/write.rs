@@ -15,6 +15,33 @@ use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, fstatat_leaf, openat_leaf};
 
+/// Recover the true instant from a pre-epoch setattr request that fuser
+/// 0.15–0.18 mangled while decoding.
+///
+/// fuser 0.15–0.18 `system_time_from_time` (`ll/request.rs`) turns a
+/// pre-epoch wire timespec `{S < 0, N > 0}` into
+/// `UNIX_EPOCH - Duration::new(|S|, N)` — it subtracts the nanoseconds
+/// instead of borrowing a second, so a kernel request for -1.5 s arrives as
+/// -2.5 s. The kernel always sends normalized timespecs, which makes the
+/// intent recoverable: `UNIX_EPOCH - Duration::new(|S| - 1, 1e9 - N)` for
+/// `N > 0`. Whole seconds and post-epoch instants pass through unchanged.
+/// Remove together with [`fuser_wire_time`](crate::attr::fuser_wire_time)
+/// (attr.rs) once the dependency ships fuser's fixed conversions (master,
+/// post-0.18).
+fn fuser_decoded_time(t: std::time::SystemTime) -> std::time::SystemTime {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(_) => t,
+        Err(e) if e.duration().subsec_nanos() == 0 => t,
+        Err(e) => {
+            let d = e.duration();
+            match d.as_secs().checked_sub(1) {
+                Some(secs) => UNIX_EPOCH - Duration::new(secs, 1_000_000_000 - d.subsec_nanos()),
+                None => t,
+            }
+        }
+    }
+}
+
 impl SkillFs {
     pub(in crate::fs) fn write_impl(
         &mut self,
@@ -753,6 +780,7 @@ impl SkillFs {
         );
         reply.entry(&Duration::from_secs(1), &attr, 0);
     }
+
     pub(in crate::fs) fn setattr_impl(
         &mut self,
         req: &Request,
@@ -1122,6 +1150,9 @@ impl SkillFs {
                     tv_nsec: libc::UTIME_NOW,
                 },
                 Some(fuser::TimeOrNow::SpecificTime(t)) => {
+                    // Undo fuser's pre-epoch decode mangling first (see
+                    // `fuser_decoded_time`).
+                    let t = fuser_decoded_time(t);
                     match t.duration_since(UNIX_EPOCH) {
                         Ok(d) => libc::timespec {
                             tv_sec: d.as_secs() as i64,
@@ -1156,6 +1187,9 @@ impl SkillFs {
                     tv_nsec: libc::UTIME_NOW,
                 },
                 Some(fuser::TimeOrNow::SpecificTime(t)) => {
+                    // Undo fuser's pre-epoch decode mangling first (see
+                    // `fuser_decoded_time`).
+                    let t = fuser_decoded_time(t);
                     match t.duration_since(UNIX_EPOCH) {
                         Ok(d) => libc::timespec {
                             tv_sec: d.as_secs() as i64,
@@ -1251,5 +1285,43 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod time_decode_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// fuser 0.15–0.18's actual buggy decode, verbatim from `ll/request.rs`
+    /// `system_time_from_time`, as the adversary.
+    fn fuser_0_15_system_time_from_time(secs: i64, nsecs: u32) -> std::time::SystemTime {
+        if secs >= 0 {
+            UNIX_EPOCH + Duration::new(secs as u64, nsecs)
+        } else {
+            UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
+        }
+    }
+
+    /// The kernel's request for -1.5 s arrives on the wire as
+    /// `{-2, 500_000_000}`; fuser 0.15 decodes it to EPOCH - 2.5 s, and the
+    /// compensation recovers the true instant.
+    #[test]
+    fn decode_compensation_recovers_kernel_intent() {
+        let mangled = fuser_0_15_system_time_from_time(-2, 500_000_000);
+        assert_eq!(mangled, UNIX_EPOCH - Duration::from_millis(2500));
+        let recovered = fuser_decoded_time(mangled);
+        assert_eq!(recovered, UNIX_EPOCH - Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn decode_compensation_keeps_whole_seconds_and_post_epoch() {
+        let whole = fuser_0_15_system_time_from_time(-2, 0);
+        assert_eq!(
+            fuser_decoded_time(whole),
+            UNIX_EPOCH - Duration::from_secs(2)
+        );
+        let post = UNIX_EPOCH + Duration::from_millis(2500);
+        assert_eq!(fuser_decoded_time(post), post);
     }
 }

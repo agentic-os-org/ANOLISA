@@ -252,6 +252,65 @@ assert_contains "$PRIMARY_MD" "name: primary-skill" "可读取 primary SKILL.md"
 PASSTHROUGH_CONTENT="$(cat "$MOUNT_DIR/skills/primary-skill/assets/info.txt")"
 assert_equals "$PASSTHROUGH_CONTENT" "passthrough-ok" "物理文件透传正确"
 
+# Pre-epoch timestamp round trip: fuser 0.15 mishandles pre-epoch times on
+# the wire; attr.rs/write.rs compensate, so both directions must round-trip
+# to the nanosecond. Skipped on hosts where the backing filesystem cannot
+# represent the probe value (32-bit time_t range).
+PRE_EPOCH_NS=-1500000000
+NEAR_EPOCH_NS=-1
+python3 - "$SOURCE_DIR/primary-skill/SKILL.md" "$PRE_EPOCH_NS" <<'PY' >/dev/null 2>&1 || PRE_EPOCH_SUPPORTED=0
+import os, sys
+try:
+    os.utime(sys.argv[1], ns=(int(sys.argv[2]), int(sys.argv[2])))
+except (OverflowError, OSError):
+    sys.exit(1)
+if os.stat(sys.argv[1]).st_mtime_ns != int(sys.argv[2]):
+    sys.exit(1)
+PY
+if [[ "${PRE_EPOCH_SUPPORTED:-1}" == "1" ]]; then
+	BACKING_MT="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$SOURCE_DIR/primary-skill/SKILL.md")"
+	sleep 1.2 # past the 1s attribute TTL: the backing file changed outside the mount
+	MOUNT_MT="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$MOUNT_DIR/skills/primary-skill/SKILL.md")"
+	assert_equals "$MOUNT_MT" "$BACKING_MT" "backing -1.5s 经挂载读取保持一致"
+
+	python3 - "$MOUNT_DIR/skills/primary-skill/SKILL.md" <<'PY' >/dev/null 2>&1
+import os, sys
+os.utime(sys.argv[1], ns=(-1500000000, -1500000000))
+PY
+	BACKING_MT_AFTER="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$SOURCE_DIR/primary-skill/SKILL.md")"
+	assert_equals "$BACKING_MT_AFTER" "$PRE_EPOCH_NS" "挂载侧设置 -1.5s 后 backing 保持一致"
+
+	# Near-epoch nanosecond boundary (-1 ns) in both directions.
+	python3 - "$SOURCE_DIR/primary-skill/SKILL.md" "$NEAR_EPOCH_NS" <<'PY' >/dev/null 2>&1 || NEAR_EPOCH_SUPPORTED=0
+import os, sys
+try:
+    os.utime(sys.argv[1], ns=(int(sys.argv[2]), int(sys.argv[2])))
+except (OverflowError, OSError):
+    sys.exit(1)
+if os.stat(sys.argv[1]).st_mtime_ns != int(sys.argv[2]):
+    sys.exit(1)
+PY
+	if [[ "${NEAR_EPOCH_SUPPORTED:-1}" == "1" ]]; then
+		sleep 1.2 # past the 1s attribute TTL
+		MOUNT_MT_NS="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$MOUNT_DIR/skills/primary-skill/SKILL.md")"
+		assert_equals "$MOUNT_MT_NS" "$NEAR_EPOCH_NS" "backing -1ns 经挂载读取保持一致"
+
+		python3 - "$MOUNT_DIR/skills/primary-skill/SKILL.md" <<'PY' >/dev/null 2>&1
+import os, sys
+os.utime(sys.argv[1], ns=(-1, -1))
+PY
+		BACKING_MT_NS="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$SOURCE_DIR/primary-skill/SKILL.md")"
+		assert_equals "$BACKING_MT_NS" "$NEAR_EPOCH_NS" "挂载侧设置 -1ns 后 backing 保持一致"
+	else
+		echo "[skillfs-e2e] 跳过 -1ns 边界校验：backing 文件系统不支持该时间范围"
+	fi
+
+	# Restore a normal mtime so later sections are unaffected.
+	python3 -c 'import os,time,sys; p=sys.argv[1]; os.utime(p, ns=(int(time.time()*1e9),)*2)' 		"$SOURCE_DIR/primary-skill/SKILL.md"
+else
+	echo "[skillfs-e2e] 跳过 pre-epoch 往返校验：backing 文件系统不支持该时间范围"
+fi
+
 DISCOVER_MD="$(cat "$MOUNT_DIR/skills/skill-discover/SKILL.md")"
 assert_contains "$DISCOVER_MD" "## other" "discover 包含 secondary view 章节"
 assert_contains "$DISCOVER_MD" "secondary-skill" "discover 列出隐藏技能"
