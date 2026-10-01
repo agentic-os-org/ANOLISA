@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use thiserror::Error;
 
 use crate::{ParamType, Parameter, ParseStatus, ReturnField, SkillEntry, SkillMetadata};
@@ -288,14 +290,22 @@ fn parse_returns(section: Option<&String>, issues: &mut Vec<String>) -> Vec<Retu
         .collect()
 }
 
-/// Parse lines like: - `name` (type, required|optional): description
+/// `- \`name\` (type, required|optional): description`. Compiled once:
+/// SKILL.md re-parses run on every FUSE write event (sync worker) and on
+/// every store refresh, so per-call compilation is wasted work.
 ///
 /// Names are kebab-case per `validate_name` (`[a-z0-9-]`), so the name group
 /// admits hyphens (`max-results`); `\w+` alone would flag those lines as
 /// malformed and drop the parameter.
+static TYPED_LIST_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Static literal pattern; compilation cannot fail at runtime.
+    Regex::new(r"^-\s+`([\w-]+)`\s+\((\w+)(?:,\s*(required|optional))?\):\s*(.*)$")
+        .expect("static literal pattern")
+});
+
+/// Parse lines like: - `name` (type, required|optional): description
 fn parse_typed_list(section: &str, issues: &mut Vec<String>) -> Vec<Parameter> {
-    let re_pattern = r"^-\s+`([\w-]+)`\s+\((\w+)(?:,\s*(required|optional))?\):\s*(.*)$";
-    let re = regex::Regex::new(re_pattern).expect("valid regex");
+    let re = &*TYPED_LIST_RE;
 
     let mut result = Vec::new();
     for line in section.lines() {
