@@ -598,8 +598,10 @@ impl TokenlessRuntime {
             record = record.with_tool_use_id(tool_use_id.clone());
         }
 
-        if let Some(recorder) = &self.stats_recorder {
-            let _ = recorder.record(&record);
+        if let Some(recorder) = &self.stats_recorder
+            && let Err(e) = recorder.record(&record)
+        {
+            eprintln!("[tokenless-stats] WARNING: failed to record stats entry: {e}");
         }
         if self.config.sls_enabled {
             SlsWriter::new().write(&record);
@@ -938,7 +940,7 @@ pub fn retrieve_recorded(
         let tokenizer_id = payload_tokens
             .is_some()
             .then_some(tokenless_protocol::TOKENIZER_ID);
-        let _ = recorder.record_retrieve_event(
+        if let Err(e) = recorder.record_retrieve_event(
             &hash,
             outcome,
             source,
@@ -947,7 +949,9 @@ pub fn retrieve_recorded(
             None,
             None,
             None,
-        );
+        ) {
+            eprintln!("[tokenless-stats] WARNING: failed to record retrieve event: {e}");
+        }
     }
     match result {
         Ok(Some(payload)) => Ok(payload),
@@ -1042,25 +1046,34 @@ fn record_entry_stats(
         record = record.with_tool_use_id(tool_use_id.clone());
     }
 
-    if let Some(recorder) = recorder
-        && let Ok(stats_id) = recorder.record(&record)
-        && stats.disposition == Disposition::Applied
-        && !stash_keys.is_empty()
-    {
-        let artifact_kind = if stats
-            .applied_operations
-            .contains(&tokenless_protocol::AppliedOperation::SchemaCompression)
-        {
-            "schema_compression"
-        } else if stats
-            .applied_operations
-            .contains(&tokenless_protocol::AppliedOperation::JsonRecordReduction)
-        {
-            "json_record_reduction"
-        } else {
-            "json_truncation"
-        };
-        let _ = recorder.record_artifacts(stats_id, artifact_kind, stash_keys);
+    if let Some(recorder) = recorder {
+        match recorder.record(&record) {
+            Ok(stats_id) => {
+                if stats.disposition == Disposition::Applied && !stash_keys.is_empty() {
+                    let artifact_kind = if stats
+                        .applied_operations
+                        .contains(&tokenless_protocol::AppliedOperation::SchemaCompression)
+                    {
+                        "schema_compression"
+                    } else if stats
+                        .applied_operations
+                        .contains(&tokenless_protocol::AppliedOperation::JsonRecordReduction)
+                    {
+                        "json_record_reduction"
+                    } else {
+                        "json_truncation"
+                    };
+                    if let Err(e) = recorder.record_artifacts(stats_id, artifact_kind, stash_keys) {
+                        eprintln!(
+                            "[tokenless-stats] WARNING: failed to record stash artifacts: {e}"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[tokenless-stats] WARNING: failed to record stats entry: {e}");
+            }
+        }
     }
     if sls_enabled {
         SlsWriter::new().write(&record);

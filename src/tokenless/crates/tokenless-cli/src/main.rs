@@ -1280,8 +1280,9 @@ fn record_compression_stats(
     // SQLite stats recording — gated by stats_enabled
     if config.is_stats_enabled()
         && let Ok(recorder) = open_recorder_with(database_paths)
+        && let Err(e) = recorder.record(&record)
     {
-        let _ = recorder.record(&record);
+        eprintln!("[tokenless-stats] WARNING: failed to record stats entry: {e}");
     }
 
     // SLS recording — fail-silent, independent of SQLite
