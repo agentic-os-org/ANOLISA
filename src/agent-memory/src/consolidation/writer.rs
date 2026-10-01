@@ -90,7 +90,18 @@ impl FactWriter {
                             old_path,
                             score
                         );
-                        let _ = s.supersede(old_path, &fact.id);
+                        // A failed supersede leaves the old fact active in
+                        // the index, so it keeps conflicting with (and
+                        // shadowing search results alongside) every newer
+                        // fact. The write below still proceeds — the new
+                        // fact is not lost — but the failure must be
+                        // visible to operators.
+                        if let Err(e) = s.supersede(old_path, &fact.id) {
+                            tracing::warn!(
+                                "failed to supersede '{old_path}' for fact '{}': {e}",
+                                fact.id
+                            );
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("conflict detection failed: {e}"),
