@@ -14,12 +14,13 @@
 //! units via `systemctl --user`. A manager only acts on requests of its
 //! own scope (see [`ServiceManager::handles_scope`]); a request for the
 //! other scope is a documented skip.
-//!
 //! `FakeServiceManager` is the executor used by `service.rs`'s own unit
 //! tests and by integration tests that need to assert which ops the
-//! orchestrators dispatched.
+//! orchestrators dispatched (gated behind the `test-util` feature).
 
+#[cfg(any(test, feature = "test-util"))]
 use std::collections::HashSet;
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::Mutex;
 
 use anolisa_env::EnvFacts;
@@ -28,7 +29,8 @@ use anolisa_platform::command::{CommandOutput, CommandRunner, InheritedLocaleCom
 use crate::manifest::ServiceScope;
 
 /// One operation issued against a service manager. Used both to drive
-/// systemctl and to record what a [`FakeServiceManager`] saw.
+/// systemctl and to record what the `FakeServiceManager` (test-util
+/// feature) saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ServiceOp {
     /// Query service state.
@@ -513,6 +515,7 @@ impl<R: CommandRunner + Send + Sync> ServiceManager for SystemdServiceManager<R>
 /// Test executor. Records every (op, unit) call and lets tests assert
 /// which units the orchestrators tried to drive without actually
 /// invoking systemctl.
+#[cfg(any(test, feature = "test-util"))]
 pub struct FakeServiceManager {
     manager_name: String,
     supported: bool,
@@ -525,6 +528,7 @@ pub struct FakeServiceManager {
     fail_ops: Mutex<HashSet<(ServiceOp, String)>>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl FakeServiceManager {
     /// Build a supported, **system**-scope fake manager with an initially
     /// inactive unit state and no injected failures.
@@ -599,12 +603,14 @@ impl FakeServiceManager {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl Default for FakeServiceManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl ServiceManager for FakeServiceManager {
     fn manager(&self) -> &str {
         &self.manager_name
