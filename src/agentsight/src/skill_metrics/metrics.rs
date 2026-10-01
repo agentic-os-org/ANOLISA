@@ -14,7 +14,10 @@ use super::types::*;
 
 /// Compute skill metrics from a set of GenAI events.
 ///
-/// Only computes metrics enabled in `options`.
+/// Only computes metrics enabled in `options`. Events may arrive in any
+/// order: `time_range_ns` and every `first_seen_*` field are derived from
+/// the timestamps themselves, not from slice position, so callers do not
+/// need to pre-sort.
 pub fn compute_skill_metrics(
     events: &[TraceEventDetail],
     options: &MetricOptions,
@@ -56,9 +59,12 @@ pub fn compute_skill_metrics(
     let time_range = if events.is_empty() {
         (0, 0)
     } else {
+        // Min/max over the timestamps themselves: correct for any input
+        // ordering, unlike first()/last() which assumed pre-sorted events.
+        let timestamps = events.iter().map(|e| e.start_timestamp_ns);
         (
-            events.first().unwrap().start_timestamp_ns,
-            events.last().unwrap().start_timestamp_ns,
+            timestamps.clone().min().unwrap_or(0),
+            timestamps.max().unwrap_or(0),
         )
     };
 
@@ -124,13 +130,20 @@ fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
             .or_default()
             .insert(record.session_id.clone());
 
-        downloads
+        // Keep the earliest record as "first seen" — the input is not
+        // guaranteed to be sorted, so first-insert would be whichever
+        // record the caller happened to pass first.
+        let entry = downloads
             .entry(record.skill_name.clone())
             .or_insert_with(|| SkillFirstSeen {
                 first_seen_session_id: record.session_id.clone(),
                 first_seen_timestamp_ns: record.timestamp_ns,
                 total_sessions: 0,
             });
+        if record.timestamp_ns < entry.first_seen_timestamp_ns {
+            entry.first_seen_session_id = record.session_id.clone();
+            entry.first_seen_timestamp_ns = record.timestamp_ns;
+        }
     }
 
     // Update total_sessions counts
@@ -380,5 +393,70 @@ mod tests {
         assert_eq!(report.event_count, 0);
         assert_eq!(report.loads.unwrap().total_loads, 0);
         assert_eq!(report.usage_ratio.unwrap().total_sessions, 0);
+    }
+
+    /// Minimal event carrying one skill advertisement, at a chosen
+    /// timestamp and session, for order-independence tests.
+    fn skill_event(id: i64, start_ns: i64, session: &str) -> TraceEventDetail {
+        use crate::genai::semantic::{InputMessage, MessagePart};
+        TraceEventDetail {
+            id,
+            call_id: Some(format!("c{id}")),
+            start_timestamp_ns: start_ns,
+            end_timestamp_ns: Some(start_ns + 1000),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_messages: None,
+            output_messages: None,
+            system_instructions: Some(
+                serde_json::to_string(&vec![InputMessage {
+                    role: "system".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "<available_skills><skill><name>test-skill</name><description>A test</description></skill></available_skills>"
+                            .to_string(),
+                    }],
+                    name: None,
+                }])
+                .unwrap(),
+            ),
+            agent_name: Some("TestAgent".into()),
+            process_name: None,
+            pid: Some(100),
+            user_query: None,
+            event_json: None,
+            trace_id: Some(session.into()),
+            conversation_id: Some("conv-1".into()),
+            cache_read_tokens: None,
+            status: Some("complete".into()),
+            interruption_type: None,
+        }
+    }
+
+    #[test]
+    fn time_range_is_independent_of_input_order() {
+        // Descending input: first()/last() would report (30_000, 10_000).
+        let events = [
+            skill_event(1, 30_000, "session-late"),
+            skill_event(2, 10_000, "session-early"),
+        ];
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        assert_eq!(report.time_range_ns, (10_000, 30_000));
+    }
+
+    #[test]
+    fn downloads_first_seen_uses_earliest_timestamp() {
+        // The later download arrives first in the slice; "first seen" must
+        // still be the earlier one.
+        let events = [
+            skill_event(1, 30_000, "session-late"),
+            skill_event(2, 10_000, "session-early"),
+        ];
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        let downloads = report.downloads.unwrap();
+        let seen = downloads.downloads.get("test-skill").unwrap();
+        assert_eq!(seen.first_seen_timestamp_ns, 10_000);
+        assert_eq!(seen.first_seen_session_id, "session-early");
     }
 }
