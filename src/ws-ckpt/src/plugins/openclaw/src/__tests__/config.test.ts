@@ -86,6 +86,24 @@ describe("parseWorkspaceCleanupJson", () => {
     expect(r.kind).toBe("parse-error");
   });
 
+  it("accepts count at the u32 ceiling", () => {
+    const r = parseWorkspaceCleanupJson(
+      v1({ auto_cleanup_keep: { mode: "count", count: 4294967295 } }),
+    );
+    expect(r).toEqual({ kind: "count", num: 4294967295 });
+  });
+
+  it("rejects count above the u32 ceiling", () => {
+    // 2**53 is still a safe integer; the daemon's `keep` is u32, so no
+    // legitimate policy can carry it.
+    for (const count of [4294967296, 2 ** 53, 1e15]) {
+      const r = parseWorkspaceCleanupJson(
+        v1({ auto_cleanup_keep: { mode: "count", count } }),
+      );
+      expect(r.kind).toBe("parse-error");
+    }
+  });
+
   it("rejects string count", () => {
     const r = parseWorkspaceCleanupJson(
       v1({ auto_cleanup_keep: { mode: "count", count: "5" } }),
