@@ -276,17 +276,20 @@ pub async fn checkpoint(
     // make sure index directory exists
     tokio::fs::create_dir_all(&snap_dir).await?;
 
-    // 7. Create readonly snapshot via backend
+    // 7. Parse metadata before any side effect: a parse failure after the
+    // subvolume exists would leave it untracked (undeletable via the index)
+    // and burn the snapshot ID for retries.
+    let parsed_metadata = match metadata {
+        Some(ref s) => Some(serde_json::from_str(s)?),
+        None => None,
+    };
+
+    // 8. Create readonly snapshot via backend
     state
         .backend
         .create_snapshot(&ws.ws_id, &snapshot_id)
         .await?;
 
-    // 8. Build metadata
-    let parsed_metadata = match metadata {
-        Some(ref s) => Some(serde_json::from_str(s)?),
-        None => None,
-    };
     let meta = SnapshotMeta {
         message,
         metadata: parsed_metadata,
@@ -1721,6 +1724,67 @@ mod tests {
             }
             _ => panic!("expected SnapshotAlreadyExists error"),
         }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_invalid_metadata_creates_no_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(PartialFailBackend::new(
+            tmp.path().join("data"),
+            std::iter::empty(),
+        ));
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tmp.path().join("state"),
+        ));
+
+        let ws_id = "ws-badmeta";
+        let subvol = tmp.path().join("data").join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("content"), b"non-empty").unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                SnapshotIndex::new(ws_path.clone()),
+            )
+            .unwrap();
+
+        // Invalid metadata must fail before the backend side effect, so the
+        // subvolume is never created and the ID stays usable.
+        let resp = checkpoint(
+            &state,
+            ws_id,
+            "snap-bad",
+            None,
+            Some("not-json".to_string()),
+            false,
+        )
+        .await;
+        assert!(resp.is_err(), "invalid metadata must error: {resp:?}");
+        assert_eq!(
+            backend
+                .create_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "snapshot was created before the metadata was validated"
+        );
+
+        // The ID is not burned: a retry with valid metadata succeeds.
+        let resp = checkpoint(
+            &state,
+            ws_id,
+            "snap-bad",
+            None,
+            Some("{}".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resp, Response::CheckpointOk { .. }), "{resp:?}");
     }
 
     #[tokio::test]
