@@ -107,6 +107,11 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer：风险拦截
 
+对不含 argv 条件的 exec、文件 open/write 和 connect 操作进行执行前 `block`，要求内核启用 BPF LSM，
+并加载对应的 hook。缺少这些能力时，初始策略和运行时策略更新都会被拒绝，并报告缺失的 hook。
+仅选择 full hook profile 无法让未启用 BPF LSM 的内核具备阻断能力；受支持的 `notify` 和 `kill`
+规则仍可通过 tracepoint 执行。
+
 `agentsight-enforcer` 是可以拦截高风险 Agent 动作的特权守护进程，随安装包发布，由
 `agentsight-enforcer.service` 启动。当它的 socket（`/run/agentsight/enforcer.sock`）不存在时，`serve`
 会打印：
@@ -134,10 +139,11 @@ $ sudo journalctl -u agentsight-enforcer
 [启用系统层文件防误删](deployment.md#启用系统层文件防误删)。
 
 拦截能力还取决于引擎的 hook 预算：只有当引擎启动时预留了对应的 BPF LSM hook、且内核启用了
-BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。当 `block`
-规则命中在一个无法拒绝该操作的后端上——例如 `block connect` 规则命中时 `enforce_socket_connect`
-hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 violation 落账。遇到这类降级
-报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
+BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。上述不含
+argv 条件的 exec、文件 open/write 和 connect 规则在缺少支持时会按上文所述直接被拒绝。没有独立
+block feature bit 的规则仍保留降级报告行为：例如 `block recv` 规则命中时没有可用的
+`enforce_socket_recvmsg` hook，引擎仍会以 `effect=block` 且 `blocked=false` 的 violation 落账。
+遇到这类降级报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
 `ACTPLANE_PINNED_PROFILE`）与内核 LSM 配置。
 
 协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。mock 后端仍然拒绝
