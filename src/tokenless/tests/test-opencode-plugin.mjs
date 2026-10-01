@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,82 @@ const sandbox = mkdtempSync(join(tmpdir(), "tokenless-opencode-plugin-"));
 const runner = join(sandbox, "hook runner.sh");
 const log = join(sandbox, "hooks.log");
 
-writeFileSync(runner, `#!/usr/bin/env bash
+async function assertHookTimeoutCleansUp(mode) {
+  const timeoutRunner = join(sandbox, `timeout-${mode}.sh`);
+  const pidFile = join(sandbox, `timeout-${mode}.pid`);
+  writeFileSync(
+    timeoutRunner,
+    `#!/usr/bin/env bash
+cat >/dev/null
+${mode === "ignore-term" ? "trap '' TERM" : ""}
+sleep 60 &
+sleeper=$!
+printf '%s %s\\n' "$$" "$sleeper" > "$TOKENLESS_TEST_PID"
+printf '{}'
+${mode === "descendant" ? "exit 0" : 'wait "$sleeper"'}
+`,
+  );
+  const pluginUrl = new URL("../adapters/tokenless/opencode/plugin.js", import.meta.url).href;
+  const probe = `
+    import { TokenlessPlugin } from ${JSON.stringify(pluginUrl)};
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, delay, ...args) =>
+      realSetTimeout(callback, delay === 15_000 ? 500 : delay, ...args);
+    const hooks = await TokenlessPlugin();
+    const output = { args: {} };
+    await hooks["tool.execute.before"](
+      { tool: "read", sessionID: "timeout-session", callID: "timeout-call" }, output,
+    );
+    console.log(JSON.stringify(output));
+  `;
+  const livePids = [];
+  try {
+    const child = spawnSync(process.execPath, ["--input-type=module", "--eval", probe], {
+      env: {
+        ...process.env,
+        TOKENLESS_HOOK_RUNNER: timeoutRunner,
+        TOKENLESS_TEST_PID: pidFile,
+      },
+      encoding: "utf8",
+      timeout: 3_000,
+      killSignal: "SIGKILL",
+    });
+    const pids = readFileSync(pidFile, "utf8").trim().split(/\s+/).map(Number);
+    const cleanupDeadline = Date.now() + 500;
+    do {
+      livePids.length = 0;
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 0);
+          // A killed descendant may briefly await reaping by the system's init.
+          const state =
+            process.platform === "linux"
+              ? readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")[0]
+              : "running";
+          if (state !== "Z") livePids.push(pid);
+        } catch (error) {
+          if (error.code !== "ESRCH" && error.code !== "ENOENT") throw error;
+        }
+      }
+      if (!livePids.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } while (Date.now() < cleanupDeadline);
+    assert.ifError(child.error);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout.trim(), '{"args":{}}');
+    assert.deepEqual(livePids, [], `${mode} hook processes survived their timeout`);
+  } finally {
+    for (const pid of livePids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
+  }
+}
+
+writeFileSync(
+  runner,
+  `#!/usr/bin/env bash
 set -euo pipefail
 hook="\${1:?hook name required}"
 payload="$(cat)"
@@ -34,7 +110,8 @@ case "$hook" in
     ;;
   *) printf '%s\\n' '{}' ;;
 esac
-`);
+`,
+);
 
 process.env.TOKENLESS_HOOK_RUNNER = runner;
 process.env.TOKENLESS_TEST_LOG = log;
@@ -49,10 +126,7 @@ try {
   assert.equal(beforeOutput.args.command, "rtk git status");
 
   const afterOutput = { title: "bash", output: "original-response", metadata: {} };
-  await hooks["tool.execute.after"](
-    { ...beforeInput, args: beforeOutput.args },
-    afterOutput,
-  );
+  await hooks["tool.execute.after"]({ ...beforeInput, args: beforeOutput.args }, afterOutput);
   assert.equal(
     afterOutput.output,
     "[tokenless:ready] partial\n[tokenless:env] warning\ncompressed-response",
@@ -107,10 +181,19 @@ try {
   assert.equal(rewrite.payload.session_id, "session-1");
   assert.equal(rewrite.payload.tool_call_id, "call-1");
   assert.equal(rewrite.payload.tool_name, "bash");
-  assert.equal(
-    records.filter((record) => record.hook === "compress_schema_hook.py").length,
-    1,
-  );
+  assert.equal(records.filter((record) => record.hook === "compress_schema_hook.py").length, 1);
+
+  if (process.platform !== "win32") {
+    const failures = [];
+    for (const mode of ["descendant", "ignore-term"]) {
+      try {
+        await assertHookTimeoutCleansUp(mode);
+      } catch (error) {
+        failures.push(new Error(`${mode}: ${error.message}`, { cause: error }));
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, "Hook cleanup failed");
+  }
 
   console.log("OpenCode plugin tests passed");
 } finally {
