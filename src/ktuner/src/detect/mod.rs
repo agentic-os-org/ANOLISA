@@ -426,7 +426,7 @@ fn read_network_info() -> Result<Vec<NetInfo>> {
             let speed_mbps = fs::read_to_string(&speed_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<i64>().ok())
-                .map(|s| if s > 0 { s as u64 } else { 0 })
+                .map(sanitize_speed_mbps)
                 .unwrap_or(0);
 
             nets.push(NetInfo {
@@ -448,6 +448,19 @@ fn read_sysctl_values() -> Result<SysctlValues> {
         tcp_fastopen: read_sysctl_u64("/proc/sys/net/ipv4/tcp_fastopen"),
         thp_enabled: read_thp_enabled(),
     })
+}
+
+/// Normalize a raw link-speed reading. The kernel prints SPEED_UNKNOWN (-1
+/// cast to %u) as 4294967295 for interfaces that are UP but have no
+/// negotiated rate (common for macvlan/ipvlan); treat it — and any
+/// non-positive value — as unknown (0), not as a real rate, so the
+/// >= 10000 10-GbE rules do not misfire.
+fn sanitize_speed_mbps(s: i64) -> u64 {
+    if s > 0 && s != 4_294_967_295 {
+        s as u64
+    } else {
+        0
+    }
 }
 
 pub(crate) fn read_sysctl_u64(path: &str) -> u64 {
@@ -608,6 +621,20 @@ mod tests {
     fn test_detect_disk_type() {
         assert_eq!(detect_disk_type("nvme0n1"), DiskType::NVMe);
         assert_eq!(detect_disk_type("nvme1n1"), DiskType::NVMe);
+    }
+
+    #[test]
+    fn test_sanitize_speed_mbps() {
+        // SPEED_UNKNOWN arrives as -1 (and the kernel prints it as 4294967295
+        // via %u); both must read as unknown, not as a 4 Gbps link that the
+        // >= 10000 rules would treat as sub-10G.
+        assert_eq!(sanitize_speed_mbps(-1), 0);
+        assert_eq!(sanitize_speed_mbps(0), 0);
+        assert_eq!(sanitize_speed_mbps(4_294_967_295), 0);
+        // Real rates pass through unchanged.
+        assert_eq!(sanitize_speed_mbps(1000), 1000);
+        assert_eq!(sanitize_speed_mbps(10000), 10000);
+        assert_eq!(sanitize_speed_mbps(25000), 25000);
     }
 
     #[test]
