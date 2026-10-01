@@ -279,6 +279,7 @@ fn flush(
         .drain()
         .filter_map(|p| relative(mount, &p))
         .collect();
+    let mut to_remove_files: Vec<String> = Vec::new();
     let mut to_upsert: Vec<(String, i64, u64, String)> = Vec::new();
     let mut to_upsert_vec: Vec<(String, Vec<f32>)> = Vec::new();
 
@@ -308,11 +309,21 @@ fn flush(
             continue;
         }
         if !is_indexable(rel_path, meta.len()) {
+            to_remove_files.push(rel);
             continue;
         }
-        let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
-            Some(b) => b,
-            None => continue,
+        let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), rel_path) {
+            Ok(b) => b,
+            Err(MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // A former text file may now contain binary data. Evict its
+                // old content, while retaining entries on transient I/O errors.
+                to_remove_files.push(rel);
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("index read failed for {rel}: {e}");
+                continue;
+            }
         };
         let mtime = super::store::mtime_ms_of(&meta);
         to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
@@ -332,6 +343,11 @@ fn flush(
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
+        }
+    }
+    for rel in to_remove_files {
+        if let Err(e) = store.remove_file(&rel) {
+            tracing::warn!("index file removal failed for {rel}: {e}");
         }
     }
     for (rel, mtime, size, body) in to_upsert {
@@ -535,5 +551,127 @@ fn is_overflow(e: &notify::Error) -> bool {
         }
         notify::ErrorKind::MaxFilesWatch => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ns::Namespace;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn setup() -> (tempfile::TempDir, MountPointLite, Arc<Mutex<BM25Store>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = MountPoint::ensure(Namespace::user("tester").unwrap(), tmp.path()).unwrap();
+        let store = Arc::new(Mutex::new(BM25Store::open_in_memory().unwrap()));
+        (tmp, mount.clone_lite(), store)
+    }
+
+    fn flush_path(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>, path: &str) {
+        let mut modified = HashSet::from([mount.root.join(path)]);
+        flush(mount, store, None, None, &mut modified, &mut HashSet::new()).unwrap();
+    }
+
+    fn seed_file(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>, path: &str) {
+        std::fs::create_dir_all(mount.root.join(path).parent().unwrap()).unwrap();
+        std::fs::write(mount.root.join(path), "cobaltzebra original content").unwrap();
+        flush_path(mount, store, path);
+        store.lock().unwrap().upsert_vec(path, &[1.0, 0.0]).unwrap();
+    }
+
+    fn assert_evicted_and_recoverable(
+        mount: &MountPointLite,
+        store: &Arc<Mutex<BM25Store>>,
+        changed: &str,
+        sibling: &str,
+    ) {
+        {
+            let store = store.lock().unwrap();
+            assert_eq!(store.known_paths().unwrap(), [sibling]);
+            let hits = store.search("cobaltzebra", 10, false).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].path, sibling);
+            let vectors = store.search_vec(&[1.0, 0.0], 10).unwrap();
+            assert_eq!(vectors.len(), 1);
+            assert_eq!(vectors[0].0, sibling);
+        }
+
+        std::fs::write(mount.root.join(changed), "heliotrope replacement").unwrap();
+        flush_path(mount, store, changed);
+        let store = store.lock().unwrap();
+        let hits = store.search("heliotrope", 10, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, changed);
+        assert_eq!(store.paths_without_vec().unwrap(), [changed]);
+    }
+
+    #[test]
+    fn flush_evicts_oversized_text_and_vector() {
+        let (_tmp, mount, store) = setup();
+        seed_file(&mount, &store, "changed.md");
+        seed_file(&mount, &store, "sibling.md");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(mount.root.join("changed.md"))
+            .unwrap();
+        file.set_len(4 * 1024 * 1024 + 1).unwrap();
+
+        flush_path(&mount, &store, "changed.md");
+
+        assert_evicted_and_recoverable(&mount, &store, "changed.md", "sibling.md");
+    }
+
+    #[test]
+    fn flush_evicts_non_utf8_text_and_vector() {
+        let (_tmp, mount, store) = setup();
+        seed_file(&mount, &store, "changed.md");
+        seed_file(&mount, &store, "sibling.md");
+        std::fs::write(mount.root.join("changed.md"), [0xff, 0xfe]).unwrap();
+
+        flush_path(&mount, &store, "changed.md");
+
+        assert_evicted_and_recoverable(&mount, &store, "changed.md", "sibling.md");
+    }
+
+    #[test]
+    fn flush_ineligible_removal_matches_only_the_exact_file() {
+        for (changed, sibling) in [
+            ("report%.md", "report-2026.md/other.md"),
+            ("report_.md", "report1.md/other.md"),
+            ("report.md", "REPORT.md/other.md"),
+        ] {
+            let (_tmp, mount, store) = setup();
+            seed_file(&mount, &store, changed);
+            seed_file(&mount, &store, sibling);
+            std::fs::write(mount.root.join(changed), [0xff, 0xfe]).unwrap();
+
+            flush_path(&mount, &store, changed);
+
+            assert_evicted_and_recoverable(&mount, &store, changed, sibling);
+        }
+    }
+
+    #[test]
+    fn flush_preserves_index_on_transient_read_error() {
+        // Root can bypass file permissions, so this fixture requires an
+        // ordinary user to exercise the read-error branch.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let (_tmp, mount, store) = setup();
+        seed_file(&mount, &store, "changed.md");
+        let path = mount.root.join("changed.md");
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            crate::safe_fs::read_to_string(mount.root_fd.as_fd(), Path::new("changed.md")).is_err()
+        );
+
+        flush_path(&mount, &store, "changed.md");
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let store = store.lock().unwrap();
+        assert_eq!(store.search("cobaltzebra", 10, false).unwrap().len(), 1);
+        assert_eq!(store.search_vec(&[1.0, 0.0], 10).unwrap().len(), 1);
     }
 }
