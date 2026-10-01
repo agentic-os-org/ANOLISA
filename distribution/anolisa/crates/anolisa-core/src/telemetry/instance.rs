@@ -447,19 +447,31 @@ pub fn write_instance_snapshot(
 
 // ── Parsing helpers ──────────────────────────────────────────────────
 
-/// Parse `/sys/devices/system/cpu/present` format (e.g. "0-3" → 4, "0" → 1)
+/// Parse `/sys/devices/system/cpu/present` content (e.g. "0-3" → 4, "0" → 1).
+///
+/// The kernel emits a comma-separated CPU list whose entries are single CPU
+/// ids ("7" → one CPU) or inclusive ranges ("2-5" → four CPUs). Sparse lists
+/// such as "0-3,8-11" occur on hotplug-capable hosts and count every listed
+/// member, not the distance between the extreme ids.
 fn parse_cpu_present(content: &str) -> Option<u32> {
     let s = content.trim();
-    if s.contains('-') {
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
-        if parts.len() == 2 {
-            let lo: u32 = parts[0].parse().ok()?;
-            let hi: u32 = parts[1].parse().ok()?;
-            return Some(hi - lo + 1);
-        }
+    if s.is_empty() {
+        return None;
     }
-    // Single CPU: "0"
-    s.parse::<u32>().ok().map(|v| v + 1)
+    let mut total: u32 = 0;
+    for entry in s.split(',') {
+        let (lo, hi) = match entry.split_once('-') {
+            Some((lo, hi)) => (lo.parse::<u32>().ok()?, hi.parse::<u32>().ok()?),
+            None => {
+                let id: u32 = entry.parse().ok()?;
+                (id, id)
+            }
+        };
+        // Reversed ranges are malformed kernel output, not zero CPUs.
+        let count = hi.checked_sub(lo)?.checked_add(1)?;
+        total = total.checked_add(count)?;
+    }
+    Some(total)
 }
 
 /// Parse `image_id="..."` from `/etc/image-id` content.
@@ -868,5 +880,34 @@ mod tests {
         assert_eq!(parse_cpu_present("0-7"), Some(8));
         assert_eq!(parse_cpu_present("0"), Some(1));
         assert_eq!(parse_cpu_present("2-5"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_sparse_list() {
+        // Sparse hotplug topology: count members, not the extreme span.
+        assert_eq!(parse_cpu_present("0-3,8-11"), Some(8));
+        assert_eq!(parse_cpu_present("0,2,4"), Some(3));
+        assert_eq!(parse_cpu_present("2-5,7"), Some(5));
+        assert_eq!(parse_cpu_present("4-7\n"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_nonzero_singleton() {
+        // A lone "7" means only CPU 7 is present: one CPU, not eight.
+        assert_eq!(parse_cpu_present("7"), Some(1));
+        assert_eq!(parse_cpu_present("1"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_rejects_malformed() {
+        assert_eq!(parse_cpu_present(""), None);
+        assert_eq!(parse_cpu_present("5-3"), None, "reversed range");
+        assert_eq!(parse_cpu_present("0-3,"), None, "trailing comma");
+        assert_eq!(parse_cpu_present("x"), None);
+        assert_eq!(
+            parse_cpu_present("0-4294967295"),
+            None,
+            "count overflows u32"
+        );
     }
 }
