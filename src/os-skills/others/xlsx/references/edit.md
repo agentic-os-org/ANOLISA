@@ -526,6 +526,11 @@ python3 SKILL_DIR/scripts/formula_check.py output.xlsx
 - Named ranges in `xl/workbook.xml` `<definedNames>` — check and update if they reference shifted rows.
 - Structured table references (`Table[@Column]`) inside formulas.
 - External workbook links in `xl/externalLinks/`.
+- An uppercase name used without call parentheses (e.g. a defined name like `LOG10`, or a bare function reference) — its digits still shift; only call syntax like `LOG10(...)` is protected.
+- References inside double-quoted string literals (e.g. `HYPERLINK("#A5","go")`) — intentionally left alone, matching Excel's own recalc behavior.
+- Array/shared formula declarations (`<f t="array" ref="...">`, `<f t="shared" ref="...">`) — the formula text is shifted but the `ref` attribute is not, so the declared range no longer matches the cells carrying the formula.
+- `dataValidation` `<formula1>`/`<formula2>` and `conditionalFormatting` `<formula>` rule expressions — only the `sqref` range moves; the conditions still compare against the old cells.
+- `xl/calcChain.xml` — repacked unchanged by `xlsx_pack.py`. A stale calc chain is a classic trigger of Excel's "found unreadable content" repair prompt; delete the file before repacking **and** remove its `[Content_Types].xml` Override plus the `workbook.xml.rels` Relationship (deleting only the file corrupts the package), or verify the workbook opens without a repair dialog.
 
 ### 5.2 Inserting a Column in the Middle
 
