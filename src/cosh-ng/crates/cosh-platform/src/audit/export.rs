@@ -277,9 +277,17 @@ fn update_export_state(root: &Path, error: Option<CoshError>) {
         code: format!("{:?}", error.code).to_ascii_lowercase(),
         occurred_at: Utc::now(),
     });
-    let _ = update_state(root, AuditSettings::default(), |state| {
+    // A failed persist leaves the health diagnostics showing a stale
+    // export error — one that was actually cleared, or a missing one —
+    // so surface it instead of dropping it silently.
+    if let Err(persist_error) = update_state(root, AuditSettings::default(), |state| {
         state.last_export_error = last_export_error;
-    });
+    }) {
+        tracing::warn!(
+            target: "cosh_audit",
+            "failed to persist export health state: {persist_error}"
+        );
+    }
 }
 
 fn collect_events(
@@ -695,6 +703,30 @@ mod tests {
         }
         std::fs::write(root.path().join("events.jsonl"), b"Bearer synthetic-secret").unwrap();
         assert!(scan_bundle(root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_export_state_warns_when_persist_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::audit::AuditTestDir::create();
+        let state_dir = root.path().join("v1");
+        std::fs::create_dir(&state_dir).unwrap();
+        // The owner keeps read access, so the v1 tree still passes the
+        // private-directory checks, but every state publish inside it now
+        // fails: exactly the persist failure the warn branch witnesses.
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        crate::audit::capture_logs(|logs| {
+            update_export_state(root.path(), None);
+            let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            assert!(output.contains("cosh_audit"), "log output: {output}");
+            assert!(
+                output.contains("failed to persist export health state"),
+                "log output: {output}"
+            );
+        });
+        assert!(!root.path().join("v1/state.json").exists());
     }
 
     #[test]

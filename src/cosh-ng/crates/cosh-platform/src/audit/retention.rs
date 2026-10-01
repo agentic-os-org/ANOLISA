@@ -120,50 +120,67 @@ pub fn schedule_retention(root: PathBuf, settings: AuditSettings, component: Aud
         return;
     }
     std::thread::spawn(move || {
-        let result = execute_retention(&root, &settings, Utc::now());
-        let mut state = read_state(&root)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| AuditOperationalState::new(settings.clone()));
-        match result {
-            Ok(execution) => {
-                if execution.status == RetentionExecutionStatus::SkippedBusy {
-                    return;
-                }
-                let event_result = emit_retention_event(&root, component, &execution, &settings);
-                if let Err(error) = &event_result {
-                    tracing::warn!(target: "cosh_audit", ?error, "scheduled retention event write failed");
-                }
-                if execution.status == RetentionExecutionStatus::Complete && event_result.is_ok() {
-                    state.last_retention_success = Some(Utc::now());
-                    state.last_retention_error = None;
-                } else {
-                    state.last_retention_error = Some(AuditStateError {
-                        operation: "retention".to_string(),
-                        code: if event_result.is_err() {
-                            "event_write_failed".to_string()
-                        } else if execution.status == RetentionExecutionStatus::Blocked {
-                            "lifecycle_scan_blocked".to_string()
-                        } else {
-                            "partial_delete".to_string()
-                        },
-                        occurred_at: Utc::now(),
-                    });
-                }
+        run_retention_pass(&root, settings, component);
+    });
+}
+
+/// Executes one scheduled pass and persists its health state.
+///
+/// Split out of the detached worker so tests can drive the exact
+/// production path — including the logged persist failure — without
+/// spawning or joining a thread.
+fn run_retention_pass(root: &Path, settings: AuditSettings, component: AuditComponentName) {
+    let result = execute_retention(root, &settings, Utc::now());
+    let mut state = read_state(root)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| AuditOperationalState::new(settings.clone()));
+    match result {
+        Ok(execution) => {
+            if execution.status == RetentionExecutionStatus::SkippedBusy {
+                return;
             }
-            Err(error) => {
+            let event_result = emit_retention_event(root, component, &execution, &settings);
+            if let Err(error) = &event_result {
+                tracing::warn!(target: "cosh_audit", ?error, "scheduled retention event write failed");
+            }
+            if execution.status == RetentionExecutionStatus::Complete && event_result.is_ok() {
+                state.last_retention_success = Some(Utc::now());
+                state.last_retention_error = None;
+            } else {
                 state.last_retention_error = Some(AuditStateError {
                     operation: "retention".to_string(),
-                    code: format!("{:?}", error.code).to_ascii_lowercase(),
+                    code: if event_result.is_err() {
+                        "event_write_failed".to_string()
+                    } else if execution.status == RetentionExecutionStatus::Blocked {
+                        "lifecycle_scan_blocked".to_string()
+                    } else {
+                        "partial_delete".to_string()
+                    },
                     occurred_at: Utc::now(),
                 });
             }
         }
-        let _ = update_state(&root, settings, |current| {
-            current.last_retention_error = state.last_retention_error;
-            current.last_retention_success = state.last_retention_success;
-        });
-    });
+        Err(error) => {
+            state.last_retention_error = Some(AuditStateError {
+                operation: "retention".to_string(),
+                code: format!("{:?}", error.code).to_ascii_lowercase(),
+                occurred_at: Utc::now(),
+            });
+        }
+    }
+    // A failed persist leaves the health diagnostics showing stale
+    // retention state — an old error that was actually cleared, or a
+    // missing one — so surface it instead of dropping it silently.
+    if let Err(error) = update_state(root, settings, |current| {
+        current.last_retention_error = state.last_retention_error;
+        current.last_retention_success = state.last_retention_success;
+    }) {
+        tracing::warn!(
+            target: "cosh_audit",
+            "failed to persist retention health state: {error}"
+        );
+    }
 }
 
 fn emit_retention_event(
@@ -642,6 +659,36 @@ mod tests {
         assert_eq!(event.event_type.as_str(), "retention.pruned");
         assert_eq!(event.data()["operation"], "scheduled_retention");
         assert_eq!(event.outcome.status, AuditOutcomeStatus::Success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_retention_pass_warns_when_persist_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = private_root();
+        // The owner keeps read access, so the v1 tree still passes the
+        // private-directory checks, but every state publish inside it now
+        // fails: exactly the persist failure the warn branch witnesses.
+        std::fs::set_permissions(
+            root.path().join("v1"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        crate::audit::capture_logs(|logs| {
+            run_retention_pass(
+                root.path(),
+                AuditSettings::default(),
+                AuditComponentName::CoshCore,
+            );
+            let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            assert!(output.contains("cosh_audit"), "log output: {output}");
+            assert!(
+                output.contains("failed to persist retention health state"),
+                "log output: {output}"
+            );
+        });
+        assert!(!root.path().join("v1/state.json").exists());
     }
 
     #[cfg(target_os = "linux")]
