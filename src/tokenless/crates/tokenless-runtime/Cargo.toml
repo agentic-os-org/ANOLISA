@@ -19,5 +19,6 @@ tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats" }
 
 [dev-dependencies]
+libc.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true

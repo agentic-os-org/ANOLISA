@@ -928,7 +928,7 @@ pub(crate) fn retrieve_authorized_with_store(
             Err(_) => ("error", None),
         };
         let tokenizer_id = payload_tokens.is_some().then_some(TOKENIZER_ID);
-        let _ = recorder.record_retrieve_event(
+        if let Err(e) = recorder.record_retrieve_event(
             &hash,
             outcome,
             source,
@@ -937,7 +937,14 @@ pub(crate) fn retrieve_authorized_with_store(
             Some(&attribution.agent_id),
             attribution.session_id.as_deref(),
             attribution.tool_use_id.as_deref(),
-        );
+        ) {
+            // Fail-soft, and the warning itself must not be able to
+            // fail the retrieval: warn_stats discards its own write
+            // errors.
+            crate::warn_stats(&format!(
+                "[tokenless-stats] WARNING: failed to record retrieve event: {e}"
+            ));
+        }
     }
     match result {
         Ok(Some(payload)) => Ok(RetrieveResponse { hash, payload }),
