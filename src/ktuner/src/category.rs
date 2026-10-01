@@ -53,6 +53,7 @@ pub fn validate_category(cat: &str) -> anyhow::Result<()> {
         cat_lower.as_str(),
         "network"
             | "net"
+            | "网络"
             | "内存"
             | "memory"
             | "mem"
@@ -197,6 +198,15 @@ mod tests {
         for cat in [
             "net", "network", "mem", "memory", "io", "disk", "cpu", "security", "sec",
         ] {
+            assert!(validate_category(cat).is_ok(), "{cat} should be valid");
+        }
+    }
+
+    #[test]
+    fn test_validate_category_cn_aliases() {
+        // Every alias filter_by_category accepts must also pass validation,
+        // or the CLI rejects the category before filtering can run.
+        for cat in ["网络", "内存", "磁盘", "调度", "安全"] {
             assert!(validate_category(cat).is_ok(), "{cat} should be valid");
         }
     }
