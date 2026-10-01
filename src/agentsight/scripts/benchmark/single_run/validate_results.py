@@ -340,7 +340,10 @@ def make_report(
         token_correct = {
             request_id
             for request_id in matched
-            if any(total == expected_total_tokens for _, total in captured[request_id])
+            if any(
+                status == "complete" and total == expected_total_tokens
+                for status, total in captured[request_id]
+            )
         }
     for request_id in complete:
         total = next(
