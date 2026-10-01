@@ -241,12 +241,18 @@ write_config() {
 
   if [[ -z "$api_key" ]]; then
     echo ""
-    read -rp "Enter your DashScope API Key: " api_key
+    # EOF (non-interactive stdin) must also land on the skip path below
+    # instead of aborting the installer.
+    read -rp "Enter your DashScope API Key: " api_key || true
   fi
 
   if [[ -z "$api_key" ]]; then
     warn "No API key provided — skipping configuration."
-    return 1
+    # Skipping configuration is the designed graceful outcome: the caller
+    # continues with the remaining install steps. A non-zero return here
+    # would trip errexit (main runs under `set -euo pipefail`) and abort
+    # the whole install.
+    return 0
   fi
 
   mkdir -p "$HOME/.claude"
