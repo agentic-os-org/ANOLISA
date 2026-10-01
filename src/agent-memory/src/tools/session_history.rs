@@ -184,15 +184,13 @@ pub fn memory_timeline(svc: &MemoryService, session_id: &str, limit: usize) -> R
 
 fn parse_frontmatter_flat(content: &str) -> std::collections::HashMap<String, String> {
     let mut fm = std::collections::HashMap::new();
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            for line in rest[..end].lines() {
-                if let Some((key, value)) = line.split_once(": ") {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    if !key.starts_with(' ') && !key.starts_with('-') {
-                        fm.insert(key.to_string(), value.to_string());
-                    }
+    if let Some((fm_str, _)) = super::split_frontmatter(content) {
+        for line in fm_str.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                if !key.starts_with(' ') && !key.starts_with('-') {
+                    fm.insert(key.to_string(), value.to_string());
                 }
             }
         }
@@ -201,12 +199,14 @@ fn parse_frontmatter_flat(content: &str) -> std::collections::HashMap<String, St
 }
 
 fn extract_body(content: &str) -> String {
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
-        }
+    // Fence matching mirrors the canonical reader (parse_frontmatter_flat
+    // in user_profile.rs): the closing fence is a line that is exactly
+    // `---` (see `split_frontmatter`), it may end the file, and it may
+    // close an empty frontmatter block.
+    match super::split_frontmatter(content) {
+        Some((_, body)) => body.trim().to_string(),
+        None => content.trim().to_string(),
     }
-    content.trim().to_string()
 }
 
 fn parse_count_from_body(body: &str, keyword: &str) -> usize {
@@ -248,6 +248,14 @@ fn parse_list_from_body(body: &str, prefix: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_body_accepts_fence_without_trailing_newline() {
+        // The same fence-at-EOF form the user_profile and export regressions
+        // pin: the closing fence may end the file, and the body is empty
+        // rather than the whole file.
+        assert_eq!(extract_body("---\nid: x\n---"), "");
+    }
 
     #[test]
     fn parse_frontmatter_basic() {
