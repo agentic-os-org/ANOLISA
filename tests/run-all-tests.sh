@@ -11,8 +11,10 @@ fi
 
 run_shell() {
     echo "==> Running copilot-shell tests"
-    cd "$ROOT_DIR/deprecated/copilot-shell" || exit 1
-    npm test
+    (
+        cd "$ROOT_DIR/deprecated/copilot-shell" || exit 1
+        npm test
+    )
 }
 
 run_sec() {
@@ -24,8 +26,10 @@ run_sec() {
     fi
 
     echo "==> Running agent-sec-core e2e test scripts manually"
-    if [ -f "/usr/local/bin/linux-sandbox" ]; then
-        python3 tests/e2e/linux-sandbox/e2e_test.py
+    # Mirror the script's own discovery (shutil.which with an absolute
+    # fallback) so PATH-installed sandboxes are not silently skipped.
+    if command -v linux-sandbox >/dev/null 2>&1 || [ -x /usr/local/bin/linux-sandbox ]; then
+        python3 "$ROOT_DIR/src/agent-sec-core/tests/e2e/linux-sandbox/e2e_test.py"
     else
         echo "linux-sandbox not found at /usr/local/bin/linux-sandbox, skipping e2e_test.py"
     fi
@@ -33,44 +37,50 @@ run_sec() {
 
 run_sight() {
     echo "==> Running agentsight tests"
-    cd "$ROOT_DIR/src/agentsight" || exit 1
-    if command -v cargo >/dev/null 2>&1; then
-        cargo test
-    else
-        echo "cargo not found, skipping agentsight tests."
-    fi
+    (
+        cd "$ROOT_DIR/src/agentsight" || exit 1
+        if command -v cargo >/dev/null 2>&1; then
+            cargo test
+        else
+            echo "cargo not found, skipping agentsight tests."
+        fi
+    )
 }
 
 run_tokenless() {
     echo "==> Running tokenless tests"
-    cd "$ROOT_DIR/src/tokenless" || exit 1
-    if command -v make >/dev/null 2>&1; then
-        make test
-    elif command -v cargo >/dev/null 2>&1; then
-        echo "make not found, using cargo directly"
-        cargo test --workspace
-    else
-        echo "cargo not found, skipping tokenless tests."
-    fi
+    (
+        cd "$ROOT_DIR/src/tokenless" || exit 1
+        if command -v make >/dev/null 2>&1; then
+            make test
+        elif command -v cargo >/dev/null 2>&1; then
+            echo "make not found, using cargo directly"
+            cargo test --workspace
+        else
+            echo "cargo not found, skipping tokenless tests."
+        fi
+    )
 }
 
 run_agent_memory() {
     echo "==> Running agent-memory tests (Linux only)"
-    cd "$ROOT_DIR/src/agent-memory" || exit 1
-    if [ "$(uname -s)" != "Linux" ]; then
-        echo "agent-memory is Linux-only; skipping on $(uname -s)."
-        return 0
-    fi
-    # `make test` also runs the bash-only adapter install-script test, which
-    # cargo cannot cover; fall back to cargo when make is unavailable.
-    if command -v make >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
-        make test
-    elif command -v cargo >/dev/null 2>&1; then
-        echo "make not found, using cargo directly"
-        cargo test --locked
-    else
-        echo "cargo not found, skipping agent-memory tests."
-    fi
+    (
+        cd "$ROOT_DIR/src/agent-memory" || exit 1
+        if [ "$(uname -s)" != "Linux" ]; then
+            echo "agent-memory is Linux-only; skipping on $(uname -s)."
+            exit 0
+        fi
+        # `make test` also runs the bash-only adapter install-script test, which
+        # cargo cannot cover; fall back to cargo when make is unavailable.
+        if command -v make >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+            make test
+        elif command -v cargo >/dev/null 2>&1; then
+            echo "make not found, using cargo directly"
+            cargo test --locked
+        else
+            echo "cargo not found, skipping agent-memory tests."
+        fi
+    )
 }
 
 if [ -z "$FILTER" ]; then
