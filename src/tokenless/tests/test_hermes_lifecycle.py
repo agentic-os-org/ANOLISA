@@ -235,6 +235,55 @@ class HermesLifecycleTest(unittest.TestCase):
         self.assertEqual(request["result_kind"], "retrieve")
         self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
+    def test_failed_terminal_preserves_error_evidence_for_core(self) -> None:
+        diagnostic = "Install the missing command and retry."
+
+        def diagnose(tokenless_bin, request, timeout, operation):
+            self.requests.append((tokenless_bin, request, timeout, operation))
+            return {
+                "disposition": "tool_error",
+                "additional_context": (
+                    diagnostic if "command not found" in request["input"]["content"] else None
+                ),
+            }
+
+        self.plugin.run_compress = diagnose
+        for output in ("", "partial stdout\n" * 300):
+            for status in ("error", ""):
+                with self.subTest(output_length=len(output), status=status):
+                    original = json.dumps(
+                        {
+                            "output": output,
+                            "exit_code": -1,
+                            "error": "command not found: required-command",
+                        }
+                    )
+                    result = self.plugin.on_transform_tool_result(
+                        tool_name="terminal",
+                        args={"command": "required-command"},
+                        result=original,
+                        status=status,
+                    )
+
+                    request = self.requests[-1][1]["input"]
+                    self.assertEqual(request["content"], original)
+                    self.assertEqual(request["status"], "error")
+                    self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
+                    self.assertEqual(result, f"{original}\n\n{diagnostic}")
+
+    def test_denied_and_interrupted_terminal_keep_the_full_envelope(self) -> None:
+        self.response = {"disposition": "passthrough"}
+        original = json.dumps(
+            {"output": "partial output", "exit_code": 130, "error": "execution stopped"}
+        )
+        for status in ("blocked", "interrupted"):
+            with self.subTest(status=status):
+                result = self.plugin.on_transform_tool_result(
+                    tool_name="terminal", result=original, status=status
+                )
+                self.assertIsNone(result)
+                self.assertEqual(self.requests[-1][1]["input"]["content"], original)
+
     def test_post_tool_does_not_misclassify_retrieve_like_commands(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}
         marker = "<<tokenless:0123456789abcdef01234567>>"
