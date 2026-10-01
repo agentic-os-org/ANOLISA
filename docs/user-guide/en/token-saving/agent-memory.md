@@ -235,7 +235,7 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_write` | `path`, `content` | `overwrite` | `wrote N bytes to <path>` |
 | `mem_append` | `path`, `content` | — | `appended N bytes to <path>` |
 | `mem_edit` | `path`, `old_str`, `new_str` | — | `edited <path>` (`old_str` must match exactly once) |
-| `mem_list` | — | `dir`, `recursive`, `glob` | `{name, type, size, mtime}` array |
+| `mem_list` | — | `dir`, `recursive`, `glob` | `{name, type, size, mtime}` array, capped at 5000 entries (a truncated listing warns in the log) |
 | `mem_grep` | `pattern` | `dir`, `type`, `max`, `case_insensitive` | `{path, line, text}` array |
 | `mem_diff` | `path1`, `path2` | — | unified diff |
 | `mem_mkdir` | `path` | — | `created <path>` |
