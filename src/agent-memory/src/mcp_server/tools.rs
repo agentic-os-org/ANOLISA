@@ -425,7 +425,7 @@ impl MemoryMcpServer {
             &self.svc,
             &title,
             status.as_deref(),
-            progress.map(|p| p as u8),
+            progress,
             next_steps,
             blockers,
             files_modified,
