@@ -159,7 +159,10 @@ impl MountPoint {
             root,
             meta_dir,
             meta_dir_name: self.meta_dir_name().to_string(),
-            root_fd: Arc::new(self.root_fd.try_clone().expect("root_fd dup")),
+            // Share the descriptor instead of dup(2)-ing it: a dup can fail
+            // (EMFILE under fd pressure), and the Arc already provides the
+            // cross-thread ownership the watcher needs.
+            root_fd: Arc::clone(&self.root_fd),
         }
     }
 }
@@ -755,6 +758,7 @@ mod tests {
     use async_trait::async_trait;
     use notify::event::{Flag, ModifyKind};
     use std::fs::{self, FileTimes};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -1788,5 +1792,21 @@ mod tests {
         assert_eq!(store.lock().unwrap().count().unwrap(), 0);
         flush_pending(&mount, &store, None, None, &mut pending, Instant::now()).unwrap();
         assert_eq!(store.lock().unwrap().known_paths().unwrap(), ["changed.md"]);
+    }
+
+    #[test]
+    fn clone_lite_shares_root_fd_instead_of_duping() {
+        // Sharing the descriptor keeps clone_lite infallible under fd
+        // exhaustion (dup(2) returns EMFILE) and consumes no extra
+        // descriptor; the Arc preserves ownership for the watcher thread.
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = MountPoint {
+            ns: Namespace::user("clone-lite-test").unwrap(),
+            root: tmp.path().to_path_buf(),
+            meta_dir: tmp.path().join(".anolisa"),
+            root_fd: Arc::new(crate::safe_fs::open_root(tmp.path()).unwrap()),
+        };
+        let lite = mount.clone_lite();
+        assert_eq!(lite.root_fd.as_raw_fd(), mount.root_fd.as_raw_fd());
     }
 }
