@@ -1825,9 +1825,23 @@ fn has_bond() -> bool {
     if std::path::Path::new("/proc/net/bonding").is_dir() {
         return true;
     }
-    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+    dir_has_bond(std::path::Path::new("/sys/class/net"))
+}
+
+/// Whether a `/sys/class/net`-style directory lists an actual bond interface.
+///
+/// The kernel's `bonding_masters` control file appears in this directory
+/// whenever the bonding module is loaded — even with zero bonds configured —
+/// so the exact name is not a bond. `detect::read_network_info` skips it for
+/// the same reason.
+fn dir_has_bond(dir: &std::path::Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.filter_map(|e| e.ok()) {
-            if e.file_name().to_string_lossy().starts_with("bond") {
+            let name = e.file_name();
+            if name == *"bonding_masters" {
+                continue;
+            }
+            if name.to_string_lossy().starts_with("bond") {
                 return true;
             }
         }
@@ -5439,6 +5453,57 @@ mod tests {
             category: Category::Performance,
             writable: false,
         }
+    }
+
+    /// Synthetic `/sys/class/net`-style dir for `dir_has_bond` (std-only, no
+    /// tempfile dependency).
+    /// Drop guard over a synthetic `/sys/class/net`-style dir; removal
+    /// survives a failing assert (cf. `SchedDir`).
+    struct NetDir(std::path::PathBuf);
+
+    impl NetDir {
+        fn new(entries: &[&str]) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner-has-bond-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in entries {
+                if name.ends_with('/') {
+                    std::fs::create_dir(dir.join(name.trim_end_matches('/'))).unwrap();
+                } else {
+                    std::fs::write(dir.join(name), b"").unwrap();
+                }
+            }
+            Self(dir)
+        }
+    }
+
+    impl Drop for NetDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn dir_has_bond_ignores_bonding_masters_control_file() {
+        // bonding module loaded, zero bonds: the kernel lists the regular
+        // file `bonding_masters` alongside real interfaces.
+        let dir = NetDir::new(&["bonding_masters", "eth0/", "eth1/", "lo/"]);
+        assert!(!dir_has_bond(&dir.0));
+    }
+
+    #[test]
+    fn dir_has_bond_detects_real_bond_interfaces() {
+        let dir = NetDir::new(&["bonding_masters", "bond0/", "eth0/"]);
+        assert!(dir_has_bond(&dir.0));
+
+        let dir = NetDir::new(&["eth0/", "lo/"]);
+        assert!(!dir_has_bond(&dir.0));
     }
 
     #[test]
