@@ -93,6 +93,20 @@ async fn health_check_loop(state: Arc<DaemonState>) {
     }
 }
 
+/// Cutoff for `Age` retention: `now - secs`.
+///
+/// Checked math: `parse_duration_secs` admits anything up to `i64::MAX`
+/// seconds, but `chrono::Duration::seconds` panics beyond ~9.2e15 s (its
+/// millisecond bound) and `now - delta` panics when the result leaves the
+/// `NaiveDateTime` range (~2.6e15 s of headroom). Either case returns `None`,
+/// which the caller treats as "nothing expires".
+fn age_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    secs: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::TimeDelta::try_seconds(secs as i64).and_then(|delta| now.checked_sub_signed(delta))
+}
+
 /// Auto-cleanup: purge non-pinned snapshots per `CleanupRetention` (pinned always kept).
 /// - `Count(n)`: keep n newest per workspace.
 /// - `Age { secs, .. }`: delete if older than `secs` (strict, no count floor).
@@ -140,14 +154,16 @@ async fn auto_cleanup(state: &DaemonState) {
                             .collect()
                     }
                 }
-                CleanupRetention::Age { secs, .. } => {
-                    let cutoff = now - chrono::Duration::seconds(*secs as i64);
-                    unpinned
+                CleanupRetention::Age { secs, .. } => match age_cutoff(now, *secs) {
+                    Some(cutoff) => unpinned
                         .iter()
                         .filter(|(_, ts)| *ts < cutoff)
                         .map(|(id, _)| id.clone())
-                        .collect()
-                }
+                        .collect(),
+                    // Retention beyond chrono's representable range: the cutoff
+                    // sits in the unreachable past, so nothing expires yet.
+                    None => Vec::new(),
+                },
             };
 
             (to_remove, state.index_dir(&ws_id))
@@ -278,6 +294,7 @@ async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLin
 mod tests {
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use super::age_cutoff;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
 
     fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
@@ -321,6 +338,41 @@ mod tests {
         // auto_cleanup is inherited from global (true), keep is overridden.
         assert!(eff.auto_cleanup);
         assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
+    }
+
+    // ── Age cutoff checked math ──
+    //
+    // `parse_duration_secs` admits anything up to i64::MAX seconds, but the
+    // raw `now - chrono::Duration::seconds(secs)` this module used to run
+    // panics for values beyond chrono's TimeDelta/DateTime range, killing the
+    // spawned auto-cleanup task for the daemon's lifetime.
+
+    #[test]
+    fn age_cutoff_normal_retention_subtracts_from_now() {
+        let now = chrono::Utc::now();
+        let cutoff = age_cutoff(now, 30 * 86400).expect("30d is representable");
+        assert!(cutoff < now);
+    }
+
+    #[test]
+    fn age_cutoff_huge_retention_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 1e16 s passes parse_duration_secs (1e16 < i64::MAX) but overflows
+        // chrono's TimeDelta seconds bound (~9.2e15 s).
+        let raw = "10000000000000000s";
+        let secs = match CleanupRetention::age(raw).expect("parse accepts 1e16 s") {
+            CleanupRetention::Age { secs, .. } => secs,
+            other => panic!("expected Age, got {other:?}"),
+        };
+        assert_eq!(age_cutoff(now, secs), None);
+    }
+
+    #[test]
+    fn age_cutoff_out_of_datetime_range_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 8.5e15 s fits TimeDelta (max ~9.2e15) but `now - delta` leaves the
+        // representable date range (~2.6e15 s of headroom from 2026).
+        assert_eq!(age_cutoff(now, 8_500_000_000_000_000), None);
     }
 
     // ── Filesystem-usage health probe (#3053 review P1-a / P2) ──
