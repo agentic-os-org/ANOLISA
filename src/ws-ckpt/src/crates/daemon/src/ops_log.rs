@@ -106,11 +106,20 @@ pub fn log_operation(ops_name: &'static str, agent_name: &str, response: &Respon
 }
 
 fn write_record(record: &OpsRecord<'_>) -> std::io::Result<()> {
+    write_record_to(std::path::Path::new(OPS_LOG_PATH), record)
+}
+
+/// Serialize and append one JSONL record to `path`.
+///
+/// Split from [`write_record`] so tests exercise the production
+/// serialization/append path against a temporary file instead of
+/// re-implementing it.
+fn write_record_to(path: &std::path::Path, record: &OpsRecord<'_>) -> std::io::Result<()> {
     let mut line = serde_json::to_string(record)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     line.push('\n');
 
-    let mut file = OpenOptions::new().append(true).open(OPS_LOG_PATH)?;
+    let mut file = OpenOptions::new().append(true).open(path)?;
     file.write_all(line.as_bytes())?;
     file.flush()
 }
@@ -260,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn write_to_tempfile() {
+    fn write_record_appends_jsonl_to_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ws-ckpt.jsonl");
         std::fs::File::create(&path).expect("create");
@@ -279,18 +288,54 @@ mod tests {
             err_reason: "none",
             supply: "none",
         };
+        // Exercise the production writer the daemon uses, not a re-creation.
+        write_record_to(&path, &record).expect("first write");
 
-        let mut line = serde_json::to_string(&record).expect("serialize");
-        line.push('\n');
-        let mut file = OpenOptions::new().append(true).open(&path).expect("open");
-        file.write_all(line.as_bytes()).expect("write");
-        file.flush().expect("flush");
+        let record2 = OpsRecord {
+            ops_id: "test-id-2".to_string(),
+            ops_name: "ckpt",
+            ckpt_time: 1,
+            list_time: 0,
+            ..record
+        };
+        write_record_to(&path, &record2).expect("second write appends");
 
         let contents = std::fs::read_to_string(&path).expect("read");
-        assert_eq!(contents.lines().count(), 1);
-        let parsed: serde_json::Value =
-            serde_json::from_str(contents.lines().next().unwrap()).expect("parse");
-        assert_eq!(parsed["ops_name"], "list");
-        assert_eq!(parsed["list_time"], 1);
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "appending must preserve earlier records");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse first");
+        assert_eq!(first["ops_name"], "list");
+        assert_eq!(first["list_time"], 1);
+        assert_eq!(first["ops_id"], "test-id");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("parse second");
+        assert_eq!(second["ops_name"], "ckpt");
+        assert_eq!(second["ckpt_time"], 1);
+    }
+
+    #[test]
+    fn write_record_reports_missing_target() {
+        // Production gates on OPS_LOG_PATH existing before writing; the
+        // writer itself must still surface the error instead of creating
+        // telemetry files at arbitrary paths.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("never-created.jsonl");
+        let record = OpsRecord {
+            component_name: "ws-ckpt",
+            component_version: env!("CARGO_PKG_VERSION"),
+            component_agent_name: "user",
+            ops_id: "test-id".to_string(),
+            ops_name: "list",
+            ckpt_time: 0,
+            roll_time: 0,
+            diff_time: 0,
+            list_time: 1,
+            ops_time: 1,
+            err_reason: "none",
+            supply: "none",
+        };
+        let err = write_record_to(&missing, &record).expect_err("append without create fails");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(!missing.exists(), "writer must not create its target");
     }
 }
