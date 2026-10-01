@@ -273,19 +273,23 @@ impl RegistrationManager {
         if let Ok(rec) = serde_json::from_str::<RegisterRecord>(&content) {
             // Reject future schema versions we don't understand, but accept
             // older versions (v1 is handled separately below; any v2-compatible
-            // version should continue to work).
-            let current = REGISTER_SCHEMA_VERSION.parse::<u32>().ok();
-            let parsed = rec.schema_version.parse::<u32>().ok();
-            if parsed > current {
-                eprintln!(
-                    "[anolisa] warn: {} has schema_version {} (expected <= {}); treating as INIT",
-                    path.display(),
-                    rec.schema_version,
-                    REGISTER_SCHEMA_VERSION
-                );
-                return None;
+            // version should continue to work). A version that does not parse
+            // as a number is equally not understood — Option ordering must not
+            // let the unparseable case compare as "not greater" and pass.
+            match (
+                rec.schema_version.parse::<u32>(),
+                REGISTER_SCHEMA_VERSION.parse::<u32>(),
+            ) {
+                (Ok(parsed), Ok(current)) if parsed <= current => return Some(rec),
+                _ => {}
             }
-            return Some(rec);
+            eprintln!(
+                "[anolisa] warn: {} has schema_version {} (expected <= {}); treating as INIT",
+                path.display(),
+                rec.schema_version,
+                REGISTER_SCHEMA_VERSION
+            );
+            return None;
         }
 
         // Try v1 migration
@@ -664,6 +668,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = mgr(&dir);
         fs::write(&m.register_path, "not valid json {{").unwrap();
+        assert_eq!(m.read_state(), ConsentState::InitFresh);
+    }
+
+    #[test]
+    fn test_future_schema_version_treated_as_init() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        write_register_file(
+            &m.register_path,
+            r#"{"schema_version":"3","state":"registered","history":[]}"#,
+        );
+        assert_eq!(m.read_state(), ConsentState::InitFresh);
+    }
+
+    #[test]
+    fn test_unparseable_schema_version_treated_as_init() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        // A version this binary cannot parse as a supported number must be
+        // rejected like a future version, not honored as the current schema.
+        write_register_file(
+            &m.register_path,
+            r#"{"schema_version":"2.0","state":"registered","history":[]}"#,
+        );
         assert_eq!(m.read_state(), ConsentState::InitFresh);
     }
 
