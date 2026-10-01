@@ -56,6 +56,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 启用对应 Adapter 后，一次工具调用可能经过以下阶段：
 
 ```text
+工具调用前：已硬关闭的 Tool Ready Hook → 命令重写
 工具调用前：已识别的构建/测试命令预留给 Build Log；其他命令 RTK 改写 → 传递输出优化状态
 工具调用后：状态与优化旁路 → JSON/CSV/TSV/Search/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
 模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
