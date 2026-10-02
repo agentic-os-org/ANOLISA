@@ -171,17 +171,26 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
         return Ok(0);
     }
 
-    let applied = tuner::apply_quiet(&recs)?;
+    let outcome = tuner::apply_quiet(&recs)?;
     let (_, eval_after) = gather()?;
     let score_after = eval_after.score();
 
+    let failed: Vec<serde_json::Value> = outcome
+        .failed
+        .iter()
+        .map(|f| json!({ "param": f.param, "error": f.error }))
+        .collect();
     let output = json!({
-        "applied": applied,
+        "applied": outcome.applied,
+        "failed": failed,
         "score_before": score_before,
         "score_after": score_after,
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(0)
+    // Mirror `check`'s exit convention (1 = attention needed): a tune that
+    // failed some or all writes must not report success — the old code exited
+    // 0 even when every write failed (e.g. read-only /proc/sys in a container).
+    Ok(if outcome.failed.is_empty() { 0 } else { 1 })
 }
 
 fn cmd_fix(param: &str) -> Result<i32> {

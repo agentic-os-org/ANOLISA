@@ -26,17 +26,34 @@ struct RollbackData {
     entries: BTreeMap<String, RollbackEntry>,
 }
 
-pub fn apply(recommendations: &[Recommendation]) -> Result<usize> {
+/// One parameter that failed to apply, with the write/verify error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyFailure {
+    pub param: String,
+    pub error: String,
+}
+
+/// Outcome of applying a batch: how many params were applied and which failed
+/// with why. Mirrors `RollbackOutcome` so `tune` can report partial failure
+/// the way `rollback` already does — the previous return type (a bare count)
+/// could not represent failures at all, so quiet mode dropped them entirely.
+pub struct ApplyOutcome {
+    pub applied: usize,
+    pub failed: Vec<ApplyFailure>,
+}
+
+pub fn apply(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, false)
 }
 
-pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<usize> {
+pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, true)
 }
 
-fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize> {
+fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyOutcome> {
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
+    let mut failed: Vec<ApplyFailure> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
         match apply_single(rec) {
             Ok(()) => {
@@ -53,6 +70,10 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
                 applied_recs.push(rec.clone());
             }
             Err(e) => {
+                failed.push(ApplyFailure {
+                    param: rec.param.clone(),
+                    error: e.to_string(),
+                });
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} : {}",
@@ -81,7 +102,10 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
         println!();
         println!("  没有配置被成功应用");
     }
-    Ok(applied_recs.len())
+    Ok(ApplyOutcome {
+        applied: applied_recs.len(),
+        failed,
+    })
 }
 
 /// Apply a single recommendation with rollback recording and persistence, but
@@ -766,6 +790,33 @@ mod tests {
         assert_eq!(
             param_to_path("net.core.rmem_max"),
             "/proc/sys/net/core/rmem_max"
+        );
+    }
+
+    #[test]
+    fn apply_reports_missing_params_as_failures() {
+        // Nonexistent paths fail inside write_and_verify before any write, so
+        // this is safe for non-root CI: every param must come back as a
+        // recorded failure with its reason, not vanish — the old quiet-mode
+        // contract dropped the error text entirely, so `ktuner tune` printed
+        // {"applied": 0} and exited 0 even when every write failed.
+        let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
+            .iter()
+            .map(|p| Recommendation {
+                param: p.to_string(),
+                current_value: "0".to_string(),
+                recommended_value: "1".to_string(),
+                writable: true,
+                ..Default::default()
+            })
+            .collect();
+        let outcome = apply_quiet(&recs).expect("apply_quiet must not fail on per-param errors");
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.failed.len(), 2, "both failures must be reported");
+        assert_eq!(outcome.failed[0].param, "vm.ktuner_no_such_a");
+        assert!(
+            !outcome.failed[0].error.is_empty(),
+            "error text must survive quiet mode"
         );
     }
 
