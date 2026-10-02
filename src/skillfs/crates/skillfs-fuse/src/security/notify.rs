@@ -225,6 +225,10 @@ pub enum NotifyError {
     /// wrong key material, or an oversized frame. Retrying with the same
     /// key would only produce the same refusal.
     AuthRejected(String),
+    /// The daemon answered but cannot admit the request yet (notify queue
+    /// full, worker stopping). The daemon's own message says "reconcile
+    /// later"; an identical retry succeeds once it drains or restarts.
+    DaemonUnavailable(String),
 }
 
 impl std::fmt::Display for NotifyError {
@@ -254,6 +258,9 @@ impl std::fmt::Display for NotifyError {
             }
             Self::AuthRejected(message) => {
                 write!(f, "notify: authentication rejected: {message}")
+            }
+            Self::DaemonUnavailable(body) => {
+                write!(f, "notify: daemon temporarily unavailable: {body}")
             }
         }
     }
@@ -293,9 +300,10 @@ impl NotifyError {
     pub fn retry_class(&self) -> NotifyRetryClass {
         match self {
             Self::Connect(e) | Self::Write(e) | Self::Read(e) => io_retry_class(e.kind()),
-            Self::Timeout | Self::EndpointUnavailable(_) | Self::AuthTransport(_) => {
-                NotifyRetryClass::Transient
-            }
+            Self::Timeout
+            | Self::EndpointUnavailable(_)
+            | Self::AuthTransport(_)
+            | Self::DaemonUnavailable(_) => NotifyRetryClass::Transient,
             Self::AuthInconclusive(_) => NotifyRetryClass::Ambiguous,
             Self::InvalidResponse { .. }
             | Self::Rejected { .. }
@@ -623,10 +631,33 @@ fn validate_response(body: &str) -> Result<(), NotifyError> {
             body: body.trim().to_string(),
         })?;
 
-    let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !ok {
-        return Err(NotifyError::Rejected {
+    // Only an explicit boolean `ok` participates in the verdict protocol.
+    // Treating a missing or wrongly-typed field as `false` would let a
+    // malformed reply (no `ok` at all, or `"ok":"false"`) reach the error
+    // decoding below and be classified from its error code — e.g. a
+    // corrupt `{"error":{"code":"unavailable"}}` would masquerade as a
+    // retryable capacity condition and keep reconcile retrying a protocol
+    // mismatch forever. Malformed shape is a permanent InvalidResponse.
+    let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) else {
+        return Err(NotifyError::InvalidResponse {
             body: body.trim().to_string(),
+        });
+    };
+    if !ok {
+        // The daemon distinguishes "cannot admit yet" (notify queue full,
+        // worker stopping — SkillFsError::Unavailable on its side) from
+        // verdicts an identical retry would reproduce, via the
+        // machine-readable error code; only the latter is permanent.
+        let code = parsed
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str);
+        return Err(if code == Some("unavailable") {
+            NotifyError::DaemonUnavailable(body.trim().to_string())
+        } else {
+            NotifyError::Rejected {
+                body: body.trim().to_string(),
+            }
         });
     }
 
@@ -769,6 +800,9 @@ pub enum ScriptedNotifyFailure {
     AuthRejected,
     /// `Rejected` — daemon answered but refused the request. Permanent.
     DaemonRejected,
+    /// `DaemonUnavailable` — daemon answered `error.code = "unavailable"`
+    /// (notify queue full, worker stopping). Transient.
+    DaemonUnavailable,
 }
 
 impl ScriptedNotifyFailure {
@@ -795,6 +829,10 @@ impl ScriptedNotifyFailure {
             Self::DaemonRejected => NotifyError::Rejected {
                 body: r#"{"ok":false,"error":{"code":"unknown_skill"}}"#.to_string(),
             },
+            Self::DaemonUnavailable => NotifyError::DaemonUnavailable(
+                r#"{"ok":false,"error":{"code":"unavailable","message":"SkillFS: notify queue is full; reconcile later"}}"#
+                    .to_string(),
+            ),
         }
     }
 }
@@ -2240,6 +2278,60 @@ mod tests {
     }
 
     #[test]
+    fn validate_response_classifies_unavailable_as_transient() {
+        // The daemon's SkillFsError::Unavailable (notify queue full, worker
+        // stopping) carries error.code = "unavailable" and its message says
+        // "reconcile later" — the client must treat it as retryable, not as
+        // a permanent rejection that drops the reconcile forever.
+        let body = r#"{"ok":false,"error":{"code":"unavailable","message":"SkillFS: notify queue is full; reconcile later"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::DaemonUnavailable(_)) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Transient);
+            }
+            other => panic!("expected DaemonUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_response_rejects_ok_false_without_error_code() {
+        // A refusal without the machine-readable code stays a plain
+        // Permanent rejection.
+        let body = r#"{"ok":false,"stderr":"nope"}"#;
+        assert!(matches!(
+            validate_response(body),
+            Err(NotifyError::Rejected { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_response_missing_ok_is_not_unavailable() {
+        // Review regression: a reply with no `ok` field at all used to be
+        // decoded as a refusal and classified from its error code, so this
+        // malformed body was treated as retryable DaemonUnavailable and
+        // reconcile kept it as a transient capacity condition forever.
+        let body = r#"{"error":{"code":"unavailable"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::InvalidResponse { .. }) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Permanent);
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_response_non_boolean_ok_is_not_unavailable() {
+        // Same regression class: a string "ok" is a malformed verdict, not
+        // a refusal the error decoder may reclassify.
+        let body = r#"{"ok":"false","error":{"code":"unavailable"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::InvalidResponse { .. }) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Permanent);
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_response_rejects_accepted_false() {
         let body = r#"{"ok":true,"data":{"schemaVersion":2,"accepted":false}}"#;
         assert!(matches!(
@@ -3362,6 +3454,27 @@ mod tests {
         assert_eq!(metrics.succeeded, 1);
         assert_eq!(metrics.failed, 2);
         assert_eq!(metrics.pending, 0);
+        ctrl.shutdown();
+    }
+
+    #[test]
+    fn reconcile_retries_when_the_daemon_answers_unavailable() {
+        // A queue-full / worker-stopping answer ("error.code":"unavailable")
+        // is a capacity condition, not a verdict: the reconcile must be
+        // requeued and delivered once the daemon drains.
+        let client = Arc::new(ScriptedNotifyClient::new(
+            ScriptedNotifyFailure::DaemonUnavailable,
+            2,
+        ));
+        let ctrl = retry_controller(client.clone());
+
+        assert_eq!(ctrl.enqueue_startup_reconcile(&["alpha".to_string()]), 1);
+        let attempts = ctrl.flush_until_delivered_for_testing(10);
+
+        assert_eq!(attempts, 3, "two unavailable answers then one success");
+        assert_eq!(client.attempts(), 3);
+        assert_eq!(ctrl.pending_len(), 0, "unavailable must not drop the entry");
+        assert_eq!(client.events().len(), 1);
         ctrl.shutdown();
     }
 
