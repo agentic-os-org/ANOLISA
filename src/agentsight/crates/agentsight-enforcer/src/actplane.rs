@@ -222,6 +222,15 @@ impl ActPlaneBackend {
             });
         }
         let compiled = compile_str(&request.policy_dsl).map_err(BackendError::CompileFailure)?;
+        // Surface compile-time warnings (e.g. an endpoint pattern that lowered
+        // to a match-nothing matcher) so the degradation is visible instead of
+        // silently installing a rule that never fires.
+        for warning in &compiled.warnings {
+            log::warn!(
+                "policy compile warning (binding_id={}): {warning}",
+                request.binding_id
+            );
+        }
         if compiled
             .labels
             .get("COMMAND")

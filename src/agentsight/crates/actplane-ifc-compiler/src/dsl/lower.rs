@@ -341,6 +341,91 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_endpoint_pattern_is_recorded_and_warned() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "*.internal"
+            rule r:
+              block connect endpoint "*" if NET unless target "*.internal"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get("*.internal"),
+            Some(&Vec::new()),
+            "wildcard pattern must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("*.internal") && w.contains("match-nothing")),
+            "wildcard pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn unresolvable_endpoint_hostname_is_recorded_and_warned() {
+        // A 100-byte label exceeds the 63-byte DNS label limit, so resolution
+        // fails deterministically regardless of the resolver environment.
+        let host = format!("{}.invalid", "x".repeat(100));
+        let pol = crate::dsl::parse::parse(&format!(
+            r#"source NET = endpoint "{host}"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#
+        ))
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get(&host),
+            Some(&Vec::new()),
+            "unresolvable hostname must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains(&host) && w.contains("match-nothing")),
+            "unresolvable hostname must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn representable_endpoint_patterns_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "10.0."
+            rule r:
+              block connect endpoint "*" if NET unless target "127.0.0.1"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "numeric patterns must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn resolved_endpoint_hostname_does_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "localhost"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "a hostname that resolves must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
     fn file_path_at_abi_limit_compiles() {
         // 63 bytes: exactly PAT - 1, fits with NUL terminator in [u8; 64]
         let path = format!("/{}", "a".repeat(62)); // "/" + 62 × 'a' = 63 bytes
@@ -484,6 +569,8 @@ struct Ctx {
     next_inval: u32,
     endpoint_cache: HashMap<String, Vec<(u32, u32)>>,
     endpoint_resolutions: HashMap<String, Vec<String>>,
+    endpoint_cond_warned: std::collections::HashSet<String>,
+    warnings: Vec<String>,
 }
 impl Ctx {
     fn endpoint_matches(&mut self, pat: &str) -> Vec<(u32, u32)> {
@@ -502,11 +589,25 @@ impl Ctx {
                     .collect(),
             );
             if addrs.is_empty() {
+                self.warnings.push(format!(
+                    "endpoint pattern '{pat}' resolved to no IPv4 addresses at compile time; \
+                     it lowers to a match-nothing matcher, so connect/recv to it never matches"
+                ));
                 vec![(0, u32::MAX)]
             } else {
                 addrs.into_iter().map(|addr| (addr, u32::MAX)).collect()
             }
         } else {
+            // Wildcards ("*.internal"), IPv6 or CIDR literals, and anything
+            // else the kernel-side (ipv4, mask) ABI cannot express. Record the
+            // pattern and warn instead of degrading to match-nothing silently.
+            self.endpoint_resolutions
+                .insert(pat.to_string(), Vec::new());
+            self.warnings.push(format!(
+                "endpoint pattern '{pat}' cannot be lowered to an IPv4 matcher \
+                 (wildcard or non-IPv4 literal); it lowers to a match-nothing matcher, \
+                 so connect/recv to it never matches"
+            ));
             vec![(0, u32::MAX)]
         };
         self.endpoint_cache.insert(pat.to_string(), matches.clone());
@@ -522,6 +623,13 @@ impl Ctx {
         // several A records but the current ABI can store only one condition
         // address. For `target not PAT`, use match-any before negation so the
         // condition is false for every endpoint, and the rule still applies.
+        if !negate && self.endpoint_cond_warned.insert(pat.to_string()) {
+            self.warnings.push(format!(
+                "endpoint pattern '{pat}' expands to multiple IPv4 addresses; the condition \
+                 ABI stores one address, so an `unless target` on it matches nothing and the \
+                 exception is void"
+            ));
+        }
         if negate { (0, 0) } else { (0, u32::MAX) }
     }
 
@@ -827,10 +935,17 @@ pub struct Compiled {
     pub reasons: Vec<String>, // indexed by lowered rule_id
     pub meta: Vec<RuleMeta>,  // indexed by lowered rule_id
     pub labels: HashMap<String, u64>,
-    /// Exact hostname endpoint patterns that were resolved at compile time.
+    /// Endpoint patterns that were resolved (or rejected) at compile time.
     /// Non-empty values are the IPv4 A records expanded into kernel matchers;
-    /// an empty value means resolution was attempted but yielded no IPv4.
+    /// an empty value means the pattern lowers to a match-nothing matcher —
+    /// either a hostname whose resolution yielded no IPv4, or a pattern the
+    /// IPv4 matcher ABI cannot express (wildcard, IPv6, or CIDR literal).
     pub endpoint_resolutions: HashMap<String, Vec<String>>,
+    /// Non-fatal compile-time diagnostics for patterns whose meaning silently
+    /// degrades under the current ABI (see `endpoint_resolutions`). Compilation
+    /// still succeeds; callers should surface these warnings so the
+    /// match-nothing degradation is visible instead of silent.
+    pub warnings: Vec<String>,
 }
 
 fn collect_label_names(pol: &Policy) -> Vec<String> {
@@ -901,6 +1016,8 @@ pub fn compile_with_labels(
         next_inval: 0,
         endpoint_cache: HashMap::new(),
         endpoint_resolutions: HashMap::new(),
+        endpoint_cond_warned: std::collections::HashSet::new(),
+        warnings: Vec::new(),
     };
     for name in &sorted_labels {
         ctx.label_bit(name)?;
@@ -1139,6 +1256,7 @@ pub fn compile_with_labels(
         meta,
         labels: ctx.labels,
         endpoint_resolutions: ctx.endpoint_resolutions,
+        warnings: ctx.warnings,
     })
 }
 
