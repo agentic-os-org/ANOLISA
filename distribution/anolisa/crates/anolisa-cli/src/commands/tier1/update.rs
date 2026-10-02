@@ -4503,8 +4503,9 @@ sha256 = "{sha}"
         let old_body: &[u8] = b"installed 0.1.0\n";
         seed_installed_raw(&c, "foo", "0.1.0", old_body);
 
-        // v2's contract adds a system-package whose probe can never succeed, so
-        // the preflight fails on every host.
+        // v2's contract adds a system-package that can never be satisfied:
+        // its probe does not exist, and on a host without a native package
+        // family no resolution can answer for it either.
         let deps = r#"
 [[component.dependencies]]
 name = "absent-tool"
@@ -4530,8 +4531,14 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
             .expect_err("update must refuse when the new artifact adds an unmet dependency");
         assert_eq!(err.code(), "EXECUTION_FAILED");
+        // Linux preflight reports "missing runtime dependencies"; hosts
+        // without a native package family (macOS) refuse the same update at
+        // system-package resolution — "runtime dependencies require manual
+        // recovery … cannot determine system package". Both wordings carry
+        // the gate's marker, and the unchanged-file asserts below pin the
+        // real contract: refused, nothing effectively changed.
         assert!(
-            err.reason().contains("missing runtime dependencies"),
+            err.reason().contains("runtime dependencies"),
             "error must come from the runtime preflight, got: {}",
             err.reason()
         );

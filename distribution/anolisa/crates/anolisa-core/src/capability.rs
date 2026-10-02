@@ -458,7 +458,11 @@ impl FileCapabilitySnapshot {
 /// Failures while reading or decoding a Linux file-capability xattr.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CapabilityProbeError {
-    /// The filesystem refused the xattr read.
+    /// The filesystem refused the xattr read. Only constructed by the
+    /// Linux-gated probe, so gated with it: an ungated variant would be
+    /// dead code on macOS and fail the documented `clippy -D warnings`
+    /// gate there.
+    #[cfg(target_os = "linux")]
     #[error("reading security.capability from {path} failed: {source}")]
     Read {
         /// File whose xattr could not be read.
@@ -468,6 +472,8 @@ pub(crate) enum CapabilityProbeError {
         source: std::io::Error,
     },
     /// The kernel returned an unsupported or truncated capability payload.
+    /// Linux-gated with [`Self::Read`] for the same reason.
+    #[cfg(target_os = "linux")]
     #[error("security.capability on {path} is malformed: {reason}")]
     Malformed {
         /// File carrying the malformed xattr.
