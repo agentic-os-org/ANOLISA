@@ -189,11 +189,23 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 dur: per_call.max(0.0),
                 cmd: call.command_summary(cmd_chars),
                 err,
+                target: file_target(call),
                 result_tokens: None,
             });
         }
     }
     out
+}
+
+/// The file/path argument a call acts on, when it takes one. The command
+/// summary is a JSON blob truncated at ~50 chars - too short for deep paths -
+/// so consumers that need the target (e.g. files-touched aggregation) must
+/// read the argument, not the summary.
+fn file_target(call: &crate::atif::AtifToolCall) -> Option<String> {
+    ["file_path", "path", "notebook_path", "filePath"]
+        .iter()
+        .find_map(|k| call.arguments.get(k).and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 /// Tool execution window of agent step `idx`: next agent step's start (or
@@ -392,6 +404,25 @@ mod tests {
         let input = "Target file this round: MEMORY.md\nCurrent usage: 5949 / 10240 bytes (58%).\n\nFull MEMORY.md entries...\nPlease reflect and reorganize the target file.";
         let result = strip_system_context(input);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tool_calls_carry_file_target() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Edit",
+               "arguments":{"file_path":"src/agentsight/deep/path/mod.rs","old_string":"a","new_string":"b"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":2,"source":"agent","timestamp":"2025-01-01T00:00:02Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"cargo test"}}]}
+        ]"#,
+        ));
+        assert_eq!(
+            inv.tool_calls[0].target.as_deref(),
+            Some("src/agentsight/deep/path/mod.rs")
+        );
+        assert_eq!(inv.tool_calls[1].target, None);
     }
 
     #[test]

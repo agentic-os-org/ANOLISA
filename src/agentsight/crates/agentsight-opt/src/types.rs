@@ -476,6 +476,11 @@ pub struct ToolCallRecord {
     pub dur: f64,        // duration in seconds
     pub cmd: String,     // command summary (truncated)
     pub err: bool,       // whether the call returned an error
+    /// File/path argument this call acts on, when the tool takes one
+    /// (file_path / path / notebook_path / filePath). `cmd` is a JSON blob
+    /// truncated at ~50 chars, so consumers needing the target read this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(default)]
     pub result_tokens: Option<u64>, // token count from cost side (future use)
 }
