@@ -836,10 +836,21 @@ fn eval_tcp_rmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 131072, 16777216])
+        } else {
+            "4096 131072 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_rmem".to_string(),
             current_value: content,
-            recommended_value: "4096 131072 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 接收缓冲区上限，充分利用带宽-延迟积".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -864,10 +875,21 @@ fn eval_tcp_wmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 65536, 16777216])
+        } else {
+            "4096 65536 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_wmem".to_string(),
             current_value: content,
-            recommended_value: "4096 65536 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 发送缓冲区上限，避免大流量传输时发送端瓶颈".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -913,18 +935,41 @@ fn eval_ip_local_port_range(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if parts.len() == 2 && parts[1] - parts[0] < 30000 {
-        recs.push(Recommendation {
-            param: "net.ipv4.ip_local_port_range".to_string(),
-            current_value: content,
-            recommended_value: "1024 65535".to_string(),
-            reason: "可用临时端口范围过小，高并发短连接场景下可能耗尽端口导致连接失败".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if parts.len() == 2 {
+        port_range_recommendation(parts[0], parts[1], recs);
     }
     1
+}
+
+/// Value-driven core of the port-range rule, separated so tests can force
+/// every branch on any host (the sysctl is read from the live /proc).
+///
+/// Raise-only range semantics: the low endpoint an administrator chose is
+/// never lowered (the old fixed "1024 65535" rewrite collapsed a range
+/// deliberately narrowed for hardening, e.g. "50000 60000", back to the
+/// full span). The fix widens upward from the current low endpoint; when
+/// even the maximum high endpoint (65535) cannot reach the 30000-port
+/// threshold, the hardening choice wins and nothing is recommended — an
+/// unsatisfiable recommendation that fires on every check would be worse.
+fn port_range_recommendation(lo: u64, hi: u64, recs: &mut Vec<Recommendation>) {
+    if hi.saturating_sub(lo) >= 30_000 {
+        return;
+    }
+    // Widen upward to the maximum port; if even that cannot reach the
+    // threshold from the current low endpoint, the administrator's
+    // hardening choice wins (see the doc comment above).
+    if 65_535_u64.saturating_sub(lo) < 30_000 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "net.ipv4.ip_local_port_range".to_string(),
+        current_value: format!("{lo} {hi}"),
+        recommended_value: format!("{lo} 65535"),
+        reason: "可用临时端口范围过小，高并发短连接场景下可能耗尽端口导致连接失败；在不降低起始端口（可能是安全加固）的前提下向上扩展".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
 }
 
 fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -4038,7 +4083,11 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if vals.len() >= 4 && (vals[0] < 1024 || vals[1] < 65536 || vals[3] < 4096) {
+    // Raise-only per field: the old fixed quadruple "1024 65536 256 4096"
+    // lowered semmns/semopm/semmni an administrator deliberately raised
+    // whenever any single checked field was low, and semopm was rewritten
+    // without ever being checked.
+    if let Some(recommended) = sem_recommendation(&vals) {
         let current_str = vals
             .iter()
             .map(|v| v.to_string())
@@ -4047,7 +4096,7 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         recs.push(Recommendation {
             param: "kernel.sem".to_string(),
             current_value: current_str,
-            recommended_value: "1024 65536 256 4096".to_string(),
+            recommended_value: recommended,
             reason: "数据库场景下信号量参数过低，可能导致连接数受限或 semget() 失败".to_string(),
             confidence: Confidence::Medium,
             category: Category::Performance,
@@ -5432,6 +5481,31 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Formats `vals` with each field raised to at least its floor, preserving
+/// any value an administrator deliberately set above the floor. Rewriting a
+/// multi-field sysctl with fixed numbers would lower those fields instead
+/// (e.g. kernel.sem "512 1024000000 500 32000" → "1024 65536 256 4096"
+/// collapses semmns by four orders of magnitude).
+fn per_field_max(vals: &[u64], floors: &[u64]) -> String {
+    vals.iter()
+        .zip(floors.iter().chain(std::iter::repeat(&0)))
+        .map(|(v, floor)| v.max(floor).to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Per-field floors for `kernel.sem` (semmsl, semmns, semopm, semmni) on a
+/// database host. The recommendation raises each field to at least its floor
+/// and otherwise keeps the current value. Returns `None` when every field
+/// already meets its floor.
+fn sem_recommendation(vals: &[u64]) -> Option<String> {
+    const FLOORS: [u64; 4] = [1024, 65536, 256, 4096];
+    if vals.len() < 4 || vals.iter().zip(FLOORS).all(|(v, floor)| *v >= floor) {
+        return None;
+    }
+    Some(per_field_max(vals, &FLOORS))
+}
+
 fn read_sysctl_string(path: &str) -> String {
     std::fs::read_to_string(path)
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -5442,6 +5516,81 @@ fn read_sysctl_string(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::detect::*;
+
+    #[test]
+    fn sem_recommendation_only_raises_fields() {
+        // Everything at or above the floors: no recommendation.
+        assert_eq!(sem_recommendation(&[32000, 1024000000, 500, 32000]), None);
+        // One low field: raise it, keep every other field (the old fixed
+        // quadruple collapsed semmns from 1024000000 to 65536 here).
+        assert_eq!(
+            sem_recommendation(&[512, 1024000000, 500, 32000]).as_deref(),
+            Some("1024 1024000000 500 32000")
+        );
+        // semopm low alone is now detected (it was rewritten before without
+        // ever being part of the trigger).
+        assert_eq!(
+            sem_recommendation(&[32000, 1024000000, 100, 32000]).as_deref(),
+            Some("32000 1024000000 256 32000")
+        );
+        // All four low: the full floor tuple.
+        assert_eq!(
+            sem_recommendation(&[250, 32000, 32, 128]).as_deref(),
+            Some("1024 65536 256 4096")
+        );
+        // Malformed input: no recommendation rather than a partial write.
+        assert_eq!(sem_recommendation(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn tcp_buffer_recommendations_keep_raised_defaults() {
+        // A raised default (262144 / 131072) survives; only the max field
+        // is lifted to the 10-GbE floor.
+        assert_eq!(
+            per_field_max(&[4096, 262144, 8388608], &[4096, 131072, 16777216]),
+            "4096 262144 16777216"
+        );
+        assert_eq!(
+            per_field_max(&[4096, 131072, 8388608], &[4096, 65536, 16777216]),
+            "4096 131072 16777216"
+        );
+        // Untouched defaults below the floors are raised to them.
+        assert_eq!(
+            per_field_max(&[4096, 87380, 6291456], &[4096, 131072, 16777216]),
+            "4096 131072 16777216"
+        );
+    }
+
+    #[test]
+    fn port_range_recommendation_never_lowers_the_low_endpoint() {
+        // The reviewer's hardening case: "50000 60000" must NOT be
+        // rewritten to "1024 65535" (the old fixed tuple lowered field 0).
+        // Widening upward cannot reach the 30000-port threshold from
+        // 50000, so the hardening choice wins: no recommendation at all,
+        // rather than an unsatisfiable one that fires on every check.
+        let mut recs = Vec::new();
+        port_range_recommendation(50_000, 60_000, &mut recs);
+        assert!(recs.is_empty(), "hardened range must not be lowered or nagged");
+
+        // A low-but-recoverable range widens upward only: the low endpoint
+        // survives verbatim, the high endpoint extends to 65535.
+        let mut recs = Vec::new();
+        port_range_recommendation(32_768, 60_999, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].current_value, "32768 60999");
+        assert_eq!(recs[0].recommended_value, "32768 65535");
+
+        // The default narrow range gets the full-span widening.
+        let mut recs = Vec::new();
+        port_range_recommendation(1024, 20_000, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "1024 65535");
+
+        // An already-adequate range stays silent.
+        let mut recs = Vec::new();
+        port_range_recommendation(1024, 65_535, &mut recs);
+        assert!(recs.is_empty());
+    }
 
     fn rec(param: &str, conf: Confidence) -> Recommendation {
         Recommendation {
