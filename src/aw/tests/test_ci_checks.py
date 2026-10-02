@@ -167,7 +167,7 @@ class GateTests(unittest.TestCase):
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
-                ["aw-config", "aw-core", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"],
             ),
         ):
             (directory / "src").mkdir(parents=True)
@@ -197,7 +197,7 @@ class GateTests(unittest.TestCase):
             (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
-            (6, "aw-exec"), (6, "aw-contracts"), (6, "tokio"),
+            (6, "aw-contracts"), (6, "tokio"),
         ):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})

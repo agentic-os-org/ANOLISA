@@ -19,9 +19,10 @@ embedding application.
 | Embedding Adapter | Supply trusted capabilities, normalize events, schedule steps and apply native effects |
 
 The Host reuses these libraries without making offline admission execute
-commands or making raw transport understand Provider JSON. Native hook command
-callers continue to use `aw-exec` directly, retaining raw bytes and native exit
-status. `aw-host` does not implement the separate `aw-core::Host` contract,
+commands or making raw transport understand Provider JSON. Native steps
+explicitly select `native-hook/v1alpha1`; the Host uses the same executor to
+retain raw bytes and native exit status without a Provider handshake. `aw-host`
+does not implement the separate `aw-core::Host` contract,
 create Core receipts or change Core's final-dispatch requirements.
 
 ## Prepare a fixed context
@@ -41,9 +42,10 @@ executable files or dependencies: their trust and stability remain the caller's
 responsibility.
 
 Preparation parses configuration and calls `admission::preflight` for all enabled
-requirements before starting any Provider. Each referenced Provider then runs
-`describe` and `validate_config` in separate processes. Disabled-only references
-are skipped. The checked replies become evidence for `admission::admit`; only
+requirements before starting any Provider. Each referenced structured Provider then runs
+`describe` and `validate_config` in separate processes. Native command Providers
+are admitted through the explicit native step contract without those calls.
+Disabled-only references are skipped. The checked replies become evidence for `admission::admit`; only
 fully admitted steps are retained. Failure returns no partially prepared Host,
 and earlier completed calls are not rolled back. Preparation methods should
 therefore avoid side effects.
@@ -87,15 +89,23 @@ including failed attempts; there is no automatic retry. Creating another Event
 does not deduplicate a native callback. Before dispatch, the Adapter must collect
 the results required by its own contract.
 
-All exchanges use one process per method, literal argv, one JSON request and one
-JSON response. Transport retains its separate one-second cleanup budget; this
+Structured exchanges use one process per method, literal argv, one JSON request
+and one JSON response. For native steps, use `Host::hook_event` with the original
+callback bytes as well as the normalized event. The raw input is immutable for
+that Event; native commands receive it without AW protocol wrapping. Transport
+retains its separate one-second cleanup budget; this
 can extend return time beyond the event deadline. Unverifiable cleanup remains
 an execution failure. Process-group cleanup is not a sandbox or OS enforcement;
 see [bounded command execution](bounded-execution.md).
 
 ## Interpret reports
 
-`Invocation.result` retains either an `Outcome` or the original `Failure`.
+`Invocation.result` retains either a `StepOutput` or the original `Failure`.
+`StepOutput::Provider` contains the checked structured outcome;
+`StepOutput::Native` contains stdout, stderr and native process status. A native
+nonzero exit is a result for the Adapter to interpret, not a structured Provider
+error. The following effect and response-validation rules apply to structured
+Provider outcomes.
 A successful `block` effect is a policy outcome. A nonzero exit, incomplete
 stdin write, transport failure, Provider error or invalid protocol response is
 an execution failure. `failure_action` separately reports the configured

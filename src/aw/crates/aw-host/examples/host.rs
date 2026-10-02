@@ -50,7 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for step in event.steps() {
         let invocation = event.invoke(&step.step_id)?;
         let (effects, failure) = match invocation.result {
-            Ok(outcome) => (outcome.as_value()["effects"].clone(), None),
+            Ok(aw_host::StepOutput::Provider(outcome)) => {
+                (outcome.as_value()["effects"].clone(), None)
+            }
+            Ok(aw_host::StepOutput::Native(_)) => {
+                return Err("example requires structured Provider steps".into())
+            }
             Err(error) => {
                 failed = true;
                 (json!(null), Some(error.to_string()))

@@ -42,7 +42,7 @@ Ubuntu 24.04。两者均使用 Python 3.12.3、Node.js 24.15.0 和固定 Rust �
 | `aw-core` | 通过可信运行时端口执行计划；依赖 `aw-contracts` |
 | `aw-exec` | Linux 有界命令传输与所属进程组清理；独立于 Provider 协议 |
 | `aw-host` | 组合配置、Provider 准入和有界传输，提供本地准备与调用；依赖 `aw-config`、`aw-provider` 和 `aw-exec` |
-| `aw-service` | 独立本地服务、可复用客户端与开发者 CLI；通过 `aw-host` 执行 Provider，复用 `aw-core` Journal 保存元数据 |
+| `aw-service` | 独立服务、可复用客户端与原生启动器；通过 `aw-host` 执行 Hook，`aw-exec` 管理前台进程，`aw-core` Journal 保存元数据 |
 
 原生框架接入不属于这些库或服务；进程执行属于 `aw-exec`。
 Provider 消息解析和离线准入保留在 `aw-provider`；`aw-host` 负责它们的执行边界，

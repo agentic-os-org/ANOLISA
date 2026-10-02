@@ -10,6 +10,8 @@ mod runtime;
 mod server;
 mod wire;
 
+pub mod launch_service;
+
 pub use client::Client;
 pub use server::Server;
 pub use wire::{

@@ -105,12 +105,34 @@ pub enum Operation {
         /// Service-issued identifier.
         instance_id: String,
     },
+    /// Cancel this instance's events, wait for cleanup, then release its binding.
+    ///
+    /// A timed-out release keeps the instance draining and forbids new events;
+    /// another release may finish cleanup without reopening the instance.
+    ReleaseInstance {
+        /// Service-issued identifier.
+        instance_id: String,
+    },
     /// Establish one shared event lifetime, without executing any step.
     OpenEvent {
         /// Prepared service instance.
         instance_id: String,
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
+    },
+    /// Lease one native callback shared by all step processes for the same tool call.
+    ///
+    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Repeated opens require identical input and reuse the first deadline. Closed
+    /// correlations remain claimed until unbind; they cannot start a new budget.
+    /// At most 1024 correlations are retained per instance; exhaustion is explicit.
+    OpenHookEvent {
+        /// Prepared service instance.
+        instance_id: String,
+        /// Normalized event, with matching instance and native correlation IDs.
+        event: Value,
+        /// Exact callback stdin, limited independently to one MiB.
+        native_input: Vec<u8>,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {
@@ -137,7 +159,7 @@ pub enum Operation {
     Stop,
 }
 
-/// Exactly one result or error code, never raw Provider diagnostics.
+/// Exactly one result or error code; native results explicitly carry callback bytes.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {

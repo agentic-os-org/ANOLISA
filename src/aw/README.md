@@ -2,68 +2,65 @@
 
 [中文版](README_zh.md)
 
-AW provides a shared configuration and local service for Agent policies. The Linux
-service prepares external Providers, executes tool-event steps and keeps durable
-audit metadata independently of an Agent or shell. Adapters supply native
-capabilities, schedule callbacks and apply the returned effects. The interfaces
-are experimental; QwenPaw, Qoder CLI, OpenClaw and Hermes integration is still
-being built.
+AW provides a shared configuration and local service for Agent policies. On
+Linux, it starts Qoder CLI with configured tool Hooks, runs external Providers
+and keeps execution metadata independently of the Agent session. Users retain
+Qoder's terminal interface and native Hook scheduling. QwenPaw, OpenClaw and
+Hermes adapters remain planned; the current interfaces are experimental.
 
 ## Available today
 
 | Capability | Availability |
 | --- | --- |
 | Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
-| Run a standalone Linux service and query local execution records | ✅ Source build |
-| Execute Provider steps for `tool.before` (`observe`/`block`) and `tool.after` (`observe`) | ✅ Local client API and synthetic-event example |
-| Start an Agent, install its Hooks or verify native effect adoption | ❌ |
-| Install a published AW package or start the service on demand | ❌ |
-| Ask for approval, replace tool results or enforce policy below native Hooks | ❌ |
+| Start Qoder CLI 1.1.64 and connect before/after tool Hooks | ✅ Linux source build |
+| Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
+| Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |
+| Start or reuse a standalone service and query execution metadata | ✅ |
+| Start QwenPaw, OpenClaw or Hermes through AW | ❌ |
+| Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
 
-Service status and Provider admission do not establish that an Agent is protected.
-The service returns candidate effects; the future Adapter must prove adoption.
-
-## Run from source
+## Run Qoder
 
 AW is not yet available through `anolisa install` or an RPM. On Linux, install
-rustup and build from the repository root:
+rustup and Qoder CLI 1.1.64, then build from the repository root. Update the
+example's `spec.agents.qoder.argv` if that Qoder version is outside `PATH`.
 
 ```bash
 cd src/aw
 cargo build --locked -p aw-service --bin aw
-target/debug/aw validate --config crates/aw-config/examples/aw.minimal.yaml
-AW_DEMO_ROOT="$(mktemp -d "$PWD/target/aw-demo.XXXXXX")"
-printf 'Socket: %s\n' "$AW_DEMO_ROOT/state/aw.sock"
-target/debug/aw serve --config crates/aw-config/examples/aw.minimal.yaml \
-  --state-dir "$AW_DEMO_ROOT/state"
+target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-`serve` runs in the foreground. The starter configuration contains no Providers.
-From a second terminal in `src/aw`, set `AW_DEMO_SOCKET` to the absolute path
-printed above, then inspect or stop this service:
+The example runs a neutral command before and after successful tools. It
+demonstrates Hook execution; it does not install security rules. AW starts or
+reuses the configured service and opens Qoder's normal interface. Exiting Qoder
+returns to the original terminal and releases that session; the shared service
+and audit history remain available.
 
 ```bash
-AW_DEMO_SOCKET=/absolute/socket/path/printed/above
-target/debug/aw status --socket "$AW_DEMO_SOCKET"
-target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
-The foreground command exits after cleanup. Audit records remain in the state
-directory. After the foreground command exits, `rm -r -- "$AW_DEMO_ROOT"`
-in its terminal removes only this demo directory and its audit history. The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md)
-includes a runnable Provider demo, command reference and restart guidance.
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains native
+settings coexistence, serial/parallel Hooks, Provider configuration, explicit
+service startup and record queries. Native Hooks retain their framework's
+limits; service status alone does not prove that Qoder adopted a policy.
 
 ## Integration and development
 
 The reusable `aw-service::Client` binds to one service generation and configuration
-revision. An Adapter opens one event, invokes its steps serially or concurrently,
-then closes it. All steps share the event deadline and may be attempted once.
-The service persists execution metadata before returning results; it never
-retries an uncertain call automatically.
+revision. Adapters normalize callbacks and retain native scheduling. Related
+callbacks share one event deadline, and each step may be attempted once. The
+service records execution metadata before returning results and never retries
+an uncertain call automatically.
 
-`aw-host` also remains available for direct embedding. `aw-core` provides a
-separate pinned-plan execution API and the durable `FileJournal` storage reused
-by the service. Neither interface grants native permission or certifies adoption.
+`aw-host` supports both structured Provider messages and explicitly selected
+native Hook byte transport. `aw-core` provides a separate pinned-plan execution
+API and the durable `FileJournal` storage reused by the service. These boundaries
+leave cosh, desktop clients and Herdr independent of the service implementation.
 
 - [User guide](../../docs/user-guide/en/user-entrypoint/aw.md) and
   [configuration reference](../../docs/developer-guide/en/aw/configuration.md)

@@ -216,7 +216,9 @@ fn successful_allow_block_and_after_observe_remain_candidate_effects() {
             .unwrap();
         let invocation = selected.invoke(step).unwrap();
         assert!(invocation.failure_action.is_none());
-        let outcome = invocation.result.unwrap();
+        let aw_host::StepOutput::Provider(outcome) = invocation.result.unwrap() else {
+            panic!("expected Provider outcome")
+        };
         assert_eq!(outcome.requests_block(), blocked);
         assert_eq!(
             outcome.as_value()["effects"].as_array().unwrap().len(),
