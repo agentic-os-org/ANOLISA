@@ -1436,6 +1436,63 @@ mod tests {
         }
     }
 
+    /// A valid id must still reach the real flow: with an empty workspace the
+    /// legacy checkpoint answers CheckpointSkipped (validation passed, no
+    /// backend call) — the gate rejects only invalid ids.
+    #[tokio::test]
+    async fn legacy_checkpoint_accepts_valid_id_through_the_gate() {
+        let fx = GuardFixture::new("ws-test");
+        let ws_ref = fx.ws_link.to_string_lossy().to_string();
+        let resp = checkpoint(&fx.state, &ws_ref, "snap-ok", None, None, false)
+            .await
+            .unwrap();
+        assert!(
+            matches!(resp, Response::CheckpointSkipped { .. }),
+            "valid id must pass validation and reach the flow, got {resp:?}"
+        );
+    }
+
+    /// The wire-level path is gated too: a crafted socket request with a
+    /// traversal id is rejected by the dispatcher, not only by the inner
+    /// function.
+    #[tokio::test]
+    async fn dispatcher_rejects_checkpoint_with_unsafe_id() {
+        let fx = GuardFixture::new("ws-test");
+        // Skip the real btrfs image bootstrap; the traversal id must be
+        // rejected before any backend work is reached.
+        fx.state.mark_bootstrapped();
+        let seed = fx
+            .state
+            .backend
+            .data_root()
+            .join("ws-test")
+            .join("seed.txt");
+        std::fs::write(&seed, b"x").unwrap();
+        let resp = crate::dispatcher::dispatch(
+            &fx.state,
+            ws_ckpt_common::Request::Checkpoint {
+                workspace: fx.ws_link.to_string_lossy().to_string(),
+                id: "../../pwn".to_string(),
+                message: None,
+                metadata: None,
+                pin: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                resp,
+                Response::Error {
+                    code: ErrorCode::InvalidPath,
+                    ..
+                }
+            ),
+            "wire-level request must be rejected with InvalidPath, got {resp:?}"
+        );
+        let arc = fx.state.get_by_wsid("ws-test").unwrap();
+        assert!(arc.read().await.index.snapshots.is_empty());
+    }
+
     #[tokio::test]
     async fn v1_snapshot_ops_refuse_detached_registration() {
         for mode in [
