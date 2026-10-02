@@ -1,0 +1,44 @@
+{
+  "extends": [
+    "@commitlint/config-conventional"
+  ],
+  "rules": {
+    "scope-enum": [
+      1,
+      "always",
+      [
+        "cosh",
+        "cosh-ng",
+        "sec-core",
+        "skill",
+        "sight",
+        "tokenless",
+        "ckpt",
+        "memory",
+        "anolisa",
+        "skillfs",
+        "ktuner",
+        "blaze",
+        "aw",
+        "deps",
+        "ci",
+        "docs",
+        "chore"
+      ]
+    ],
+    "scope-empty": [
+      2,
+      "never"
+    ],
+    "header-max-length": [
+      2,
+      "always",
+      120
+    ],
+    "body-max-line-length": [
+      1,
+      "always",
+      100
+    ]
+  }
+}

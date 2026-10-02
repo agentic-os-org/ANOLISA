@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "issue_triagers": [
+      "kongche-jbw"
+    ]
+  },
+  "components": [
+    {
+      "id": "anolisa",
+      "display_name": "ANOLISA CLI",
+      "aliases": [
+        "anolisa-cli"
+      ],
+      "issue_option": "anolisa",
+      "path_prefixes": [
+        "distribution/anolisa/"
+      ],
+      "label": "component:anolisa",
+      "commit_scope": "anolisa",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": "anolisa/v",
+      "ci_key": "anolisa",
+      "issue_triagers": [
+        "kongche-jbw",
+        "ikunkun-sys"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "cosh",
+      "display_name": "Cosh",
+      "aliases": [
+        "copilot-shell"
+      ],
+      "issue_option": "cosh",
+      "path_prefixes": [
+        "deprecated/copilot-shell/"
+      ],
+      "label": "component:cosh",
+      "commit_scope": "cosh",
+      "commit_scope_aliases": [
+        "copilot-shell"
+      ],
+      "release_tag_prefix": "cosh/v",
+      "ci_key": "copilot_shell",
+      "issue_triagers": [
+        "kongche-jbw",
+        "samchu-zsl"
+      ],
+      "status": "deprecated"
+    },
+    {
+      "id": "cosh-ng",
+      "display_name": "Cosh NG",
+      "aliases": [],
+      "issue_option": "cosh-ng",
+      "path_prefixes": [
+        "src/cosh-ng/"
+      ],
+      "label": "component:cosh-ng",
+      "commit_scope": "cosh-ng",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": "cosh-ng/v",
+      "ci_key": "cosh_ng",
+      "issue_triagers": [
+        "zkl123",
+        "SunnyQjm"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "sec-core",
+      "display_name": "Agent Security Core",
+      "aliases": [
+        "agent-sec-core"
+      ],
+      "issue_option": "sec-core",
+      "path_prefixes": [
+        "src/agent-sec-core/"
+      ],
+      "label": "component:sec-core",
+      "commit_scope": "sec-core",
+      "commit_scope_aliases": [
+        "agent-sec-core"
+      ],
+      "release_tag_prefix": "sec-core/v",
+      "ci_key": "agent_sec_core",
+      "issue_triagers": [
+        "edonyzpc",
+        "kid9",
+        "RemindD"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "skill",
+      "display_name": "OS Skills",
+      "aliases": [
+        "os-skills"
+      ],
+      "issue_option": "skill",
+      "path_prefixes": [
+        "src/os-skills/"
+      ],
+      "label": "component:skill",
+      "commit_scope": "skill",
+      "commit_scope_aliases": [
+        "os-skills"
+      ],
+      "release_tag_prefix": "skill/v",
+      "ci_key": null,
+      "issue_triagers": [
+        "Ziqi002"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "sight",
+      "display_name": "AgentSight",
+      "aliases": [
+        "agentsight"
+      ],
+      "issue_option": "sight",
+      "path_prefixes": [
+        "src/agentsight/"
+      ],
+      "label": "component:sight",
+      "commit_scope": "sight",
+      "commit_scope_aliases": [
+        "agentsight"
+      ],
+      "release_tag_prefix": "sight/v",
+      "ci_key": "agentsight",
+      "issue_triagers": [
+        "chengshuyi",
+        "jfeng18",
+        "viron-xiao"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "tokenless",
+      "display_name": "Tokenless",
+      "aliases": [],
+      "issue_option": "tokenless",
+      "path_prefixes": [
+        "src/tokenless/"
+      ],
+      "label": "component:tokenless",
+      "commit_scope": "tokenless",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": "tokenless/v",
+      "ci_key": "tokenless",
+      "issue_triagers": [
+        "Forrest-ly",
+        "ikunkun-sys"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "ckpt",
+      "display_name": "Workspace Checkpoint",
+      "aliases": [
+        "ws-ckpt"
+      ],
+      "issue_option": "ckpt",
+      "path_prefixes": [
+        "src/ws-ckpt/"
+      ],
+      "label": "component:ckpt",
+      "commit_scope": "ckpt",
+      "commit_scope_aliases": [
+        "ws-ckpt"
+      ],
+      "release_tag_prefix": "ckpt/v",
+      "ci_key": "ws_ckpt",
+      "issue_triagers": [
+        "yummypeng"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "memory",
+      "display_name": "Agent Memory",
+      "aliases": [
+        "agent-memory"
+      ],
+      "issue_option": "memory",
+      "path_prefixes": [
+        "src/agent-memory/"
+      ],
+      "label": "component:memory",
+      "commit_scope": "memory",
+      "commit_scope_aliases": [
+        "agent-memory"
+      ],
+      "release_tag_prefix": "memory/v",
+      "ci_key": "agent_memory",
+      "issue_triagers": [
+        "ikunkun-sys"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "skillfs",
+      "display_name": "SkillFS",
+      "aliases": [],
+      "issue_option": "skillfs",
+      "path_prefixes": [
+        "src/skillfs/"
+      ],
+      "label": "component:skillfs",
+      "commit_scope": "skillfs",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": "skillfs/v",
+      "ci_key": "skillfs",
+      "issue_triagers": [
+        "kongche-jbw"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "ktuner",
+      "display_name": "KTuner",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/ktuner/"
+      ],
+      "label": "component:ktuner",
+      "commit_scope": "ktuner",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": "ktuner/v",
+      "ci_key": "ktuner",
+      "issue_triagers": [],
+      "status": "incubating"
+    },
+    {
+      "id": "blaze",
+      "display_name": "Blaze",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/blaze/"
+      ],
+      "label": "component:blaze",
+      "commit_scope": "blaze",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": "blaze",
+      "issue_triagers": [],
+      "status": "incubating"
+    },
+    {
+      "id": "aw",
+      "display_name": "AW",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/aw/"
+      ],
+      "label": "component:aw",
+      "commit_scope": "aw",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": null,
+      "issue_triagers": [
+        "kongche-jbw"
+      ],
+      "status": "incubating"
+    },
+    {
+      "id": "osbase",
+      "display_name": "OS Base",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/osbase/"
+      ],
+      "label": "component:osbase",
+      "commit_scope": null,
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": null,
+      "issue_triagers": [
+        "casparant"
+      ],
+      "status": "internal"
+    }
+  ]
+}

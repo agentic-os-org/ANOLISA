@@ -1,0 +1,23 @@
+# Clippy lint 配置
+# 运行: cargo clippy --workspace --all-targets
+
+# 函数体认知复杂度阈值 (默认 25，适当收紧)
+cognitive-complexity-threshold = 30
+
+# 函数参数数量上限 (超过则触发 too_many_arguments)
+too-many-arguments-threshold = 8
+
+# 单个函数最大行数 (超过则触发 too_many_lines)
+too-many-lines-threshold = 150
+
+# 类型复杂度上限 (嵌套泛型层数)
+type-complexity-threshold = 300
+
+# 允许的 enum variant 数量上限
+enum-variant-size-threshold = 200
+
+# 小对象传值而非传引用的字节数阈值
+trivial-copy-size-limit = 16
+
+# 允许使用的通配符导入路径 (不触发 wildcard_imports lint)
+allowed-wildcard-imports = ["cosh_types::*"]

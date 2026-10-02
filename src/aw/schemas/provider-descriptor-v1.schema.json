@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/provider-descriptor/v1",
+  "title": "Admitted provider descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "provider_id",
+    "provider_version",
+    "manifest_digest",
+    "driver",
+    "lifecycle",
+    "guarantee",
+    "capabilities"
+  ],
+  "properties": {
+    "provider_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "provider_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "driver": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "lifecycle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "guarantee": {
+      "enum": [
+        "declared",
+        "enforced"
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capability",
+          "authority",
+          "input_schema",
+          "output_schema",
+          "boundaries"
+        ],
+        "properties": {
+          "capability": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^!-~]"
+            }
+          },
+          "authority": {
+            "enum": [
+              "observe",
+              "advise",
+              "mediate",
+              "enforce"
+            ]
+          },
+          "input_schema": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+          },
+          "output_schema": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+          },
+          "boundaries": {
+            "type": "array",
+            "items": {
+              "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/boundary"
+            },
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 64
+    }
+  }
+}

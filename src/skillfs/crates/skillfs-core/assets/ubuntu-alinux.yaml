@@ -1,0 +1,2079 @@
+# Ubuntu ↔ Alinux conversion rules — SkillFS built-in catalog
+# ══════════════════════════════════════════════════════════════════
+# Each rule is a YAML mapping with these fields:
+#   ubuntu      — literal substring as it appears in Ubuntu/Debian-style content
+#   alinux      — literal substring it should be rewritten to on Alinux/Anolis-style
+#   direction   — bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+#   match       — literal | token (OPTIONAL; defaults to literal)
+#                 token requires ASCII-alphanumeric boundaries at source edges
+#   auto_apply  — always | never (REQUIRED; the only eligibility field)
+#                 always → SkillFS applies this rule in an allowed direction
+#                 never  → SkillFS loads the rule but never applies it
+#   confidence  — high | medium | low (OPTIONAL annotation; inert at runtime)
+#   notes       — OPTIONAL human-readable comment (inert at runtime)
+#
+# SkillFS decides eligibility solely from auto_apply. confidence and notes are
+# accepted for human review but never change behavior: SkillFS performs no
+# verification, Repology lookup, network call, subprocess, or LLM review. In
+# this catalog high-confidence rules are auto_apply: always; medium and low
+# rules are included as auto_apply: never so they are documented but inert.
+#
+# MATCHING: SkillFS applies rules in a single left-to-right pass over the
+# original text. At each position the LONGEST matching source pattern wins
+# (most specific first), its replacement is emitted, and the scan skips past
+# the matched span. Neither the replacement nor already-scanned text is
+# rewritten again, so results do NOT depend on rule order and overlapping
+# patterns never cascade (e.g. "apache2" never rewrites inside "apache2-utils",
+# and "cron" never re-hits the "crond" a longer rule produced).
+# A `match: token` candidate is considered only when ASCII letters or digits do
+# not touch an alphanumeric edge of its source; omitted `match` stays literal.
+#
+# Ineligible rules (auto_apply: never, identity, or direction-disallowed) still
+# take part in the scan as protection matches: when one is the longest match at
+# a position it is emitted unchanged and skipped, so a shorter eligible rule
+# cannot rewrite inside a span such a rule claims. Protection is deduplicated by
+# (source, match): a substitution removes only the same source/mode protection.
+# Different modes coexist; substitution wins only when its mode also matches,
+# otherwise a matching protection still preserves the source span.
+# ══════════════════════════════════════════════════════════════════
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1. Package manager — install / remove / upgrade verbs
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "sudo apt-get install -y "
+  alinux: "sudo dnf install -y "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "sudo apt install -y "
+  alinux: "sudo dnf install -y "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt install -y "
+  alinux: "dnf install -y "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get install "
+  alinux: "dnf install -y "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+  notes: reverse loses -y; not a 1:1 round-trip
+
+- ubuntu: "apt install "
+  alinux: "dnf install -y "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get remove -y "
+  alinux: "dnf remove -y "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get remove "
+  alinux: "dnf remove "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt remove "
+  alinux: "dnf remove "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get purge "
+  alinux: "dnf remove "
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: purge removes config files too; dnf remove keeps them
+
+- ubuntu: "apt-get autoremove"
+  alinux: "dnf autoremove"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt autoremove"
+  alinux: "dnf autoremove"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get clean"
+  alinux: "dnf clean all"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt clean"
+  alinux: "dnf clean all"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get upgrade -y"
+  alinux: "dnf upgrade -y"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get upgrade"
+  alinux: "dnf upgrade"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt upgrade -y"
+  alinux: "dnf upgrade -y"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt upgrade"
+  alinux: "dnf upgrade"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-get dist-upgrade"
+  alinux: "dnf distro-sync"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: dist-upgrade and distro-sync have similar but not identical semantics
+
+- ubuntu: "apt-get update"
+  alinux: "dnf check-update"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt update"
+  alinux: "dnf check-update"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2. Package manager — query / search
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "apt-cache search "
+  alinux: "dnf search "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt search "
+  alinux: "dnf search "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-cache show "
+  alinux: "dnf info "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt show "
+  alinux: "dnf info "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt list --installed"
+  alinux: "dnf list installed"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apt-cache policy "
+  alinux: "dnf info "
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "dpkg -l | grep "
+  alinux: "rpm -qa | grep "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "dpkg -L "
+  alinux: "rpm -ql "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "dpkg-query -W"
+  alinux: "rpm -qa"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 3. Package manager — repository configuration
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "add-apt-repository "
+  alinux: "dnf config-manager --add-repo "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/apt/sources.list.d/"
+  alinux: "/etc/yum.repos.d/"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/apt/sources.list"
+  alinux: "/etc/yum.repos.d/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Ubuntu single sources.list vs RHEL per-repo .repo files; not 1:1
+
+- ubuntu: "/etc/apt/keyrings/"
+  alinux: "/etc/pki/rpm-gpg/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/apt/trusted.gpg.d/"
+  alinux: "/etc/pki/rpm-gpg/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "apt-key add "
+  alinux: "rpm --import "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. Development libraries — -dev → -devel
+# ──────────────────────────────────────────────────────────────────────
+
+# OpenSSL / TLS
+- ubuntu: "libssl-dev"
+  alinux: "openssl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgnutls28-dev"
+  alinux: "gnutls-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libssh-dev"
+  alinux: "libssh-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libssh2-1-dev"
+  alinux: "libssh2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libnspr4-dev"
+  alinux: "nspr-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libnss3-dev"
+  alinux: "nss-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# HTTP / curl
+- ubuntu: "libcurl4-openssl-dev"
+  alinux: "libcurl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libcurl4-gnutls-dev"
+  alinux: "libcurl-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "libcurl4-nss-dev"
+  alinux: "libcurl-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+# XML / parsing
+- ubuntu: "libxml2-dev"
+  alinux: "libxml2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxslt1-dev"
+  alinux: "libxslt-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libexpat1-dev"
+  alinux: "expat-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Compression
+- ubuntu: "zlib1g-dev"
+  alinux: "zlib-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libbz2-dev"
+  alinux: "bzip2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "liblzma-dev"
+  alinux: "xz-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libzstd-dev"
+  alinux: "libzstd-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libsnappy-dev"
+  alinux: "snappy-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Database client libs
+- ubuntu: "libsqlite3-dev"
+  alinux: "sqlite-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpq-dev"
+  alinux: "postgresql-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libmysqlclient-dev"
+  alinux: "mariadb-connector-c-devel"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "default-libmysqlclient-dev"
+  alinux: "mariadb-connector-c-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+# Auth / crypto / kerberos
+- ubuntu: "libldap2-dev"
+  alinux: "openldap-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libsasl2-dev"
+  alinux: "cyrus-sasl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libkrb5-dev"
+  alinux: "krb5-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpam0g-dev"
+  alinux: "pam-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libaudit-dev"
+  alinux: "audit-libs-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libcap-dev"
+  alinux: "libcap-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libacl1-dev"
+  alinux: "libacl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libattr1-dev"
+  alinux: "libattr-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libselinux1-dev"
+  alinux: "libselinux-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Misc system libs
+- ubuntu: "libffi-dev"
+  alinux: "libffi-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libreadline-dev"
+  alinux: "readline-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libreadline6-dev"
+  alinux: "readline-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libreadline7-dev"
+  alinux: "readline-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libreadline8-dev"
+  alinux: "readline-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libncurses5-dev"
+  alinux: "ncurses-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libncursesw5-dev"
+  alinux: "ncurses-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libncurses-dev"
+  alinux: "ncurses-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgdbm-dev"
+  alinux: "gdbm-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libdb-dev"
+  alinux: "libdb-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpcre2-dev"
+  alinux: "pcre2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpcre3-dev"
+  alinux: "pcre-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libidn-dev"
+  alinux: "libidn-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libidn2-dev"
+  alinux: "libidn2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libtirpc-dev"
+  alinux: "libtirpc-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# systemd / dbus / glib
+- ubuntu: "libsystemd-dev"
+  alinux: "systemd-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libudev-dev"
+  alinux: "systemd-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: udev headers are part of systemd-devel on RHEL
+
+- ubuntu: "libdbus-1-dev"
+  alinux: "dbus-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libglib2.0-dev"
+  alinux: "glib2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# GUI toolkits
+- ubuntu: "libgtk-3-dev"
+  alinux: "gtk3-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgtk2.0-dev"
+  alinux: "gtk2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "qtbase5-dev"
+  alinux: "qt5-qtbase-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libqt5-dev"
+  alinux: "qt5-qtbase-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+# Image formats
+- ubuntu: "libjpeg-dev"
+  alinux: "libjpeg-turbo-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libjpeg-turbo8-dev"
+  alinux: "libjpeg-turbo-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpng-dev"
+  alinux: "libpng-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpng12-dev"
+  alinux: "libpng-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpng16-dev"
+  alinux: "libpng-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libtiff-dev"
+  alinux: "libtiff-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libtiff5-dev"
+  alinux: "libtiff-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libwebp-dev"
+  alinux: "libwebp-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgif-dev"
+  alinux: "giflib-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Fonts / rendering
+- ubuntu: "libfreetype6-dev"
+  alinux: "freetype-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libfontconfig1-dev"
+  alinux: "fontconfig-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libcairo2-dev"
+  alinux: "cairo-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpango1.0-dev"
+  alinux: "pango-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgdk-pixbuf2.0-dev"
+  alinux: "gdk-pixbuf2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libharfbuzz-dev"
+  alinux: "harfbuzz-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Linear algebra / numerics
+- ubuntu: "libatlas-base-dev"
+  alinux: "atlas-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libopenblas-dev"
+  alinux: "openblas-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libblas-dev"
+  alinux: "blas-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "liblapack-dev"
+  alinux: "lapack-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libfftw3-dev"
+  alinux: "fftw-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgsl-dev"
+  alinux: "gsl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Audio
+- ubuntu: "libasound2-dev"
+  alinux: "alsa-lib-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpulse-dev"
+  alinux: "pulseaudio-libs-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libjack-jackd2-dev"
+  alinux: "jack-audio-connection-kit-devel"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "libsndfile1-dev"
+  alinux: "libsndfile-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libogg-dev"
+  alinux: "libogg-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libvorbis-dev"
+  alinux: "libvorbis-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Video / multimedia
+- ubuntu: "libavcodec-dev"
+  alinux: "ffmpeg-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: requires EPEL or RPM Fusion
+
+- ubuntu: "libavformat-dev"
+  alinux: "ffmpeg-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "libavutil-dev"
+  alinux: "ffmpeg-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "libsdl2-dev"
+  alinux: "SDL2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Language headers
+- ubuntu: "python3-dev"
+  alinux: "python3-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "python3.10-dev"
+  alinux: "python3.10-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "python3.11-dev"
+  alinux: "python3.11-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "python3.12-dev"
+  alinux: "python3.12-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "ruby-dev"
+  alinux: "ruby-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "perl-dev"
+  alinux: "perl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# DNS / network
+- ubuntu: "libldns-dev"
+  alinux: "ldns-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpcap-dev"
+  alinux: "libpcap-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libnl-3-dev"
+  alinux: "libnl3-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libnetfilter-queue-dev"
+  alinux: "libnetfilter_queue-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. Package name differences (no -dev/-devel suffix)
+# ──────────────────────────────────────────────────────────────────────
+
+# Compilers / toolchains
+- ubuntu: "build-essential"
+  alinux: '@"Development Tools"'
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Alinux uses dnf groups; quoted to keep the @ + space safe
+
+- ubuntu: "g++"
+  alinux: "gcc-c++"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Web servers
+- ubuntu: "apache2"
+  alinux: "httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "apache2-utils"
+  alinux: "httpd-tools"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Database servers
+- ubuntu: "mysql-server"
+  alinux: "mariadb-server"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Alinux ships MariaDB by default; switch back to mysql-server only if you really want Oracle MySQL
+
+- ubuntu: "mysql-client"
+  alinux: "mariadb"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "postgresql-client"
+  alinux: "postgresql"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "postgresql-contrib"
+  alinux: "postgresql-contrib"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "redis-server"
+  alinux: "redis"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Fonts (CJK is the most painful)
+- ubuntu: "fonts-noto-cjk"
+  alinux: "google-noto-sans-cjk-ttc-fonts"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "fonts-noto-color-emoji"
+  alinux: "google-noto-emoji-color-fonts"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "fonts-wqy-zenhei"
+  alinux: "wqy-zenhei-fonts"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "fonts-wqy-microhei"
+  alinux: "wqy-microhei-fonts"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "fonts-arphic-ukai"
+  alinux: "cjkuni-ukai-fonts"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "fonts-dejavu-core"
+  alinux: "dejavu-sans-fonts"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "fonts-liberation"
+  alinux: "liberation-fonts"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Network / system tools
+- ubuntu: "iputils-ping"
+  alinux: "iputils"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "iproute2"
+  alinux: "iproute"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "dnsutils"
+  alinux: "bind-utils"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "openssh-client"
+  alinux: "openssh-clients"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "cron"
+  alinux: "cronie"
+  direction: bidirectional
+  match: token
+  auto_apply: always
+  confidence: high
+  notes: token boundaries prevent matches inside crontab, cronutils, and micron
+
+- ubuntu: "ntp"
+  alinux: "chrony"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Alinux 8+ ships chrony, not ntpd
+
+- ubuntu: "ntpdate"
+  alinux: "chrony"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "ufw"
+  alinux: "firewalld"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: low
+  notes: ufw and firewalld have very different command surfaces; flag for review
+
+- ubuntu: "vim-tiny"
+  alinux: "vim-minimal"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6. Tool replacements (no like-for-like; needs flagging)
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "pdftk"
+  alinux: "qpdf"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: pdftk default Ubuntu repo only; qpdf covers most use cases on Alinux
+
+- ubuntu: "alien"
+  alinux: "alien"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+  notes: works in both directions but conversions are lossy
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 7. systemd unit names
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "apache2.service"
+  alinux: "httpd.service"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "mysql.service"
+  alinux: "mariadb.service"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "ssh.service"
+  alinux: "sshd.service"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "cron.service"
+  alinux: "crond.service"
+  direction: bidirectional
+  match: token
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "ntp.service"
+  alinux: "chronyd.service"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "ufw.service"
+  alinux: "firewalld.service"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: low
+
+# systemctl verbs (apache2/ssh/cron/mysql)
+- ubuntu: "systemctl restart apache2"
+  alinux: "systemctl restart httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl restart ssh"
+  alinux: "systemctl restart sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl restart cron"
+  alinux: "systemctl restart crond"
+  direction: bidirectional
+  match: token
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl restart mysql"
+  alinux: "systemctl restart mariadb"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "systemctl status apache2"
+  alinux: "systemctl status httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl status ssh"
+  alinux: "systemctl status sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl enable apache2"
+  alinux: "systemctl enable httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl enable ssh"
+  alinux: "systemctl enable sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl start apache2"
+  alinux: "systemctl start httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl start ssh"
+  alinux: "systemctl start sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl stop apache2"
+  alinux: "systemctl stop httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemctl stop ssh"
+  alinux: "systemctl stop sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 8. Filesystem paths
+# ──────────────────────────────────────────────────────────────────────
+
+# Fonts
+- ubuntu: "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+  alinux: "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+  alinux: "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/usr/share/fonts/truetype/wqy/"
+  alinux: "/usr/share/fonts/wqy-zenhei/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+  alinux: "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/usr/share/fonts/truetype/dejavu/"
+  alinux: "/usr/share/fonts/dejavu-sans-fonts/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/usr/share/fonts/truetype/liberation/"
+  alinux: "/usr/share/fonts/liberation-sans/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+# Network configuration
+- ubuntu: "/etc/network/interfaces"
+  alinux: "/etc/sysconfig/network-scripts/"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+  notes: file vs directory; format completely different
+
+- ubuntu: "/etc/network/interfaces.d/"
+  alinux: "/etc/sysconfig/network-scripts/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/netplan/"
+  alinux: "/etc/NetworkManager/system-connections/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: low
+
+# Timezone
+- ubuntu: "/etc/timezone"
+  alinux: "/etc/localtime"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+  notes: file format differs; conversion may need additional work
+
+# Web server doc roots / configs
+- ubuntu: "/etc/apache2/apache2.conf"
+  alinux: "/etc/httpd/conf/httpd.conf"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/apache2/sites-available/"
+  alinux: "/etc/httpd/conf.d/"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/apache2/sites-enabled/"
+  alinux: "/etc/httpd/conf.d/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/apache2/mods-available/"
+  alinux: "/etc/httpd/conf.modules.d/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/var/log/apache2/"
+  alinux: "/var/log/httpd/"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# MySQL / MariaDB
+- ubuntu: "/etc/mysql/my.cnf"
+  alinux: "/etc/my.cnf"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/mysql/conf.d/"
+  alinux: "/etc/my.cnf.d/"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/var/log/mysql/"
+  alinux: "/var/log/mariadb/"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 9. Misc command differences
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "update-alternatives "
+  alinux: "alternatives "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "service apache2"
+  alinux: "service httpd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "service mysql"
+  alinux: "service mariadb"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "service ssh"
+  alinux: "service sshd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "service cron"
+  alinux: "service crond"
+  direction: bidirectional
+  match: token
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/init.d/apache2"
+  alinux: "/etc/init.d/httpd"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/init.d/ssh"
+  alinux: "/etc/init.d/sshd"
+  direction: bidirectional
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "/etc/init.d/cron"
+  alinux: "/etc/init.d/crond"
+  direction: bidirectional
+  match: token
+  auto_apply: never
+  confidence: medium
+
+
+# ══════════════════════════════════════════════════════════════════════
+# EXPANSION — verified on Alinux 4 Agentic Edition via `dnf info`
+# Only packages confirmed present in the default Alinux 4 repos or
+# EPEL are included. Packages that returned "not found" are omitted.
+# ══════════════════════════════════════════════════════════════════════
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 11. Additional -dev/-devel pairs (verified on Alinux 4)
+# ──────────────────────────────────────────────────────────────────────
+
+# YAML / config
+- ubuntu: "libyaml-dev"
+  alinux: "libyaml-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Event loops
+- ubuntu: "libev-dev"
+  alinux: "libev-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libevent-dev"
+  alinux: "libevent-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Stack unwinding
+- ubuntu: "libunwind-dev"
+  alinux: "libunwind-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Protobuf
+- ubuntu: "libprotobuf-dev"
+  alinux: "protobuf-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "protobuf-compiler"
+  alinux: "protobuf-compiler"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# UUID
+- ubuntu: "uuid-dev"
+  alinux: "libuuid-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# JSON
+- ubuntu: "libjson-c-dev"
+  alinux: "json-c-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libjansson-dev"
+  alinux: "jansson-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# HTTP server libs
+- ubuntu: "libmicrohttpd-dev"
+  alinux: "libmicrohttpd-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Crypto
+- ubuntu: "libsodium-dev"
+  alinux: "libsodium-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Messaging
+- ubuntu: "libzmq3-dev"
+  alinux: "zeromq-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libzmq5-dev"
+  alinux: "zeromq-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+# KV stores
+- ubuntu: "liblmdb-dev"
+  alinux: "lmdb-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libleveldb-dev"
+  alinux: "leveldb-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# USB / HID
+- ubuntu: "libusb-1.0-0-dev"
+  alinux: "libusbx-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libhidapi-dev"
+  alinux: "hidapi-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Bluetooth
+- ubuntu: "libbluetooth-dev"
+  alinux: "bluez-libs-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Config file parsing
+- ubuntu: "libconfig-dev"
+  alinux: "libconfig-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Test frameworks
+- ubuntu: "check"
+  alinux: "check-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "libcmocka-dev"
+  alinux: "libcmocka-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libcunit1-dev"
+  alinux: "CUnit-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Desktop notifications
+- ubuntu: "libnotify-dev"
+  alinux: "libnotify-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Multimedia frameworks
+- ubuntu: "libgstreamer1.0-dev"
+  alinux: "gstreamer1-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgstreamer-plugins-base1.0-dev"
+  alinux: "gstreamer1-plugins-base-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# OCR / document
+- ubuntu: "libtesseract-dev"
+  alinux: "tesseract-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libleptonica-dev"
+  alinux: "leptonica-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libpoppler-dev"
+  alinux: "poppler-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# GeoIP
+- ubuntu: "libmaxminddb-dev"
+  alinux: "libmaxminddb-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# HTTP/2
+- ubuntu: "libnghttp2-dev"
+  alinux: "libnghttp2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Public suffix
+- ubuntu: "libpsl-dev"
+  alinux: "libpsl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Text stemming
+- ubuntu: "libstemmer-dev"
+  alinux: "libstemmer-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Google RE2
+- ubuntu: "libre2-dev"
+  alinux: "re2-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Abseil (C++ base)
+- ubuntu: "libabsl-dev"
+  alinux: "abseil-cpp-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# LZ4 compression
+- ubuntu: "liblz4-dev"
+  alinux: "lz4-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# xxHash
+- ubuntu: "libxxhash-dev"
+  alinux: "xxhash-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Libtool
+- ubuntu: "libltdl-dev"
+  alinux: "libtool-ltdl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# GMP / MPFR / MPC (math)
+- ubuntu: "libgmp-dev"
+  alinux: "gmp-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libmpfr-dev"
+  alinux: "mpfr-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libmpc-dev"
+  alinux: "libmpc-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Virtualization
+- ubuntu: "libvirt-dev"
+  alinux: "libvirt-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# X11 / GUI (Python tkinter, Tcl/Tk, OpenGL)
+- ubuntu: "libx11-dev"
+  alinux: "libX11-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxext-dev"
+  alinux: "libXext-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxrender-dev"
+  alinux: "libXrender-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxft-dev"
+  alinux: "libXft-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxpm-dev"
+  alinux: "libXpm-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxt-dev"
+  alinux: "libXt-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libxmu-dev"
+  alinux: "libXmu-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libgl-dev"
+  alinux: "mesa-libGL-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "libglu1-mesa-dev"
+  alinux: "mesa-libGLU-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Tcl / Tk (Python tkinter build dep)
+- ubuntu: "tcl-dev"
+  alinux: "tcl-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "tk-dev"
+  alinux: "tk-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Lua
+- ubuntu: "liblua5.4-dev"
+  alinux: "lua-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "liblua5.3-dev"
+  alinux: "lua-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+# PHP
+- ubuntu: "php-dev"
+  alinux: "php-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 12. Language ecosystem system dependencies
+# ──────────────────────────────────────────────────────────────────────
+
+# Python build deps (pyenv / cpython from source)
+- ubuntu: "python3-venv"
+  alinux: "python3-virtualenv"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: python3-venv is Ubuntu's venv package; Alinux uses virtualenv
+
+- ubuntu: "python3-pip"
+  alinux: "python3-pip"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "python3-setuptools"
+  alinux: "python3-setuptools"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "python3-wheel"
+  alinux: "python3-wheel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Go
+- ubuntu: "golang-go"
+  alinux: "golang"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Rust
+- ubuntu: "rustc"
+  alinux: "rust"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "cargo"
+  alinux: "cargo"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Java
+- ubuntu: "default-jdk"
+  alinux: "java-latest-openjdk-devel"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Alinux name changes per JDK version; map to "latest"
+
+- ubuntu: "default-jre"
+  alinux: "java-latest-openjdk"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "maven"
+  alinux: "maven"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "ant"
+  alinux: "ant"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# PHP
+- ubuntu: "php-mysql"
+  alinux: "php-mysqlnd"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "php-pgsql"
+  alinux: "php-pgsql"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "php-fpm"
+  alinux: "php-fpm"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Node.js
+- ubuntu: "nodejs"
+  alinux: "nodejs"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "npm"
+  alinux: "npm"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Assembly
+- ubuntu: "nasm"
+  alinux: "nasm"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "yasm"
+  alinux: "yasm"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. Additional system tools / services / paths
+# ──────────────────────────────────────────────────────────────────────
+
+# Nginx (same name on both, but include for completeness in service mapping)
+- ubuntu: "systemctl restart nginx"
+  alinux: "systemctl restart nginx"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "/etc/nginx/"
+  alinux: "/etc/nginx/"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# PHP-FPM service
+- ubuntu: "php7.4-fpm"
+  alinux: "php-fpm"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+- ubuntu: "php8.1-fpm"
+  alinux: "php-fpm"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+
+# Document tools
+- ubuntu: "poppler-utils"
+  alinux: "poppler-utils"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "ghostscript"
+  alinux: "ghostscript"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "imagemagick"
+  alinux: "ImageMagick"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# TeX / LaTeX
+- ubuntu: "texlive-latex-base"
+  alinux: "texlive-latex"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "texlive-xetex"
+  alinux: "texlive-xetex"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "texlive-latex-extra"
+  alinux: "texlive-scheme-basic"
+  direction: ubuntu_to_alinux_only
+  auto_apply: never
+  confidence: medium
+  notes: Alinux ships texlive as schemes; basic is the closest equivalent
+
+# Graph / visualization
+- ubuntu: "graphviz"
+  alinux: "graphviz"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Debugging / profiling
+- ubuntu: "valgrind"
+  alinux: "valgrind"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "strace"
+  alinux: "strace"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "gdb"
+  alinux: "gdb"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "linux-tools-common"
+  alinux: "perf"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "linux-tools-generic"
+  alinux: "perf"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "systemtap"
+  alinux: "systemtap"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "sysstat"
+  alinux: "sysstat"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "iotop"
+  alinux: "iotop"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "bpfcc-tools"
+  alinux: "bcc-tools"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "bpftrace"
+  alinux: "bpftrace"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Networking tools
+- ubuntu: "ncat"
+  alinux: "nmap-ncat"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "socat"
+  alinux: "socat"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Terminal multiplexers / shells
+- ubuntu: "tmux"
+  alinux: "tmux"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "screen"
+  alinux: "screen"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "zsh"
+  alinux: "zsh"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "bash-completion"
+  alinux: "bash-completion"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Container tools
+- ubuntu: "skopeo"
+  alinux: "skopeo"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Kubernetes
+- ubuntu: "kubectl"
+  alinux: "kubernetes-client"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Virtualization
+- ubuntu: "qemu-kvm"
+  alinux: "qemu-kvm"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "virtinst"
+  alinux: "virt-install"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+# Misc config commands
+- ubuntu: "dpkg-reconfigure tzdata"
+  alinux: "timedatectl set-timezone"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+  notes: semantic-level remap, verified by LLM + manual review
+
+- ubuntu: "dpkg-reconfigure locales"
+  alinux: "localectl set-locale"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+  notes: semantic-level remap
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 14. Subprocess / scripting patterns (Python, shell)
+# ──────────────────────────────────────────────────────────────────────
+
+- ubuntu: "subprocess.run([\"apt-get\","
+  alinux: "subprocess.run([\"dnf\","
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "subprocess.run([\"apt\","
+  alinux: "subprocess.run([\"dnf\","
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "os.system(\"apt-get "
+  alinux: "os.system(\"dnf "
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+
+- ubuntu: "os.system(\"apt "
+  alinux: "os.system(\"dnf "
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: high

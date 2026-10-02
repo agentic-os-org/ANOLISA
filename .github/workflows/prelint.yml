@@ -1,0 +1,161 @@
+###############################################################################
+# PR metadata checks
+#
+# Commit messages are a hard gate. PR title, branch name, and issue linkage are
+# advisory so external contributors receive guidance without being blocked.
+###############################################################################
+
+name: CI / PR Lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main, "feature/**", "release/**"]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commit-lint:
+    name: 📝 Commit Message Lint
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint commit messages
+        uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: .github/commitlint.config.json
+
+      - name: Explain how to fix commit messages
+        if: failure()
+        env:
+          DOCS_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docs_url="https://github.com/${GITHUB_REPOSITORY}/blob/${DOCS_REVISION}"
+          {
+            printf '%s\n' '## Commit message check failed' ''
+            printf '%s\n' \
+              'Each commit must use `type(scope): imperative description`.' \
+              'Example: `fix(cosh): handle empty configuration`' ''
+            printf '%s\n' 'To update the latest commit:' '```bash' \
+              'git commit --amend' 'git push --force-with-lease' '```' ''
+            printf '%s\n' 'To update an older commit, select `reword` in:' \
+              '```bash' 'git rebase -i HEAD~N' \
+              'git push --force-with-lease' '```' ''
+            printf '%s\n' \
+              "- [English contribution guide](${docs_url}/CONTRIBUTING.md#commit-messages)" \
+              "- [中文贡献指南](${docs_url}/CONTRIBUTING_zh.md#commit-规范)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  pr-checks:
+    name: 🔍 PR Checks
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - name: Checkout governance metadata
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/components.json
+          sparse-checkout-cone-mode: false
+
+      - name: Validate PR metadata
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const metadata = JSON.parse(
+              fs.readFileSync('.github/components.json', 'utf8')
+            );
+
+            const componentScopes = metadata.components
+              .flatMap((component) => [
+                component.commit_scope,
+                ...(component.commit_scope_aliases || []),
+              ])
+              .filter(Boolean);
+            const validScopes = [
+              ...new Set([...componentScopes, 'deps', 'ci', 'docs', 'chore']),
+            ].sort();
+
+            const warnings = [];
+            const pr = context.payload.pull_request;
+            const title = pr.title || '';
+            const branch = pr.head.ref || '';
+            const body = pr.body || '';
+
+            const titleMatch = title.match(
+              /^(feat|fix|refactor|perf|docs|chore|test|ci|build|style|revert)(\(([^)]+)\))!?: .+/
+            );
+            if (!titleMatch) {
+              warnings.push(
+                'PR title should use `type(scope): description`, for example ' +
+                '`feat(tokenless): add adapter diagnostics`.'
+              );
+            } else if (!validScopes.includes(titleMatch[3])) {
+              warnings.push(
+                `PR title scope "${titleMatch[3]}" is not recognized. ` +
+                `Recommended scopes: ${validScopes.join(', ')}.`
+              );
+            }
+
+            const alwaysAllowed = [
+              /^main$/,
+              /^dependabot\/.+/,
+              /^renovate\/.+/,
+              /^revert-.+/,
+              /^agent\/[a-z0-9][a-z0-9._-]*$/,
+              /^chore\/changelog-.+/,
+            ];
+            const scopePattern = validScopes
+              .map((scope) => scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+              .join('|');
+            const namedPatterns = [
+              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^fix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^hotfix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^release/(${scopePattern})/v\\d+\\.\\d+$`),
+            ];
+            if (
+              !alwaysAllowed.some((pattern) => pattern.test(branch)) &&
+              !namedPatterns.some((pattern) => pattern.test(branch))
+            ) {
+              warnings.push(
+                `Branch "${branch}" does not follow the recommended naming ` +
+                'pattern. Fork contributors may ignore this advisory.'
+              );
+            }
+
+            const closingKeyword =
+              /\b(closes|fixes|resolves|close|fix|resolve)\s+#\d+/i;
+            const exemption = body.match(/no-issue\s*:\s*(.+)/i);
+            if (!closingKeyword.test(body) && !exemption?.[1]?.trim()) {
+              warnings.push(
+                'Link an issue with `closes #123`, or add ' +
+                '`no-issue: <brief reason>` for a genuinely trivial change.'
+              );
+            }
+
+            if (warnings.length === 0) {
+              core.notice('PR metadata follows the recommended conventions.');
+            } else {
+              for (const warning of warnings) {
+                core.warning(warning);
+              }
+            }
+
+            await core.summary
+              .addHeading('PR metadata guidance', 3)
+              .addRaw(
+                warnings.length === 0
+                  ? 'No metadata warnings.'
+                  : warnings.map((warning) => `- ${warning}`).join('\n')
+              )
+              .addRaw(
+                '\n\nThese checks are advisory. Commit message lint remains the hard gate. ' +
+                'See CONTRIBUTING.md and AGENTS.md.'
+              )
+              .write();

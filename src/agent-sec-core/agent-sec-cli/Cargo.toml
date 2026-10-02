@@ -1,0 +1,50 @@
+[workspace]
+members = ["crates/model-service", "crates/prompt-scanner"]
+
+[profile.dev.package]
+# Rule-set startup is dominated by runtime regex compilation; unoptimised,
+# these make a dev-profile scan ~7x slower.
+aho-corasick.opt-level = 3
+regex.opt-level = 3
+regex-automata.opt-level = 3
+regex-syntax.opt-level = 3
+
+[workspace.dependencies]
+base64 = "0.22"
+log = "0.4"
+percent-encoding = "2.3"
+pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3-log = "0.9"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = "0.9"
+thiserror = "1.0"
+unicode-normalization = "0.1"
+unicode-properties = "0.1"
+ureq = { version = "2.10", features = ["json"] }
+# Same parser ureq resolves requests with, so base_url validation cannot
+# disagree with the transport about which host is being contacted.
+url = "2.5"
+
+[package]
+name = "agent-sec-cli"
+version = "0.13.2"
+edition = "2021"
+description = "Agent Security Core CLI - Native Rust extensions"
+license = "Apache-2.0"
+
+[lib]
+# Library name: will generate _native.cpython-XXX.so
+name = "agent_sec_cli_native"
+# cdylib for generating Python extension module
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3: Rust bindings for Python
+pyo3 = { workspace = true }
+# Installs the `log` implementation for the whole extension; without it every
+# log::warn! in the dependency tree is a no-op.
+pyo3-log = { workspace = true }
+prompt-scanner = { path = "crates/prompt-scanner" }
+serde_json = { workspace = true }

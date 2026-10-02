@@ -1,0 +1,7 @@
+{
+  "ready": true,
+  "backend": "actplane",
+  "capabilities": {
+    "file_delete_guard": true
+  }
+}

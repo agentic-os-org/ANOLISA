@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Codex PreToolUse RTK command rewriting hook.
+
+Reads a PreToolUse hook request from stdin, extracts the shell command,
+invokes ``rtk rewrite`` for token optimization, and returns the rewritten
+command via ``updatedInput``.
+
+Protocol:
+    stdin  ← codex PreToolUse JSON (tool_name, tool_input.command, ...)
+    stdout → {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                      "permissionDecision": "allow",
+                                      "updatedInput": {...}}}
+
+rtk exit code protocol:
+    0 = rewrite available → apply
+    1 = no RTK equivalent → skip (passthrough)
+    2 = deny rule matched → skip
+    3 = Ask/Default → apply (non-interactive context)
+
+Fail-open: all error paths exit 0 with empty stdout (passthrough).
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from typing import Optional
+
+# Resolve shared hook utilities (common/hooks/) with FHS fallback paths.
+# Primary: relative path (works for source-tree and FHS/RPM install).
+# Fallbacks: system and user FHS paths (works when Codex caches only the
+# plugin subdirectory and the relative path resolves outside the cache).
+#
+# Trust model (aligned with bash is_trusted_file / Rust is_trusted_path):
+#   - System FHS paths (/usr/share, /usr/local/share) are unconditional.
+#   - User-relative paths use passwd DB home (NOT $HOME — env-controllable),
+#     with ownership and parent-dir permission checks.
+#   - Relative ../../common/hooks is trusted only if the resolved target
+#     exists and is under a system prefix or a passwd-validated home path.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_trusted_dir(path: str) -> bool:
+    """Check whether a directory is trusted for Python module imports.
+
+    Mirrors the trust criteria in bash tool_ready_hook.sh (is_trusted_file)
+    and Rust env_check.rs (is_trusted_path): system paths unconditional,
+    user paths validated via passwd + ownership + parent permission checks.
+
+    NOTE: Callers should pass realpath-resolved paths (not just abspath)
+    so that symlink targets are validated before the trust check — a
+    symlinked /usr/share/anolisa → /tmp/ would bypass the prefix check
+    if only abspath is used.
+    """
+    # System FHS prefixes are always trusted
+    for prefix in ("/usr/share/", "/usr/local/share/", "/usr/libexec/", "/usr/lib/anolisa/"):
+        if path.startswith(prefix):
+            return True
+    # For paths outside system prefixes (e.g. source-tree cloned to
+    # /opt/anolisa/), trust them if owned by current uid or root AND
+    # parent directory is not world-writable. This covers developer
+    # worktrees without requiring the path to be under passwd home.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid != os.getuid() and st.st_uid != 0:
+        # Not owned by us or root — refuse. Home paths must be owned by
+        # us or root; source-tree paths outside system prefixes are
+        # already covered by the ownership check above (current uid/root).
+        return False
+    # Ownership OK — check parent directory is not world-writable
+    parent = os.path.dirname(path)
+    try:
+        pst = os.stat(parent)
+    except OSError:
+        return False
+    if pst.st_uid != os.getuid() and pst.st_uid != 0:
+        return False
+    if pst.st_mode & 0o002:  # world-writable
+        return False
+    return True
+
+
+# Resolve real home from passwd DB for user-install fallback path.
+# Falls back to "" (empty) when unavailable — candidate is then skipped.
+try:
+    import pwd as _pwd
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_REAL_HOME, *parts) if _REAL_HOME else ""
+
+
+_HOOK_UTILS_CANDIDATES = [
+    os.path.join(_HERE, "..", "..", "common", "hooks"),                   # source-tree / FHS
+    "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
+    os.path.join(_REAL_HOME, ".local", "share",
+                 "anolisa", "adapters", "tokenless", "common", "hooks") if _REAL_HOME else "",
+]
+_HOOK_UTILS_RESOLVED = ""
+for _C in _HOOK_UTILS_CANDIDATES:
+    if _C and _is_trusted_dir(os.path.realpath(_C)) and os.path.isdir(_C):
+        _HOOK_UTILS_RESOLVED = os.path.realpath(_C)
+        sys.path.insert(0, _C)
+        break
+
+if _HOOK_UTILS_RESOLVED:
+    from hook_utils import parse_version as _parse_version, skip_silent as _skip, write_context as _write_context  # noqa: E402
+else:
+    # Fail-open: no trusted hook_utils found → provide inline fallbacks
+    # so the hook script exits 0 (passthrough) rather than ImportError → exit 1.
+    import re as _re
+
+    def _skip() -> None:  # type: ignore[assignment,misc]
+        sys.exit(0)
+
+    def _parse_version(version_str: str) -> tuple | None:  # type: ignore[assignment,misc]
+        m = _re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+        if m:
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        return None
+
+    _WRITE_CONTEXT_WARNED = False
+
+    def _write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:  # type: ignore[assignment,misc]
+        global _WRITE_CONTEXT_WARNED
+        if not _WRITE_CONTEXT_WARNED:
+            print("[tokenless] WARNING: rtk session tracking unavailable (hook_utils not loaded, rewrite still works)", file=sys.stderr)
+            _WRITE_CONTEXT_WARNED = True
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
+_MIN_RTK_VERSION = (0, 35, 0)
+
+# RTK binary search paths. Codex can cache this script without common/hooks;
+# keep this standalone list aligned with hook_utils.py::_known_binary_paths.
+_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
+_RTK_FALLBACK_DEBIAN = "/usr/lib/anolisa/tokenless/rtk"
+_RTK_SYSTEM_BIN = "/usr/local/bin/rtk"
+_RTK_SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless/rtk"
+_RTK_RPM_BIN = "/usr/bin/rtk"
+_RTK_LOCAL_BIN = _user_path(".local", "bin", "rtk")
+_RTK_ANOLISA_USER = _user_path(
+    ".local",
+    "lib",
+    "anolisa",
+    "libexec",
+    "tokenless",
+    "rtk",
+)
+_RTK_MAKE_USER = _user_path(".local", "libexec", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_rtk() -> Optional[str]:
+    """Locate the rtk binary."""
+    path = shutil.which("rtk")
+    if path:
+        return path
+    for fp in (
+        _RTK_LOCAL_BIN,
+        _RTK_ANOLISA_USER,
+        _RTK_MAKE_USER,
+        _RTK_SYSTEM_BIN,
+        _RTK_SYSTEM_LIBEXEC,
+        _RTK_RPM_BIN,
+        _RTK_FALLBACK,
+        _RTK_FALLBACK_DEBIAN,
+        _RTK_LOCAL_SHARE,
+        _RTK_LOCAL_LIB,
+    ):
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            return fp
+    return None
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    # 1. Resolve rtk binary
+    rtk_bin = _find_rtk()
+    if not rtk_bin:
+        _skip()
+
+    # 2. Version guard
+    try:
+        result = subprocess.run(
+            [rtk_bin, "--version"],
+            capture_output=True, text=True, timeout=3,
+        )
+        ver = _parse_version(result.stdout)
+        if ver and ver < _MIN_RTK_VERSION:
+            _skip()
+    except Exception:
+        _skip()
+
+    # 3. Read stdin JSON
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    # 4. Extract command from tool_input
+    tool_name = input_data.get("tool_name", "")
+    tool_input = input_data.get("tool_input", {})
+    if isinstance(tool_input, str):
+        try:
+            tool_input = json.loads(tool_input)
+        except (json.JSONDecodeError, ValueError):
+            _skip()
+    cmd = tool_input.get("command", "")
+    if not cmd:
+        _skip()
+
+    # 5. Set up RTK env context for stats
+    session_id = input_data.get("session_id", "")
+    tool_use_id = input_data.get("tool_use_id", "")
+
+    env = os.environ.copy()
+    env["TOKENLESS_AGENT_ID"] = AGENT_ID
+    if session_id:
+        env["TOKENLESS_SESSION_ID"] = session_id
+    if tool_use_id:
+        env["TOKENLESS_TOOL_USE_ID"] = tool_use_id
+
+    _write_context(AGENT_ID, session_id, tool_use_id)
+
+    # 6. Rewrite via rtk
+    try:
+        proc = subprocess.run(
+            [rtk_bin, "rewrite", cmd],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except Exception:
+        _skip()
+
+    # 7. Interpret rtk exit code
+    if proc.returncode in (1, 2):
+        _skip()
+
+    rewritten = proc.stdout.strip()
+    if not rewritten or rewritten == cmd:
+        _skip()
+
+    # 8. Build codex PreToolUse response with updatedInput
+    updated_input = dict(tool_input)
+    updated_input["command"] = rewritten
+
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+    }
+    print(json.dumps(response, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

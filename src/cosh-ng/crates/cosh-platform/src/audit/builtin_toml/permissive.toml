@@ -1,0 +1,25 @@
+# Built-in audit policy: permissive.
+#
+# default = Allow. Only blocks operations that are obviously catastrophic
+# (filesystem destruction, system shutdown). Suitable for sandboxed
+# containers, CI runners, and other environments where you've decided
+# the blast radius is contained.
+
+version = "v1-permissive"
+default = "Allow"
+
+[[rules]]
+name = "shell-deny-extreme-destructive"
+outcome = "Deny"
+reason = "Catastrophically destructive command"
+[rules.matches]
+subsystem = "shell"
+operation = { one_of = ["rm", "dd", "shutdown", "reboot", "halt", "poweroff", "init", "format"] }
+
+[[rules]]
+name = "shell-deny-mkfs"
+outcome = "Deny"
+reason = "Filesystem creation is never auto-approved"
+[rules.matches]
+subsystem = "shell"
+operation = { glob = "mkfs*" }

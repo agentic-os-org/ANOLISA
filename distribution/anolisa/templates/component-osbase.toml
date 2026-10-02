@@ -1,0 +1,70 @@
+# Template: osbase component manifest v2.
+# Copy to distribution/anolisa/manifests/osbase/<component>.toml.
+
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[component]
+name = "sandbox-kata"
+version = "0.1.0"
+layer = "osbase"
+domain = "sandbox"
+description = "Kata Containers substrate"
+stability = "experimental"
+
+[source]
+path = "src/osbase/sandbox-kata"
+upstream = "external"
+
+[distribution]
+default_channel = "stable"
+allowed_channels = ["stable", "beta"]
+index_ref = "builtin"
+source_fallback = false
+checksum = "sha256"
+signature = "cosign"
+
+[[distribution.selectors]]
+install_mode = "system"
+os = ["alinux", "anolis", "rhel", "centos"]
+pkg_base = "rpm"
+preferred_artifact_types = ["rpm"]
+
+[[distribution.selectors]]
+install_mode = "system"
+os = ["ubuntu", "debian"]
+pkg_base = "deb"
+preferred_artifact_types = ["deb"]
+
+[install]
+modes = ["system"]
+services = []
+
+[[install.files]]
+source = "share/sandbox-kata/configuration.toml"
+dest = "{etcdir}/sandbox/kata/configuration.toml"
+mode = "0644"
+owner = "anolisa"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+requires_kernel = ">=5.4"
+incompatible_env = ["container_rootless"]
+
+[environment.requires_env]
+kvm_available = "true"
+
+[dependencies]
+runtime = ["kata-runtime", "qemu-kvm"]
+components = ["sandbox-container"]
+
+[[health_checks]]
+name = "runtime"
+kind = "command"
+command = "kata-runtime --version"
+
+[[rollback]]
+kind = "restore-file"
+path = "{etcdir}/sandbox/kata/configuration.toml"
+backup_required = true

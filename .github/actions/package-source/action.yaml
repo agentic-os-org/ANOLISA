@@ -1,0 +1,394 @@
+name: Package Source
+description: >
+  Build a source archive for the given component and version.
+  Optionally signs the archive (os-skills, agent-sec-core) and uploads it as a GitHub Actions artifact.
+
+inputs:
+  component:
+    description: 'Component name (e.g. copilot-shell, os-skills)'
+    required: true
+  version:
+    description: 'Version string without v prefix (e.g. 2.1.0)'
+    required: true
+  tokenless-source-root:
+    description: 'Repository root containing the Tokenless source tree'
+    required: false
+    default: '.'
+  artifact-suffix:
+    description: 'Suffix appended to both the tar.gz filename and artifact name (e.g. ".preview"). Leave empty for official builds.'
+    required: false
+    default: ''
+  retention-days:
+    description: 'Number of days to retain the uploaded artifact'
+    required: false
+    default: '14'
+  upload-artifact:
+    description: 'Whether to upload the completed archive as a GitHub Actions artifact'
+    required: false
+    default: 'true'
+  skill-sign-private-key:
+    description: 'ASCII-armored GPG private key for signing (skills only). Pass secrets.SKILL_SIGN_PRIVATE_KEY from the caller workflow.'
+    required: false
+    default: ''
+  skill-sign-public-key:
+    description: 'ASCII-armored GPG public key for signature verification (skills only). Pass vars.SKILL_SIGN_PUBLIC_KEY from the caller workflow.'
+    required: false
+    default: ''
+
+outputs:
+  archive-sha256:
+    description: 'SHA256 checksum of the produced archive'
+    value: ${{ steps.checksum.outputs.sha256 }}
+
+runs:
+  using: composite
+  steps:
+    # -----------------------------------------------------------------
+    # Step 1: Resolve source directory
+    # -----------------------------------------------------------------
+    - name: Resolve source directory
+      shell: bash
+      env:
+        TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless-source-root }}
+      run: |
+        COMPONENT="${{ inputs.component }}"
+        VERSION="${{ inputs.version }}"
+        SUFFIX="${{ inputs.artifact-suffix }}"
+
+        case "$COMPONENT" in
+          copilot-shell)  SRC_DIR="deprecated/copilot-shell" ;;
+          cosh-ng)        SRC_DIR="src/cosh-ng" ;;
+          agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
+          agentsight)     SRC_DIR="src/agentsight" ;;
+          tokenless)     SRC_DIR="${TOKENLESS_SOURCE_ROOT}/src/tokenless" ;;
+          os-skills)      SRC_DIR="src/os-skills" ;;
+          ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
+          agent-memory)   SRC_DIR="src/agent-memory" ;;
+          skillfs)        SRC_DIR="src/skillfs" ;;
+          ktuner)         SRC_DIR="src/ktuner" ;;
+          anolisa)        SRC_DIR="distribution/anolisa" ;;
+          *)
+            echo "ERROR: Unknown component: $COMPONENT"
+            exit 1
+            ;;
+        esac
+
+        echo "SRC_DIR=${SRC_DIR}" >> $GITHUB_ENV
+        echo "ARCHIVE_NAME=${COMPONENT}-${VERSION}" >> $GITHUB_ENV
+        echo "ARCHIVE_FILE=${COMPONENT}-${VERSION}${SUFFIX}.tar.gz" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 2: Resolve LICENSE
+    #
+    # Detect the symlink here and record the resolved real path
+    # so Step 3 can substitute it during archive creation without
+    # modifying the source tree.
+    # -----------------------------------------------------------------
+    - name: Resolve LICENSE
+      shell: bash
+      run: |
+        LICENSE_RESOLVED=false
+        LICENSE_REAL_PATH=""
+        LICENSE_BUILD_TARGET=""
+
+        for src_license in "${SRC_DIR}/LICENSE" "${SRC_DIR}/license" \
+                           "${SRC_DIR}/LICENSE.txt" "${SRC_DIR}/license.txt"; do
+          # Use -L to detect symlinks; git on Linux restores path-reference LICENSE
+          # files as symlinks rather than plain text files.
+          if [ -L "${src_license}" ]; then
+            ref_path="$(realpath "${src_license}")"
+            if [ -f "${ref_path}" ]; then
+              LICENSE_RESOLVED=true
+              LICENSE_REAL_PATH="${ref_path}"
+              LICENSE_BUILD_TARGET="$(basename "${src_license}")"
+              echo "Detected LICENSE symlink: ${src_license} -> ${ref_path}"
+              break
+            else
+              echo "ERROR: LICENSE symlink target not found at ${ref_path}"
+              exit 1
+            fi
+          fi
+        done
+
+        echo "LICENSE_RESOLVED=${LICENSE_RESOLVED}" >> $GITHUB_ENV
+        echo "LICENSE_REAL_PATH=${LICENSE_REAL_PATH}" >> $GITHUB_ENV
+        echo "LICENSE_BUILD_TARGET=${LICENSE_BUILD_TARGET}" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 3.1: Create source archive
+    #
+    # If Step 2 detected a LICENSE path reference, the resolved real
+    # file is copied into the build tree before packaging so the archive
+    # ships the actual license text. The source tree is never modified.
+    # -----------------------------------------------------------------
+    - name: Create source archive
+      shell: bash
+      env:
+        GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
+      run: |
+        mkdir -p /tmp/build/${ARCHIVE_NAME}
+        if [ "${{ inputs.component }}" = "os-skills" ]; then
+          # Copy top-level files (LICENSE, README, etc.) into archive root.
+          find "${SRC_DIR}" -maxdepth 1 -not -type d -exec cp -p {} /tmp/build/${ARCHIVE_NAME}/ \;
+
+          # Flatten skill directories (identified by containing SKILL.md) into
+          # skills/ subdirectory, mirroring the RPM spec install logic.
+          mkdir -p /tmp/build/${ARCHIVE_NAME}/skills
+          find "${SRC_DIR}" -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
+            skill_dir=$(dirname "$skillmd")
+            cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
+          done
+
+        elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
+          cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+          # Source0 must contain source and lockfiles only. Source1 supplies
+          # every generated Cargo/npm dependency needed by the offline V2 RPM.
+          find "/tmp/build/${ARCHIVE_NAME}" -type d \( \
+            -name '.venv' -o -name 'node_modules' -o -name 'target' -o \
+            -name 'dist' -o -name '__pycache__' -o -name '.pytest_cache' -o \
+            -name '.ruff_cache' \
+          \) -prune -exec rm -rf {} +
+          # Replace example keys in trusted-keys with the real GPG public key
+          # so the packaged archive ships the production key.
+          if [ -n "$GPG_PUBLIC_KEY" ]; then
+            TRUSTED_KEYS_DIR="/tmp/build/${ARCHIVE_NAME}/agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys"
+            rm -f "${TRUSTED_KEYS_DIR}"/*.asc
+            echo "$GPG_PUBLIC_KEY" > "${TRUSTED_KEYS_DIR}/agent-sec.asc"
+          fi
+        else
+          cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+        fi
+
+        # Substitute resolved LICENSE into the build tree without touching the source.
+        # Remove the dangling symlink first (cp -r preserves symlinks, which become
+        # dangling in /tmp/build since the symlink target no longer exists there).
+        if [ "${LICENSE_RESOLVED}" = "true" ]; then
+          rm -f "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
+          cp -p "${LICENSE_REAL_PATH}" "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
+        fi
+
+    - name: Vendor rtk source (tokenless)
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd /tmp/build/${ARCHIVE_NAME}
+
+        rm -rf third_party/rtk
+        bash "$GITHUB_ACTION_PATH/../build-tokenless-prebuilt/setup-rtk.sh" "$PWD"
+        rm -rf third_party/rtk/.git
+
+    - name: Generate tokenless component contract
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        make -C /tmp/build/${ARCHIVE_NAME} generate-component-contract
+
+    # -----------------------------------------------------------------
+    # Step 3.2: Prepare generated plugin assets
+    #
+    # The source archive for ws-ckpt ships pre-installed node_modules
+    # so downstream consumers can use plugins without running npm.
+    # agent-memory ships a pre-built OpenClaw plugin bundle because the
+    # RPM build verifies the bundle exists but intentionally does not
+    # run npm inside rpmbuild.
+    # -----------------------------------------------------------------
+    - name: Setup Node.js (plugins)
+      if: inputs.component == 'ws-ckpt' || inputs.component == 'agent-memory'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install plugin npm dependencies (ws-ckpt)
+      if: inputs.component == 'ws-ckpt'
+      shell: bash
+      run: |
+        found=0
+        while IFS= read -r pkg; do
+          plugin_dir=$(dirname "$pkg")
+          echo "::group::npm install: ${plugin_dir#/tmp/build/${ARCHIVE_NAME}/}"
+          cd "$plugin_dir"
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --omit=peer
+          else
+            npm install --ignore-scripts --omit=peer
+          fi
+          echo "::endgroup::"
+          found=$((found + 1))
+          cd /tmp/build/${ARCHIVE_NAME}
+        done < <(find /tmp/build/${ARCHIVE_NAME}/src/plugins -name 'package.json' -not -path '*/node_modules/*' 2>/dev/null)
+
+        if [ "$found" -eq 0 ]; then
+          echo "::warning::No plugin package.json found under src/plugins/"
+        else
+          echo "Installed npm dependencies for $found plugin(s)"
+        fi
+
+    - name: Build OpenClaw plugin (agent-memory)
+      if: inputs.component == 'agent-memory'
+      shell: bash
+      run: |
+        if ! command -v jq >/dev/null; then
+          sudo apt-get update
+          sudo apt-get install -y jq
+        fi
+        make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin
+
+    # Run the adapter unit suite on nightly and release packaging paths as
+    # well as PR CI, so a failing plugin cannot ship inside an RPM.
+    #
+    # Both ordering constraints come from `build-openclaw-plugin` above: it
+    # runs `sync-versions` first and manifest-config-schema-test.ts asserts on
+    # the rewritten openclaw.plugin.json, so the suite has to run after it and
+    # not before; and its `npm install` leaves this same directory warm, so the
+    # suite's own install is a no-op and the tests add ~4 s.
+    - name: Setup Node.js (agent-memory plugin tests)
+      if: inputs.component == 'agent-memory'
+      uses: actions/setup-node@v4
+      with:
+        # Not the action's Node 20: tests/unit/corpus-routing-test.ts imports
+        # real OpenClaw runtime code
+        # (`openclaw/plugin-sdk/memory-core-host-engine-storage`), and openclaw
+        # declares an engine floor Node 20 does not meet -- >=22.14.0 at the
+        # locked 2026.5.7, already >=22.19.0 at 2026.5.22. Not a paperwork
+        # violation either: on Node 20.19.5 the suite fails outright, undici
+        # throwing `TypeError: webidl.util.markAsUncloneable is not a
+        # function`, which would block nightly and release packaging. Node 20
+        # is enough for the build step, where esbuild never executes the host,
+        # but not for running it. 22.23.2 clears both floors and is the pin
+        # build-tokenless-prebuilt already uses, so runners cache it. No step
+        # after this one -- in this action or in any calling job -- uses Node,
+        # so the PATH switch stays contained.
+        node-version: '22.23.2'
+
+    - name: Test OpenClaw plugin (agent-memory)
+      if: inputs.component == 'agent-memory'
+      shell: bash
+      run: |
+        make -C /tmp/build/${ARCHIVE_NAME} test-openclaw-plugin
+
+    # -----------------------------------------------------------------
+    # Step 3.3: Continue Create source archive
+    # -----------------------------------------------------------------
+    - name: Create source archive (tar)
+      shell: bash
+      run: |
+        mkdir -p /tmp/archives
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
+
+    - name: Verify tokenless component contract in archive
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARCHIVE="/tmp/archives/${ARCHIVE_FILE}"
+        EXPECTED_VERSION=$(grep '^version' "/tmp/build/${ARCHIVE_NAME}/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+        CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        if [ -z "$CONTRACT_VERSION" ]; then
+          echo "ERROR: .anolisa/component.toml is missing from the archive or has no version"
+          exit 1
+        fi
+        if [ "$CONTRACT_VERSION" != "$EXPECTED_VERSION" ]; then
+          echo "ERROR: archive contract version ${CONTRACT_VERSION} does not match Cargo.toml ${EXPECTED_VERSION}"
+          exit 1
+        fi
+        echo "Archive contract version verified: ${CONTRACT_VERSION}"
+
+    # -----------------------------------------------------------------
+    # Step 4: Sign archive (os-skills only)
+    #
+    # Signing is automatically applied when component == os-skills.
+    # No external sign parameter needed; the action decides internally.
+    # -----------------------------------------------------------------
+    - name: Sign archive (os-skills)
+      if: inputs.component == 'os-skills' && inputs.skill-sign-private-key != ''
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-private-key }}
+      run: |
+        bash src/agent-sec-core/tools/sign-skill.sh --batch /tmp/build/${ARCHIVE_NAME}/skills
+
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
+
+        echo "ARCHIVE_SIGNED=true" >> $GITHUB_ENV
+
+    - name: Warn if os-skills signing skipped
+      if: inputs.component == 'os-skills' && inputs.skill-sign-private-key == ''
+      shell: bash
+      run: |
+        echo "::warning::SKILL_SIGN_PRIVATE_KEY is not set; os-skills archive will be published UNSIGNED."
+
+    # -----------------------------------------------------------------
+    # Step 5: Sign archive (agent-sec-core only)
+    #
+    # Signing is automatically applied when component == agent-sec-core.
+    # No external sign parameter needed; the action decides internally.
+    # -----------------------------------------------------------------
+    - name: Sign archive (agent-sec-core)
+      if: inputs.component == 'agent-sec-core' && inputs.skill-sign-private-key != ''
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-private-key }}
+      run: |
+        bash src/agent-sec-core/tools/sign-skill.sh --batch /tmp/build/${ARCHIVE_NAME}/skills
+
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
+
+        echo "ARCHIVE_SIGNED=true" >> $GITHUB_ENV
+
+    - name: Warn if agent-sec-core signing skipped
+      if: inputs.component == 'agent-sec-core' && inputs.skill-sign-private-key == ''
+      shell: bash
+      run: |
+        echo "::warning::SKILL_SIGN_PRIVATE_KEY is not set; agent-sec-core archive will be published UNSIGNED."
+
+    # -----------------------------------------------------------------
+    # Step 6: Summarize
+    # -----------------------------------------------------------------
+    - name: Summarize
+      shell: bash
+      run: |
+        echo "### Package Result" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | \`${{ inputs.component }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Version | \`${{ inputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Archive | \`${ARCHIVE_FILE}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Size | $(du -sh /tmp/archives/${ARCHIVE_FILE} | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+        if [ "${ARCHIVE_SIGNED:-false}" = "true" ]; then
+          echo "| Signing | ✅ Signed |" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ "${LICENSE_RESOLVED}" = "true" ]; then
+          echo "| LICENSE | ✅ Resolved |" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Contents:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        tar -tzf /tmp/archives/${ARCHIVE_FILE} >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+    # -----------------------------------------------------------------
+    # Step 7: Compute checksum
+    # -----------------------------------------------------------------
+    - name: Compute checksum
+      id: checksum
+      shell: bash
+      run: |
+        SHA256=$(sha256sum "/tmp/archives/${ARCHIVE_FILE}" | awk '{print $1}')
+        echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+        echo "Archive SHA256: ${SHA256}"
+
+    # -----------------------------------------------------------------
+    # Step 8: Upload artifact
+    # -----------------------------------------------------------------
+    - name: Upload artifact
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.component }}-${{ inputs.version }}${{ inputs.artifact-suffix }}
+        path: /tmp/archives/${{ env.ARCHIVE_FILE }}
+        retention-days: ${{ inputs.retention-days }}

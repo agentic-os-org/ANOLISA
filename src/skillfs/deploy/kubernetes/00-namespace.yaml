@@ -1,0 +1,10 @@
+# Dedicated namespace for the SkillFS sidecar example.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: skillfs-container-example
+  labels:
+    app.kubernetes.io/name: skillfs
+    app.kubernetes.io/component: fuse-sidecar
+    app.kubernetes.io/part-of: anolisa
+    skillfs.anolisa.io/purpose: sidecar-example

@@ -1,0 +1,143 @@
+# Dependabot Configuration
+# ========================
+# Toggle: set open-pull-requests-limit to 0 (off) or 1 (on) per ecosystem.
+# Strategy: minor + patch updates grouped into one PR; major updates get separate PRs.
+
+version: 2
+updates:
+  # copilot-shell (npm)
+  - package-ecosystem: "npm"
+    directory: "/deprecated/copilot-shell"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      npm-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "copilot-shell"
+
+  # agent-sec-core (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/agent-sec-core"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "agent-sec-core"
+
+  # agentsight (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/agentsight"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "agentsight"
+
+  # tokenless (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/tokenless"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "tokenless"
+
+  # agent-memory (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/agent-memory"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "agent-memory"
+
+  # SkillFS (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/skillfs"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "skillfs"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    groups:
+      actions-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"

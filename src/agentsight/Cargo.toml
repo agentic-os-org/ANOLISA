@@ -1,0 +1,174 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/actplane-ifc-compiler",
+    "crates/agentsight-audit",
+    "crates/agentsight-atif",
+    "crates/agentsight-enforcer",
+    "crates/agentsight-opt",
+    "crates/agentsight-opt-store",
+    "crates/agentsight-sqlite-lifecycle",
+    "crates/agentsight-trajectory-collector",
+    "crates/enforcement-protocol",
+    "crates/ebpf-ifc-engine",
+]
+
+[workspace.package]
+edition = "2024"
+
+# Shared third-party dependency versions (AGENTS.md §3.3). Member crates
+# reference these via `{ workspace = true }`; the root crate is being
+# migrated to workspace deps incrementally.
+[workspace.dependencies]
+anyhow = "1.0.86"
+actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+async-trait = "0.1.89"
+chrono = { version = "0.4.41", features = ["serde"] }
+criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }
+ctrlc = "3.4"
+dirs = "6"
+ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+env_filter = "1.0"
+fs2 = "0.4"
+futures = "0.3.32"
+libc = "0.2.155"
+log = "0.4.22"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+rig-core = "0.40.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "1.0.63"
+tokio = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[package]
+name = "agentsight"
+version = "0.13.0"
+edition = "2024"
+
+[features]
+default = ["server"]
+server = [
+    "dep:actix-web",
+    "dep:actix-cors",
+    "dep:include_dir",
+    "dep:agentsight-opt",
+    "dep:agentsight-opt-store",
+]
+
+[lib]
+name = "agentsight"
+crate-type = ["cdylib", "rlib"]
+
+# Cross-platform dependencies (compile on all OSes)
+[dependencies]
+agentsight-audit = { path = "crates/agentsight-audit" }
+agentsight-atif = { path = "crates/agentsight-atif" }
+agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
+agentsight-opt = { path = "crates/agentsight-opt", optional = true }
+agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
+agentsight-sqlite-lifecycle = { path = "crates/agentsight-sqlite-lifecycle" }
+agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+env_filter = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+regex = "1.10.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10.8"
+rusqlite = { workspace = true }
+structopt = "0.3.26"
+llm-tokenizer = "1.3"
+minijinja = "2"
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+ureq = "2.10"
+thiserror = { workspace = true }
+uuid = { workspace = true }
+lru = "0.12.3"
+once_cell = "1.19.0"
+hf-hub = "0.5"
+notify = "6"
+# HTTP API server (optional, enabled by "server" feature)
+actix-web = { version = "4", optional = true }
+actix-cors = { version = "0.7", optional = true }
+include_dir = { version = "0.7", optional = true }
+
+# macOS / non-Linux dependencies (local trajectory viewer + collector)
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ctrlc = "3.4"
+dirs = { workspace = true }
+sysinfo = "0.33"
+
+[dev-dependencies]
+actix-web = { version = "4", features = ["macros"] }
+agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
+criterion = { workspace = true }
+
+# Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
+[target.'cfg(target_os = "linux")'.dependencies]
+libbpf-rs = "0.23.3"
+pagemap = "0.1.0"
+perf-event-open-sys = "4.0.0"
+procfs = "0.16.0"
+read-process-memory = "0.1.6"
+crossbeam-channel = "0.5.13"
+daemonize = "0.5"
+ctrlc = "3.4"
+capstone = "0.12.0"
+gimli = "0.30.0"
+protobuf = "3.5.1"
+byteorder = "1.5.0"
+clru = "0.6.2"
+moka = { version = "0.12.10", features = ["sync"] }
+num_cpus = "1.16.0"
+ctor = "0.2.8"
+glob = "0.3.1"
+uname = "0.1.1"
+httparse = "1.10.1"
+hpack = "0.3"
+memmap2 = "0.9.4"
+typed-arena = "2.0.2"
+symbolic-common = "12.10.0"
+symbolic-demangle = { version = "12.10.0", default-features = false, features = [
+    "rust",
+    "cpp",
+] }
+base64 = "0.22"
+openssl = { version = "0.10", features = ["vendored"] }
+flate2 = "1"
+zstd = "0.13"
+brotli = "8"
+async-stream = "0.3.6"
+async-trait = { workspace = true }
+cached = "0.52.0"
+futures = { workspace = true }
+log4rs = "1.3.0"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[profile.dev]
+debug-assertions = false
+
+# Linux-only build dependencies (eBPF skeleton + C header generation)
+[target.'cfg(target_os = "linux")'.build-dependencies]
+libbpf-cargo = "0.23.3"
+bindgen = "0.69.4"
+cc = "1.1.31"
+cbindgen = "0.27"
+
+# Redirect the pinned ActPlane git dependencies to the reviewed vendored copies.
+# The git+rev pins above are what scripts/build-enforcer.sh attests against; this
+# [patch] makes the workspace build the vendored crates without a network fetch.
+[patch."https://github.com/eunomia-bpf/ActPlane.git"]
+actplane-ifc-compiler = { path = "crates/actplane-ifc-compiler" }
+ebpf-ifc-engine = { path = "crates/ebpf-ifc-engine" }

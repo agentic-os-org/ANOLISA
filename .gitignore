@@ -1,0 +1,54 @@
+# Node.js
+node_modules/
+/dist/
+npm-debug.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Rust
+**/target/
+**/*.rs.bk
+
+# Build artifacts
+rpmbuild/
+website/.docusaurus/
+website/.generated/
+website/build/
+# target/ is already covered by **/target/ (Rust rule above)
+*.o
+# Vendored ActPlane CO-RE BPF object must be committed so `cargo build`
+# needs no BPF toolchain (clang/libbpf/vmlinux.h) in CI/workspace builds.
+!/src/agentsight/crates/ebpf-ifc-engine/prebuilt/process.bpf.o
+*.a
+*.so
+*.dylib
+*.dll
+*.tar.gz
+*.rpm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+.qoder/
+.claude/
+.agents/
+
+!src/agent-sec-core/codex-plugin/.agents/
+!src/agent-sec-core/codex-plugin/.agents/**

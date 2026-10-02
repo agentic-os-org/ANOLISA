@@ -1,0 +1,105 @@
+# Deterministic skill source for the SkillFS container sidecar example.
+#
+# The ConfigMap holds only the example content. It is never mounted as the
+# SkillFS source: a ConfigMap volume is read-only and SkillFS requires a
+# writable source root for write passthrough. The init container copies these
+# files into the writable source volume instead (see 20-pod.yaml).
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skillfs-example-source
+  labels:
+    app.kubernetes.io/name: skillfs
+    app.kubernetes.io/component: fuse-sidecar
+    skillfs.anolisa.io/purpose: sidecar-example
+data:
+  # ---------------------------------------------------------------------------
+  # View configuration.
+  #
+  # `default = true` decides what the Agent container sees directly at the
+  # mount root; the secondary view proves that view filtering still applies
+  # across the container boundary rather than the mount exposing the raw source.
+  # ---------------------------------------------------------------------------
+  skillfs-views.toml: |
+    [[view]]
+    name = "default"
+    default = true
+    description = "Skills exposed directly to the workload container"
+    skills = ["skillfs-container-example"]
+
+    [[view]]
+    name = "reserve"
+    default = false
+    description = "Skills reachable only through skill-discover"
+    skills = ["skillfs-container-reserve"]
+
+  # ---------------------------------------------------------------------------
+  # Default-view skill.
+  #
+  # The conditional block is what makes the transform observable: on Linux the
+  # compiled read must contain SKILLFS_TRANSFORM_LINUX and must NOT contain
+  # SKILLFS_TRANSFORM_OTHER or the `@if` directive lines, while the physical
+  # source file on the sidecar still contains all three. Comparing the two is a
+  # byte-level proof that the Agent reads through the transform pipeline.
+  # ---------------------------------------------------------------------------
+  SKILL.md: |
+    ---
+    name: skillfs-container-example
+    description: Example skill served through the SkillFS container sidecar
+    version: 1.0.0
+    tags: [example, kubernetes, sidecar]
+    enabled: true
+    ---
+
+    # SkillFS Container Example
+
+    This skill demonstrates the SkillFS FUSE sidecar on Kubernetes.
+
+    SKILLFS_EXAMPLE_ID=container-sidecar-v1
+
+    <!-- @if os == linux -->
+    SKILLFS_TRANSFORM_LINUX
+    <!-- @else -->
+    SKILLFS_TRANSFORM_OTHER
+    <!-- @endif -->
+
+    ## Parameters
+
+    - `target` (string, required): Path checked by the workload
+
+    ## Returns
+
+    - `status` (string, required): Literal `ok` when the mount is healthy
+
+  # ---------------------------------------------------------------------------
+  # Ordinary passthrough file inside the default-view skill. Reads must return
+  # these bytes unchanged, unlike SKILL.md.
+  # ---------------------------------------------------------------------------
+  reference.md: |
+    # Passthrough Reference
+
+    SKILLFS_PASSTHROUGH_MARKER=container-sidecar-v1
+
+    Ordinary files are served straight from the physical source tree. The
+    directive syntax below must survive verbatim, because only SKILL.md goes
+    through the transform pipeline:
+
+    <!-- @if os == linux -->
+    not-compiled
+    <!-- @endif -->
+
+  # ---------------------------------------------------------------------------
+  # Secondary-view skill. Must NOT appear at the mount root.
+  # ---------------------------------------------------------------------------
+  reserve-SKILL.md: |
+    ---
+    name: skillfs-container-reserve
+    description: Secondary-view skill that must not appear at the mount root
+    version: 1.0.0
+    enabled: true
+    ---
+
+    # SkillFS Secondary View Example
+
+    SKILLFS_RESERVE_MARKER=container-sidecar-v1

@@ -1,0 +1,43 @@
+{
+  "name": "anolisa-website",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "npm run prepare && docusaurus start",
+    "start:zh": "npm run prepare && docusaurus start --locale zh",
+    "build": "npm run prepare && docusaurus build",
+    "preview": "docusaurus serve --host 0.0.0.0 --port 3000",
+    "prepare": "npm run validate:locales && npm run prepare:docs && npm run generate:changelog && npm run generate:agents && npm run validate:agent-index",
+    "prepare:docs": "node scripts/prepare-docs.mjs",
+    "generate:changelog": "node scripts/generate-changelog.mjs",
+    "generate:agents": "node scripts/generate-agent-index.mjs",
+    "validate:locales": "node scripts/validate-locales.mjs",
+    "validate:agent-index": "node scripts/validate-agent-index.mjs",
+    "test:layout": "node --test scripts/generate-agent-index.test.mjs",
+    "check:links": "node scripts/check-links.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@mdx-js/react": "^3.1.1",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/tsconfig": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "@types/node": "^22.15.3",
+    "@types/react": "^19.1.2",
+    "ajv": "^8.17.1",
+    "typescript": "~5.8.3"
+  },
+  "engines": {
+    "node": ">=20.0"
+  }
+}

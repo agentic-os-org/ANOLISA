@@ -1,0 +1,4 @@
+  PID  PPID COMMAND         %MEM %CPU   RSS    VSZ COMMAND
+   15     1 ps               0.0  0.0  1668   2704 ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem
+    1     0 sh               0.0  0.0   856   1724 sh -lc apk add --no-cache procps-ng >/dev/null && echo "--- versions ---" && ps --version && free --version && top --version 2>/dev/null || true && echo "--- ps aux ---" && ps aux --sort=-%mem | head && echo "--- ps eo ---" && ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head && echo "--- free -m ---" && free -m && echo "--- top ---" && top -b -n1 | head -20
+   16     1 head             0.0  0.0   780   1704 head

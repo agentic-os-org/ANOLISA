@@ -1,0 +1,17 @@
+[component]
+name = "loongshield"
+version = "0.1.0"
+layer = "osbase"
+description = "LoongShield — system security hardening and integrity enforcement"
+
+[install]
+modes = ["system"]
+
+[environment]
+requires_os = "linux"
+
+[environment.requires_env]
+privilege = "root"
+
+[dependencies]
+components = ["kernel"]

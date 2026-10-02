@@ -1,0 +1,36 @@
+###############################################################################
+# Docs Lint — documentation-standard.md enforcement
+#
+# Jobs:
+#   docs-lint — bilingual naming convention + en/zh user-guide tree parity
+#               + relative link integrity for docs/ and README files
+###############################################################################
+
+name: CI / Docs
+
+on:
+  pull_request:
+    branches: [main, 'feature/**', 'release/**']
+    paths:
+      - 'docs/**'
+      - '**/*.md'
+      - 'scripts/docs-lint.sh'
+      - '.github/docs-lint-exemptions.txt'
+      - 'scripts/docs-link-check.py'
+      - '.github/workflows/docs-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  docs-lint:
+    name: 📚 Docs Lint
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Naming convention + en/zh tree parity
+        run: bash scripts/docs-lint.sh
+
+      - name: Relative link check
+        run: python3 scripts/docs-link-check.py

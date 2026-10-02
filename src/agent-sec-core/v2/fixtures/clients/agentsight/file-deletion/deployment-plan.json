@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "bindingId": "10000000-0000-4000-8000-000000000001",
+    "bindingRevision": 7,
+    "policyId": "00000000-0000-4000-8000-000000000002",
+    "policyRevision": 1,
+    "scopeId": "20000000-0000-4000-8000-000000000001",
+    "scopeRevision": 3
+  },
+  "policy": {
+    "mediaType": "application/vnd.actplane.dsl.v1",
+    "content": "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"/etc/agent/config.yaml\" if AGENT\n  because \"AgentSecCore file deletion policy\"\nrule agentseccore-unlink-0001:\n  block unlink file \"/workspace/important/**\" if AGENT\n  because \"AgentSecCore file deletion policy\"\n"
+  },
+  "scope": {
+    "kind": "process_tree",
+    "rootPid": 4242
+  }
+}

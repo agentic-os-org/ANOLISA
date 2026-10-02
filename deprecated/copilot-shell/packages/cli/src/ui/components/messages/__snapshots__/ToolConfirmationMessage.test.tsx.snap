@@ -1,0 +1,34 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolConfirmationMessage exec confirmation > renders full command in body at 40-column width (snapshot) 1`] = `
+"
+ bash
+ ╭────────────────────────────────────╮
+ │ bash -c "export                    │
+ │ PATH=/scanner/bin:$PATH; grep -rn  │
+ │ --include=*.ts "dangerous_pattern" │
+ │ /workspace/src 2>&1 | head -50"    │
+ ╰────────────────────────────────────╯
+
+ Do you want to execute this command?
+
+ ● 1. Yes, allow once
+   2. No, suggest changes (esc)
+"
+`;
+
+exports[`ToolConfirmationMessage exec confirmation > renders full command in body at 60-column width (snapshot) 1`] = `
+"
+ bash
+ ╭────────────────────────────────────────────────────────╮
+ │ bash -c "export PATH=/scanner/bin:$PATH; grep -rn      │
+ │ --include=*.ts "dangerous_pattern" /workspace/src 2>&1 |
+ │ head -50"                                              │
+ ╰────────────────────────────────────────────────────────╯
+
+ Do you want to execute this command?
+
+ ● 1. Yes, allow once
+   2. No, suggest changes (esc)
+"
+`;

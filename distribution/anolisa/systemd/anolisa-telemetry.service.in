@@ -1,0 +1,17 @@
+[Unit]
+Description=ANOLISA Telemetry uploader (self-hosted SLS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=@@ANOLISA_BIN@@ telemetry init
+ExecStart=@@ANOLISA_BIN@@ telemetry upload --loop
+Restart=on-failure
+RestartSec=30
+# The uploader checks SIGTERM inside each round; give it a bounded window to
+# flush offsets before forcing termination.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
