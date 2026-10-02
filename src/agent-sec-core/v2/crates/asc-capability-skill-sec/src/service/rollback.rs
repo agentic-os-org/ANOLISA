@@ -87,10 +87,12 @@ impl SkillSecService {
 
             if let Err(error) = backup.unchanged(directory, &original, deadline) {
                 self.remove_intent(root, Instant::now() + Duration::from_secs(5))?;
+                remove_backup(&ledger, &intent.backup_name, deadline)?;
                 return Err(error);
             }
             if source_links(directory, deadline)? != links || intent.backup_links != links {
                 self.remove_intent(root, Instant::now() + Duration::from_secs(5))?;
+                remove_backup(&ledger, &intent.backup_name, deadline)?;
                 return Err(SkillSecError::Integrity(
                     "source links changed before rollback".into(),
                 ));
@@ -119,6 +121,7 @@ impl SkillSecService {
                 return Err(error);
             }
             self.remove_intent(root, deadline)?;
+            remove_backup(&ledger, &intent.backup_name, deadline)?;
             let activation = refresh_locked(&ledger, directory, key, root, deadline);
             let mut result = decision_payload(&manifest, &activation, true);
             result["rollbackBackup"] = json!(
@@ -175,7 +178,13 @@ impl SkillSecService {
         let state = Directory::open(&self.config.state_dir)?;
         let bytes = match state.read(&intent_name(root), MAX_RECORD_BYTES, deadline) {
             Ok(bytes) => bytes,
-            Err(error) if missing(&error) => return Ok(false),
+            Err(error) if missing(&error) => {
+                // No intent can reference any backup any more; drop crash
+                // leftovers so repeated aborted rollbacks cannot accumulate
+                // unreferenced copies under .skill-meta/backups.
+                prune_orphan_backups(directory, deadline)?;
+                return Ok(false);
+            }
             Err(error) => return Err(error),
         };
         let intent: RollbackIntent = serde_json::from_slice(&bytes)?;
@@ -189,6 +198,8 @@ impl SkillSecService {
         }
         if !intent.replace_started {
             self.remove_intent(root, deadline)?;
+            let ledger = required_ledger(directory)?;
+            remove_backup(&ledger, &intent.backup_name, deadline)?;
             return Ok(true);
         }
         let ledger = required_ledger(directory)?;
@@ -214,6 +225,7 @@ impl SkillSecService {
             restore_links(directory, &intent.backup_links, deadline)?;
         }
         self.remove_intent(root, deadline)?;
+        remove_backup(&ledger, &intent.backup_name, deadline)?;
         Ok(true)
     }
 
@@ -240,6 +252,36 @@ impl SkillSecService {
     fn remove_intent(&self, root: &SkillRoot, deadline: Instant) -> Result<(), SkillSecError> {
         Directory::open(&self.config.state_dir)?.remove_child(&intent_name(root), deadline)
     }
+}
+
+/// Deletes the recovery backup referenced by a finished intent.
+/// Removing a missing backup is a no-op, so crash-leftover cleanup is idempotent.
+fn remove_backup(ledger: &Ledger, name: &str, deadline: Instant) -> Result<(), SkillSecError> {
+    match ledger.meta.child("backups", false) {
+        Ok(backups) => backups.remove_child(name, deadline),
+        Err(error) if missing(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes recovery backups no live intent references. At most one intent
+/// exists per Skill, so with no intent present every `backups/` entry is
+/// unreachable garbage from a crash between commit and intent cleanup.
+fn prune_orphan_backups(directory: &Directory, deadline: Instant) -> Result<(), SkillSecError> {
+    let Some(ledger) = Ledger::open(directory, false)? else {
+        return Ok(());
+    };
+    let backups = match ledger.meta.child("backups", false) {
+        Ok(backups) => backups,
+        Err(error) if missing(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for name in backups.names(deadline)? {
+        if valid_backup_name(&name) {
+            backups.remove_child(&name, deadline)?;
+        }
+    }
+    Ok(())
 }
 
 fn committed(
@@ -426,6 +468,38 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn reconcile_prunes_orphaned_backups_when_no_intent_exists() {
+        // A crash between backup creation and intent removal leaves a full
+        // source-tree copy under .skill-meta/backups with nothing referencing
+        // it. With no intent, no backup can be referenced, so reconcile must
+        // garbage-collect it instead of letting every aborted rollback leak
+        // up to the ledger content limit (2000 files / 50 MiB) per attempt.
+        let (_temp, service, root) = fixture();
+        service
+            .certify(&root, "fixture", None, &json!([]), deadline())
+            .unwrap();
+        let backups = root.io_dir.join(".skill-meta/backups");
+        let orphan = backups.join(format!("rollback-{}", "0".repeat(64)));
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("run.sh"), "stale recovery copy").unwrap();
+        // A non-backup-named entry must be left alone: it is not ours to judge.
+        let stranger = backups.join("not-a-rollback");
+        fs::create_dir_all(&stranger).unwrap();
+        fs::write(stranger.join("keep"), "operator data").unwrap();
+
+        service.reconcile(&root, deadline()).unwrap();
+
+        assert!(
+            !orphan.exists(),
+            "an unreferenced rollback backup must be pruned by reconcile"
+        );
+        assert!(
+            stranger.exists(),
+            "entries that do not follow the backup naming scheme must not be removed"
+        );
+    }
+
+    #[test]
     fn reconcile_restores_interrupted_root_even_without_skill_md() {
         let (_temp, service, root) = fixture();
         service
@@ -514,6 +588,14 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.io_dir.join("run.sh")).unwrap(),
             "later edits"
+        );
+        assert!(
+            !ledger.meta.path.join("backups").exists()
+                || fs::read_dir(ledger.meta.path.join("backups"))
+                    .unwrap()
+                    .count()
+                    == 0,
+            "recovering a never-started intent must also drop its unused backup"
         );
         let mut intent = service
             .begin_rollback(&root, &ledger, &backup, &manifest, deadline())
