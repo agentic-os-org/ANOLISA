@@ -147,6 +147,37 @@ describe("CrontabManager.sync", () => {
   });
 });
 
+describe("quoted workspaces", () => {
+  // A workspace containing a single quote is shell-escaped on disk ('\''
+  // runs); extraction must undo the escape or sync never matches its own
+  // entries and appends a duplicate on every session start.
+  const WS = "/home/it's/proj";
+  const ESCAPED = WS.replace(/'/g, "'\\''");
+  const existing = `0 * * * * /usr/local/bin/ws-ckpt checkpoint -w '${ESCAPED}' -s "cron-123" >/dev/null 2>&1`;
+
+  it("sync is idempotent for a workspace containing single quotes", async () => {
+    mockRunCrontab
+      .mockResolvedValueOnce({ exitCode: 0, stdout: existing, stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+
+    expect(await CrontabManager.sync(WS, ["0 * * * *"])).toBe(true);
+    const input = mockRunCrontab.mock.calls[1][1].input;
+    const entries = input.split("\n").filter((l) => l.includes("ws-ckpt"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toContain(ESCAPED);
+  });
+
+  it("remove clears entries for a workspace containing single quotes", async () => {
+    mockRunCrontab
+      .mockResolvedValueOnce({ exitCode: 0, stdout: existing, stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+
+    expect(await CrontabManager.remove(WS)).toBe(true);
+    const input = mockRunCrontab.mock.calls[1][1].input;
+    expect(input).not.toContain("ws-ckpt");
+  });
+});
+
 describe("CrontabManager.remove", () => {
   it("removes all entries for workspace", async () => {
     mockRunCrontab
