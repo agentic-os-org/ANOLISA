@@ -482,6 +482,17 @@ impl ComponentIndex {
                     reason: "component name must not be empty".to_string(),
                 });
             }
+            // Identity fields are matched by exact equality (resolution,
+            // targets_for_component, BackendKind::from_name): a padded value
+            // would pass the empty check yet never match any input, leaving
+            // the entry silently unusable. Reject at load instead.
+            if name != entry.name {
+                return Err(ComponentIndexError::Invalid {
+                    reason: format!(
+                        "component name '{name}' must not carry leading or trailing whitespace"
+                    ),
+                });
+            }
             if !names.insert(name.to_string()) {
                 return Err(ComponentIndexError::Invalid {
                     reason: format!("duplicate component '{name}'"),
@@ -517,9 +528,23 @@ impl ComponentIndex {
                         reason: format!("component '{name}' has an empty backend kind"),
                     });
                 }
+                if backend.kind.trim() != backend.kind {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' backend kind must not carry leading or trailing whitespace"
+                        ),
+                    });
+                }
                 if backend.package.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!("component '{name}' has an empty backend package"),
+                    });
+                }
+                if backend.package.trim() != backend.package {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' backend package must not carry leading or trailing whitespace"
+                        ),
                     });
                 }
                 if let Some(provides) = backend.provides.as_deref()
@@ -538,6 +563,13 @@ impl ComponentIndex {
                 if alias.kind.trim().is_empty() || alias.name.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!("component '{name}' has an empty alias kind or name"),
+                    });
+                }
+                if alias.kind.trim() != alias.kind || alias.name.trim() != alias.name {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' alias kind and name must not carry leading or trailing whitespace"
+                        ),
                     });
                 }
             }
@@ -1004,6 +1036,45 @@ targets = {targets}
                 "unexpected error for {targets}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn whitespace_padded_identity_fields_are_rejected() {
+        // Identity lookups match by exact equality, so a padded value would
+        // pass validation yet never match any user input — the entry is
+        // silently unusable. Every padded identity field must be rejected at
+        // load, and canonical spellings must still parse.
+        let targets = r#"targets = [{ os = "linux", arch = "x86_64" }]"#;
+        for source in [
+            format!("\nschema_version = 2\n\n[[components]]\nname = \" cosh\"\n{targets}\n"),
+            format!("\nschema_version = 2\n\n[[components]]\nname = \"cosh \"\n{targets}\n"),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw \"\npackage = \"cosh\"\n"
+            ),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw\"\npackage = \"cosh \"\n"
+            ),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell \"\n"
+            ),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.aliases]]\nkind = \" rpm-package\"\nname = \"copilot-shell\"\n"
+            ),
+        ] {
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("padded identity fields must be rejected");
+            assert!(
+                matches!(err, ComponentIndexError::Invalid { ref reason }
+                    if reason.contains("whitespace")),
+                "unexpected error: {err}"
+            );
+        }
+
+        let canonical = format!(
+            "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw\"\npackage = \"cosh\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n"
+        );
+        ComponentIndex::from_toml_str(&canonical, "components.toml")
+            .expect("canonical index must still load");
     }
 
     #[test]
