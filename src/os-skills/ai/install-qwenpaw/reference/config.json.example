@@ -1,0 +1,296 @@
+{
+  "channels": {
+    "imessage": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "db_path": "~/Library/Messages/chat.db",
+      "poll_sec": 1.0,
+      "media_dir": "~/.qwenpaw/media",
+      "max_decoded_size": 10485760
+    },
+    "discord": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "bot_token": "",
+      "http_proxy": "",
+      "http_proxy_auth": ""
+    },
+    "dingtalk": {
+      "enabled": true,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "client_id": "{DINGTALK_CLIENT_ID}",
+      "client_secret": "{DINGTALK_CLIENT_SECRET}",
+      "media_dir": "~/.qwenpaw/media"
+    },
+    "feishu": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "app_id": "",
+      "app_secret": "",
+      "encrypt_key": "",
+      "verification_token": "",
+      "media_dir": "~/.qwenpaw/media"
+    },
+    "qq": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "app_id": "",
+      "client_secret": "",
+      "markdown_enabled": true
+    },
+    "telegram": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "bot_token": "",
+      "http_proxy": "",
+      "http_proxy_auth": "",
+      "show_typing": null
+    },
+    "mattermost": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "url": "",
+      "bot_token": "",
+      "media_dir": "~/.qwenpaw/media/mattermost",
+      "show_typing": null,
+      "thread_follow_without_mention": false
+    },
+    "mqtt": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "host": "",
+      "port": null,
+      "transport": "",
+      "clean_session": true,
+      "qos": 2,
+      "username": null,
+      "password": null,
+      "subscribe_topic": "",
+      "publish_topic": "",
+      "tls_enabled": false,
+      "tls_ca_certs": null,
+      "tls_certfile": null,
+      "tls_keyfile": null
+    },
+    "console": {
+      "enabled": true,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false
+    },
+    "matrix": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "homeserver": "",
+      "user_id": "",
+      "access_token": ""
+    },
+    "voice": {
+      "enabled": false,
+      "bot_prefix": "",
+      "filter_tool_messages": false,
+      "filter_thinking": false,
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": [],
+      "deny_message": "",
+      "require_mention": false,
+      "twilio_account_sid": "",
+      "twilio_auth_token": "",
+      "phone_number": "",
+      "phone_number_sid": "",
+      "tts_provider": "google",
+      "tts_voice": "en-US-Journey-D",
+      "stt_provider": "deepgram",
+      "language": "en-US",
+      "welcome_greeting": "Hi! This is QwenPaw. How can I help you?"
+    }
+  },
+  "mcp": {
+    "clients": {
+      "tavily_search": {
+        "name": "tavily_mcp",
+        "description": "",
+        "enabled": false,
+        "transport": "stdio",
+        "url": "",
+        "headers": {},
+        "command": "npx",
+        "args": [
+          "-y",
+          "tavily-mcp@latest"
+        ],
+        "env": {
+          "TAVILY_API_KEY": ""
+        },
+        "cwd": ""
+      }
+    }
+  },
+  "tools": {
+    "builtin_tools": {
+      "execute_shell_command": {
+        "name": "execute_shell_command",
+        "enabled": true,
+        "description": "Execute shell commands"
+      },
+      "read_file": {
+        "name": "read_file",
+        "enabled": true,
+        "description": "Read file contents"
+      },
+      "write_file": {
+        "name": "write_file",
+        "enabled": true,
+        "description": "Write content to file"
+      },
+      "edit_file": {
+        "name": "edit_file",
+        "enabled": true,
+        "description": "Edit file using find-and-replace"
+      },
+      "browser_use": {
+        "name": "browser_use",
+        "enabled": true,
+        "description": "Browser automation and web interaction"
+      },
+      "desktop_screenshot": {
+        "name": "desktop_screenshot",
+        "enabled": true,
+        "description": "Capture desktop screenshots"
+      },
+      "send_file_to_user": {
+        "name": "send_file_to_user",
+        "enabled": true,
+        "description": "Send files to user"
+      },
+      "get_current_time": {
+        "name": "get_current_time",
+        "enabled": true,
+        "description": "Get current date and time"
+      },
+      "get_token_usage": {
+        "name": "get_token_usage",
+        "enabled": true,
+        "description": "Get llm token usage"
+      }
+    }
+  },
+  "last_api": {
+    "host": null,
+    "port": null
+  },
+  "agents": {
+    "defaults": {
+      "heartbeat": {
+        "enabled": false,
+        "every": "6h",
+        "target": "main",
+        "activeHours": null
+      }
+    },
+    "running": {
+      "max_iters": 50,
+      "max_input_length": 131072,
+      "memory_compact_ratio": 0.75,
+      "memory_reserve_ratio": 0.1,
+      "enable_tool_result_compact": false,
+      "tool_result_compact_keep_n": 5
+    },
+    "llm_routing": {
+      "enabled": false,
+      "mode": "local_first",
+      "local": {
+        "provider_id": "",
+        "model": ""
+      },
+      "cloud": null
+    },
+    "language": "zh",
+    "installed_md_files_language": "zh",
+    "system_prompt_files": [
+      "AGENTS.md",
+      "SOUL.md",
+      "PROFILE.md"
+    ]
+  },
+  "last_dispatch": null,
+  "security": {
+    "tool_guard": {
+      "enabled": true,
+      "guarded_tools": null,
+      "denied_tools": [],
+      "custom_rules": [],
+      "disabled_rules": []
+    }
+  },
+  "show_tool_details": true
+}

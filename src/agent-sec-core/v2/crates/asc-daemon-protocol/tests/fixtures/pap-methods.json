@@ -1,0 +1,146 @@
+[
+  {
+    "method": "policy.templates.create",
+    "params": {
+      "policyName": "protect-important-files",
+      "template": {
+        "kind": "prevent_file_deletion",
+        "files": ["/workspace/important"]
+      }
+    },
+    "canonicalParams": {
+      "policyName": "protect-important-files",
+      "template": {
+        "kind": "prevent_file_deletion",
+        "files": ["/workspace/important"]
+      }
+    },
+    "resultType": "PreparedPolicy"
+  },
+  {
+    "method": "policy.templates.update",
+    "params": {
+      "policyId": "policy-1",
+      "policyName": "protect-important-files",
+      "template": {
+        "kind": "prevent_file_deletion",
+        "files": ["/workspace/important"]
+      }
+    },
+    "canonicalParams": {
+      "policyId": "policy-1",
+      "policyName": "protect-important-files",
+      "template": {
+        "kind": "prevent_file_deletion",
+        "files": ["/workspace/important"]
+      }
+    },
+    "resultType": "PreparedPolicy"
+  },
+  {
+    "method": "policy.templates.get",
+    "params": {"id": "policy-1", "revision": 1},
+    "canonicalParams": {"id": "policy-1", "revision": 1},
+    "resultType": "PreparedPolicy"
+  },
+  {
+    "method": "policy.templates.list",
+    "params": {},
+    "canonicalParams": {"limit": 100, "offset": 0},
+    "resultType": "ListResult<PreparedPolicy>"
+  },
+  {
+    "method": "policy.templates.delete",
+    "params": {"id": "policy-1", "revision": 1},
+    "canonicalParams": {"id": "policy-1", "revision": 1},
+    "resultType": "PreparedPolicy"
+  },
+  {
+    "method": "policy.scopes.create",
+    "params": {"selector": {"kind": "pid", "pid": 4242}},
+    "canonicalParams": {"selector": {"kind": "pid", "pid": 4242}},
+    "resultType": "PreparedScope"
+  },
+  {
+    "method": "policy.scopes.update",
+    "params": {
+      "scopeId": "scope-1",
+      "selector": {"kind": "cgroup_id", "cgroupId": 99}
+    },
+    "canonicalParams": {
+      "scopeId": "scope-1",
+      "selector": {"kind": "cgroup_id", "cgroupId": 99}
+    },
+    "resultType": "PreparedScope"
+  },
+  {
+    "method": "policy.scopes.get",
+    "params": {"id": "scope-1", "revision": 1},
+    "canonicalParams": {"id": "scope-1", "revision": 1},
+    "resultType": "PreparedScope"
+  },
+  {
+    "method": "policy.scopes.list",
+    "params": {"limit": 25, "offset": 50},
+    "canonicalParams": {"limit": 25, "offset": 50},
+    "resultType": "ListResult<PreparedScope>"
+  },
+  {
+    "method": "policy.scopes.delete",
+    "params": {"id": "scope-1", "revision": 1},
+    "canonicalParams": {"id": "scope-1", "revision": 1},
+    "resultType": "PreparedScope"
+  },
+  {
+    "method": "policy.bindings.create",
+    "params": {
+      "policyId": "policy-1",
+      "policyRevision": 1,
+      "scopeId": "scope-1",
+      "scopeRevision": 1
+    },
+    "canonicalParams": {
+      "policyId": "policy-1",
+      "policyRevision": 1,
+      "scopeId": "scope-1",
+      "scopeRevision": 1
+    },
+    "resultType": "BindingView"
+  },
+  {
+    "method": "policy.bindings.update",
+    "params": {
+      "bindingId": "binding-1",
+      "policyId": "policy-1",
+      "policyRevision": 1,
+      "scopeId": "scope-1",
+      "scopeRevision": 2
+    },
+    "canonicalParams": {
+      "bindingId": "binding-1",
+      "policyId": "policy-1",
+      "policyRevision": 1,
+      "scopeId": "scope-1",
+      "scopeRevision": 2
+    },
+    "resultType": "BindingView"
+  },
+  {
+    "method": "policy.bindings.get",
+    "params": {"id": "binding-1"},
+    "canonicalParams": {"id": "binding-1"},
+    "resultType": "BindingView"
+  },
+  {
+    "method": "policy.bindings.list",
+    "params": {"limit": 10, "offset": 20},
+    "canonicalParams": {"limit": 10, "offset": 20},
+    "resultType": "ListResult<BindingView>"
+  },
+  {
+    "method": "policy.bindings.delete",
+    "params": {"id": "binding-1"},
+    "canonicalParams": {"id": "binding-1"},
+    "resultType": "BindingView"
+  }
+]

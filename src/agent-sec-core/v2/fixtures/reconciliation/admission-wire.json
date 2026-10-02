@@ -1,0 +1,430 @@
+[
+  {
+    "reason": "full",
+    "operation": "update",
+    "binding": {
+      "spec": {
+        "bindingId": "10000000-0000-4000-8000-000000000001",
+        "bindingRevision": 7,
+        "policy": {
+          "policyId": "00000000-0000-4000-8000-000000000002",
+          "policyName": "prevent deletion",
+          "revision": 1,
+          "template": {
+            "kind": "prevent_file_deletion",
+            "files": [
+              "/workspace/important/**",
+              "/etc/agent/config.yaml"
+            ]
+          },
+          "canonicalPolicy": {
+            "irSchemaVersion": 1,
+            "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+            "policyId": "00000000-0000-4000-8000-000000000002",
+            "revision": 1,
+            "payload": {
+              "resources": [
+                {
+                  "id": "protected-file-entries",
+                  "kind": "file",
+                  "matchers": [
+                    {
+                      "path": {
+                        "type": "glob",
+                        "pattern": "/workspace/important/**"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    },
+                    {
+                      "path": {
+                        "type": "exact",
+                        "path": "/etc/agent/config.yaml"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "deny-protected-file-deletion",
+                  "when": {
+                    "type": "atom",
+                    "atom": {
+                      "type": "resource_operation",
+                      "operation": "delete",
+                      "target": {
+                        "type": "in",
+                        "resourceSet": "protected-file-entries"
+                      }
+                    }
+                  },
+                  "outcome": {
+                    "decision": "deny",
+                    "obligations": [
+                      "audit",
+                      "emit_receipt"
+                    ],
+                    "remediation": "none"
+                  },
+                  "enforcement": {
+                    "decisionTiming": "pre_effect",
+                    "requiredEvidence": [
+                      "binding_ready",
+                      "operation_denied"
+                    ]
+                  }
+                }
+              ],
+              "activation": "post_attach_allowed",
+              "failurePolicy": {
+                "runtime": "fail_closed",
+                "update": "keep_last_known_good"
+              }
+            }
+          }
+        },
+        "scope": {
+          "scopeId": "20000000-0000-4000-8000-000000000001",
+          "revision": 3,
+          "selector": {
+            "kind": "pid",
+            "pid": 4242
+          }
+        }
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "RECONCILE_QUEUE_FULL"
+        }
+      }
+    }
+  },
+  {
+    "reason": "full",
+    "operation": "delete",
+    "binding": {
+      "spec": {
+        "bindingId": "10000000-0000-4000-8000-000000000001",
+        "bindingRevision": 7,
+        "policy": {
+          "policyId": "00000000-0000-4000-8000-000000000002",
+          "policyName": "prevent deletion",
+          "revision": 1,
+          "template": {
+            "kind": "prevent_file_deletion",
+            "files": [
+              "/workspace/important/**",
+              "/etc/agent/config.yaml"
+            ]
+          },
+          "canonicalPolicy": {
+            "irSchemaVersion": 1,
+            "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+            "policyId": "00000000-0000-4000-8000-000000000002",
+            "revision": 1,
+            "payload": {
+              "resources": [
+                {
+                  "id": "protected-file-entries",
+                  "kind": "file",
+                  "matchers": [
+                    {
+                      "path": {
+                        "type": "glob",
+                        "pattern": "/workspace/important/**"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    },
+                    {
+                      "path": {
+                        "type": "exact",
+                        "path": "/etc/agent/config.yaml"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "deny-protected-file-deletion",
+                  "when": {
+                    "type": "atom",
+                    "atom": {
+                      "type": "resource_operation",
+                      "operation": "delete",
+                      "target": {
+                        "type": "in",
+                        "resourceSet": "protected-file-entries"
+                      }
+                    }
+                  },
+                  "outcome": {
+                    "decision": "deny",
+                    "obligations": [
+                      "audit",
+                      "emit_receipt"
+                    ],
+                    "remediation": "none"
+                  },
+                  "enforcement": {
+                    "decisionTiming": "pre_effect",
+                    "requiredEvidence": [
+                      "binding_ready",
+                      "operation_denied"
+                    ]
+                  }
+                }
+              ],
+              "activation": "post_attach_allowed",
+              "failurePolicy": {
+                "runtime": "fail_closed",
+                "update": "keep_last_known_good"
+              }
+            }
+          }
+        },
+        "scope": {
+          "scopeId": "20000000-0000-4000-8000-000000000001",
+          "revision": 3,
+          "selector": {
+            "kind": "pid",
+            "pid": 4242
+          }
+        }
+      },
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "RECONCILE_QUEUE_FULL"
+        }
+      }
+    }
+  },
+  {
+    "reason": "stopped",
+    "operation": "update",
+    "binding": {
+      "spec": {
+        "bindingId": "10000000-0000-4000-8000-000000000001",
+        "bindingRevision": 7,
+        "policy": {
+          "policyId": "00000000-0000-4000-8000-000000000002",
+          "policyName": "prevent deletion",
+          "revision": 1,
+          "template": {
+            "kind": "prevent_file_deletion",
+            "files": [
+              "/workspace/important/**",
+              "/etc/agent/config.yaml"
+            ]
+          },
+          "canonicalPolicy": {
+            "irSchemaVersion": 1,
+            "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+            "policyId": "00000000-0000-4000-8000-000000000002",
+            "revision": 1,
+            "payload": {
+              "resources": [
+                {
+                  "id": "protected-file-entries",
+                  "kind": "file",
+                  "matchers": [
+                    {
+                      "path": {
+                        "type": "glob",
+                        "pattern": "/workspace/important/**"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    },
+                    {
+                      "path": {
+                        "type": "exact",
+                        "path": "/etc/agent/config.yaml"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "deny-protected-file-deletion",
+                  "when": {
+                    "type": "atom",
+                    "atom": {
+                      "type": "resource_operation",
+                      "operation": "delete",
+                      "target": {
+                        "type": "in",
+                        "resourceSet": "protected-file-entries"
+                      }
+                    }
+                  },
+                  "outcome": {
+                    "decision": "deny",
+                    "obligations": [
+                      "audit",
+                      "emit_receipt"
+                    ],
+                    "remediation": "none"
+                  },
+                  "enforcement": {
+                    "decisionTiming": "pre_effect",
+                    "requiredEvidence": [
+                      "binding_ready",
+                      "operation_denied"
+                    ]
+                  }
+                }
+              ],
+              "activation": "post_attach_allowed",
+              "failurePolicy": {
+                "runtime": "fail_closed",
+                "update": "keep_last_known_good"
+              }
+            }
+          }
+        },
+        "scope": {
+          "scopeId": "20000000-0000-4000-8000-000000000001",
+          "revision": 3,
+          "selector": {
+            "kind": "pid",
+            "pid": 4242
+          }
+        }
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "RECONCILE_QUEUE_STOPPED"
+        }
+      }
+    }
+  },
+  {
+    "reason": "stopped",
+    "operation": "delete",
+    "binding": {
+      "spec": {
+        "bindingId": "10000000-0000-4000-8000-000000000001",
+        "bindingRevision": 7,
+        "policy": {
+          "policyId": "00000000-0000-4000-8000-000000000002",
+          "policyName": "prevent deletion",
+          "revision": 1,
+          "template": {
+            "kind": "prevent_file_deletion",
+            "files": [
+              "/workspace/important/**",
+              "/etc/agent/config.yaml"
+            ]
+          },
+          "canonicalPolicy": {
+            "irSchemaVersion": 1,
+            "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+            "policyId": "00000000-0000-4000-8000-000000000002",
+            "revision": 1,
+            "payload": {
+              "resources": [
+                {
+                  "id": "protected-file-entries",
+                  "kind": "file",
+                  "matchers": [
+                    {
+                      "path": {
+                        "type": "glob",
+                        "pattern": "/workspace/important/**"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    },
+                    {
+                      "path": {
+                        "type": "exact",
+                        "path": "/etc/agent/config.yaml"
+                      },
+                      "resolution": {
+                        "type": "path_entry"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "deny-protected-file-deletion",
+                  "when": {
+                    "type": "atom",
+                    "atom": {
+                      "type": "resource_operation",
+                      "operation": "delete",
+                      "target": {
+                        "type": "in",
+                        "resourceSet": "protected-file-entries"
+                      }
+                    }
+                  },
+                  "outcome": {
+                    "decision": "deny",
+                    "obligations": [
+                      "audit",
+                      "emit_receipt"
+                    ],
+                    "remediation": "none"
+                  },
+                  "enforcement": {
+                    "decisionTiming": "pre_effect",
+                    "requiredEvidence": [
+                      "binding_ready",
+                      "operation_denied"
+                    ]
+                  }
+                }
+              ],
+              "activation": "post_attach_allowed",
+              "failurePolicy": {
+                "runtime": "fail_closed",
+                "update": "keep_last_known_good"
+              }
+            }
+          }
+        },
+        "scope": {
+          "scopeId": "20000000-0000-4000-8000-000000000001",
+          "revision": 3,
+          "selector": {
+            "kind": "pid",
+            "pid": 4242
+          }
+        }
+      },
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "RECONCILE_QUEUE_STOPPED"
+        }
+      }
+    }
+  }
+]

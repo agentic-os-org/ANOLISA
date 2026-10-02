@@ -1,0 +1,14 @@
+{
+  "request": {
+    "binding_id": "d525d62c-2a3d-570b-9c25-d29c336c1d87",
+    "agent_id": "",
+    "root_pid": 4242,
+    "process_start_time": 987654,
+    "policy_id": "00000000-0000-4000-8000-000000000002",
+    "policy_revision": "1",
+    "policy_dsl": "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"/etc/agent/config.yaml\" if AGENT\n  because \"AgentSecCore file deletion policy\"\nrule agentseccore-unlink-0001:\n  block unlink file \"/workspace/important/**\" if AGENT\n  because \"AgentSecCore file deletion policy\"\n",
+    "policy_mode": "enforce"
+  },
+  "state": "enforced",
+  "domain_id": 41
+}

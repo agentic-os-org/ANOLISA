@@ -1,0 +1,25 @@
+version: 1
+default_domain: builder
+
+rules:
+  test-before-commit:
+    ifc: |
+      source COMMAND = exec "**"
+      rule test-before-commit:
+        kill exec "git" "commit" if COMMAND unless after exec "**/pytest"
+        because "run tests before commit"
+
+domains:
+  session:
+    bind:
+      - rule: test-before-commit
+        mode: default
+
+  builder:
+    parent: session
+    bind:
+      - rule: test-before-commit
+        mode: locked
+
+  helper:
+    parent: builder

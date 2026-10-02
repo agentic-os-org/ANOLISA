@@ -1,0 +1,42 @@
+# Tokenless build orchestration
+# Usage: just build       (setup rtk + build all)
+#        just setup-rtk   (clone + patch rtk only)
+
+rtk_dir   := "third_party/rtk"
+
+# Default: list available recipes
+default:
+    @just --list
+
+# Fetch the pinned RTK commit and apply Tokenless patches
+setup-rtk:
+    bash scripts/setup-rtk.sh {{rtk_dir}}
+
+# Remove cloned rtk directory (use when switching versions or re-patching)
+clean-rtk:
+    rm -rf {{rtk_dir}}
+    @echo "rtk directory removed. Run 'just setup-rtk' to re-clone."
+
+# Build tokenless (requires setup-rtk for rtk binary)
+build: setup-rtk
+    cargo build --release
+    cargo build --release --locked --manifest-path {{rtk_dir}}/Cargo.toml
+
+# Build everything (tokenless + rtk; TOON is linked in via the
+# toon-format library crate)
+build-all: build
+
+# Run tokenless crate tests (rtk excluded — vendored third-party)
+test: setup-rtk
+    cargo test -p tokenless-cli -p tokenless-schema -p tokenless-stats
+
+# Clean build artifacts
+clean:
+    cargo clean --release
+
+# Verify all binaries are built
+verify: build-all
+    @echo ""
+    @echo "=== Verification ==="
+    target/release/tokenless --version || echo "tokenless: FAILED"
+    {{rtk_dir}}/target/release/rtk --version || echo "rtk: FAILED"

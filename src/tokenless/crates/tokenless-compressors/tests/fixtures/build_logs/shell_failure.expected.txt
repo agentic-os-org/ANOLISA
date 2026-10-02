@@ -1,0 +1,13 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+21 compiler invocation lines omitted. If needed, run in shell: tokenless retrieve 1259598dfa53beec812b873f
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+src/util.c:42:5: error: 'foo' undeclared (first use in this function)
+   42 |     foo(x);
+      |     ^~~
+src/util.c:42:5: note: each undeclared identifier is reported only once
+make: *** [Makefile:12: build/util.o] Error 1
+make: Leaving directory '/work/project'
+Exit code: 2

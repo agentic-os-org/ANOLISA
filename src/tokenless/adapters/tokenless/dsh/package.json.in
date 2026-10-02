@@ -1,0 +1,26 @@
+{
+  "name": "@anolisa/dsh-tokenless",
+  "version": "@VERSION@",
+  "description": "Native DeepSeek Harness lifecycle integration for Tokenless",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["dist/", "cordis.patch.yml", "package.json"],
+  "license": "Apache-2.0",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.2 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.2 <0.2.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

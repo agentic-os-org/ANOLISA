@@ -1,0 +1,143 @@
+# Optional secure profile. Create skillfs-ledger-init from container/ledger-init.py
+# and replace both :dev image references before applying. See the user guide.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: skillfs-ledger-example
+spec:
+  restartPolicy: Always
+  initContainers:
+    - name: ledger-init
+      image: anolisa:dev
+      command: ["/usr/bin/python3.11", "/init/ledger-init.py", "/usr/share/anolisa/skills", "/state/source"]
+      env: &ledger-env
+        - {name: PYTHONPATH, value: /opt/agent-sec/lib/python3.11/site-packages}
+        - {name: HOME, value: /state/home}
+        - {name: XDG_CONFIG_HOME, value: /state/config}
+        - {name: XDG_DATA_HOME, value: /state/data}
+        - {name: XDG_RUNTIME_DIR, value: /state/run}
+      securityContext:
+        runAsUser: 0
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - {name: state, mountPath: /state}
+        - {name: init, mountPath: /init, readOnly: true}
+        - {name: init-tmp, mountPath: /tmp}
+    - name: ledger
+      image: anolisa:dev
+      restartPolicy: Always
+      command: ["agent-sec-daemon"]
+      env: *ledger-env
+      securityContext:
+        runAsUser: 0
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - {name: state, mountPath: /state}
+        - {name: ledger-tmp, mountPath: /tmp}
+      startupProbe:
+        exec: &ledger-health
+          command:
+            - /usr/bin/python3.11
+            - -c
+            - >-
+              from agent_sec_cli.daemon.client import daemon_health_reachable;
+              from agent_sec_cli.daemon.runtime import resolve_socket_path;
+              raise SystemExit(0 if daemon_health_reachable(resolve_socket_path()) else 1)
+        periodSeconds: 2
+        timeoutSeconds: 2
+        failureThreshold: 30
+      readinessProbe:
+        exec: *ledger-health
+        timeoutSeconds: 2
+      livenessProbe:
+        exec: *ledger-health
+        timeoutSeconds: 2
+        failureThreshold: 3
+    - name: skillfs
+      image: skillfs-sidecar:dev
+      restartPolicy: Always
+      env:
+        - {name: SKILLFS_SOURCE, value: /state/source}
+        - {name: SKILLFS_MOUNTPOINT, value: /shared/mount}
+        - {name: SKILLFS_DISCOVER_ROOT, value: /shared/mount/skills}
+        - name: SKILLFS_EXTRA_ARGS
+          value: --read-only --security --activation-mode file --activation-reload-mode poll --activation-events-log /state/activation-events.jsonl
+        # Virtual content remains readable when Ledger hides every business skill.
+        - {name: SKILLFS_PROBE_FILE, value: skills/skill-discover/SKILL.md}
+      securityContext: {privileged: true, runAsUser: 0}
+      volumeMounts:
+        - {name: state, mountPath: /state}
+        - {name: shared, mountPath: /shared, mountPropagation: Bidirectional}
+        - {name: fuse, mountPath: /dev/fuse}
+      startupProbe:
+        exec: {command: ["/usr/local/bin/skillfs-mount-probe", "--startup"]}
+        periodSeconds: 2
+        timeoutSeconds: 10
+        failureThreshold: 30
+      readinessProbe:
+        exec: {command: ["/usr/local/bin/skillfs-mount-probe", "--readiness"]}
+        timeoutSeconds: 10
+      livenessProbe:
+        exec: {command: ["/usr/local/bin/skillfs-mount-probe", "--liveness"]}
+        timeoutSeconds: 10
+        failureThreshold: 2
+    - name: agent-home
+      image: anolisa:dev
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          mkdir -p /agent-home/.copilot-shell
+          ln -sfn /shared/mount/skills /agent-home/.copilot-shell/skills
+          chown -R 10001:10001 /agent-home
+          chown 10001:10001 /workspace
+      volumeMounts:
+        - {name: agent-home, mountPath: /agent-home}
+        - {name: workspace, mountPath: /workspace}
+  containers:
+    - name: agent
+      image: anolisa:dev
+      command: ["cosh"]
+      stdin: true
+      tty: true
+      workingDir: /workspace
+      env:
+        - {name: HOME, value: /home/agent}
+        - {name: XDG_DATA_HOME, value: /home/agent/.local/share}
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - {name: agent-home, mountPath: /home/agent}
+        - {name: workspace, mountPath: /workspace}
+        - {name: shared, mountPath: /shared, readOnly: true, mountPropagation: HostToContainer}
+        # Mask installed copies in the workload image, including extension bundles.
+        - {name: masked, mountPath: /usr/share/anolisa/skills, readOnly: true}
+        - {name: masked, mountPath: /usr/local/share/anolisa/skills, readOnly: true}
+        - {name: masked, mountPath: /usr/share/anolisa/extensions, readOnly: true}
+        - {name: masked, mountPath: /usr/local/share/anolisa/extensions, readOnly: true}
+      readinessProbe:
+        exec:
+          command: ["/bin/sh", "-ec", "timeout 5 cat /home/agent/.copilot-shell/skills/skill-discover/SKILL.md >/dev/null"]
+        timeoutSeconds: 10
+  volumes:
+    # Persist this whole volume together: source snapshots and Ledger signing keys.
+    # A changed package requires a fresh volume and a new scan; never wipe this one.
+    - {name: state, emptyDir: {}}
+    - {name: shared, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+    - {name: agent-home, emptyDir: {}}
+    - {name: workspace, emptyDir: {}}
+    - {name: masked, emptyDir: {}}
+    - {name: init-tmp, emptyDir: {}}
+    - {name: ledger-tmp, emptyDir: {}}
+    - name: init
+      configMap: {name: skillfs-ledger-init}
+    - name: fuse
+      hostPath: {path: /dev/fuse, type: CharDevice}

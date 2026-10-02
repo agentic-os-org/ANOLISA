@@ -1,0 +1,19 @@
+[package]
+name = "tokenless-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Python bindings for the Tokenless runtime"
+publish = false
+
+[lib]
+name = "anolisa_tokenless_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
+serde.workspace = true
+serde_json.workspace = true
+tokenless-protocol = { path = "../../crates/tokenless-protocol" }
+tokenless-runtime = { path = "../../crates/tokenless-runtime" }
+tokenless-stats = { path = "../../crates/tokenless-stats" }

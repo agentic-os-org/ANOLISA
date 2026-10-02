@@ -1,0 +1,90 @@
+# Template: installed state.
+# Runtime path:
+#   user-mode:   $XDG_STATE_HOME/anolisa/installed.toml
+#   system-mode: /var/lib/anolisa/installed.toml
+
+schema_version = 4
+updated_at = "2026-06-01T10:00:00Z"
+install_mode = "user" # user | system
+prefix = "~/.local"
+anolisa_version = "0.1.0"
+
+[[objects]]
+kind = "component" # component | adapter | osbase ("capability" parses as legacy only)
+name = "agentsight"
+version = "0.2.0"
+status = "installed" # installed | partial | disabled | failed | adopted
+manifest_digest = "sha256:replace-with-manifest-digest"
+distribution_source = "builtin"
+install_backend = "raw"
+ownership = "raw_managed" # raw_managed | rpm_managed | rpm_observed
+installed_at = "2026-06-01T10:00:00Z"
+last_operation_id = "op-20260601-001"
+managed = true
+adopted = false
+subscription_scope = "none" # none | registered | entitled | reporting
+
+[[objects.files]]
+path = "~/.local/bin/agentsight"
+owner = "anolisa" # anolisa | external
+sha256 = "replace-with-sha256"
+kind = "file" # file | symlink (v4+; defaults to "file" for pre-v4 state)
+
+# Example: managed symlink entry (v4+)
+[[objects.files]]
+path = "~/.local/bin/rtk"
+owner = "anolisa"
+kind = "symlink"
+referent = "~/.local/libexec/tokenless/rtk"
+
+[[objects.external_modified_files]]
+path = "~/.openclaw/config.toml"
+owner = "external"
+backup_id = "backup-op-20260601-001-openclaw-config"
+sha256_before = "replace-with-sha256"
+sha256_after = "replace-with-sha256"
+
+[[objects.services]]
+name = "agentsight.service"
+manager = "systemd"
+restartable = true
+enabled = true
+
+[[objects.health]]
+name = "binary"
+status = "ok"
+checked_at = "2026-06-01T10:00:03Z"
+
+# Example: system RPM adopted by ANOLISA (rpm-observed ownership)
+[[objects]]
+kind = "component"
+name = "copilot-shell"
+version = "1.2.3"
+status = "adopted"
+install_backend = "rpm"
+ownership = "rpm_observed"
+installed_at = "2026-06-10T08:00:00Z"
+last_operation_id = "op-20260610-001"
+managed = false
+adopted = true
+subscription_scope = "none"
+
+[objects.rpm_metadata]
+package_name = "copilot-shell"
+evr = "0:1.2.3-1.al8"
+arch = "x86_64"
+source_repo = "@System"
+
+[[backups]]
+id = "backup-op-20260601-001-openclaw-config"
+operation_id = "op-20260601-001"
+original_path = "~/.openclaw/config.toml"
+backup_path = "~/.local/state/anolisa/backups/op-20260601-001/openclaw/config.toml"
+restore_strategy = "replace-file"
+
+[[operations]]
+id = "op-20260601-001"
+command = "install agentsight"
+status = "ok"
+started_at = "2026-06-01T10:00:00Z"
+finished_at = "2026-06-01T10:00:03Z"

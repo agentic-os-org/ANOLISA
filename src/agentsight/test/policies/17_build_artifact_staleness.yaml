@@ -1,0 +1,7 @@
+version: 1
+policy: |
+  source BUILDER = exec "**/build-agent"
+
+  rule fresh-build-before-package:
+    block exec "tar" if BUILDER unless after exec "**/cargo" since write "src/**" or write "Cargo.toml"
+    because "package only after a fresh build"

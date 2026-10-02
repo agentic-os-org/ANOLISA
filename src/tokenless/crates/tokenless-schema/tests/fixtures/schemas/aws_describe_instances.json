@@ -1,0 +1,72 @@
+{
+  "type": "function",
+  "function": {
+    "name": "describe_instances",
+    "description": "Describes the specified EC2 instances or all instances. If you specify one or more instance IDs, Amazon EC2 returns information for those instances. If you do not specify instance IDs, Amazon EC2 returns information for all relevant instances. If you specify an invalid instance ID, an error is returned. If you specify an instance that you do not own, it is not included in the returned results.",
+    "parameters": {
+      "type": "object",
+      "title": "Describe Instances Request",
+      "properties": {
+        "instance_ids": {
+          "type": "array",
+          "title": "Instance IDs",
+          "description": "The IDs of the instances to describe. You can specify up to 1000 instance IDs in a single request. If you specify an invalid instance ID, an error is returned.",
+          "items": {
+            "type": "string",
+            "title": "Instance ID"
+          }
+        },
+        "filters": {
+          "type": "array",
+          "title": "Filters",
+          "description": "The filters to apply when describing instances. Multiple filters are combined using AND logic. Wildcards (* and ?) are supported in filter values.",
+          "items": {
+            "type": "object",
+            "title": "Filter",
+            "properties": {
+              "name": {
+                "type": "string",
+                "title": "Filter Name",
+                "description": "The name of the filter. Common filter names include: architecture, availability-zone, block-device-mapping.device-name, block-device-mapping.status, block-device-mapping.volume-id, dns-name, group-id, group-name, image-id, instance-id, instance-lifecycle, instance-state-code, instance-state-name, instance-type, ip-address, key-name, launch-index, monitoring-state, owner-id, placement-group-name, platform, private-dns-name, private-ip-address, product-code, product-code.type, ramdisk-id, reason, requester-id, reservation-id, root-device-name, root-device-type, source-dest-check, spot-instance-request-id, state-reason-code, state-reason-message, subnet-id, tag, tag-key, tag-value, tenancy, virtualization-type, vpc-id.",
+                "enum": ["architecture", "availability-zone", "dns-name", "group-id", "group-name", "image-id", "instance-id", "instance-state-name", "instance-type", "ip-address", "key-name", "private-dns-name", "private-ip-address", "subnet-id", "tag", "tag-key", "vpc-id"]
+              },
+              "values": {
+                "type": "array",
+                "title": "Filter Values",
+                "description": "One or more filter values. Filter values are case-sensitive.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["name", "values"]
+          }
+        },
+        "max_results": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "The maximum number of items to return for this request. To get the next page of items, make another request and include the token from the previous response in the NextToken parameter. You cannot specify this parameter and the NextToken parameter in the same request.",
+          "default": 100,
+          "minimum": 5,
+          "maximum": 1000
+        },
+        "next_token": {
+          "type": "string",
+          "title": "Next Token",
+          "description": "The token returned from a previous paginated request. Pagination continues from the end of the items returned by the previous request."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "title": "Dry Run",
+          "description": "Checks whether you have the required permissions for the action, without actually making the request, and provides an error response. If you have the required permissions, the error response is DryRunOperation. Otherwise, it is UnauthorizedOperation."
+        },
+        "include_all_instances": {
+          "type": "boolean",
+          "title": "Include All Instances",
+          "description": "Include all instances, including those that are in the terminated state. By default, terminated instances are not included."
+        }
+      },
+      "required": []
+    }
+  }
+}

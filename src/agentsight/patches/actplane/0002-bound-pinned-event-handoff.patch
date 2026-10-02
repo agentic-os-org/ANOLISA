@@ -1,0 +1,204 @@
+From 54f91b607107eb7711919fe64a767a5fbfbad4e5 Mon Sep 17 00:00:00 2001
+From: AgentSight Patch Maintainer <agentsight@localhost>
+Date: Mon, 3 Aug 2026 10:44:39 +0800
+Subject: [PATCH 2/3] bound pinned event handoff
+
+---
+ bpf/src/lib.rs | 185 +++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 165 insertions(+), 20 deletions(-)
+
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index f4c05985..6ddf2546 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -1908,0 +1909,30 @@ impl PinnedEngine {
++    /// Consumes at most the records that could be queued in one ring-buffer snapshot.
++    ///
++    /// The caller must hold the lock from [`Self::try_lock_runtime`] continuously
++    /// through the handoff to the live [`Self::run`] consumer. Concurrent calls to
++    /// [`Self::run`] or this method are forbidden because the ring buffer has one
++    /// shared consumer position.
++    ///
++    /// A concurrent producer cannot extend this drain indefinitely. Records left
++    /// after the snapshot bound are handed to the live [`Self::run`] consumer.
++    ///
++    /// # Errors
++    ///
++    /// Returns an error when the pinned ring-buffer map cannot be opened.
++    pub fn drain_pending_events(&self) -> io::Result<usize> {
++        let data = pinned_map_data(&self.paths, "rb")?;
++        let byte_capacity = data
++            .info()
++            .map_err(|e| err(format!("inspect pinned rb: {e}")))?
++            .max_entries() as usize;
++        let snapshot_bound = pending_event_snapshot_bound(byte_capacity);
++        let mut ring =
++            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
++        let fd = ring.as_raw_fd();
++        drain_available_up_to(snapshot_bound, || {
++            Ok(consume_one_if_ready(ring_readable(fd, 0)?, || {
++                ring.next().is_some()
++            }))
++        })
++    }
++
+@@ -1916,4 +1946,7 @@ impl PinnedEngine {
+-            let mut pfd = libc::pollfd {
+-                fd,
+-                events: libc::POLLIN,
+-                revents: 0,
++            // Aya initializes a reopened ring's producer cache at zero, even when
++            // the pinned map's shared consumer offset is already nonzero.
++            if !ring_readable(fd, 100)? {
++                continue;
++            }
++            let Some(item) = ring.next() else {
++                continue;
+@@ -1921,7 +1954,3 @@ impl PinnedEngine {
+-            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+-            if r < 0 {
+-                let e = io::Error::last_os_error();
+-                if e.kind() == io::ErrorKind::Interrupted {
+-                    continue;
+-                }
+-                return Err(e);
++            let bytes: &[u8] = &item;
++            if bytes.len() < std::mem::size_of::<Event>() {
++                continue;
+@@ -1929,9 +1958,2 @@ impl PinnedEngine {
+-            while let Some(item) = ring.next() {
+-                let bytes: &[u8] = &item;
+-                if bytes.len() < std::mem::size_of::<Event>() {
+-                    continue;
+-                }
+-                let e: Event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Event) };
+-                if e.etype != EVENT_TYPE_TAINT_VIOLATION {
+-                    continue;
+-                }
++            let e: Event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Event) };
++            if e.etype == EVENT_TYPE_TAINT_VIOLATION {
+@@ -1944,0 +1967,50 @@ impl PinnedEngine {
++fn pending_event_snapshot_bound(byte_capacity: usize) -> usize {
++    byte_capacity / std::mem::size_of::<Event>()
++}
++
++fn ring_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
++    loop {
++        let mut pfd = libc::pollfd {
++            fd,
++            events: libc::POLLIN,
++            revents: 0,
++        };
++        let result = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
++        if result == 0 {
++            return Ok(false);
++        }
++        if result > 0 {
++            return ring_revents_readable(pfd.revents);
++        }
++        let error = io::Error::last_os_error();
++        if error.kind() != io::ErrorKind::Interrupted {
++            return Err(error);
++        }
++    }
++}
++
++fn ring_revents_readable(revents: i16) -> io::Result<bool> {
++    let terminal = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
++    if revents & terminal != 0 {
++        return Err(io::Error::other(format!(
++            "pinned ring poll failed: revents={revents:#x}"
++        )));
++    }
++    Ok(revents & libc::POLLIN != 0)
++}
++
++fn consume_one_if_ready(ready: bool, next: impl FnOnce() -> bool) -> bool {
++    ready && next()
++}
++
++fn drain_available_up_to(
++    limit: usize,
++    mut next: impl FnMut() -> io::Result<bool>,
++) -> io::Result<usize> {
++    let mut drained = 0;
++    while drained < limit && next()? {
++        drained += 1;
++    }
++    Ok(drained)
++}
++
+@@ -2958,0 +3031,73 @@ mod tests {
++    #[test]
++    fn pending_event_snapshot_bound_uses_fixed_event_payload_size() {
++        let event_size = std::mem::size_of::<Event>();
++
++        assert_eq!(pending_event_snapshot_bound(event_size * 3), 3);
++        assert_eq!(pending_event_snapshot_bound(event_size - 1), 0);
++    }
++
++    #[test]
++    fn pending_event_drain_stops_at_snapshot_bound_with_continuous_producer() {
++        let mut attempts = 0;
++        let drained = drain_available_up_to(3, || {
++            attempts += 1;
++            Ok(true)
++        })
++        .expect("drain succeeds");
++
++        assert_eq!(drained, 3);
++        assert_eq!(attempts, 3);
++    }
++
++    #[test]
++    fn pending_event_drain_stops_when_available_records_are_exhausted() {
++        let mut records = [true, true, false].into_iter();
++        let drained = drain_available_up_to(5, || Ok(records.next().unwrap_or(false)))
++            .expect("drain succeeds");
++
++        assert_eq!(drained, 2);
++        assert_eq!(records.next(), None);
++    }
++
++    #[test]
++    fn pinned_event_consumer_does_not_probe_an_unreadable_ring() {
++        let mut probes = 0;
++
++        let consumed = consume_one_if_ready(false, || {
++            probes += 1;
++            true
++        });
++
++        assert!(!consumed);
++        assert_eq!(probes, 0);
++    }
++
++    #[test]
++    fn pinned_event_consumer_reads_only_one_record_per_readiness() {
++        let mut probes = 0;
++
++        let consumed = consume_one_if_ready(true, || {
++            probes += 1;
++            true
++        });
++
++        assert!(consumed);
++        assert_eq!(probes, 1);
++    }
++
++    #[test]
++    fn pinned_ring_poll_rejects_terminal_events() {
++        for revents in [libc::POLLERR, libc::POLLHUP, libc::POLLNVAL] {
++            let error = ring_revents_readable(revents)
++                .expect_err("terminal poll events must fail the consumer");
++            assert!(error.to_string().contains("pinned ring poll failed"));
++        }
++    }
++
++    #[test]
++    fn pinned_ring_poll_accepts_only_readable_events() {
++        assert!(!ring_revents_readable(0).expect("empty poll result should be valid"));
++        assert!(ring_revents_readable(libc::POLLIN).expect("readable poll result should work"));
++        assert!(ring_revents_readable(libc::POLLIN | libc::POLLHUP).is_err());
++    }
++

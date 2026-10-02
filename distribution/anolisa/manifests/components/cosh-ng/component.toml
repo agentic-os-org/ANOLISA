@@ -1,0 +1,104 @@
+[component]
+name = "cosh-ng"
+version = "0.12.0"
+layer = "runtime"
+domain = "tools"
+display_name = "cosh-ng"
+description = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
+stability = "experimental"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+conflicts = ["cosh"]
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[backends.rpm]
+package = "cosh-ng"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+
+[[component.dependencies]]
+name = "bash"
+kind = "system-package"
+packages = { rpm = "bash", deb = "bash" }
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/cosh-ng/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/cosh-cli"
+target = "{bindir}/cosh-cli"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/cosh"
+target = "{bindir}/cosh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/cosh-switch"
+target = "{bindir}/cosh-switch"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-core"
+target = "{libexecdir}/cosh-ng/cosh-core"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-shell"
+target = "{libexecdir}/cosh-ng/cosh-shell"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/hooks/cosh-ng/post-install.sh"
+target = "{datadir}/hooks/cosh-ng/post-install.sh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/hooks/cosh-ng/pre-uninstall.sh"
+target = "{datadir}/hooks/cosh-ng/pre-uninstall.sh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/doc/cosh-ng/LICENSE"
+target = "{datadir}/doc/cosh-ng/LICENSE"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/doc/cosh-ng/README.md"
+target = "{datadir}/doc/cosh-ng/README.md"
+mode = "0644"
+
+[[component.hooks]]
+phase = "post_install"
+script = "{datadir}/hooks/cosh-ng/post-install.sh"
+timeout_secs = 30
+strict = false
+
+[[component.hooks]]
+phase = "pre_uninstall"
+script = "{datadir}/hooks/cosh-ng/pre-uninstall.sh"
+timeout_secs = 30
+strict = false
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/cosh-cli"
+timeout_secs = 5

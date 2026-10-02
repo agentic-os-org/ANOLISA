@@ -1,0 +1,11 @@
+rule_id: shell-self-protect-openclaw
+cwe_id: CWE-284
+desc_en: >-
+  Command disables or uninstalls the agent-sec-core plugin in OpenClaw,
+  which would remove all agent-sec-core security guardrails.
+desc_zh: >-
+  命令禁用或卸载了 OpenClaw 中的 agent-sec-core 插件，将移除 agent-sec-core 所有的安全防护。
+regex: |-
+  \bopenclaw\s+config\s+set\s+plugins\.entries\.agent-sec\.enabled\s+false\b
+  |\bopenclaw\s+plugins\s+(disable|uninstall)\s+agent-sec(?:[\s;&|><)]|$)
+severity: warn

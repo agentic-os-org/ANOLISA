@@ -1,0 +1,1587 @@
+{
+  "policy.prevent-file-deletion": {
+    "policyId": "00000000-0000-4000-8000-000000000002",
+    "policyName": "prevent deletion",
+    "revision": 1,
+    "template": {
+      "kind": "prevent_file_deletion",
+      "files": [
+        "/workspace/important/**",
+        "/etc/agent/config.yaml"
+      ]
+    },
+    "canonicalPolicy": {
+      "irSchemaVersion": 1,
+      "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+      "policyId": "00000000-0000-4000-8000-000000000002",
+      "revision": 1,
+      "payload": {
+        "resources": [
+          {
+            "id": "protected-file-entries",
+            "kind": "file",
+            "matchers": [
+              {
+                "path": {
+                  "type": "glob",
+                  "pattern": "/workspace/important/**"
+                },
+                "resolution": {
+                  "type": "path_entry"
+                }
+              },
+              {
+                "path": {
+                  "type": "exact",
+                  "path": "/etc/agent/config.yaml"
+                },
+                "resolution": {
+                  "type": "path_entry"
+                }
+              }
+            ]
+          }
+        ],
+        "rules": [
+          {
+            "id": "deny-protected-file-deletion",
+            "when": {
+              "type": "atom",
+              "atom": {
+                "type": "resource_operation",
+                "operation": "delete",
+                "target": {
+                  "type": "in",
+                  "resourceSet": "protected-file-entries"
+                }
+              }
+            },
+            "outcome": {
+              "decision": "deny",
+              "obligations": [
+                "audit",
+                "emit_receipt"
+              ],
+              "remediation": "none"
+            },
+            "enforcement": {
+              "decisionTiming": "pre_effect",
+              "requiredEvidence": [
+                "binding_ready",
+                "operation_denied"
+              ]
+            }
+          }
+        ],
+        "activation": "post_attach_allowed",
+        "failurePolicy": {
+          "runtime": "fail_closed",
+          "update": "keep_last_known_good"
+        }
+      }
+    }
+  },
+  "scope.pid-4242.rev-3": {
+    "scopeId": "20000000-0000-4000-8000-000000000001",
+    "revision": 3,
+    "selector": {
+      "kind": "pid",
+      "pid": 4242
+    }
+  },
+  "binding.rev-7": {
+    "bindingId": "10000000-0000-4000-8000-000000000001",
+    "bindingRevision": 7,
+    "policy": {
+      "$ref": "policy.prevent-file-deletion"
+    },
+    "scope": {
+      "$ref": "scope.pid-4242.rev-3"
+    }
+  },
+  "binding.rev-8": {
+    "bindingId": "10000000-0000-4000-8000-000000000001",
+    "bindingRevision": 8,
+    "policy": {
+      "$ref": "policy.prevent-file-deletion"
+    },
+    "scope": {
+      "$ref": "scope.changed"
+    }
+  },
+  "target.binding-id": {
+    "route": "test",
+    "id": "10000000-0000-4000-8000-000000000001",
+    "cleanup": [
+      255,
+      0,
+      7
+    ]
+  },
+  "target.new-b": {
+    "route": "test",
+    "id": "opaque-B",
+    "cleanup": [
+      255,
+      0,
+      7
+    ]
+  },
+  "target.non-uuid": {
+    "route": "test",
+    "id": "not-a-uuid:/PEP/item",
+    "cleanup": [
+      255,
+      0,
+      7
+    ]
+  },
+  "target.old-a": {
+    "route": "test",
+    "id": "old-A",
+    "cleanup": [
+      255,
+      0,
+      7
+    ]
+  },
+  "target.unavailable-route": {
+    "route": "retired-route",
+    "id": "old-target",
+    "cleanup": [
+      255,
+      0,
+      7
+    ]
+  },
+  "targets.new-b": [
+    {
+      "$ref": "target.new-b"
+    }
+  ],
+  "targets.old-a": [
+    {
+      "$ref": "target.old-a"
+    }
+  ],
+  "targets.old-a-and-new-b": [
+    {
+      "$ref": "target.old-a"
+    },
+    {
+      "$ref": "target.new-b"
+    }
+  ],
+  "plan.opaque": {
+    "format": "test.plan.v1",
+    "content": [
+      0,
+      255,
+      65
+    ]
+  },
+  "prepared.binding-id": {
+    "target": {
+      "$ref": "target.binding-id"
+    },
+    "format": "test.request.v1",
+    "content": [
+      0,
+      255,
+      128,
+      42
+    ]
+  },
+  "prepared.new-b": {
+    "target": {
+      "$ref": "target.new-b"
+    },
+    "format": "test.request.v1",
+    "content": [
+      0,
+      255,
+      128,
+      42
+    ]
+  },
+  "prepared.non-uuid": {
+    "target": {
+      "$ref": "target.non-uuid"
+    },
+    "format": "test.request.v1",
+    "content": [
+      0,
+      255,
+      128,
+      42
+    ]
+  },
+  "prepared.old-a": {
+    "target": {
+      "$ref": "target.old-a"
+    },
+    "format": "test.request.v1",
+    "content": [
+      0,
+      255,
+      128,
+      42
+    ]
+  },
+  "adapter.fault": {
+    "kind": "fault",
+    "code": "ADAPTER_FAULT"
+  },
+  "adapter.translated": {
+    "kind": "translated",
+    "plan": {
+      "$ref": "plan.opaque"
+    }
+  },
+  "adapter.unsupported-policy": {
+    "kind": "rejected",
+    "code": "UNSUPPORTED_POLICY"
+  },
+  "prepare.binding-id.ok": {
+    "Ok": {
+      "$ref": "prepared.binding-id"
+    }
+  },
+  "prepare.new-b.ok": {
+    "Ok": {
+      "$ref": "prepared.new-b"
+    }
+  },
+  "prepare.non-uuid.ok": {
+    "Ok": {
+      "$ref": "prepared.non-uuid"
+    }
+  },
+  "prepare.old-a.ok": {
+    "Ok": {
+      "$ref": "prepared.old-a"
+    }
+  },
+  "prepare.rejected": {
+    "Err": {
+      "kind": "REJECTED",
+      "code": "PREPARE_ERROR"
+    }
+  },
+  "prepare.retryable-error": {
+    "Err": {
+      "kind": "RETRYABLE",
+      "code": "PREPARE_ERROR"
+    }
+  },
+  "request.binding-id.no-previous": {
+    "previous": [],
+    "prepared": {
+      "$ref": "prepared.binding-id"
+    }
+  },
+  "request.new-b.no-previous": {
+    "previous": [],
+    "prepared": {
+      "$ref": "prepared.new-b"
+    }
+  },
+  "request.non-uuid.no-previous": {
+    "previous": [],
+    "prepared": {
+      "$ref": "prepared.non-uuid"
+    }
+  },
+  "request.old-a.no-previous": {
+    "previous": [],
+    "prepared": {
+      "$ref": "prepared.old-a"
+    }
+  },
+  "request.replace-old-a-with-new-b": {
+    "previous": {
+      "$ref": "targets.old-a"
+    },
+    "prepared": {
+      "$ref": "prepared.new-b"
+    }
+  },
+  "report.binding-id.present": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.binding-id"
+        },
+        "presence": "PRESENT"
+      }
+    ],
+    "error": null
+  },
+  "report.delete.new-b-retryable": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "DELETE_ERROR"
+    }
+  },
+  "report.delete.partial-rejected": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "REJECTED",
+      "code": "DELETE_ERROR"
+    }
+  },
+  "report.delete.partial-retryable": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "DELETE_ERROR"
+    }
+  },
+  "report.empty-success": {
+    "observations": [],
+    "error": null
+  },
+  "report.new-b.absent": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "ABSENT"
+      }
+    ],
+    "error": null
+  },
+  "report.new-b.duplicate-observations": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "PRESENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "ABSENT"
+      }
+    ],
+    "error": null
+  },
+  "report.new-b.present": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "PRESENT"
+      }
+    ],
+    "error": null
+  },
+  "report.new-b.rejected": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "REJECTED",
+      "code": "REMOTE_ERROR"
+    }
+  },
+  "report.new-b.retryable-error": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "REMOTE_ERROR"
+    }
+  },
+  "report.new-b.unknown": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "REMOTE_UNKNOWN"
+    }
+  },
+  "report.non-uuid.present": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.non-uuid"
+        },
+        "presence": "PRESENT"
+      }
+    ],
+    "error": null
+  },
+  "report.old-a-and-new-b.absent": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "ABSENT"
+      }
+    ],
+    "error": null
+  },
+  "report.old-a.absent": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      }
+    ],
+    "error": null
+  },
+  "report.old-a.absent-new-b.present": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "PRESENT"
+      }
+    ],
+    "error": null
+  },
+  "report.old-a.present": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "PRESENT"
+      }
+    ],
+    "error": null
+  },
+  "report.old-a.unknown": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "REMOTE_UNKNOWN"
+    }
+  },
+  "report.replace.partial-rejected": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "REJECTED",
+      "code": "UPDATE_ERROR"
+    }
+  },
+  "report.replace.partial-retryable": {
+    "observations": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "presence": "ABSENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "presence": "UNKNOWN"
+      }
+    ],
+    "error": {
+      "kind": "RETRYABLE",
+      "code": "UPDATE_ERROR"
+    }
+  },
+  "record.adapter-fault.exhausted": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
+    },
+    "deployments": []
+  },
+  "record.adapter-fault.retry-attempt-1": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
+    },
+    "deployments": []
+  },
+  "record.adapter-fault.retry-attempt-2": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "ADAPTER_FAULT"
+        }
+      }
+    },
+    "deployments": []
+  },
+  "record.binding-id.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.binding-id"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.create.claimed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLYING"
+      }
+    },
+    "deployments": []
+  },
+  "record.create.exhausted": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.create.invalid-report-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_INVALID_REPORT"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.create.pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
+    },
+    "deployments": []
+  },
+  "record.create.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.create.ready-after-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.create.registered": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLYING"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.create.retry-attempt-1": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.create.retry-attempt-2": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.create.unconfirmed-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_UNCONFIRMED"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.delete.empty-pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": []
+  },
+  "record.delete.new-b-present": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.new-b-unknown": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.delete.old-a-and-new-b-present": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.old-a-exhausted": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.old-a-pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.old-a-present-new-b-unknown": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      },
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.delete.old-a-retry-attempt-1": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.old-a-retry-attempt-2": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "REMOTE_UNKNOWN"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.partial-exhausted": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.partial-failed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "DELETE_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "DELETE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.partial-retry-attempt-1": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.partial-retry-attempt-2": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "DELETE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.unavailable-route-pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.unavailable-route"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.delete.unavailable-route-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "RECONCILE_TARGET_UNAVAILABLE"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.unavailable-route"
+        },
+        "revision": 6,
+        "presence": "UNKNOWN",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.non-uuid.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.non-uuid"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.reapply.rev-8-pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-8"
+      },
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
+    },
+    "deployments": []
+  },
+  "record.reapply.rev-8-ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-8"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 8,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.reapply.rev-8-with-new-b-present": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-8"
+      },
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.adapter-rejected": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "UNSUPPORTED_POLICY"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.claimed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLYING"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.partial-failed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "UPDATE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.replace.partial-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "UPDATE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "UNKNOWN",
+        "lastConfirmed": null
+      }
+    ]
+  },
+  "record.replace.pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.prepare-failed-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_APPLY",
+        "error": {
+          "kind": "RETRYABLE",
+          "code": "PREPARE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.prepare-rejected": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED",
+        "error": {
+          "kind": "REJECTED",
+          "code": "PREPARE_ERROR"
+        }
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 6,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.replace.ready-after-retry": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.new-b"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.reuse-old-a.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "$ref": "target.old-a"
+        },
+        "revision": 7,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "record.skip.apply-failed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLY_FAILED"
+      }
+    },
+    "deployments": []
+  },
+  "record.skip.applying": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "APPLYING"
+      }
+    },
+    "deployments": []
+  },
+  "record.skip.delete-failed": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "DELETE_FAILED"
+      }
+    },
+    "deployments": []
+  },
+  "record.skip.deleting": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "DELETING"
+      }
+    },
+    "deployments": []
+  },
+  "record.skip.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": []
+  },
+  "binding.fresh": {
+    "bindingId": "10000000-0000-4000-8000-000000000002",
+    "bindingRevision": 1,
+    "policy": {
+      "$ref": "policy.prevent-file-deletion"
+    },
+    "scope": {
+      "$ref": "scope.pid-4242.rev-3"
+    }
+  },
+  "record.fresh.pending": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.fresh"
+      },
+      "status": {
+        "phase": "PENDING_APPLY"
+      }
+    },
+    "deployments": []
+  },
+  "record.fresh.ready": {
+    "binding": {
+      "spec": {
+        "$ref": "binding.fresh"
+      },
+      "status": {
+        "phase": "READY"
+      }
+    },
+    "deployments": [
+      {
+        "target": {
+          "route": "test",
+          "id": "opaque-B",
+          "cleanup": [
+            255,
+            0,
+            7
+          ]
+        },
+        "revision": 1,
+        "presence": "PRESENT",
+        "lastConfirmed": "PRESENT"
+      }
+    ]
+  },
+  "scope.changed": {
+    "scopeId": "20000000-0000-4000-8000-000000000001",
+    "revision": 4,
+    "selector": {
+      "kind": "pid",
+      "pid": 4242
+    }
+  }
+}

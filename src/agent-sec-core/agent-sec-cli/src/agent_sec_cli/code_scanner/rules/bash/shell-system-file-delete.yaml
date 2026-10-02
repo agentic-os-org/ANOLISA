@@ -1,0 +1,15 @@
+rule_id: shell-system-file-delete
+cwe_id: CWE-778
+desc_en: >-
+  Command deletes system critical files including audit logs,
+  authentication databases, configuration files, or system binaries,
+  potentially disrupting system integrity or covering traces of malicious activity.
+desc_zh: >-
+  命令删除系统关键文件，包括审计日志、认证数据库、配置文件或系统二进制文件，
+  可能破坏系统完整性或掩盖恶意活动痕迹。
+regex: |-
+  rm\s+(?:-[a-zA-Z0-9]*\s+)*/var/(?:log|adm|cache|spool/cron)
+  |rm\s+(?:-[a-zA-Z0-9]*\s+)*/etc/(?:passwd|shadow|gshadow|group|sudoers|ssh|audit|security|cron|apt|yum|zypper|default|hosts)
+  |rm\s+(?:-[a-zA-Z0-9]*\s+)*/(?:boot|usr/bin|usr/sbin|usr/lib|usr/share/base-passwd|bin|sbin|lib)/[^\s;|&\n\)]*
+  |rm\s+(?:-[a-zA-Z0-9]*\s+)*(?:/root/\.ssh|/home/[^/]*/\.ssh)
+severity: warn

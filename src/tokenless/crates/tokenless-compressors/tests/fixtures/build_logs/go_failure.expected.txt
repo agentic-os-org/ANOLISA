@@ -1,0 +1,10 @@
+$ go build ./...
+go: downloading golang.org/x/sys v0.0.0
+go: downloading golang.org/x/net v0.1.0
+26 dependency download lines omitted. If needed, run in shell: tokenless retrieve f73812c5e471ef1d7907c79c
+go: downloading github.com/rogpeppe/go-internal v0.28.0
+go: downloading gopkg.in/check.v1 v0.29.0
+# github.com/acme/app
+./main.go:10:2: undefined: fooBar
+./main.go:15:6: declared and not used: x
+FAIL	github.com/acme/app [build failed]

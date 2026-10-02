@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": "{\"matches\":[{\"file\":\"src/mod_0.rs\",\"line\":10,\"column\":5},{\"file\":\"src/mod_1.rs\",\"line\":17,\"column\":5},{\"file\":\"src/mod_2.rs\",\"line\":24,\"column\":5},{\"file\":\"src/mod_3.rs\",\"line\":31,\"column\":5},{\"file\":\"src/mod_4.rs\",\"line\":38,\"column\":5},{\"file\":\"src/mod_5.rs\",\"line\":45,\"column\":5},{\"file\":\"src/mod_6.rs\",\"line\":52,\"column\":5},{\"file\":\"src/mod_7.rs\",\"line\":59,\"column\":5}],\"total\":8,\"truncated\":false}"
+    },
+    "suppressOutput": true
+  }
+}

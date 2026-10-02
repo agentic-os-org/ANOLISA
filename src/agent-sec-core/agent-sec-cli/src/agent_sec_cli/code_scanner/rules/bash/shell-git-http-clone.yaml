@@ -1,0 +1,9 @@
+rule_id: shell-git-http-clone
+cwe_id: CWE-319
+desc_en: >-
+  Git clone over plaintext HTTP transmits code and
+  credentials without encryption.
+desc_zh: >-
+  通过明文 HTTP 进行 Git clone，代码和凭据未加密传输。
+regex: '\bgit\b[^;|&\n]*\bclone\b[^;|&\n]*\bhttp://'
+severity: warn

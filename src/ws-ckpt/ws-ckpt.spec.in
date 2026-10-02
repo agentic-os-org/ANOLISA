@@ -1,0 +1,264 @@
+%define anolis_release 1
+%global debug_package %{nil}
+%global _localbindir /usr/local/bin
+# Filter false musl libc deps introduced by vendored node native modules
+%global __requires_exclude ^(libc\.musl-x86_64\.so\.1|libc\.so)\(\)\(64bit\)$
+
+Name:           ws-ckpt
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        AI-oriented workspace snapshot tool based on btrfs
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+BuildRequires:  cargo >= 1.70
+BuildRequires:  rust >= 1.70
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pkgconfig
+BuildRequires:  systemd-rpm-macros
+BuildRequires:  nodejs >= 18
+BuildRequires:  npm
+
+Requires:       rsync
+Requires:       btrfs-progs
+Provides:       anolisa-component(ws-ckpt)
+
+%description
+ws-ckpt is an AI-oriented filesystem snapshot tool. It supports workspace
+initialization, snapshot creation and second-level rollback. Its
+multi-backend architecture (btrfs-base / btrfs-loop) with
+three-tier auto detection picks the optimal backend for efficient
+snapshots.
+
+%prep
+%setup -q -a 1
+
+%build
+cd src
+cargo build --release --offline
+cd plugins/openclaw
+npm install --ignore-scripts
+npm run build
+
+%install
+rm -rf $RPM_BUILD_ROOT
+install -d -m 0755 %{buildroot}%{_localbindir}
+install -d -m 0755 %{buildroot}%{_unitdir}
+install -d -m 0755 %{buildroot}/etc/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
+
+install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_localbindir}/ws-ckpt
+install -p -m 0644 src/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
+install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml.sample
+# Ship the live config too; %config(noreplace) preserves admin edits on
+# upgrade and saves them as .rpmsave on erase (issue #3070).
+install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml
+cp -pr src/skills/ws-ckpt/. %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt/
+cp -pr src/plugins/openclaw/dist %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
+install -p -m 0644 src/plugins/openclaw/package.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
+install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
+cp -pr src/plugins/hermes/. %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes/
+find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
+    \( -type d -name __pycache__ -o -type d -name tests \
+       -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
+    -exec rm -rf {} +
+install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
+install -p -m 0644 scripts/openclaw/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0644 scripts/openclaw/lib-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0644 scripts/hermes/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/detect-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/install-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+
+%files
+%license LICENSE
+%doc README.md
+%attr(0755,root,root) %{_localbindir}/ws-ckpt
+%{_unitdir}/ws-ckpt.service
+%dir /etc/ws-ckpt
+%config(noreplace) /etc/ws-ckpt/config.toml
+/etc/ws-ckpt/config.toml.sample
+%dir %{_datadir}/anolisa/runtime
+%dir %{_datadir}/anolisa/runtime/skills
+%{_datadir}/anolisa/runtime/skills/ws-ckpt/
+%{_datadir}/anolisa/runtime/ws-ckpt/
+%{_datadir}/anolisa/components/ws-ckpt/
+%{_datadir}/anolisa/adapters/ws-ckpt/
+
+%post
+if [ $1 -ge 2 ]; then
+    # Upgrade: try remove legacy binary from old FHS path
+    if [ -e %{_bindir}/ws-ckpt ] && \
+       rpm -qf %{_bindir}/ws-ckpt 2>/dev/null | grep -q '^ws-ckpt-[0-9]'; then
+        rm -f %{_bindir}/ws-ckpt
+    fi
+    # Upgrade: remove pre-0.3.4 flat scripts/ layout (now per-framework)
+    rm -rf %{_datadir}/anolisa/adapters/ws-ckpt/scripts 2>/dev/null || true
+fi
+systemctl daemon-reload
+systemctl enable ws-ckpt.service
+systemctl restart ws-ckpt.service 2>/dev/null || true
+echo "ws-ckpt installed, started and enabled at boot."
+echo "Run 'systemctl status ws-ckpt' to check service status."
+echo "Run 'ws-ckpt --help' for usage."
+
+%preun
+if [ $1 -eq 0 ]; then
+    # Recover workspaces before stopping the daemon. A sentinel file carries
+    # the outcome to %postun: when recover fails (e.g. a detached registration
+    # whose snapshots may be the only copy of the data), %postun must NOT wipe
+    # /var/lib/ws-ckpt — that would destroy exactly the data recover refused
+    # to touch. The sentinel lives in /run (tmpfs) so it never survives a
+    # reinstall or leaks into the package's file list.
+    rm -f /run/ws-ckpt-recover-failed
+    if [ -x %{_localbindir}/ws-ckpt ]; then
+        if ! %{_localbindir}/ws-ckpt recover --all --force; then
+            echo "WARNING: ws-ckpt recover --all failed; preserving /var/lib/ws-ckpt"
+            echo "         (and /data/ws-ckpt if present) for manual inspection."
+            echo "         Reinstall ws-ckpt or inspect the snapshots manually"
+            echo "         before deleting the state directories."
+            : > /run/ws-ckpt-recover-failed
+        fi
+    fi
+    systemctl stop ws-ckpt.service 2>/dev/null || true
+    systemctl disable ws-ckpt.service 2>/dev/null || true
+fi
+
+%postun
+if [ $1 -eq 0 ]; then
+    # BtrfsLoop backend: umount, detach loop, then wipe state dirs.
+    # The daemon may have been serving on either the canonical FHS path or
+    # the pre-FHS legacy path (when migration was deferred); clean up both.
+    umount /mnt/btrfs-workspace 2>/dev/null || true
+    for img in /var/lib/ws-ckpt/btrfs-data.img /data/ws-ckpt/btrfs-data.img; do
+        losetup -j "$img" 2>/dev/null | \
+            cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true
+    done
+    rmdir /mnt/btrfs-workspace 2>/dev/null || true
+    # Skip the state wipe when %preun's recover failed: the loop image and
+    # state directories may hold the only remaining copies of workspace data
+    # (issue #3069). Loop devices were already detached above, so the files
+    # are merely left on disk for manual recovery.
+    if [ -e /run/ws-ckpt-recover-failed ]; then
+        echo "NOTE: preserving /var/lib/ws-ckpt (recover failed in %preun)."
+        echo "      Remove it manually once the data is no longer needed."
+    else
+        # Remove daemon runtime state to avoid stale state on reinstall
+        rm -rf /var/lib/ws-ckpt /data/ws-ckpt 2>/dev/null || true
+    fi
+    rm -f /run/ws-ckpt-recover-failed
+    systemctl daemon-reload
+fi
+
+%changelog
+* Tue Sep 22 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.5.0-1
+- Unified workspace path identity and recovery of interrupted init/unregister
+- Added guarded rollback V2 protocol variants used by cosh-ng governed tasks
+- OpenClaw allowlists now managed via its config CLI, requires OpenClaw 2026.2.13
+- Fixed detached workspaces silently accepting operations and recover --all false success
+- Preserved snapshot state on rpm -e when recover fails
+- Fixed empty-workspace snapshots, disk-pressure reclaim, and raw install discovery
+
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.5-1
+- Fixed intermittent bootstrap failure when all loop devices are in use
+- Scoped sidecar preStop loop cleanup to ws-ckpt-owned devices only
+- Added bilingual sidecar deployment guide
+
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.4-1
+- Added guarded checkpoint protocol with identity-fenced snapshot creation and crash-verifiable state
+- Fixed interrupted rollback state lost on daemon restart, ambiguous candidates preserved instead of deleted
+- Fixed config --global to verify the daemon actually loaded the written config file
+- Fixed sidecar deployment example to share /etc/ws-ckpt so global config reaches the daemon
+- Fixed error hints for containerized deployments and daemon mount-namespace visibility
+
+* Wed Aug 19 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.3-1
+- Added k8s sidecar containerized deployment support
+- Fixed daemon memory leak under sustained checkpoint workloads (OOM)
+- Fixed loop-device checkpoint latency under concurrent IO (up to 5x improvement)
+- Fixed bootstrap failure leaving orphan images and silent exit on startup errors
+- Fixed init cryptic EBUSY on already-mounted workspace path
+- Added RPM component identity declaration for adapter discovery
+
+* Thu Jul 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.2-1
+- Added an telemetry gate to ops log writes
+- Fixed auto-recover orphan .pre-init-bak from interrupted init
+
+* Thu Jul 02 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.1-1
+- Added skip auto-checkpoint after rollback
+- Fixed workspace sync after config update
+- Fixed absolute path handling for ws-ckpt in crontab entries
+- Changed rollback -n offset, pass numAncestors as-is
+
+* Thu Jun 25 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.0-1
+- Added plugin install/uninstall subcommand
+- Added component.toml for anolisa-cli adapter discovery
+- Added rollback preview support with --preview parameter
+- Added elapsed time display after each CLI operation
+- Added auto-generated snapshot ID when --snapshot is omitted
+- Added SLS ops log output for dashboard metrics
+- Added optional -t flag for diff to compare snapshot against current workspace
+- Added rollback-by-ancestor-count and snapshot DAG tracking
+- Added cron-based scheduled checkpoint snapshots
+- Fixed --snapshot/-s as primary flag and aligned plugin flag handling
+- Fixed SKILL.md to sync with actual CLI/plugin implementation
+- Fixed init and recover to guard against replaced workspace symlink
+- Fixed init rsync by dropping --copy-unsafe-links
+
+* Fri Jun 05 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.3-1
+- Added per-workspace policy override with hermes/openclaw plugin support
+- Added /proc cwd occupant guard for init and rollback
+- Added Hermes adapter runner script
+- Fixed write lock contention and cwd guard deadlock in rollback
+- Fixed input validation for non-UTF-8 paths and path-traversal snapshot IDs
+- Fixed seccomp arch selection, workspace registry concurrency, and RPM packaging
+
+* Thu May 28 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.2-1
+- Fixed openclaw uninstall to remove tool whitelist from config
+- Fixed parent path refusal to apply as workspace-level rules for skill and openclaw plugin
+
+* Wed May 27 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.1-1
+- Fixed plugin workspace config registration and auto-loading
+- Reject workspace paths that are hermes cwd itself or parent
+- Fixed plugin tool to prefer explicit workspace parameter over config
+- Fixed skill delete requiring --force flag
+- Fixed daemon workspace path validation and fswatch fd leak
+- Removed unused btrfs_ops.rs module
+
+* Fri May 22 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.0-1
+- Added openclaw plugin scaffolding for ws-ckpt
+- Added hermes plugin scaffolding for ws-ckpt
+- Made ws-ckpt skill agent-agnostic and prompted for workspace at invocation
+- Followed `make install` contract for build-all integration
+- Fixed bugs in list and diff sub-commands
+- Made daemon stateful
+
+* Sun May 10 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.2.0-1
+- Added auto_cleanup feature and switch
+- Unified config modification entry through the TOML file
+- Added global CLI warning when any workspace>1000 snapshots or filesystem usage>90%
+- Fixed backend detection and daemon state recovery logic
+- Fixed image size configuration not taking effect after daemon restart
+- Removed obsolete fs_warn_threshold_percent parameter
+- Fixed config.toml to ship as a sample file
+
+* Thu Apr 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.1.0-1
+- Initial release
+- Daemon with Unix Socket IPC and Bincode binary protocol.
+- `init` / `checkpoint` / `rollback` / `delete` / `list` / `diff` / `cleanup` / `status` / `config` commands.
+- Background scheduler: auto-cleanup, health check, orphan recovery.
+- Multi-backend: btrfs-base / btrfs-loop / overlayfs with auto-detection.
+- TOML config persistence with runtime hot-reload.
+- systemd service with RPM packaging for Alinux 4.

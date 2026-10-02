@@ -1,0 +1,24 @@
+# rtk source is downloaded from GitHub via justfile, not tracked in git
+third_party/rtk/
+.anolisa/component.toml
+
+# Adapter config files are generated from .in templates (VERSION from Cargo.toml)
+adapters/tokenless/manifest.json
+adapters/tokenless/openclaw/package.json
+adapters/tokenless/openclaw/openclaw.plugin.json
+adapters/tokenless/dsh/package.json
+adapters/tokenless/hermes/plugin.yaml
+adapters/tokenless/qoder/.qoder-plugin/plugin.json
+adapters/tokenless/claude-code/.claude-plugin/plugin.json
+adapters/tokenless/codex/.codex-plugin/plugin.json
+adapters/tokenless/qwencode/qwen-extension.json
+adapters/tokenless/qwenpaw/plugin.json
+adapters/tokenless/qwenpaw/requirements.txt
+python/agentscope/pyproject.toml
+python/agentscope/build/
+python/agentscope/src/*.egg-info/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+python/tokenless/python/anolisa_tokenless/_bin/rtk

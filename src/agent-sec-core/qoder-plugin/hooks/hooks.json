@@ -1,0 +1,179 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records the agent run start for local security observability",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-pii-user-prompt",
+            "description": "Scans user prompts for PII and credentials",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking prompt for PII..."
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-prompt-scan",
+            "description": "Scans user prompts for injection and jailbreak attempts",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/prompt_scanner_hook.py"],
+            "timeout": 15,
+            "statusMessage": "Checking prompt for injection attacks..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records a tool call before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-skill-ledger",
+            "description": "Validates local Skills with Skill Ledger before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking Skill trust status..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-code-scan-bash-command",
+            "description": "Scans Bash commands for security issues before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/code_scanner_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Scanning command for security issues..."
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-pii-tool-input",
+            "description": "Scans tool input for PII and credentials before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking tool input for PII..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records a successful tool call result",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-pii-tool-output",
+            "description": "Scans tool output for PII and credentials before model context",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking tool output for PII..."
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records a failed tool call",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records successful agent run completion",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "description": "Records failed agent run completion",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"],
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

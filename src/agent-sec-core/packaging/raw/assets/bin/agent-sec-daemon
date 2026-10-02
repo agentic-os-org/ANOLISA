@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launch agent-sec-daemon through the raw package's bundled Python runtime.
+set -eu
+
+BINDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+exec "$BINDIR/agent-sec-python" \
+    -c 'import sys; sys.argv[0] = "agent-sec-daemon"; from agent_sec_cli.daemon.server import main; sys.exit(main())' \
+    "$@"

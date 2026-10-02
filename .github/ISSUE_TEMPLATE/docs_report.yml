@@ -1,0 +1,26 @@
+name: Documentation Issue
+description: Report incorrect, missing, unclear, or outdated documentation
+labels: ["type:documentation", "scope:documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Paste a URL, file path, or section name.
+      placeholder: https://agentic-os.sh/docs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or unclear?
+      description: A short explanation is enough.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change
+      description: Optional. Describe the wording, example, or missing content that would help.

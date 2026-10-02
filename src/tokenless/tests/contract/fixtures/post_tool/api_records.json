@@ -1,0 +1,61 @@
+{
+  "session_id": "sess-parity",
+  "tool_use_id": "toolu_parity_api",
+  "tool_name": "WebFetch",
+  "tool_response": {
+    "url": "https://registry.example.com/packages",
+    "status": 200,
+    "debug": "cache=miss upstream=registry-04 trace=9f2e11c0 backend_latency_ms=184 retries=0 tls=reused pool=warm shard=eu-central-1a",
+    "results": [
+      {
+        "name": "alpha",
+        "version": "1.0.3",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      },
+      {
+        "name": "bravo",
+        "version": "2.4.0",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      },
+      {
+        "name": "charlie",
+        "version": "0.9.17",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      },
+      {
+        "name": "delta",
+        "version": "3.1.2",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      },
+      {
+        "name": "echo",
+        "version": "1.12.5",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      },
+      {
+        "name": "foxtrot",
+        "version": "0.2.8",
+        "license": null,
+        "homepage": "",
+        "keywords": [],
+        "deprecated": null
+      }
+    ],
+    "count": 6
+  }
+}

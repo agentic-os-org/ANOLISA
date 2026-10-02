@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/skillfs-core",
+    "crates/skillfs-fuse",
+    "crates/skillfs-cli",
+]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.86"
+license = "Apache-2.0"
+authors = ["The Anolisa Authors"]
+repository = "https://github.com/alibaba/anolisa"
+readme = "README.md"
+
+[workspace.dependencies]
+# Shared dependencies across crates
+skillfs-core = { path = "crates/skillfs-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+getrandom = "0.4"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
+thiserror = "2"
+parking_lot = "0.12"
+tempfile = "3"
+libc = "0.2"

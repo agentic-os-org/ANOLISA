@@ -1,0 +1,17 @@
+[package]
+name = "tokenless-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tool schema compression for LLM token optimization"
+
+[dependencies]
+serde_json.workspace = true
+regex.workspace = true
+# Stash trait + key + marker only — no SQLite backend here. The CLI supplies
+# the concrete backend, so the schema crate stays free of rusqlite.
+tokenless-ccr = { path = "../tokenless-ccr", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokenless-ccr = { path = "../tokenless-ccr", features = ["sqlite"] }

@@ -1,0 +1,478 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/configuration/v1alpha1",
+  "title": "AW desired configuration v1alpha1",
+  "description": "Static desired configuration only; passing validation does not establish runtime support or grant effects.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "aw/v1alpha1"
+    },
+    "kind": {
+      "const": "AWConfiguration"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "daemon",
+        "execution",
+        "audit",
+        "agents",
+        "providers",
+        "events"
+      ],
+      "properties": {
+        "daemon": {
+          "$ref": "#/$defs/daemon"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution"
+        },
+        "audit": {
+          "$ref": "#/$defs/audit"
+        },
+        "agents": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 128,
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/agent"
+          }
+        },
+        "providers": {
+          "type": "object",
+          "minProperties": 0,
+          "maxProperties": 128,
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/provider"
+          }
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "session.start": {
+              "$ref": "#/$defs/event"
+            },
+            "input.submit": {
+              "$ref": "#/$defs/event"
+            },
+            "tool.before": {
+              "$ref": "#/$defs/beforeEvent"
+            },
+            "tool.after": {
+              "$ref": "#/$defs/toolEvent"
+            },
+            "permission.request": {
+              "$ref": "#/$defs/event"
+            },
+            "compact.before": {
+              "$ref": "#/$defs/event"
+            },
+            "compact.after": {
+              "$ref": "#/$defs/event"
+            },
+            "subagent.start": {
+              "$ref": "#/$defs/event"
+            },
+            "subagent.stop": {
+              "$ref": "#/$defs/event"
+            },
+            "turn.stop": {
+              "$ref": "#/$defs/event"
+            },
+            "session.end": {
+              "$ref": "#/$defs/event"
+            },
+            "model.before_request": {
+              "$ref": "#/$defs/event"
+            },
+            "runtime.observed": {
+              "$ref": "#/$defs/event"
+            },
+            "runtime.exited": {
+              "$ref": "#/$defs/event"
+            },
+            "security.violation": {
+              "$ref": "#/$defs/event"
+            },
+            "coverage.changed": {
+              "$ref": "#/$defs/event"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-zA-Z0-9._-]"
+      }
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {
+        "pattern": "\u0000"
+      }
+    },
+    "positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 4096,
+        "not": {
+          "pattern": "\u0000"
+        }
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "prefixItems": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "not": {
+            "pattern": "\u0000"
+          }
+        }
+      ]
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startup",
+        "endpoint",
+        "state_dir"
+      ],
+      "properties": {
+        "startup": {
+          "enum": [
+            "on_demand",
+            "external"
+          ]
+        },
+        "endpoint": {
+          "$ref": "#/$defs/text"
+        },
+        "state_dir": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guarantee",
+        "default_event_budget_ms"
+      ],
+      "properties": {
+        "guarantee": {
+          "const": "native_hook"
+        },
+        "default_event_budget_ms": {
+          "$ref": "#/$defs/positive"
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "payload"
+      ],
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "payload": {
+          "const": "metadata_only"
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter",
+        "argv"
+      ],
+      "properties": {
+        "adapter": {
+          "enum": [
+            "qwenpaw",
+            "qoder",
+            "openclaw",
+            "hermes"
+          ]
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "transport",
+        "timeout_ms",
+        "max_output_bytes",
+        "config"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "transport": {
+          "$ref": "#/$defs/transport"
+        },
+        "timeout_ms": {
+          "$ref": "#/$defs/positive"
+        },
+        "max_output_bytes": {
+          "$ref": "#/$defs/positive"
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "argv",
+        "location"
+      ],
+      "properties": {
+        "type": {
+          "const": "stdio"
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "location": {
+          "const": "agent"
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "steps"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "budget_ms": {
+          "$ref": "#/$defs/positive"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        }
+      }
+    },
+    "toolEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "steps"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "budget_ms": {
+          "$ref": "#/$defs/positive"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tools"
+          ],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "beforeEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "steps"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "budget_ms": {
+          "$ref": "#/$defs/positive"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tools"
+          ],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true
+            }
+          }
+        },
+        "guard": {
+          "const": "security.violation"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "operation",
+        "effects",
+        "on_error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/name"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "provider": {
+          "$ref": "#/$defs/name"
+        },
+        "operation": {
+          "$ref": "#/$defs/name"
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "observe",
+              "block",
+              "replace_input",
+              "replace_result",
+              "ask"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "on_error": {
+          "enum": [
+            "report",
+            "block",
+            "withhold_result"
+          ]
+        }
+      }
+    }
+  }
+}

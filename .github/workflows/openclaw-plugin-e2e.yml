@@ -1,0 +1,227 @@
+name: CI / OpenClaw Plugin E2E
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - ".github/workflows/openclaw-plugin-e2e.yml"
+      - "src/agent-sec-core/openclaw-plugin/src/**"
+      - "src/agent-sec-core/openclaw-plugin/scripts/**"
+      - "src/agent-sec-core/openclaw-plugin/tests/e2e/**"
+      - "src/agent-sec-core/openclaw-plugin/package.json"
+      - "src/agent-sec-core/openclaw-plugin/package-lock.json"
+      - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
+      - "src/agent-sec-core/scripts/ci/run-openclaw-plugin-e2e.sh"
+  push:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - ".github/workflows/openclaw-plugin-e2e.yml"
+      - "src/agent-sec-core/openclaw-plugin/src/**"
+      - "src/agent-sec-core/openclaw-plugin/scripts/**"
+      - "src/agent-sec-core/openclaw-plugin/tests/e2e/**"
+      - "src/agent-sec-core/openclaw-plugin/package.json"
+      - "src/agent-sec-core/openclaw-plugin/package-lock.json"
+      - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
+      - "src/agent-sec-core/scripts/ci/run-openclaw-plugin-e2e.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-agent-sec-cli:
+    name: Build one agent-sec-cli wheel
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    defaults:
+      run:
+        working-directory: src/agent-sec-core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.6"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build agent-sec-cli wheel
+        run: make build-cli
+
+      - name: Upload agent-sec-cli wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-cli-wheel
+          path: src/agent-sec-core/target/wheels/*.whl
+          if-no-files-found: error
+
+  build-openclaw-plugin:
+    name: Build one OpenClaw plugin package
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    defaults:
+      run:
+        working-directory: src/agent-sec-core/openclaw-plugin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
+
+      - name: Install plugin dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Build and pack plugin
+        run: |
+          mkdir -p ../target/openclaw-plugin
+          npm run build
+          npm pack --pack-destination ../target/openclaw-plugin
+
+      - name: Upload OpenClaw plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-openclaw-plugin
+          path: src/agent-sec-core/target/openclaw-plugin/*.tgz
+          if-no-files-found: error
+
+  openclaw-plugin-e2e:
+    name: OpenClaw ${{ matrix.openclaw.label }} E2E
+    needs:
+      - build-agent-sec-cli
+      - build-openclaw-plugin
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        openclaw:
+          - label: "2026.4.14"
+            version: "2026.4.14"
+            expected-version: "2026.4.14"
+            expect-unsafe-install: "true"
+          - label: "2026.4.23"
+            version: "2026.4.23"
+            expected-version: "2026.4.23"
+            expect-unsafe-install: "true"
+          - label: "2026.4.24"
+            version: "2026.4.24"
+            expected-version: "2026.4.24"
+            expect-unsafe-install: "true"
+          - label: "2026.4.29"
+            version: "2026.4.29"
+            expected-version: "2026.4.29"
+            expect-unsafe-install: "true"
+          - label: "2026.5.7"
+            version: "2026.5.7"
+            expected-version: "2026.5.7"
+            expect-unsafe-install: "true"
+          - label: "2026.5.28"
+            version: "2026.5.28"
+            expected-version: "2026.5.28"
+            expect-unsafe-install: "true"
+          - label: "2026.6.10"
+            version: "2026.6.10"
+            expected-version: "2026.6.10"
+            expect-unsafe-install: "true"
+          - label: "2026.8.1"
+            version: "2026.8.1"
+            expected-version: "2026.8.1"
+            expect-unsafe-install: "false"
+          - label: latest
+            version: "latest"
+            node-version: "24.16.0"
+            expected-version: ""
+            expect-unsafe-install: ""
+    defaults:
+      run:
+        working-directory: src/agent-sec-core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.openclaw.node-version || '22' }}
+          cache: npm
+          cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.6"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify jq
+        run: jq --version
+
+      - name: Download agent-sec-cli wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-sec-cli-wheel
+          path: src/agent-sec-core/target/wheels
+
+      - name: Download OpenClaw plugin package
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-sec-openclaw-plugin
+          path: src/agent-sec-core/target/openclaw-plugin
+
+      # The `latest` entry tracks whatever OpenClaw release is current, so it
+      # can break on upstream changes unrelated to this repository. Keep it
+      # non-blocking: report the failure as a warning instead of failing CI.
+      - name: Run OpenClaw plugin E2E
+        id: e2e
+        continue-on-error: ${{ matrix.openclaw.label == 'latest' }}
+        env:
+          OPENCLAW_VERSION: ${{ matrix.openclaw.version }}
+          OPENCLAW_EXPECTED_VERSION: ${{ matrix.openclaw.expected-version }}
+          OPENCLAW_MATRIX_LABEL: ${{ matrix.openclaw.label }}
+          EXPECT_UNSAFE_INSTALL_FLAG: ${{ matrix.openclaw.expect-unsafe-install }}
+          AGENT_SEC_CLI_WHEEL: target/wheels/*.whl
+          OPENCLAW_E2E_PLUGIN_PACKAGE: target/openclaw-plugin/*.tgz
+          OPENCLAW_E2E_RESULT_ROOT: target/openclaw-e2e/results
+          # The native prompt scanner's standard mode requires an Ollama L2
+          # model service that is not available in this CI environment. Use
+          # fast (L1-only) mode so the E2E exercises the hook integration
+          # without depending on an external inference backend.
+          PROMPT_SCANNER_SCAN_MODE: fast
+        run: scripts/ci/run-openclaw-plugin-e2e.sh
+
+      - name: Report non-blocking E2E failure
+        if: steps.e2e.outcome == 'failure'
+        run: |
+          echo "::warning title=OpenClaw ${{ matrix.openclaw.label }} E2E failed (non-blocking)::This matrix entry tracks the latest OpenClaw release and does not gate CI. Inspect the uploaded evidence artifact to decide whether the plugin needs an update."
+
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-plugin-e2e-${{ matrix.openclaw.label }}
+          path: |
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/summary.json
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/summary.md
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/pilot-result.json
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/logs/**
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/agent-sec-cli-overrides.json
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/agent-sec-data/*.jsonl
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/agent-sec-data/*.db
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/openclaw-state/openclaw.json
+            src/agent-sec-core/target/openclaw-e2e/results/${{ matrix.openclaw.label }}/**/workdir/openclaw-state/logs/*.jsonl
+          if-no-files-found: warn

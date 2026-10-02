@@ -1,0 +1,16 @@
+# Build artifacts of the standalone benchmark workspace.
+target/
+# Run-time outputs of run-benchmarks.sh — regenerated on every run and
+# machine-specific, so they must never be committed.
+benchmark_identity.json
+benchmark_output_*.log
+# Benchmark result reports: run/machine-specific artifacts. This workspace
+# keeps its own reports/ directory so L1 and L2 results never mix; generate
+# them locally (run-benchmarks.sh) or attach to the PR as CI artifacts —
+# never commit them, wherever they land. Reports follow the per-layer naming
+# L1_COMPRESSOR_BENCHMARK_REPORT[_DIFF].md, mirroring the L2 workspace.
+reports/
+*_REPORT.md
+*_REPORT_DIFF.md
+report.json
+*_REPORT_zh.md

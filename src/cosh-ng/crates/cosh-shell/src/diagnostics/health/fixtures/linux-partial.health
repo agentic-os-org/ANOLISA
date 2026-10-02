@@ -1,0 +1,17 @@
+# cosh-shell doctor fixture: partially unavailable environment
+# Core resource facts collected, but several checks could not run.
+# Overall severity resolves to Unavailable -> doctor status "warning" (exit 1).
+host=fixture-linux-partial
+score=74
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.available_mib u64 12000 MiB
+fact memory memory.available_ratio f64 0.366 -
+fact cpu cpu.load_1m f64 1.1 -
+fact cpu cpu.cores u64 8 -
+fact cpu cpu.load_per_core_1m f64 0.14 -
+fact disk filesystem.max_used_ratio f64 0.42 -
+fact disk filesystem.riskiest_mount str / -
+unavailable kernel_signal permission_denied unavailable 5
+unavailable provider command_missing unavailable 1
+unavailable hooks permission_denied unavailable 1

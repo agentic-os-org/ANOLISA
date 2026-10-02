@@ -1,0 +1,12 @@
+version: 1
+rules:
+  known:
+    ifc: |
+      rule known:
+        kill exec "git"
+        because "known"
+domains:
+  session:
+    bind:
+      - rule: missing
+        mode: locked

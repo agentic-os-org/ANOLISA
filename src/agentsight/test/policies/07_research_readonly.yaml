@@ -1,0 +1,9 @@
+version: 1
+policy: |
+  source RESEARCH = exec "**/research-agent"
+
+  rule research-readonly:
+    block write file "/**" if RESEARCH
+    block connect endpoint "*" if RESEARCH
+    block exec "git" if RESEARCH
+    because "research sub-agent is read-only"
