@@ -73,7 +73,12 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
             row = max(1, row + delta)
         return f"{dollar_col}{col_part}{dollar_row}{row}"
 
-    pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+    # Boundary guards keep tokens that merely look like references intact:
+    # a letter/digit/dot before the match means scientific notation (1E3) or
+    # an identifier fragment, and "(", "!" or "[" after it means a function
+    # call (LOG10, ATAN2), an unquoted sheet name (Q1!B5) or a structured
+    # table token (DATA1[...]).
+    pattern = r'(?<![A-Za-z0-9_.])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Za-z0-9_(!\[])'
     return re.sub(pattern, replacer, text)
 
 
