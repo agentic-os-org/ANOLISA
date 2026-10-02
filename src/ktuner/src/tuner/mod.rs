@@ -406,11 +406,6 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
 const NONSYSCTL_SCRIPT_PATH: &str = "/etc/ktuner/apply-nonsysctl.sh";
 const NONSYSCTL_SERVICE_PATH: &str = "/etc/systemd/system/ktuner-nonsysctl.service";
 
-/// Regenerate the persisted config files from the cumulative rollback record,
-/// which is the single source of truth for everything ktuner has applied. This
-/// keeps persistence cumulative across runs (previously each run overwrote the
-/// files with only its own batch, silently dropping earlier params) and never
-/// persists a param that failed to apply (those are not in the record).
 /// Render the persisted file bodies from the rollback ledger, which is the
 /// single source of truth for everything ktuner has applied. Returns
 /// `(sysctl_conf, nonsysctl_script)`; `None` when a file would be empty.
@@ -453,6 +448,11 @@ fn render_persistence(
     (sysctl, nonsysctl)
 }
 
+/// Regenerate the persisted config files from the cumulative rollback record,
+/// which is the single source of truth for everything ktuner has applied. This
+/// keeps persistence cumulative across runs (previously each run overwrote the
+/// files with only its own batch, silently dropping earlier params) and never
+/// persists a param that failed to apply (those are not in the record).
 fn persist_from_rollback() -> Result<()> {
     let data = load_rollback();
     let (sysctl_content, nonsysctl_script) = render_persistence(&data.entries);
