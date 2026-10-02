@@ -1,0 +1,24 @@
+# ws-ckpt workspace snapshot daemon
+#
+# Two ways to start:
+#   Service mode:  cp ws-ckpt.service /etc/systemd/system/ && systemctl enable --now ws-ckpt
+#   Manual mode:   ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level debug]
+
+[Unit]
+Description=ws-ckpt workspace snapshot daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ws-ckpt daemon
+ExecReload=/usr/local/bin/ws-ckpt reload
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+StateDirectory=ws-ckpt
+StateDirectoryMode=0755
+RuntimeDirectory=ws-ckpt
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

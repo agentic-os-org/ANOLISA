@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "labels": [
+    {
+      "name": "status:needs-triage",
+      "color": "fbca04",
+      "description": "Awaiting initial maintainer triage"
+    },
+    {
+      "name": "status:needs-info",
+      "color": "d4c5f9",
+      "description": "More information is needed from the reporter"
+    },
+    {
+      "name": "status:accepted",
+      "color": "0e8a16",
+      "description": "Accepted and ready to be worked on"
+    },
+    {
+      "name": "status:in-progress",
+      "color": "1d76db",
+      "description": "Someone is actively working on this"
+    },
+    {
+      "name": "status:blocked",
+      "color": "b60205",
+      "description": "Blocked by another decision or dependency"
+    },
+    {
+      "name": "status:duplicate",
+      "color": "cfd3d7",
+      "description": "Duplicate of another issue"
+    },
+    {
+      "name": "status:declined",
+      "color": "eeeeee",
+      "description": "Not planned or outside the current project scope"
+    },
+    {
+      "name": "priority:p0",
+      "color": "b60205",
+      "description": "Critical and urgent"
+    },
+    {
+      "name": "priority:p1",
+      "color": "d93f0b",
+      "description": "High priority"
+    },
+    {
+      "name": "priority:p2",
+      "color": "fbca04",
+      "description": "Normal priority"
+    },
+    {
+      "name": "priority:p3",
+      "color": "c2e0c6",
+      "description": "Low priority"
+    },
+    {
+      "name": "risk:security",
+      "color": "b60205",
+      "description": "Security-sensitive change"
+    },
+    {
+      "name": "risk:privileged",
+      "color": "d93f0b",
+      "description": "Touches privileged or elevated operations"
+    },
+    {
+      "name": "risk:breaking",
+      "color": "e99695",
+      "description": "May break a public interface or workflow"
+    },
+    {
+      "name": "risk:cross-component",
+      "color": "5319e7",
+      "description": "Changes contracts across multiple components"
+    }
+  ]
+}

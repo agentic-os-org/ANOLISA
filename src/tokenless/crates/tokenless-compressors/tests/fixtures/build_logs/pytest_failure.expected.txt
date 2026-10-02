@@ -1,0 +1,29 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+collected 34 items
+
+tests/test_core.py::test_case_00 PASSED [  2%]
+tests/test_core.py::test_case_01 PASSED [  5%]
+16 passing test lines omitted. If needed, run in shell: tokenless retrieve 0c1370cf7c844f326f7dd44a
+tests/test_core.py::test_case_18 PASSED [ 55%]
+tests/test_core.py::test_case_19 PASSED [ 58%]
+tests/test_math.py::test_answer FAILED [ 61%]
+tests/test_core.py::test_case_20 PASSED [ 61%]
+tests/test_core.py::test_case_21 PASSED [ 64%]
+9 passing test lines omitted. If needed, run in shell: tokenless retrieve c514eb7c0b1d9686602cdbe4
+tests/test_core.py::test_case_31 PASSED [ 94%]
+tests/test_core.py::test_case_32 PASSED [ 97%]
+
+=================================== FAILURES ===================================
+_________________________________ test_answer __________________________________
+
+    def test_answer():
+>       assert compute() == 4
+E       assert 3 == 4
+E        +  where 3 = compute()
+
+tests/test_math.py:12: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_math.py::test_answer - assert 3 == 4
+========================= 1 failed, 33 passed in 2.14s =========================

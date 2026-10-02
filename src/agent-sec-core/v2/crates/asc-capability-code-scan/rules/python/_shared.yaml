@@ -1,0 +1,30 @@
+sensitive_file_paths:
+  - /etc/shadow
+  - /etc/gshadow
+  - ~/\.ssh
+  - /etc/ssh/
+  - ~/\.gnupg
+  - \.env\b
+  - /etc/machine-id
+  - /etc/passwd
+  - /etc/sudoers
+  - /etc/pam\.d/
+  - /etc/security/
+  - /etc/sysctl\.conf
+  - /etc/sysctl\.d/
+  - /boot/
+  - /usr/lib/systemd/
+  - /etc/systemd/system/
+  # Agent runtime credential and auth state files.
+  - ~/\.codex/auth\.json\b
+  - ~/\.hermes/auth\.json\b
+  - ~/\.hermes/\.env\b
+  - ~/\.hermes/config\.yaml\b
+  - ~/\.hermes/profiles/[^/]+/auth\.json\b
+  - ~/\.hermes/profiles/[^/]+/\.env\b
+  - ~/\.hermes/profiles/[^/]+/config\.yaml\b
+  - ~/\.openclaw/openclaw\.json\b
+  - ~/\.openclaw/agents/[^/]+/agent/models\.json\b
+  - ~/\.copilot-shell/settings\.json\b
+  - ~/\.copilot-shell/aliyun_creds\.json\b
+  - ~/\.copilot-shell/mcp-oauth-tokens(-v2)?\.json\b

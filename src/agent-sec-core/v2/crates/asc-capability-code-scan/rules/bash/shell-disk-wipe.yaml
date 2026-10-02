@@ -1,0 +1,20 @@
+rule_id: shell-disk-wipe
+cwe_id: CWE-78
+desc_en: >-
+  Command performs destructive disk operation such as formatting,
+  zeroing, wiping signatures, or shredding a device.
+desc_zh: >-
+  命令执行破坏性磁盘操作，如格式化、清零、擦除签名或销毁设备数据。
+# Intentionally diverges from the V1 copy of this file, and must not be synced
+# back. V1 writes the closing-quote check as a named conditional group,
+# `(?(dd_quote)(?P=dd_quote))`. fancy-regex compiles that but silently never
+# takes the branch, which inverts the outcome: `dd of="/dev/sda"` stops being
+# reported while `dd of="/dev/sda` starts being reported. The numeric form below
+# is understood identically by Python `re` and fancy-regex, so behaviour matches
+# V1. `mkfs` is non-capturing to keep the quote group at index 1.
+regex: |-
+  \bmkfs(?:\.\w+)?\b
+  |\bdd\b[^;\n&|]*\bof=(["'])?\/dev\/(?:[hsv]d[a-z](?:[0-9]+)?|xvd[a-z](?:[0-9]+)?|nvme[0-9]+n[0-9]+(?:p[0-9]+)?|mmcblk[0-9]+(?:p[0-9]+)?|md[0-9]+(?:p[0-9]+)?|dm-[0-9]+|mapper\/[^\s"';&|)<>]+|loop[0-9]+(?:p[0-9]+)?|nbd[0-9]+(?:p[0-9]+)?|rbd[0-9]+(?:p[0-9]+)?|zram[0-9]+|disk\/by-(?:id|path|uuid|label|partuuid|partlabel)\/[^\s"';&|)<>]+)(?(1)\1)(?=$|[\s;|&)]|[<>](?!\())
+  |\bwipefs\b
+  |\bshred\b
+severity: warn

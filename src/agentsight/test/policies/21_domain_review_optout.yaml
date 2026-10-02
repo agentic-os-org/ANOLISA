@@ -1,0 +1,40 @@
+version: 1
+default_domain: review
+
+rules:
+  no-branch:
+    ifc: |
+      source COMMAND = exec "**"
+      rule no-branch:
+        kill exec "git" "branch" if COMMAND
+        because "branches are created outside the agent"
+
+  no-network:
+    ifc: |
+      source COMMAND = exec "**"
+      rule no-network:
+        kill connect endpoint "*" if COMMAND
+        because "network is off unless a child domain opts out"
+
+  read-only:
+    ifc: |
+      source COMMAND = exec "**"
+      rule read-only:
+        kill write file "/repo/**" if COMMAND
+        because "review work is read-only"
+
+domains:
+  session:
+    bind:
+      - rule: no-branch
+        mode: locked
+      - rule: no-network
+        mode: default
+
+  review:
+    parent: session
+    disable:
+      - no-network
+    bind:
+      - rule: read-only
+        mode: locked

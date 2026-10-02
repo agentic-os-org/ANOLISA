@@ -1,0 +1,75 @@
+{
+  "plan_id": "plan-1",
+  "revision": 1,
+  "event_id": "event-1",
+  "scope": {
+    "environment_id": "env-1",
+    "execution_context_id": "ctx-1",
+    "actor_id": "actor-1",
+    "runtime_id": "runtime-1",
+    "runtime_generation": 1,
+    "binding_revision": 1,
+    "session_id": "session-1",
+    "turn_id": "turn-1",
+    "tool_use_id": "tool-1"
+  },
+  "boundary_id": "result-slot",
+  "boundary_revision": 1,
+  "boundary": "pre_tool",
+  "policy_revision": 1,
+  "source_digest": "7d10fced96b38c84f90db07708f266e83da48ca763189eaed7fe1a00348385eb",
+  "steps": [
+    {
+      "step_id": "step-0",
+      "capability": "security.command.inspect/v2",
+      "input_schema": {
+        "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-input/v2",
+        "digest": "8cf82737eecde901e0499c3467ba58c7b9c46df08146e766f6096c2eac810d2e"
+      },
+      "output_schema": {
+        "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-output/v2",
+        "digest": "fc31061a277f3a3b7a983f4744f3e8f89b775cb2fe5bc6bafae932fc06f450a7"
+      },
+      "selection": "exactly_one",
+      "providers": [
+        {
+          "provider_id": "fixture-provider",
+          "provider_version": "1",
+          "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397"
+        }
+      ],
+      "required": true,
+      "on_failure": "deny_dispatch",
+      "input_source": "boundary_source"
+    },
+    {
+      "step_id": "step-1",
+      "capability": "security.command.inspect/v2",
+      "input_schema": {
+        "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-input/v2",
+        "digest": "8cf82737eecde901e0499c3467ba58c7b9c46df08146e766f6096c2eac810d2e"
+      },
+      "output_schema": {
+        "id": "https://agentic-os.sh/schemas/aw/security-command-inspect-output/v2",
+        "digest": "fc31061a277f3a3b7a983f4744f3e8f89b775cb2fe5bc6bafae932fc06f450a7"
+      },
+      "selection": "exactly_one",
+      "providers": [
+        {
+          "provider_id": "fixture-provider",
+          "provider_version": "1",
+          "manifest_digest": "35c53b7986dfb2897e7e2e9cdf56c69a49d2c1bcccaea7c310d60b11b59c9397"
+        }
+      ],
+      "required": true,
+      "on_failure": "deny_dispatch",
+      "input_source": "boundary_source"
+    }
+  ],
+  "os_requirement": {
+    "policy_digest": "bd44acb86f2ff048f897ee4b673b15f9184c97c4e903684a8003ed390881d752",
+    "required_controls": [
+      "filesystem.access/v1"
+    ]
+  }
+}

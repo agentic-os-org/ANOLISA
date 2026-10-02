@@ -1,0 +1,69 @@
+{
+  "name": "tokenless",
+  "version": "@VERSION@",
+  "description": "Token-Less context compression for Qwen Code — RTK command rewriting, response/TOON/schema compression, and registered but hard-disabled Tool Ready",
+  "author": { "name": "ANOLISA" },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/alibaba/anolisa/tree/main/src/tokenless",
+  "keywords": ["token-optimization", "rtk", "compression", "toon", "tool-ready"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-tool-ready",
+            "description": "Registered hard-disabled Tool Ready pass-through; performs no check, repair, or block",
+            "command": "bash \"${extensionPath}/hooks/run-hook.sh\" tool_ready_hook.sh",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qwencode" }
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-rewrite",
+            "description": "Rewrites shell commands via rtk for token savings",
+            "command": "bash \"${extensionPath}/hooks/run-hook.sh\" rewrite_hook.py --agent-id qwencode",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qwencode" }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(?!(?:Read|Glob|NotebookRead)$).+",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-response",
+            "description": "Compresses tool responses and encodes to TOON format",
+            "command": "bash \"${extensionPath}/hooks/run-hook.sh\" compress_response_hook.py --agent-id qwencode",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qwencode" }
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-schema",
+            "description": "Compresses tool schema definitions for token savings",
+            "command": "bash \"${extensionPath}/hooks/run-hook.sh\" compress_schema_hook.py",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qwencode" }
+          }
+        ]
+      }
+    ]
+  }
+}

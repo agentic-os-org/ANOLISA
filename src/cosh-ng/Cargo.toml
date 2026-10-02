@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "crates/cosh-types",
+    "crates/cosh-platform",
+    "crates/cosh-cli",
+    "crates/cosh-core",
+    "crates/cosh-shell",
+    "crates/cosh-gateway-contracts",
+    "crates/cosh-gateway",
+    "crates/cosh-gateway-app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.26.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[workspace.dependencies]
+agent-client-protocol = "=2.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false }
+glob = "0.3"
+globset = "=0.4.15"
+ignore = "=0.4.22"
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+which = "7"
+toml = "0.8"
+regex = "1"
+sha2 = "0.10"
+semver = "1"
+fs2 = "0.4"
+keyring = "2.3.3"
+nix = { version = "0.29", default-features = false, features = ["dir", "fs", "process", "signal", "socket", "user"] }
+rustix = { version = "0.38", default-features = false, features = ["fs", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+signal-hook = "0.3"
+uuid = { version = "1", features = ["v4"] }
+wait-timeout = "0.2"
+vt100 = "0.16.2"
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
+thiserror = "2"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

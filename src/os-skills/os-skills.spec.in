@@ -1,0 +1,61 @@
+%undefine __brp_mangle_shebangs
+
+Name:           os-skills
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        OS Skill for ANOLISA Agentic OS
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+BuildArch:      noarch
+Provides:       anolisa-component(os-skills)
+
+%description
+A collection of agentic OS skills for Copilot Shell, providing capabilities
+including AI tool installation, Alibaba Cloud ECS management, DevOps
+workflows, kernel development, security auditing, and system administration.
+
+%prep
+%autosetup -n %{name}-%{version}
+
+#%build
+# Nothing to build - skills are static assets
+
+%install
+rm -rf %{buildroot}
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/skills
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/os-skills
+install -p -m 0644 component.toml \
+    %{buildroot}%{_datadir}/anolisa/components/os-skills/component.toml
+
+# Find each skill directory (identified by containing SKILL.md) and copy it
+# flattened into the target skills directory.
+find . -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
+    skill_dir=$(dirname "$skillmd")
+    cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/
+done
+
+# Set permissions
+find %{buildroot}%{_datadir}/anolisa/skills -type d -exec chmod 0755 {} +
+find %{buildroot}%{_datadir}/anolisa/skills -type f -name '*.sh' -exec chmod 0755 {} +
+find %{buildroot}%{_datadir}/anolisa/skills -type f -name '*.py' -exec chmod 0755 {} +
+find %{buildroot}%{_datadir}/anolisa/skills -type f \
+    ! -name '*.sh' ! -name '*.py' -exec chmod 0644 {} +
+
+%files
+%license LICENSE
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/components
+%dir %{_datadir}/anolisa/components/os-skills
+%{_datadir}/anolisa/components/os-skills/component.toml
+%dir %{_datadir}/anolisa/skills
+%{_datadir}/anolisa/skills/*
+
+%changelog
+* Fri Aug 21 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.6.3-1
+- Let anolisa upgrade resolve existing OS Skills through RPM metadata.
+
+* Wed Mar 18 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.1-1
+- Initial RPM package

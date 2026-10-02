@@ -1,0 +1,28 @@
+[package]
+name = "agentsight-enforcer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["mock-backend"]
+mock-backend = []
+actplane = ["dep:actplane-ifc-compiler", "dep:ebpf-ifc-engine"]
+
+[dependencies]
+agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
+anyhow = { workspace = true }
+ctrlc = { workspace = true }
+env_filter = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+actplane-ifc-compiler = { workspace = true, optional = true }
+ebpf-ifc-engine = { workspace = true, optional = true }
+
+# Live file-delete enforcement demo; only builds with the actplane backend.
+[[example]]
+name = "enforce_unlink_demo"
+required-features = ["actplane"]

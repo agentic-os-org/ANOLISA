@@ -1,0 +1,152 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+Name:           copilot-shell
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Copilot Shell - Entrance to AI-native OS
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+BuildRequires:  nodejs >= 20
+BuildRequires:  make
+Requires:       nodejs >= 20
+Requires(post):	  lua
+Requires(postun): lua
+Provides:       %{_bindir}/co %{_bindir}/copilot %{_bindir}/cosh
+Provides:       anolisa-component(cosh)
+Conflicts:      cosh-ng
+
+%description
+Copilot Shell - Entrance to AI-native OS.
+AI-powered assistant that helps developers through natural language interaction.
+
+%prep
+%setup -q
+
+%build
+make deps-ci
+make build
+
+%install
+rm -rf %{buildroot}
+make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
+install -d %{buildroot}%{_datadir}/anolisa/components/cosh
+install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/component.toml
+
+# Install cosh-switch script
+cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
+#!/bin/bash
+set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
+case "$current" in
+  cosh-ng)
+    target="copilot-shell"
+    echo "Current: cosh-ng -> switching to copilot-shell"
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    target="cosh-ng"
+    echo "Current: copilot-shell -> switching to cosh-ng"
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac
+case "${LANG:-}" in
+  zh_*|zh)
+    echo ""
+    echo "已切换到 ${target}。当前会话仍运行在旧模式下，无法热切换。"
+    echo "请退出并重新打开 shell（或重新连接会话），再运行 \"cosh\" 进入新模式。" ;;
+  *)
+    echo ""
+    echo "Switched to $target. The current session still runs the old mode and cannot hot-switch."
+    echo "Please exit and reopen your shell (or reconnect the session), then run \"cosh\" to enter the new mode." ;;
+esac
+EOF
+chmod 0755 %{buildroot}%{_bindir}/cosh-switch
+
+# Install cosh-switch extension (provides /cosh-switch slash command)
+install -d %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/commands
+cat > %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/cosh-extension.json << 'EOF'
+{
+  "name": "cosh-switch",
+  "version": "1.0.0",
+  "commands": ["commands"]
+}
+EOF
+cat > %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/commands/cosh-switch.toml << 'EOF'
+description = "Switch between copilot-shell and cosh-ng"
+show_command = false
+run = """set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo 'none')
+case "$current" in
+  cosh-ng)
+    target='copilot-shell'
+    echo 'Current: cosh-ng -> switching to copilot-shell'
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    target='cosh-ng'
+    echo 'Current: copilot-shell -> switching to cosh-ng'
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo 'Error: neither cosh-ng nor copilot-shell is installed.'; exit 1 ;;
+esac
+case "${LANG:-}" in
+  zh_*|zh)
+    echo ''
+    echo "已切换到 ${target}。当前会话仍运行在旧模式下，无法热切换。"
+    echo '请退出并重新打开 shell（或重新连接会话），再运行 cosh 进入新模式。' ;;
+  *)
+    echo ''
+    echo "Switched to $target. The current session still runs the old mode and cannot hot-switch."
+    echo 'Please exit and reopen your shell (or reconnect the session), then run cosh to enter the new mode.' ;;
+esac"""
+EOF
+
+
+%files
+%license %{_docdir}/%{name}/LICENSE
+%doc %{_docdir}/%{name}/README.md
+%{_prefix}/lib/%{name}
+%{_datadir}/%{name}
+%{_datadir}/anolisa/components/cosh/component.toml
+%{_bindir}/co
+%{_bindir}/copilot
+%{_bindir}/cosh
+%{_bindir}/cosh-switch
+%{_datadir}/anolisa/extensions/cosh-switch
+
+%post -p <lua>
+nl        = '\n'
+cosh      = '%{_bindir}/cosh'..nl
+f = io.open('/etc/shells', 'a+')
+if f then
+  local shells = nl..f:read('*all')..nl
+  if not shells:find(nl..cosh) then f:write(cosh) end
+  f:close()
+end
+
+%postun -p <lua>
+-- Run it only if we are uninstalling
+if arg[2] == 0
+then
+  t={}
+  for line in io.lines("/etc/shells")
+  do
+    if line ~= "%{_bindir}/cosh"
+    then
+      table.insert(t,line)
+    end
+  end
+
+  f = io.open("/etc/shells", "w+")
+  for n,line in pairs(t)
+  do
+    f:write(line.."\n")
+  end
+  f:close()
+end
+
+%changelog
+* Wed Mar 26 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 2.0.0-1
+- Initial RPM package

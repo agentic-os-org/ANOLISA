@@ -1,0 +1,11 @@
+rule_id: shell-ssh-keygen-weak
+cwe_id: CWE-326
+desc_en: >-
+  SSH key generation uses deprecated algorithm (DSA) or
+  insufficient key length (RSA 1024-bit).
+desc_zh: >-
+  SSH 密钥生成使用已弃用的算法 (DSA) 或不足的密钥长度 (RSA 1024 位)。
+regex: |-
+  \bssh-keygen\b[^;|&\n]*-t\s*dsa\b
+  |\bssh-keygen\b[^;|&\n]*-b\s*1024\b
+severity: warn

@@ -1,0 +1,190 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type React from 'react';
+import { useMemo } from 'react';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import type { HistoryItem } from '../types.js';
+import { UserMessage } from './messages/UserMessage.js';
+import { UserShellMessage } from './messages/UserShellMessage.js';
+import { GeminiMessage } from './messages/GeminiMessage.js';
+import { InfoMessage } from './messages/InfoMessage.js';
+import { ErrorMessage } from './messages/ErrorMessage.js';
+import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
+import { GeminiMessageContent } from './messages/GeminiMessageContent.js';
+import { GeminiThoughtMessage } from './messages/GeminiThoughtMessage.js';
+import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageContent.js';
+import { CompressionMessage } from './messages/CompressionMessage.js';
+import { SummaryMessage } from './messages/SummaryMessage.js';
+import { WarningMessage } from './messages/WarningMessage.js';
+import { Box } from 'ink';
+import { AboutBox } from './AboutBox.js';
+import { StatsDisplay } from './StatsDisplay.js';
+import { ModelStatsDisplay } from './ModelStatsDisplay.js';
+import { ToolStatsDisplay } from './ToolStatsDisplay.js';
+import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
+import { Help } from './Help.js';
+import type { SlashCommand } from '../commands/types.js';
+import { ExtensionsList } from './views/ExtensionsList.js';
+import { getMCPServerStatus } from '@copilot-shell/core';
+import { ToolsList } from './views/ToolsList.js';
+import { McpStatus } from './views/McpStatus.js';
+import { ClawhubOutputBox } from './views/ClawhubOutputBox.js';
+
+interface HistoryItemDisplayProps {
+  item: HistoryItem;
+  availableTerminalHeight?: number;
+  terminalWidth: number;
+  mainAreaWidth?: number;
+  isPending: boolean;
+  isFocused?: boolean;
+  commands?: readonly SlashCommand[];
+  activeShellPtyId?: number | null;
+  embeddedShellFocused?: boolean;
+  availableTerminalHeightGemini?: number;
+}
+
+const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
+  item,
+  availableTerminalHeight,
+  terminalWidth,
+  mainAreaWidth,
+  isPending,
+  commands,
+  isFocused = true,
+  activeShellPtyId,
+  embeddedShellFocused,
+  availableTerminalHeightGemini,
+}) => {
+  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
+  const contentWidth = terminalWidth - 4;
+  const boxWidth = mainAreaWidth || contentWidth;
+
+  return (
+    <Box
+      flexDirection="column"
+      key={itemForDisplay.id}
+      marginLeft={2}
+      marginRight={2}
+    >
+      {/* Render standard message types */}
+      {itemForDisplay.type === 'user' && (
+        <UserMessage text={itemForDisplay.text} commands={commands} />
+      )}
+      {itemForDisplay.type === 'user_shell' && (
+        <UserShellMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'gemini' && (
+        <GeminiMessage
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+        />
+      )}
+      {itemForDisplay.type === 'gemini_content' && (
+        <GeminiMessageContent
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+        />
+      )}
+      {itemForDisplay.type === 'gemini_thought' && (
+        <GeminiThoughtMessage
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+        />
+      )}
+      {itemForDisplay.type === 'gemini_thought_content' && (
+        <GeminiThoughtMessageContent
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+        />
+      )}
+      {itemForDisplay.type === 'info' && (
+        <InfoMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'warning' && (
+        <WarningMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'error' && (
+        <ErrorMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'about' && (
+        <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'help' && commands && (
+        <Help commands={commands} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'stats' && (
+        <StatsDisplay duration={itemForDisplay.duration} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'model_stats' && (
+        <ModelStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'tool_stats' && (
+        <ToolStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'quit' && (
+        <SessionSummaryDisplay
+          duration={itemForDisplay.duration}
+          width={boxWidth}
+        />
+      )}
+      {itemForDisplay.type === 'tool_group' && (
+        <ToolGroupMessage
+          toolCalls={itemForDisplay.tools}
+          groupId={itemForDisplay.id}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth}
+          isFocused={isFocused}
+          activeShellPtyId={activeShellPtyId}
+          embeddedShellFocused={embeddedShellFocused}
+        />
+      )}
+      {itemForDisplay.type === 'compression' && (
+        <CompressionMessage compression={itemForDisplay.compression} />
+      )}
+      {item.type === 'summary' && <SummaryMessage summary={item.summary} />}
+      {itemForDisplay.type === 'extensions_list' && <ExtensionsList />}
+      {itemForDisplay.type === 'tools_list' && (
+        <ToolsList
+          contentWidth={contentWidth}
+          tools={itemForDisplay.tools}
+          showDescriptions={itemForDisplay.showDescriptions}
+        />
+      )}
+      {itemForDisplay.type === 'clawhub_output' && (
+        <ClawhubOutputBox
+          title={itemForDisplay.title}
+          items={itemForDisplay.items}
+          text={itemForDisplay.text}
+          isError={itemForDisplay.isError}
+          width={boxWidth}
+        />
+      )}
+      {itemForDisplay.type === 'mcp_status' && (
+        <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />
+      )}
+    </Box>
+  );
+};
+
+// Export alias for backward compatibility
+export { HistoryItemDisplayComponent as HistoryItemDisplay };

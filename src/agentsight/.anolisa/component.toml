@@ -1,0 +1,92 @@
+[component]
+name = "agentsight"
+version = "0.13.0"
+layer = "runtime"
+domain = "observability"
+display_name = "AgentSight"
+description = "Agent observability with Linux eBPF tracing and cross-platform trajectory collection and analysis"
+owner = "agentsight-team"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[backends.rpm]
+package = "agentsight"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+min_kernel = "5.8"
+
+[[component.dependencies]]
+name = "elfutils-libelf"
+kind = "system-package"
+probe = "grep -aqF libelf.so.1 /etc/ld.so.cache"
+packages = { rpm = "elfutils-libelf", deb = "libelf1" }
+
+[[component.dependencies]]
+name = "ebpf-btf"
+kind = "platform-capability"
+check = "btf"
+min_kernel = "5.8"
+
+[component.layout]
+modes = ["system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/agentsight/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/agentsight"
+target = "{bindir}/agentsight"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/agentsight-enforcer"
+target = "{bindir}/agentsight-enforcer"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/agentsight-start"
+target = "{bindir}/agentsight-start"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/agentsight/agentsight.service"
+target = "{unitdir}/agentsight.service"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/agentsight/agentsight-enforcer.service"
+target = "{unitdir}/agentsight-enforcer.service"
+mode = "0644"
+
+[[component.capabilities]]
+path = "{bindir}/agentsight"
+caps = ["cap_bpf", "cap_perfmon"]
+optional = true
+
+[[component.services]]
+unit = "agentsight-enforcer.service"
+scope = "system"
+enable = false
+start = false
+
+[[component.services]]
+unit = "agentsight.service"
+scope = "system"
+enable = false
+start = false
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/agentsight"
+timeout_secs = 5

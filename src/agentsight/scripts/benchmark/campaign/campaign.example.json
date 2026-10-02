@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "campaign_id": "replace-after-baseline-pretest",
+  "comparison_mode": "ab_comparison",
+  "versions": {
+    "baseline": {
+      "commit": "BASELINE_COMMIT",
+      "binary": "/absolute/path/to/baseline/agentsight",
+      "config": "/absolute/path/to/baseline/agentsight.json",
+      "db": "/var/log/sysak/.agentsight/genai_events.db"
+    },
+    "optimized": {
+      "commit": "OPTIMIZED_COMMIT",
+      "binary": "/absolute/path/to/optimized/agentsight",
+      "config": "/absolute/path/to/optimized/agentsight.json",
+      "db": "/var/log/sysak/.agentsight/genai_events.db"
+    }
+  },
+  "thresholds": {
+    "min_throughput_ratio": 0.95,
+    "min_http_success_rate": 0.999,
+    "min_trace_completeness": 0.999,
+    "min_token_accuracy": 1.0,
+    "max_p99_ms": 1000,
+    "max_drop_rate": 0.001,
+    "max_rss_mb": 1024,
+    "max_rss_slope_mb_per_hour": 10,
+    "max_fd_slope_per_hour": 2,
+    "max_thread_slope_per_hour": 1,
+    "max_socket_slope_per_hour": 2,
+    "max_recovery_seconds": 300
+  },
+  "load": {
+    "protocol": "sse",
+    "payload_kb": 4,
+    "chunks": 10,
+    "chunk_bytes": 64
+  },
+  "safety": {
+    "max_results_gb": 30,
+    "min_free_disk_gb": 5,
+    "min_available_memory_mb": 2048,
+    "max_agentsight_rss_mb": 1536,
+    "max_k6_vus": 256
+  },
+  "smoke": {
+    "qps": 10,
+    "duration_seconds": 30
+  },
+  "capacity": {
+    "qps_start": 10,
+    "qps_resolution": 1,
+    "qps_safety_max": 12800,
+    "pretest_warmup_seconds": 30,
+    "pretest_duration_seconds": 60,
+    "search_start_ratio": 0.8,
+    "probe_warmup_seconds": 180,
+    "probe_duration_seconds": 300,
+    "confirm_warmup_seconds": 180,
+    "confirm_duration_seconds": 900,
+    "confirm_repetitions": 3
+  },
+  "matrix": {
+    "qps": [],
+    "warmup_seconds": 180,
+    "duration_seconds": 900,
+    "repetitions": 3
+  },
+  "soak": {
+    "warmup_seconds": 600,
+    "duration_seconds": 14400
+  },
+  "recovery": {
+    "stable_seconds": 600,
+    "overload_seconds": 300,
+    "recover_seconds": 900,
+    "repetitions": 3,
+    "tolerance_ratio": 0.1,
+    "recovery_window_seconds": 300
+  },
+  "fault": {
+    "warmup_seconds": 180,
+    "duration_seconds": 300,
+    "repetitions_per_case": 10
+  }
+}

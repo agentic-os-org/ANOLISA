@@ -1,0 +1,9 @@
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index 9aa6017..e1bca62 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -160,0 +161,4 @@ struct CConfig {
++/// AgentSight ABI guard: the compiled config blob must match this engine's
++/// CConfig size. Cross-checked against actplane-ifc-compiler at compile time.
++pub const EXPECTED_CONFIG_BLOB_SIZE: usize = std::mem::size_of::<CConfig>();
++

@@ -1,0 +1,12 @@
+# Build artifacts of the standalone L2 benchmark workspace.
+target/
+# Run-time outputs of l2_compare — regenerated on every run and
+# machine-specific, so they must never be committed. This workspace keeps its
+# own reports/ directory (l2_compare --report-dir reports) so L1 and L2 results
+# never mix; nothing report-shaped is committed, wherever it lands.
+reports/
+__pycache__/
+.probe_cache.json
+*_REPORT.md
+report.json
+*_REPORT_zh.md

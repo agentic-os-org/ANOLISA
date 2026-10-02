@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/security-command-inspect-output/v2",
+  "title": "security-command-inspect output v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision"
+  ],
+  "properties": {
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "findings",
+        "coverage",
+        "reasons",
+        "execution_intent_digest"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "allow",
+            "warn",
+            "deny"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/finding"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "coverage": {
+          "allOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/coverage"
+            },
+            {
+              "properties": {
+                "complete": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/rule"
+          },
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "execution_intent_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "allow"
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "coverage": {
+                "properties": {
+                  "complete": {
+                    "const": true
+                  }
+                }
+              },
+              "reasons": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "warn",
+                  "deny"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              },
+              "reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

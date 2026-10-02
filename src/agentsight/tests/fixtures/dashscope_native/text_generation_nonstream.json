@@ -1,0 +1,1 @@
+{"output":{"choices":[{"message":{"content":"收到了","role":"assistant"},"finish_reason":"stop"}]},"usage":{"total_tokens":26,"output_tokens":1,"input_tokens":25,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"b82b259c-ed1d-95bd-8c0e-4f357868a622"}

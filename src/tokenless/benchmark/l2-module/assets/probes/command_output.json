@@ -1,0 +1,34 @@
+[
+  {
+    "question": "Does each commit line in the log start with an abbreviated hexadecimal commit hash? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Do the commit subject lines follow the conventional 'type(scope): description' format? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Are more than 10 commits listed in this output? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Does the output contain an 'Author:' line? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Does the output contain a 'Date:' line? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Does the output include a summary line stating how many files changed? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Is this output produced by a version control tool? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Quote the full commit hash shown at the top of the output, if one is present.",
+    "expected_contains": "commit"
+  }
+]

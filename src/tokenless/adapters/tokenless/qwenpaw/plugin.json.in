@@ -1,0 +1,17 @@
+{
+  "id": "tokenless",
+  "name": "Tokenless",
+  "version": "@VERSION@",
+  "type": "general",
+  "description": "ANOLISA Tokenless: compress tool schemas and tool results before they reach the model",
+  "author": "ANOLISA",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.0.0",
+    "max": "3.0.0"
+  },
+  "meta": {}
+}

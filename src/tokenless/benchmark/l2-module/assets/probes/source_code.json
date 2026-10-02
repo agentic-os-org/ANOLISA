@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What is the value of the MARKER_PREFIX constant?",
+    "expected_contains": "<<tokenless:"
+  },
+  {
+    "question": "What is the value of the MARKER_SUFFIX constant?",
+    "expected_contains": ">>"
+  },
+  {
+    "question": "How many hex characters must a valid stash key contain?",
+    "expected_contains": "24"
+  },
+  {
+    "question": "Which hash function is used to derive stash keys?",
+    "expected_contains": "blake3"
+  },
+  {
+    "question": "Which function builds a marker string for a given hash?",
+    "expected_contains": "marker_for"
+  },
+  {
+    "question": "Which function extracts the first marker's hash from arbitrary text?",
+    "expected_contains": "extract_hash"
+  },
+  {
+    "question": "What does parse_marker return for malformed input?",
+    "expected_contains": "none"
+  },
+  {
+    "question": "Which function computes a stash key for a payload?",
+    "expected_contains": "compute_key"
+  },
+  {
+    "question": "What is the name of the test that asserts the key length?",
+    "expected_contains": "key_is_24_hex_chars"
+  },
+  {
+    "question": "Which public function validates that a bare hash is a well-formed stash key?",
+    "expected_contains": "is_valid_hash"
+  }
+]

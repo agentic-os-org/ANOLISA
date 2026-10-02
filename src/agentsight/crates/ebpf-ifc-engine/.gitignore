@@ -1,0 +1,12 @@
+/.output/
+/bootstrap/
+
+# root-level binaries produced by the bpf Makefile
+/browsertrace
+/process
+/process_new
+/sslsniff
+/stdiocap
+/test_taint
+/test_process_*
+target

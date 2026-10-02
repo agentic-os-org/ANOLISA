@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: Apache-2.0
+# Default policy for the agent-rl workload class.
+#
+# This policy targets long-running RL rollout workloads with high resource
+# quotas.
+
+# Policy manifest version. Must be 1 (only supported version).
+manifest_version = 1
+
+# Unique name for this policy. Used in API responses, logs, and metrics.
+policy_name = "agent-rl-default"
+
+# Priority for conflict resolution when multiple policies match the same
+# request. Higher value wins. Type: signed integer. Default: 0.
+priority = 100
+
+# ---------------------------------------------------------------------------
+# Match conditions. ALL fields must match for this policy to apply.
+# The engine evaluates policies in descending priority order and returns the
+# first match.
+# ---------------------------------------------------------------------------
+[match]
+# Workload class to match against the request's declared class.
+# Options: agent-rl, agent-tool, serverless, dev-shell, untrusted, function.
+workload_class = "agent-rl"
+
+# Optional: require specific OCI image labels to be present on the request.
+# All key=value pairs listed here must match; empty map (or omitted) means
+# any image matches. Uncomment below to restrict matching to labeled images:
+# image_labels = { "ai.anolisa.workload" = "rl-rollout" }
+
+# ---------------------------------------------------------------------------
+# Backend and hook selection. Determines how the sandbox is created.
+# ---------------------------------------------------------------------------
+[select]
+# Ordered list of backends to try. Daemon picks the first one whose binary
+# is available (configured in [backends] of config.toml).
+# Options: firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
+#          kata-qemu, runc, bubblewrap.
+backend_priority = ["firecracker", "bubblewrap"]
+
+# Kernel hooks to activate for this workload class.
+# Available hooks (Phase 2+): "mm-template", "uffd-wp".
+# Empty list means no kernel hooks.  Default: [].
+kernel_hooks = []
+
+# Memory templates to bind at instance creation.
+# Requires corresponding kernel_hooks to be active.  Default: [].
+templates = []
+
+# Behavior when a declared kernel hook is not available on this host.
+# Options: "fail" (reject the request), "degrade" (proceed without the hook),
+#          "continue" (silently skip).  Default: "fail".
+fallback_on_missing_hook = "degrade"
+
+# ---------------------------------------------------------------------------
+# Resource quotas applied to each sandbox instance (cgroup v2 knobs).
+# All fields are optional; omitting a field means no limit for that resource.
+# ---------------------------------------------------------------------------
+[quota]
+# CPU weight (cgroup cpu.weight analogue). Range: 1-10000.
+cpu_shares = 1024
+
+# Memory high watermark (soft limit). Exceeding triggers reclaim pressure.
+# Format: size string (e.g. "512M", "2G").
+memory_high = "2G"
+
+# Memory hard max. OOM-killed if exceeded.
+# Format: size string.
+memory_max = "4G"
+
+# Maximum number of PIDs (processes + threads).
+pids_max = 4096
+
+# ---------------------------------------------------------------------------
+# VM generic resource spec. Only consumed by VM backends.
+#
+# VM resource resolution order:
+# 1. [backend.firecracker].vcpus / .memory  (highest priority)
+# 2. [vm].vcpus / .memory                   (policy-level default)
+# 3. Code default: 1 vCPU, 256Mi            (fallback)
+# ---------------------------------------------------------------------------
+[vm]
+vcpus = 4
+memory = "4G"
+
+# ---------------------------------------------------------------------------
+# Firecracker-specific knobs.
+# ---------------------------------------------------------------------------
+[backend.firecracker]
+boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+enable_vsock = true   # requires the compatible guest agent on vsock port 5000
+enable_network = false # opt in to a per-sandbox netns, tap, veth, and NAT
+serial_log = false
+
+# ---------------------------------------------------------------------------
+# Lifecycle hook sequences (Phase 3 — not yet active in v0.1).
+# Each hook is a string of format "<provider>:<action>".
+# ---------------------------------------------------------------------------
+# [hooks.on_create]
+# sequence = ["template-reg:bind-mm-template"]
+
+# [hooks.on_reset]
+# sequence = ["mm-template:rollback"]
+
+# [hooks.on_destroy]
+# sequence = ["template-reg:unbind-mm-template"]

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Run Python entry points from the raw package's isolated runtime.
+set -eu
+
+PREFIX=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+RUNTIME="$PREFIX/lib/anolisa/sec-core/python3.11/runtime"
+SITE_PACKAGES="$PREFIX/lib/anolisa/sec-core/python3.11/site-packages"
+PYTHON="$RUNTIME/bin/python3.11"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: bundled Python runtime is missing: $PYTHON" >&2
+    exit 127
+fi
+VERSION=$(PYTHONHOME="$RUNTIME" PYTHONNOUSERSITE=1 \
+    "$PYTHON" -c 'import platform; print(platform.python_version())')
+if [ "$VERSION" != "3.11.6" ]; then
+    echo "ERROR: bundled Python runtime must be 3.11.6, found $VERSION" >&2
+    exit 1
+fi
+
+PYTHONHOME="$RUNTIME" \
+PYTHONNOUSERSITE=1 \
+PYTHONPATH="$SITE_PACKAGES" \
+    exec "$PYTHON" "$@"

@@ -1,0 +1,22 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+21 compiler invocation lines omitted. If needed, run in shell: tokenless retrieve 1259598dfa53beec812b873f
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+info: waiting for file lock on build/.lock (attempt 1)
+info: waiting for file lock on build/.lock (attempt 2)
+info: waiting for file lock on build/.lock (attempt 3)
+info: waiting for file lock on build/.lock (attempt 4)
+info: waiting for file lock on build/.lock (attempt 5)
+info: waiting for file lock on build/.lock (attempt 6)
+info: waiting for file lock on build/.lock (attempt 7)
+info: waiting for file lock on build/.lock (attempt 8)
+info: waiting for file lock on build/.lock (attempt 9)
+info: waiting for file lock on build/.lock (attempt 10)
+info: waiting for file lock on build/.lock (attempt 11)
+info: waiting for file lock on build/.lock (attempt 12)
+ar rcs build/libapp.a build/main.o build/util.o build/parser.o build/lexer.o build/codegen.o build/optimizer.o build/linker.o build/loader.o
+cc build/main.o build/libapp.a -o build/app
+make: Leaving directory '/work/project'
+Exit code: 0

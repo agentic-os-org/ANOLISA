@@ -1,0 +1,1624 @@
+{
+  "source_revision": "07ed471e45144a5fd6e6157eb75e2882f85f5bf2",
+  "source_hashes": {
+    "__init__.py": "5dd5a1d71b3d08571d7bdaa2d685f580b581237e3e50d6486b9f39b928fefb4f",
+    "activation_policy.py": "f846de87b1cee44b0fc2f90d5cb262c702d4f0e33a90a536f864b90feb15f47f",
+    "analyze.py": "831352d17b37748708f3419fed6dff9e06f6499c0f8274bce54fc8cf2dc739df",
+    "cli.py": "156baf64717b25ee02f526902e961d89423f51d18fc75f2d19fac6a479e06ada",
+    "config.py": "201ce48997a584e81862da54be6c9aa9c21ff2f76957417533bcabcced73defe",
+    "core/__init__.py": "b218dee7af4e2e005e0765537ee6ca5b05dec4873d87e7d6ae44be111be2acdb",
+    "core/auditor.py": "7e2ecd1814cf09dddeece3f25dd699d0b4813e06f9e021b154bcfd3a92189147",
+    "core/certifier.py": "a4cf00746b29f9a94fa95ee56f866803d961c55d20f5f30d011fe966a5739faa",
+    "core/checker.py": "d2f54ebd80681c359586ac767dfbfbbe40dbf1cedf54921c83655a2aa923aea6",
+    "core/decision.py": "eefb18edc5d6a422624a41cb025b648b6d780dc2147925bbb013db0879d5c584",
+    "core/exposure.py": "ffcdafa9e8015db7fab553da7e30b5fc1e4191efa0f374412635f45d4764cf7b",
+    "core/file_hasher.py": "96c4aa2d8679a2af929d21ac55a4362e24ffd1abb123678b3201b8af01479852",
+    "core/live_root.py": "3cc93b56de90f9d478e373b3bffeb989ea596acbfd13de871dbb3fb9649a9ab1",
+    "core/manifest_helpers.py": "103a47bda3f1473b074d12a4519519e4132729b76084b567405d0a08000e11f5",
+    "core/manifest_integrity.py": "7bb9330f1ba1539151583844ae1a467c36b047af9f6ca915a928900558ee7ba3",
+    "core/resolver.py": "9b645322ed77d97d447c2608b61a334760bf4fd9a250f48cbdd04494ea58e435",
+    "core/status.py": "f37faacdb6e707d3f290f0db61716a42b624d80b274641693d0dff16ff256a9e",
+    "core/version_chain.py": "23ceca610e306cd67e92eacffd2b9ec7dc88632fec3148356d79eda8dad7c1b7",
+    "errors.py": "4a1356a7dfdcfb129a194013d600931aafa29f1011502e46523b23a7f0127e86",
+    "models/__init__.py": "9865a5ff2753146f74132b3645849e4b92fea330fffc0867476c0e15e37e038f",
+    "models/finding.py": "f637e763c804b91ddaf428ba5089407dd9aaea23483f62b4566e4648988d4147",
+    "models/manifest.py": "7583edbd9a6c4b17aa5b869be89e0447f93a3211930ee6c3ef7e6f0d6f417327",
+    "models/scan.py": "720bd4b9bab5b6a934aefe36633ce6b6c0972a2c40839a805a7df775a1cca530",
+    "path_identity.py": "8c05e20513e10d6a15e4725a19fb5e87f3ce4b8061ca14db7892fdf497235db7",
+    "paths.py": "7de6711caae6c7f087e051cf71c8430c81acf851879189770df6d1c4125ea95f",
+    "scanner/__init__.py": "313a551c597d01d29377233f12859a16d3e0ffcf423296ad507d8e212c3549ba",
+    "scanner/builtins/__init__.py": "7bc54c44221c0b9933c9016b57822ffd2c5a8a6b0075b8ea6fb7188cfd16721b",
+    "scanner/builtins/cisco_static/__init__.py": "eaa1155a2bfde4da78885ad8d6fb67380b0b9c540cb0319f80e5323b7b50f2c4",
+    "scanner/builtins/cisco_static/scanner.py": "389436ed638fc0de7fcdd8b04a945ff9c7a23c7e71b4b92cb3390555ac2b53cc",
+    "scanner/builtins/dispatcher.py": "1cf0f52e4e3c20b0a967b6255658e1a20deb2134e44c0c64669e0ecd1a9787cd",
+    "scanner/names.py": "f1b7615545e9a4610b37d76bb9b7cda24d0393c73dde0bba31a394257043e44a",
+    "scanner/parsers.py": "5e7228c8776207b83f11202d763e7a8e24494b364001e9ffb491f8ae27fb25ea",
+    "scanner/registry.py": "8a127f92f987789efc767e574f868e624929c5281855f75c6d8221468a07f51a",
+    "scanner/skill_code_scanner.py": "a942e51097e2eb9ecdbe7ca2adc57d4307cf6bebea254dd58c03e215d8f503c0",
+    "signing/__init__.py": "4726b5f1e098686020bcc0b23cc97d43fa4cc54da9ea954dab7a22f74ee785a8",
+    "signing/base.py": "a0db2555730476a8e46732bdad3400e2c380f5afc5f9dcbbee33b7fc4a2d25a9",
+    "signing/ed25519.py": "6689a77fee7e6bbe6d6956eea874a80a9e105189ccece9b3ac0c912fcc565c56",
+    "signing/key_manager.py": "08a1c0b56592e294f293ab15f4c176f2d620d4d1cbf31829dde88bbfa54e6a54",
+    "skillfs_peer_auth.py": "f5157304fd780bae2616ba011a908303ad1c88240bc65a601c42b58b309f8b9d",
+    "utils.py": "31499cacc71235233bfb395128a82fccc6a095d21ad21676bd2be1d0db155170"
+  },
+  "cases": [
+    {
+      "name": "fresh-pending",
+      "steps": [
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "unmanaged",
+            "latestVersionId": null,
+            "activeVersionId": null,
+            "target": null,
+            "userDecision": null,
+            "reasonCode": "unmanaged_skill_root",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": null,
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "skill root is not managed by the current Skill Ledger daemon: canonical skill root is not configured in managedSkillDirs",
+            "findings": [],
+            "warnings": []
+          }
+        },
+        {
+          "op": "activate",
+          "expected": {
+            "schemaVersion": 1,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "activeVersionId": null,
+            "status": "none",
+            "latestStatus": "none",
+            "latestVersionId": null,
+            "policy": "pass_warn_only",
+            "userDecision": null,
+            "reasonCode": "latest_risk_pending_decision",
+            "message": "Latest skill status is none for version none; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'."
+          }
+        }
+      ]
+    },
+    {
+      "name": "pass-warn",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000001",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "normal",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [],
+            "warnings": []
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "warn",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "warn",
+            "newVersion": false,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "warn",
+            "latestVersionId": "v000001",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "normal",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "warn",
+              "scanStatus": "warn",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "warn",
+              "scanStatus": "warn",
+              "userDecision": null
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [
+              {
+                "rule": "review",
+                "level": "warn",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        },
+        {
+          "op": "activate",
+          "expected": {
+            "schemaVersion": 1,
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "activeVersionId": "v000001",
+            "status": "warn",
+            "latestStatus": "warn",
+            "latestVersionId": "v000001",
+            "policy": "pass_warn_only",
+            "userDecision": null,
+            "reasonCode": "normal",
+            "message": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "deny-decisions",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "userDecision": null,
+            "reasonCode": "latest_risk_pending_decision",
+            "message": "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "Latest skill status is deny for version v000001; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'.",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": [
+              "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review."
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "allow",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_allow",
+              "message": null
+            },
+            "currentStatus": "deny"
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_allow",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              }
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        },
+        {
+          "op": "decide",
+          "action": "block",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": {
+              "action": "block",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": null,
+              "activeVersionId": null,
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "block",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_block",
+              "message": null
+            },
+            "currentStatus": "deny"
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": null,
+            "userDecision": {
+              "action": "block",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_block",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "block",
+                "reason": "fixture review"
+              }
+            },
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "user decision block hides this skill",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        },
+        {
+          "op": "clear",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": null,
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/__pending_decision__.snapshot",
+              "activeVersionId": null,
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": null,
+              "reasonCode": "latest_risk_pending_decision",
+              "message": "Latest skill status is deny for version v000001; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'."
+            }
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "userDecision": null,
+            "reasonCode": "latest_risk_pending_decision",
+            "message": "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "Latest skill status is deny for version v000001; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'.",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": [
+              "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review."
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "allow-pins-older",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "allow",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_allow",
+              "message": null
+            },
+            "currentStatus": "deny"
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_allow",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "user decision allow pins active version v000001 instead of latest v000002",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        },
+        {
+          "op": "export",
+          "version": "active",
+          "expected": {
+            "versionId": "v000001"
+          }
+        },
+        {
+          "op": "clear",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "userDecision": null,
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000002",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_allow",
+              "message": null
+            }
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_allow",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "user decision allow pins active version v000001 instead of latest v000002",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "always-allow-inherits",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "always_allow",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": {
+              "action": "always_allow",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "always_allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_always_allow",
+              "message": null
+            },
+            "currentStatus": "deny"
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000002",
+            "target": ".skill-meta/versions/v000002.snapshot",
+            "userDecision": {
+              "action": "always_allow",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_always_allow",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "always_allow",
+                "reason": "fixture review"
+              }
+            },
+            "active": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "always_allow",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        },
+        {
+          "op": "clear",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "userDecision": null,
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000002",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "always_allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_always_allow",
+              "message": null
+            }
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": {
+              "action": "always_allow",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_always_allow",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "always_allow",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "user decision always_allow pins active version v000001 instead of latest v000002",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "policy-fallback",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "latest_risk_fallback_to_previous",
+            "message": "Latest version v000002 is deny and is not exposed; current active version is v000001. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block, rollback --version v000001, or allow after review.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "Latest skill status is deny for version v000002; active version is v000001.",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": [
+              "Latest version v000002 is deny and is not exposed; current active version is v000001. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block, rollback --version v000001, or allow after review."
+            ]
+          }
+        },
+        {
+          "op": "activate",
+          "expected": {
+            "schemaVersion": 1,
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "activeVersionId": "v000001",
+            "status": "deny",
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "policy": "pass_warn_only",
+            "userDecision": null,
+            "reasonCode": "latest_risk_fallback_to_previous",
+            "message": "Latest skill status is deny for version v000002; active version is v000001."
+          }
+        }
+      ]
+    },
+    {
+      "name": "block-new-version",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "block",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "userDecision": {
+              "action": "block",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": null,
+              "activeVersionId": null,
+              "status": "pass",
+              "latestStatus": "pass",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "block",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_block",
+              "message": null
+            },
+            "currentStatus": "pass"
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": null,
+            "userDecision": {
+              "action": "block",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_block",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "block",
+                "reason": "fixture review"
+              }
+            },
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "user decision block hides this skill",
+            "findings": [],
+            "warnings": []
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "latest_risk_fallback_to_previous",
+            "message": "Latest version v000002 is deny and is not exposed; current active version is v000001. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block, rollback --version v000001, or allow after review.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "block",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "Latest skill status is deny for version v000002; active version is v000001.",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": [
+              "Latest version v000002 is deny and is not exposed; current active version is v000001. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block, rollback --version v000001, or allow after review."
+            ]
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000002",
+            "target": ".skill-meta/versions/v000002.snapshot",
+            "userDecision": null,
+            "reasonCode": "normal",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000002",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000002",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [],
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-suppresses-allow",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "allow",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "userDecision": {
+              "action": "allow",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "deny",
+              "latestStatus": "deny",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_allow",
+              "message": null
+            },
+            "currentStatus": "deny"
+          }
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/versions/v000002.json",
+          "content": "{}"
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "userDecision": null,
+            "reasonCode": "latest_risk_pending_decision",
+            "message": "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "deny",
+              "scanStatus": "deny",
+              "userDecision": {
+                "action": "allow",
+                "reason": "fixture review"
+              }
+            },
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "Latest skill status is deny for version v000001; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'.",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ],
+            "warnings": [
+              "Latest version v000001 is deny and is not exposed; no active safe version is exposed yet. Latest findings: [deny] review: review required. Review hidden latest with export --version latest, then decide: block or allow after review."
+            ]
+          }
+        },
+        {
+          "op": "activate",
+          "expected": {
+            "schemaVersion": 1,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "activeVersionId": null,
+            "status": "deny",
+            "latestStatus": "deny",
+            "latestVersionId": "v000001",
+            "policy": "pass_warn_only",
+            "userDecision": null,
+            "reasonCode": "latest_risk_pending_decision",
+            "message": "Latest skill status is deny for version v000001; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'."
+          }
+        }
+      ]
+    },
+    {
+      "name": "rollback-previous",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "deny",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "rollback",
+          "version": "v000001",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000003",
+            "scanStatus": "pass",
+            "userDecision": {
+              "action": "rollback",
+              "targetVersionId": "v000001",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000003.snapshot",
+              "activeVersionId": "v000003",
+              "status": "pass",
+              "latestStatus": "pass",
+              "latestVersionId": "v000003",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_rollback",
+              "message": null
+            },
+            "currentStatus": "pass"
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000003",
+            "activeVersionId": "v000003",
+            "target": ".skill-meta/versions/v000003.snapshot",
+            "userDecision": {
+              "action": "rollback",
+              "targetVersionId": "v000001",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_rollback",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000003",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              }
+            },
+            "active": {
+              "versionId": "v000003",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [],
+            "warnings": []
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000003",
+            "userDecision": {
+              "action": "rollback",
+              "targetVersionId": "v000001",
+              "reason": "fixture review"
+            },
+            "status": "pass"
+          }
+        },
+        {
+          "op": "export",
+          "version": "active",
+          "expected": {
+            "versionId": "v000003"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rollback-drift-default",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo changed\n"
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "drifted",
+            "latestVersionId": "v000001",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "root_drift",
+            "message": "Current skill root drifted from latest signed version v000001; active version is v000001.",
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "drifted",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "rootMatchesActive": false,
+            "consistencyReason": "Current skill root drifted from latest signed version v000001; active version is v000001.",
+            "findings": [],
+            "warnings": [
+              "Current skill root drifted from latest signed version v000001; active version is v000001."
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "rollback",
+          "expected": {
+            "status": "decided",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "userDecision": {
+              "action": "rollback",
+              "targetVersionId": "v000001",
+              "reason": "fixture review"
+            },
+            "activation": {
+              "schemaVersion": 1,
+              "target": ".skill-meta/versions/v000001.snapshot",
+              "activeVersionId": "v000001",
+              "status": "pass",
+              "latestStatus": "pass",
+              "latestVersionId": "v000001",
+              "policy": "pass_warn_only",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              },
+              "reasonCode": "user_rollback",
+              "message": null
+            },
+            "currentStatus": "pass"
+          }
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000001",
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": {
+              "action": "rollback",
+              "targetVersionId": "v000001",
+              "reason": "fixture review"
+            },
+            "reasonCode": "user_rollback",
+            "message": null,
+            "activationPolicy": "pass_warn_only",
+            "latest": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              }
+            },
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": {
+                "action": "rollback",
+                "targetVersionId": "v000001",
+                "reason": "fixture review"
+              }
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": null,
+            "findings": [],
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "damaged-latest",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/latest.json",
+          "content": "{}"
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "tampered",
+            "latestVersionId": null,
+            "activeVersionId": "v000001",
+            "target": ".skill-meta/versions/v000001.snapshot",
+            "userDecision": null,
+            "reasonCode": "tampered",
+            "message": "Latest skill metadata is tampered for version none; active version is v000001.",
+            "activationPolicy": "pass_warn_only",
+            "latest": null,
+            "active": {
+              "versionId": "v000001",
+              "status": "pass",
+              "scanStatus": "pass",
+              "userDecision": null
+            },
+            "rootMatchesActive": true,
+            "consistencyReason": "Latest skill metadata is tampered for version none; active version is v000001.",
+            "findings": [],
+            "warnings": [
+              "Latest skill metadata is tampered for version none; active version is v000001."
+            ]
+          }
+        },
+        {
+          "op": "decide",
+          "action": "allow",
+          "expected": {
+            "executionError": "SkillLedgerError"
+          }
+        },
+        {
+          "op": "clear",
+          "expected": {
+            "executionError": "SkillLedgerError"
+          }
+        }
+      ]
+    },
+    {
+      "name": "damaged-snapshot",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/versions/v000001.snapshot/main.sh",
+          "content": "tampered"
+        },
+        {
+          "op": "show",
+          "expected": {
+            "latestStatus": "pass",
+            "latestVersionId": "v000001",
+            "activeVersionId": null,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "userDecision": null,
+            "reasonCode": "tampered",
+            "message": "Latest pass snapshot is not a trusted activation target; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'.",
+            "activationPolicy": "pass_warn_only",
+            "latest": null,
+            "active": null,
+            "rootMatchesActive": null,
+            "consistencyReason": "Latest pass snapshot is not a trusted activation target; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'.",
+            "findings": [],
+            "warnings": [
+              "Latest pass snapshot is not a trusted activation target; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'."
+            ]
+          }
+        },
+        {
+          "op": "activate",
+          "expected": {
+            "schemaVersion": 1,
+            "target": ".skill-meta/versions/__pending_decision__.snapshot",
+            "activeVersionId": null,
+            "status": "pass",
+            "latestStatus": "pass",
+            "latestVersionId": "v000001",
+            "policy": "pass_warn_only",
+            "userDecision": null,
+            "reasonCode": "tampered",
+            "message": "Latest pass snapshot is not a trusted activation target; active skill is a safe review stub pending user decision. Review with 'agent-sec-cli skill-ledger show' or 'agent-sec-cli skill-ledger export', then choose with 'agent-sec-cli skill-ledger decide'."
+          }
+        },
+        {
+          "op": "decide",
+          "action": "allow",
+          "expected": {
+            "executionError": "SkillLedgerError"
+          }
+        },
+        {
+          "op": "decide",
+          "action": "rollback",
+          "version": "v000001",
+          "expected": {
+            "executionError": "SkillLedgerError"
+          }
+        }
+      ]
+    }
+  ]
+}

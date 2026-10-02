@@ -1,0 +1,13 @@
+rule_id: py-obfuscation
+cwe_id: CWE-506
+desc_en: >-
+  Code decodes obfuscated content (base64, hex, codecs) and executes it,
+  a common technique used in malicious packages to hide payload.
+desc_zh: >-
+  代码解码混淆内容（base64、hex、codecs）并执行，这是恶意包中隐藏载荷的常见技术。
+regex: |-
+  \b(exec|eval)\s*\([^)]*\b(base64\.b64decode|b64decode)\b
+  |\b(exec|eval)\s*\([^)]*\bcodecs\.decode\b
+  |\b(exec|eval)\s*\([^)]*\bbytes\.fromhex\b
+  |\b(exec|eval)\s*\(\s*compile\s*\([^)]*\b(base64|codecs|fromhex)\b
+severity: warn

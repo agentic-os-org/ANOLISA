@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Codex PostToolUse environment diagnostics for the Tokenless plugin.
+
+Codex does not let PostToolUse hooks replace or suppress the original tool
+response. Adding compressed content through ``additionalContext`` therefore
+increases the model-visible payload instead of reducing it. This hook only
+adds actionable context for classified environment failures; successful and
+unclassified responses pass through unchanged.
+
+Protocol:
+    stdin  <- Codex PostToolUse JSON (tool_name, tool_response, ...)
+    stdout -> {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                       "additionalContext": "..."}}
+
+Fail-open: every error path exits successfully with empty stdout so a
+diagnostic failure never blocks the agent session.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+# Resolve shared hook utilities (common/hooks/) with FHS fallback paths.
+# Primary: relative path (works for source-tree and FHS/RPM install).
+# Fallbacks: system and user FHS paths (works when Codex caches only the
+# plugin subdirectory and the relative path resolves outside the cache).
+#
+# Trust model (aligned with bash is_trusted_file / Rust is_trusted_path):
+#   - System FHS paths (/usr/share, /usr/local/share) are unconditional.
+#   - Other paths must be owned by the current user or root, and their parent
+#     directory must not be world-writable.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_trusted_dir(path: str) -> bool:
+    """Check whether a directory is trusted for Python module imports."""
+    for prefix in (
+        "/usr/share/",
+        "/usr/local/share/",
+        "/usr/libexec/",
+        "/usr/lib/anolisa/",
+    ):
+        if path.startswith(prefix):
+            return True
+
+    try:
+        stat = os.stat(path)
+        parent_stat = os.stat(os.path.dirname(path))
+    except OSError:
+        return False
+    if stat.st_uid not in (os.getuid(), 0):
+        return False
+    if parent_stat.st_uid not in (os.getuid(), 0):
+        return False
+    return not parent_stat.st_mode & 0o002
+
+
+try:
+    import pwd as _pwd
+
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+_HOOK_UTILS_CANDIDATES = [
+    os.path.join(_HERE, "..", "..", "common", "hooks"),
+    "/usr/share/anolisa/adapters/tokenless/common/hooks",
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",
+    (
+        os.path.join(
+            _REAL_HOME,
+            ".local",
+            "share",
+            "anolisa",
+            "adapters",
+            "tokenless",
+            "common",
+            "hooks",
+        )
+        if _REAL_HOME
+        else ""
+    ),
+]
+_HOOK_UTILS_RESOLVED = ""
+for _candidate in _HOOK_UTILS_CANDIDATES:
+    resolved = os.path.realpath(_candidate) if _candidate else ""
+    if resolved and _is_trusted_dir(resolved) and os.path.isdir(resolved):
+        _HOOK_UTILS_RESOLVED = resolved
+        sys.path.insert(0, resolved)
+        break
+
+if _HOOK_UTILS_RESOLVED:
+    from hook_utils import (  # noqa: E402
+        SKIP_TOOLS as _SKIP_TOOLS_SHARED,
+        classify_env_error as _classify_env_error,
+        skip_silent as _skip,
+    )
+else:
+
+    def _skip() -> None:  # type: ignore[assignment,misc]
+        sys.exit(0)
+
+    def _classify_env_error(  # type: ignore[assignment,misc]
+        tool_response: object,
+    ) -> tuple[str | None, str | None]:
+        return None, None
+
+    _SKIP_TOOLS_SHARED: set[str] = {  # type: ignore[assignment,misc]
+        "Read",
+        "read",
+        "read_file",
+        "read_many_files",
+        "Glob",
+        "glob",
+        "list_directory",
+        "Grep",
+        "grep",
+        "grep_search",
+        "search_files",
+        "Lsp",
+        "lsp",
+        "NotebookRead",
+        "notebook_read",
+        "notebookread",
+    }
+
+
+SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
+    "TodoWrite",
+    "Task",
+    "TaskStatus",
+}
+
+
+def main() -> None:
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    tool_name = input_data.get("tool_name", "")
+    tool_response = input_data.get("tool_response")
+    if tool_name in SKIP_TOOLS or tool_response is None:
+        _skip()
+
+    env_category, env_hint = _classify_env_error(tool_response)
+    if not env_category or not env_hint:
+        _skip()
+
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": (
+                f"[tokenless:env:{env_category}] {env_hint} "
+                "Do NOT retry the same command — fix the environment first."
+            ),
+        }
+    }
+    print(json.dumps(response, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

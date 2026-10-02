@@ -1,0 +1,13 @@
+rule_id: shell-download-exec
+cwe_id: CWE-829
+desc_en: >-
+  Command downloads content from a remote source and immediately
+  executes it, enabling remote code execution from untrusted sources.
+desc_zh: >-
+  命令从远程源下载内容并立即执行，可能导致从不受信任的来源执行远程代码。
+regex: |-
+  \b(curl|wget)\b[^;\n]*\|\s*(?:sudo\s+)?(?:env\s+)?\b(sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node(js)?|php)\b
+  |(\b(sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node(js)?|php|source)\b|\.\s)[^;\n&]*<\([^)]*\b(curl|wget)\b
+  |\beval\b[^;\n&]*\$\([^)]*\b(curl|wget)\b
+  |\beval\b[^;\n&]*`[^`]*\b(curl|wget)\b
+severity: warn

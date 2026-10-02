@@ -1,0 +1,200 @@
+# SkillFS T0.1 external POSIX harness — caller-identity / semantics-gap manifest.
+#
+# Each non-comment line is a glob pattern (matched against the test file
+# path relative to <pjdfstest>/tests). A failing pjdfstest file whose
+# path matches at least one pattern is bucketed as a "caller-identity
+# fail" in the harness report — it is known to fail because pjdfstest's
+# subtests depend on POSIX semantics SkillFS does not currently
+# emulate:
+#
+#   * per-caller uid/gid fidelity (pjdfstest passes `-u <uid>
+#     -g <gid>` to drop privilege inside the binary; SkillFS's FUSE
+#     daemon runs as root and underlying syscalls execute as root, so
+#     EPERM/EACCES expectations against the dropped identity do not
+#     hold);
+#   * sticky-bit (S_ISVTX) semantics on rename/rmdir, which require
+#     the same per-caller uid fidelity to evaluate;
+#   * `lchmod` probes, which Linux generally does not implement;
+#     pjdfstest gates such tests behind `if supported lchmod` but
+#     also exercises related lstat/symlink branches that fail without
+#     real per-caller identity.
+#
+# Format: a `# citation` comment line MUST immediately precede each
+# glob, naming the upstream pjdfstest file and the specific line(s)
+# that demand the missing semantics. Entries without an upstream
+# citation are not allowed; "it failed in the baseline" is not a
+# citation.
+#
+# When a future SkillFS package wires `req.uid()` / `req.gid()`
+# through to underlying syscalls (e.g. via FUSE `default_permissions`
+# plus setreuid/setregid in worker threads, or via per-call seteuid),
+# remove every entry whose citation cites uid/gid fidelity and re-run.
+#
+# See docs/testing/posix-external-harness.md for the install/run guide.
+
+# ---------------------------------------------------------------------------
+# chmod
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/chmod/03.t:9,26-31 — entire test body is gated on
+# `if supported lchmod` (the FUSE daemon does not advertise lchmod
+# support); the test still emits TAP "not ok" for the missing path,
+# producing whole-file failure.
+chmod/03.t
+
+# pjdfstest tests/chmod/05.t:23-26 — `chown ${n1} 65534 65534` then
+# `-u 65534 -g 65534 chmod ${n1}/${n2} ...`. SkillFS cannot honor the
+# dropped uid/gid; EACCES expectations fail.
+chmod/05.t
+
+# pjdfstest tests/chmod/12.t:21,27,33 — `-u 65534 -g 65534 open ...`
+# asserts the resulting fstat mode. Without per-caller identity the
+# effective mode mask differs.
+chmod/12.t
+
+# ---------------------------------------------------------------------------
+# chown
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/chown/03.t:17,20,23,26 — chowns fixtures to
+# 65534 65534 then asserts ENAMETOOLONG behavior. The mode is fine,
+# but the chown ownership and the subsequent `-u 65534` calls do not
+# behave like the spec without per-caller identity.
+chown/03.t
+
+# pjdfstest tests/chown/04.t:16-19 — chown ENOENT branches. The
+# test changes ownership and exercises `-u 65534`/`lchown` paths
+# whose EPERM/EACCES outcomes depend on per-caller identity.
+chown/04.t
+
+# pjdfstest tests/chown/05.t:19-22 — `chown ${n1} 65534 65534` then
+# `-u 65534 -g 65533,65534 -- chown ${n1}/${n2} -1 65533`. Requires
+# per-caller uid/gid fidelity that SkillFS does not provide.
+chown/05.t
+
+# ---------------------------------------------------------------------------
+# ftruncate
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/ftruncate/00.t:45,56 — `-u 65534 open ${n0} O_RDONLY
+# : ftruncate 0 123` expects EINVAL. Without per-caller identity the
+# open and ftruncate run as root and the expectations diverge.
+ftruncate/00.t
+
+# pjdfstest tests/ftruncate/05.t:19-24 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 truncate`. Per-caller uid/gid required.
+ftruncate/05.t
+
+# ---------------------------------------------------------------------------
+# mkdir
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/mkdir/00.t:40-48 — after the mode/umask block (now
+# passing via T0.1 FUSE fix), the test calls
+# `chown . 65534 65534` and `-u 65534 -g 65534 mkdir ... ; expect
+# 65534,65534 lstat ${n0} uid,gid`. SkillFS keeps the daemon uid/gid.
+mkdir/00.t
+
+# pjdfstest tests/mkdir/05.t:19-25 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 mkdir`. Per-caller uid/gid required.
+mkdir/05.t
+
+# pjdfstest tests/mkdir/06.t:19-25 — same shape as mkdir/05.t.
+mkdir/06.t
+
+# ---------------------------------------------------------------------------
+# open
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/open/00.t:44-52 — after the mode/umask block (now
+# passing), the test calls `chown . 65534 65534` and `-u 65534
+# -g 65534 open ${n0} O_CREAT,O_WRONLY 0644 ; expect 65534,65534
+# lstat ${n0} uid,gid`. Per-caller uid/gid required.
+open/00.t
+
+# pjdfstest tests/open/05.t:19-25 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 open ...`. EACCES expectations require per-caller
+# identity.
+open/05.t
+
+# pjdfstest tests/open/06.t:15,21-25 — `chown ${n0} 65534 65534` +
+# `-u 65534 -g 65534 chmod` + `-u 65534 -g 65534 open`. Per-caller
+# identity required.
+open/06.t
+
+# pjdfstest tests/open/07.t:15,19-23 — same shape as open/06.t.
+open/07.t
+
+# ---------------------------------------------------------------------------
+# rename
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/rename/04.t:22-28 — chown source/dest dirs to
+# 65534 65534, then `-u 65534 -g 65534 rename` round-trips. EACCES
+# expectations require per-caller identity.
+rename/04.t
+
+# pjdfstest tests/rename/05.t:22-28 — same shape as rename/04.t.
+rename/05.t
+
+# pjdfstest tests/rename/09.t:4,23-30 — sticky-bit EACCES/EPERM tests
+# (`directory containing 'from' is marked sticky, neither the
+# containing directory nor 'from' are owned by the effective user
+# ID`). Requires per-caller uid + sticky enforcement.
+rename/09.t
+
+# pjdfstest tests/rename/10.t:4,22-35 — sticky-bit EACCES/EPERM tests
+# on the destination side, same dependency as rename/09.t.
+rename/10.t
+
+# pjdfstest tests/rename/21.t:24-41 — `-u 65534 -g 65534 rename`
+# under varying permission topologies. Per-caller identity required.
+rename/21.t
+
+# ---------------------------------------------------------------------------
+# rmdir
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/rmdir/07.t:19-24 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 rmdir` with EACCES expectations.
+rmdir/07.t
+
+# pjdfstest tests/rmdir/08.t:19-24 — same shape as rmdir/07.t.
+rmdir/08.t
+
+# pjdfstest tests/rmdir/11.t:4,20-26 — sticky-bit EACCES/EPERM
+# rmdir tests; depends on per-caller uid + sticky enforcement.
+rmdir/11.t
+
+# ---------------------------------------------------------------------------
+# truncate
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/truncate/05.t:19-24 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 truncate`. Per-caller identity required for the
+# EACCES branches.
+truncate/05.t
+
+# ---------------------------------------------------------------------------
+# unlink
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/unlink/05.t:19-24 — `chown 65534 65534` setup +
+# `-u 65534 -g 65534 unlink`. Per-caller identity required.
+unlink/05.t
+
+# pjdfstest tests/unlink/06.t:19-24 — same shape as unlink/05.t.
+unlink/06.t
+
+# ---------------------------------------------------------------------------
+# utimensat
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/utimensat/06.t:31,39 — `chown ${n0} $UID_NOBODY
+# $GID_NOBODY` then drops to nobody to assert EPERM. Per-caller
+# identity required.
+utimensat/06.t
+
+# pjdfstest tests/utimensat/07.t:27,40 — `create_file regular ... 0644
+# $UID_ROOT $GID_ROOT` then `-u $UID_NOBODY` EPERM checks.
+utimensat/07.t

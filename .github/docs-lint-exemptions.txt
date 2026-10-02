@@ -1,0 +1,3 @@
+# Files exempt from the en/zh tree parity check (pending translation).
+# Paths are relative to docs/user-guide/<lang>/ and apply to both trees.
+# Remove entries once the missing translation lands.

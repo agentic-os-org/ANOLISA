@@ -1,0 +1,50 @@
+###############################################################################
+# Community Issue Claiming
+#
+# `/claim` and `/unclaim` provide a visible ownership record for accepted
+# community tasks. External contributors still work even when GitHub cannot add
+# them as formal assignees.
+###############################################################################
+
+name: Automation / Issue Claim
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-claim-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    name: Handle claim command
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.type != 'Bot' &&
+      (
+        startsWith(github.event.comment.body, '/claim') ||
+        startsWith(github.event.comment.body, '/unclaim') ||
+        startsWith(github.event.comment.body, '/assign') ||
+        startsWith(github.event.comment.body, '/unassign')
+      )
+    runs-on: anolisa-k8s-general-ci-x64
+    env:
+      AUTOMATION_MODE: ${{ vars.COMMUNITY_AUTOMATION_MODE || 'apply' }}
+
+    steps:
+      - name: Check out claim implementation
+        uses: actions/checkout@v4
+
+      - name: Apply claim state
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const claim = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-claim.js`
+            );
+            await claim.run({ github, context, core, env: process.env });

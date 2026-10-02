@@ -1,0 +1,18 @@
+[package]
+name = "actplane-ifc-compiler"
+version = "0.1.9"
+edition = "2024"
+description = "Information-flow policy compiler for ActPlane's eBPF enforcement engine."
+license = "MIT"
+repository = "https://github.com/eunomia-bpf/ActPlane"
+readme = "../../README.md"
+keywords = ["ifc", "policy", "compiler", "ebpf", "actplane"]
+categories = ["compilers"]
+
+[lib]
+name = "actplane_ifc_compiler"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9"

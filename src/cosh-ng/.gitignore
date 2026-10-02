@@ -1,0 +1,21 @@
+# Cargo build artifacts
+/target/
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+
+# Repo wiki / generated docs
+repowiki/
+.repowiki/
+.qoder/repowiki/

@@ -1,0 +1,7 @@
+{
+  "session_id": "sess-parity",
+  "llm_request": {
+    "model": "some-model",
+    "temperature": 0
+  }
+}

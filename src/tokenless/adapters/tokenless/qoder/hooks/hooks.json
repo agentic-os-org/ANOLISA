@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=qoder-cli bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=qoder-cli bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" tool_ready_hook.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=qoder-cli bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" compress_response_hook.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

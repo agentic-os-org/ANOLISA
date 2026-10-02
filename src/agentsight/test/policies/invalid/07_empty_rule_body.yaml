@@ -1,0 +1,10 @@
+version: 1
+rules:
+  empty:
+    ifc: |
+
+domains:
+  session:
+    bind:
+      - rule: empty
+        mode: default

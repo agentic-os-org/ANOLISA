@@ -1,0 +1,342 @@
+
+%define anolis_release 1
+%global debug_package %{nil}
+
+# Disable stripping of ELF binaries.  Bundled .so files (the crate-backed
+# agent_sec_cli._native extension and prebuilt wheel extensions such as
+# cryptography and pydantic-core) have precise ELF segment alignment that
+# `strip` breaks, causing "ELF load command address/offset not page-aligned"
+# at runtime.
+%global __strip /bin/true
+
+# Use default zstd compression (level 3) instead of -19 to speed up packaging
+# of bundled native extensions; -19 takes noticeably longer with no real gain.
+%define _binary_payload w.zstdio
+%define _source_payload w.zstdio
+%{!?_userunitdir:%global _userunitdir /usr/lib/systemd/user}
+
+# Preserve original shebang (#!/usr/bin/env bash) for cross-platform compatibility
+%undefine __brp_mangle_shebangs
+
+# Exclude bundled site-packages from RPM auto-dependency scanning.
+# Prebuilt wheel .so files reference host system libraries or use hash-named
+# internal libraries, neither of which must become hard RPM
+# Requires/Provides.
+# Using path-based exclusion instead of AutoReqProv:no so that other subpackages
+# (e.g. linux-sandbox in agent-sec-cosh-hook) retain proper auto-dependency detection.
+%global __requires_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
+%global __provides_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
+
+Name:           agent-sec-core
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Agent Security Core Package (metapackage)
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+# Build dependencies
+# NOTE: The following build tools are required but NOT declared as BuildRequires
+# because they are provided by the CI environment (GitHub Actions):
+#   - Rust toolchain >= 1.93.0  (dtolnay/rust-toolchain)
+#   - Python 3.11.6 + uv        (astral-sh/setup-uv)
+#   - Node.js >= 20              (actions/setup-node)
+#   - gcc, clang, llvm, openssl-devel, libseccomp-devel, bubblewrap
+# If building outside CI, ensure these are installed manually.
+BuildRequires:  make
+BuildRequires:  systemd-rpm-macros
+
+%{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_user_preun:%{error:missing %%systemd_user_preun; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_user_postun:%{error:missing %%systemd_user_postun; install systemd-rpm-macros in the rpmbuild environment}}
+
+# Metapackage: pull all subpackages
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       agent-sec-cosh-hook = %{version}-%{release}
+Requires:       agent-sec-codex-hook = %{version}-%{release}
+Requires:       agent-sec-qoder-hook = %{version}-%{release}
+Requires:       agent-sec-openclaw-hook = %{version}-%{release}
+Requires:       agent-sec-hermes-hook = %{version}-%{release}
+Requires:       agent-sec-qwen-code-hook = %{version}-%{release}
+Requires:       agent-sec-skills = %{version}-%{release}
+
+%description
+Agent-Sec-Core is an OS-level security baseline and hardening framework for AI Agents.
+This metapackage installs all agent-sec-core components including CLI, hooks, and skills.
+
+# =============================================================================
+# Subpackage 1: agent-sec-cli
+# =============================================================================
+%package -n agent-sec-cli
+Summary:        Agent Security CLI tool (Rust + Python native extension)
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+Requires:       gnupg2 >= 2.0
+Requires:       loongshield >= 1.2.0
+Requires:       systemd
+Recommends:     python3-pgpy >= 0.5
+
+%description -n agent-sec-cli
+Agent-sec-cli provides security scanning and hardening CLI commands.
+Built with maturin as a Rust native Python extension.
+
+%files -n agent-sec-cli
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /usr/bin/agent-sec-cli
+%attr(0755,root,root) /usr/bin/agent-sec-daemon
+%{_userunitdir}/agent-sec-core.service
+/opt/agent-sec/lib/python3.11/site-packages/*
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/components
+%dir %{_datadir}/anolisa/components/sec-core
+%{_datadir}/anolisa/components/sec-core/component.toml
+%license LICENSE
+
+%post -n agent-sec-cli
+%systemd_user_post agent-sec-core.service
+
+%preun -n agent-sec-cli
+%systemd_user_preun agent-sec-core.service
+
+%postun -n agent-sec-cli
+%systemd_user_postun_with_restart agent-sec-core.service
+
+# =============================================================================
+# Subpackage 2: agent-sec-cosh-hook
+# =============================================================================
+%package -n agent-sec-cosh-hook
+Summary:        CoPilot Shell security hooks with linux-sandbox
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       bubblewrap
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-cosh-hook
+Provides code_scanner_hook and linux-sandbox for copilot-shell integration.
+The linux-sandbox binary provides secure sandboxed execution environments.
+
+%files -n agent-sec-cosh-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /usr/local/bin/linux-sandbox
+%attr(0755,root,root) /usr/share/anolisa/extensions/agent-sec-core/hooks/*.py
+/usr/share/anolisa/extensions/agent-sec-core/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 3: agent-sec-openclaw-hook
+# =============================================================================
+%package -n agent-sec-openclaw-hook
+Summary:        OpenClaw plugin for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       nodejs >= 18
+Requires:       jq
+
+%description -n agent-sec-openclaw-hook
+OpenClaw IDE plugin providing agent security integration.
+Hooks into OpenClaw to perform code scanning before tool execution.
+
+%files -n agent-sec-openclaw-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+/opt/agent-sec/openclaw-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 4: agent-sec-hermes-hook
+# =============================================================================
+%package -n agent-sec-hermes-hook
+Summary:        Hermes Agent plugin for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       jq
+
+%description -n agent-sec-hermes-hook
+Hermes Agent security plugin powered by agent-sec-core.
+Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
+
+%files -n agent-sec-hermes-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/hermes-plugin/scripts/deploy.sh
+/opt/agent-sec/hermes-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 5: agent-sec-qwen-code-hook
+# =============================================================================
+%package -n agent-sec-qwen-code-hook
+Summary:        Qwen Code extension for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qwen-code-hook
+Qwen Code security extension powered by agent-sec-core.
+Provides prompt and PII policy enforcement, lifecycle observability, and
+managed Skill Ledger validation through Qwen Code command hooks.
+
+%files -n agent-sec-qwen-code-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py
+/opt/agent-sec/qwen-code-extension/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 6: agent-sec-skills
+# =============================================================================
+%package -n agent-sec-skills
+Summary:        Agent security skill definitions for copilot-shell
+Requires:       agent-sec-cli = %{version}-%{release}
+
+%description -n agent-sec-skills
+Skill reference files and documentation for copilot-shell integration.
+Includes skill-ledger, code-scanner, prompt-scanner and related skill definitions.
+
+%files -n agent-sec-skills
+%defattr(0644,root,root,0755)
+%{_datadir}/anolisa/skills/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 7: agent-sec-codex-hook
+# =============================================================================
+%package -n agent-sec-codex-hook
+Summary:        Codex plugin security hooks
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-codex-hook
+Codex security hooks providing code scanning, PII checking, prompt scanning
+and skill ledger verification for Codex agent.
+
+%files -n agent-sec-codex-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
+/opt/agent-sec/codex-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 8: agent-sec-qoder-hook
+# =============================================================================
+%package -n agent-sec-qoder-hook
+Summary:        Qoder plugin security hooks
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qoder-hook
+Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
+
+%files -n agent-sec-qoder-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
+/opt/agent-sec/qoder-plugin/
+%license LICENSE
+
+# =============================================================================
+# Main package has no files (metapackage)
+# =============================================================================
+%files
+%license LICENSE
+
+# =============================================================================
+# Build & Install
+# =============================================================================
+%prep
+%setup -q
+
+%build
+make build-all
+make download-deps
+make stage-cli
+
+%install
+rm -rf $RPM_BUILD_ROOT
+make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
+
+%changelog
+* Thu Sep 24 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.2-1
+- Update version to 0.13.2
+
+* Wed Sep 23 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.1-1
+- Update version to 0.13.1
+
+* Sun Sep 20 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.0-1
+- Update version to 0.13.0
+
+* Fri Sep 04 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.12.0-1
+- Update version to 0.12.0
+
+* Thu Aug 27 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.11.1-1
+- Update version to 0.11.1
+
+* Fri Aug 21 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.11.0-1
+- Update version to 0.11.0
+
+* Wed Aug 12 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.10.1-1
+- Update version to 0.10.1
+
+* Fri Aug 07 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.10.0-1
+- Update version to 0.10.0
+
+* Fri Jul 24 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.9.0-1
+- Update version to 0.9.0
+
+* Fri Jul 10 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.8.0-1
+- Update version to 0.8.0
+
+* Thu Jul 02 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.7.1-1
+- Update version to 0.7.1
+
+* Fri Jun 26 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.7.0-1
+- Update version to 0.7.0
+
+* Fri Jun 05 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.6.0-1
+- Update version to 0.6.0
+
+* Fri May 22 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.5.0-1
+- Update version to 0.5.0
+
+* Wed May 13 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.4.1-1
+- Update version to 0.4.1
+
+* Sat May 09 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.4.0-1
+- Update version to 0.4.0
+
+* Sun Apr 26 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.3.0-1
+- Update version to 0.3.0
+
+* Mon Mar 23 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.8-1
+- Disable brp-mangle-shebangs to preserve #!/usr/bin/env bash for cross-platform compatibility
+
+* Fri Mar 20 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.7-1
+- Add defattr and attr in files section for permission protection
+- Fix install section: add explicit permission settings for directories and files
+- Use install -d -m 0755 instead of mkdir -p for deterministic permissions
+- Set executable permissions (0755) for .sh and .py scripts
+- Set read-only permissions (0644) for other files
+- Add build-time skill signing using sign-skill.sh
+
+* Fri Mar 20 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.6-1
+- Change skill install path to /usr/share/anolisa/skills/agent-sec-core
+
+* Thu Mar 19 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.5-1
+- Add linux-sandbox module
+
+* Thu Mar 19 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.4-1
+- Refactor: move test files from scripts/asset-verify/test/ to /tests/
+- scripts/ directory now contains only production files
+- Add asset-verify dependencies version (python3 >= 3.6, gnupg2 >= 2.0, python3-pgpy >= 0.5)
+
+* Tue Mar 17 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.3-1
+- Fix spec install section: use cp -r for recursive directory copy
+- Add asset-verify dependencies (python3, gnupg2, python3-pgpy)
+
+* Mon Mar 16 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.2-1
+- Add loongshield security hardening capability
+
+* Fri Mar 13 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.1-1
+- Initial package

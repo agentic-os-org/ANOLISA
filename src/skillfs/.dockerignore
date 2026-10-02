@@ -1,0 +1,19 @@
+# Keep the SkillFS sidecar build context small and free of host artifacts, so
+# the image contents depend only on tracked sources plus Cargo.lock.
+target/
+**/target/
+.git/
+.gitignore
+
+# Local scratch that must never reach the image.
+*.log
+*.tmp
+tmp/
+mnt/
+mount/
+
+# Documentation and container-unrelated assets are not needed by the build.
+docs/
+website/
+POSIX_FS_REFERENCES.md
+POSIX_FS_TEST_MATRIX.csv

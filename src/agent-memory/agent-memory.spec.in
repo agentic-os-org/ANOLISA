@@ -1,0 +1,289 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+Name:           agent-memory
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Agent memory — filesystem memory for AI agents (MCP Server)
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# Build dependencies
+# Rust edition 2024 needs >=1.85; cmake is required by the git2 crate's
+# vendored libgit2 build; systemd-devel ships libsystemd headers for the
+# optional journald audit fan-out. jq is used by the Makefile
+# `sync-versions` target to write Cargo.toml's version into every
+# derived JSON file (adapter manifest, npm package, mcp-server).
+#
+# The OpenClaw TS plugin (dist/index.js) is pre-built during `make dist`
+# and shipped in the source tarball (Source0); %build verifies it exists
+# but does NOT rebuild it with npm — npm's signal-exit handler crashes
+# with "Exit handler never called!" inside mock/systemd-nspawn
+# (SIGHUP propagation differs from a plain chroot). Dropping npm from
+# BuildRequires avoids this CI-only failure entirely; the pre-built
+# bundle is the authoritative copy, identical to what `npm run build`
+# would produce locally.
+BuildRequires:  cargo >= 1.85
+BuildRequires:  rust >= 1.85
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  cmake
+BuildRequires:  pkgconfig
+BuildRequires:  nodejs >= 18
+BuildRequires:  jq
+BuildRequires:  systemd-devel
+BuildRequires:  systemd-rpm-macros
+
+# Required for ANOLISA RPM component identity resolution.
+Provides:       anolisa-component(agent-memory)
+
+%description
+Agent memory is a persistent filesystem memory for AI agents, served over
+the MCP (Model Context Protocol) standard. Linux only.
+
+Core Features:
+- MCP Server: 25 tools over stdio JSON-RPC 2.0, in three tiers
+  - Tier A file ops: mem_read / write / append / edit / list / grep /
+    diff / mkdir / remove / promote / mem_session_log
+  - Tier B structured: memory_search / memory_observe /
+    memory_get_context (hidden from tools/list AND rejected at
+    tools/call with METHOD_NOT_FOUND on the expert profile) /
+    memory_task_save / memory_task_resume / memory_task_list /
+    memory_task_close
+  - Tier C governance: mem_snapshot / mem_snapshot_list /
+    mem_snapshot_restore / mem_log / mem_revert
+- Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
+  user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
+  sandbox for every file open
+- SQLite FTS5 BM25 background index with optional dense-vector
+  semantic search (OpenAI / Ollama embedding backends)
+- Optional git versioning of the mount tree with auto-commit on writes
+- tar.gz snapshots with atomic per-entry rename swap on restore
+- Optional cgroup v2 memory.max self-limit
+- Optional systemd-journald audit fan-out
+- Single statically-linked binary (bundled SQLite + vendored libgit2)
+
+Note: OpenClaw plugin (memory-anolisa) is available under
+/usr/share/anolisa/adapters/agent-memory/openclaw/. Run the install
+script to register with OpenClaw:
+  /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+- Claude Code: configure in .claude/settings.json mcpServers
+- Cursor / any MCP-compatible client: stdio transport
+
+%prep
+# -q quiet, -a 1 also extract Source1 (vendor) into the unpacked source
+# directory so .cargo/config.toml + vendor/ are in place before %build.
+# Top-level dir is `%{name}-%{version}` to match both the local
+# rpm-build.sh tarball and the CI-produced archive from
+# .github/actions/package-source (which uses ${component}-${version}).
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+# --offline forbids network access; --locked enforces Cargo.lock pinning.
+# Combined they require Source1 (vendor) to be present, fail fast otherwise.
+cargo build --release --locked --offline
+
+# Verify the pre-built OpenClaw TS plugin is present in the source
+# tarball (shipped by `make dist`). Do NOT rebuild it with npm here —
+# npm's signal-exit handler crashes inside mock/systemd-nspawn.
+test -f adapters/agent-memory/openclaw/dist/index.js \
+    || { echo "ERROR: adapters/agent-memory/openclaw/dist/index.js missing from source tarball"; exit 1; }
+
+%install
+rm -rf %{buildroot}
+
+# Install binary
+install -d -m 0755 %{buildroot}%{_bindir}
+install -p -m 0755 target/release/agent-memory %{buildroot}%{_bindir}/
+
+# Install default config
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/agent-memory
+install -p -m 0644 config/default.toml %{buildroot}%{_datadir}/anolisa/agent-memory/default.toml
+
+# Install MCP server descriptor for auto-discovery
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/mcp-servers
+install -p -m 0644 config/mcp-server.json %{buildroot}%{_datadir}/anolisa/mcp-servers/agent-memory.json
+
+# Install systemd user template (opt-in via `systemctl --user enable anolisa-memory@$USER`).
+# Per-user instance because the server is stdio-bound per agent session.
+install -d -m 0755 %{buildroot}%{_userunitdir}
+install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_userunitdir}/anolisa-memory@.service
+
+# Install tmpfiles.d snippet so /run/anolisa{,/sessions} is created at
+# boot with 0700 permissions even when the unit is started by hand.
+install -d -m 0755 %{buildroot}%{_tmpfilesdir}
+install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
+
+# Install documentation (CHANGELOG only). The bilingual user manual moved
+# to the repository-level docs/user-guide tree and is published with the
+# ANOLISA documentation, not packaged per-component.
+install -d -m 0755 %{buildroot}%{_docdir}/%{name}
+install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
+
+# Install adapter bundle per FHS spec.
+# anolisa-adapter-ctl scans %{_datadir}/anolisa/adapters/*/manifest.json.
+# Ship only what's needed at runtime — the same set that package.json
+# `files` declares: dist/ (prebuilt bundle), openclaw.plugin.json,
+# scripts/ (install/detect/uninstall), package.json (so OpenClaw can
+# read the plugin's version + name). TS sources are dev-only.
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
+
+install -m 0644 adapters/agent-memory/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/
+# Install the agent-memory RPM component contract (publishing/plugin
+# metadata) at the component-level path declared by the ANOLISA
+# component-contract model:
+# %{_datadir}/anolisa/components/<component>/component.toml.
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/agent-memory
+install -m 0644 .anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/agent-memory/
+install -m 0755 adapters/agent-memory/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0755 adapters/agent-memory/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0755 adapters/agent-memory/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0644 adapters/agent-memory/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
+install -m 0644 adapters/agent-memory/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
+# esbuild bundles typebox inline, so dist/index.js has no external
+# runtime deps beyond the openclaw peerDependency.
+install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/
+
+%files
+%defattr(0644,root,root,0755)
+%license LICENSE
+%attr(0755,root,root) %{_bindir}/agent-memory
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/agent-memory
+%attr(0644,root,root) %{_datadir}/anolisa/agent-memory/default.toml
+%dir %{_datadir}/anolisa/components
+%dir %{_datadir}/anolisa/components/agent-memory
+%attr(0644,root,root) %{_datadir}/anolisa/components/agent-memory/component.toml
+%dir %{_datadir}/anolisa/mcp-servers
+%attr(0644,root,root) %{_datadir}/anolisa/mcp-servers/agent-memory.json
+%{_userunitdir}/anolisa-memory@.service
+%{_tmpfilesdir}/anolisa-memory.conf
+%doc %{_docdir}/%{name}/CHANGELOG.md
+# Adapter bundle (anolisa-adapter-ctl auto-discovery)
+%dir %{_datadir}/anolisa/adapters
+%dir %{_datadir}/anolisa/adapters/agent-memory
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/manifest.json
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/openclaw.plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/package.json
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/index.js
+
+%post
+# Apply the shipped tmpfiles.d snippet immediately so /run/anolisa{,
+# /sessions} is in place before the first invocation, instead of
+# waiting for the next boot.
+%tmpfiles_create %{_tmpfilesdir}/anolisa-memory.conf
+# We deliberately do NOT pre-create a per-user memory directory here.
+# The previous attempt derived the target from $HOME / $SUDO_USER, both
+# of which are forgeable (an attacker with control of SUDO_USER's env
+# could redirect chown to an arbitrary path). The binary's `init`
+# subcommand creates the namespace under the invoking user's real
+# ~/.anolisa/memory/user-<uid>/ — fed by libc::getuid() — on first
+# run, which is the correct trust boundary.
+
+%preun
+# On uninstall ($1=0): run the adapter uninstall script which removes
+# the openclaw plugin (CLI or manual) and cleans openclaw.json entries.
+if [ $1 -eq 0 ]; then
+    UNINSTALL_SCRIPT="%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh"
+    if [ -f "$UNINSTALL_SCRIPT" ]; then
+        bash "$UNINSTALL_SCRIPT" || true
+    fi
+fi
+
+%changelog
+* Sun Sep 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.8-1
+- Namespace OpenClaw tools; prompts and tool policies require migration
+- Avoid memory-core takeover and declare coding profile tool membership
+- Fall back to private writable session directories for unprivileged users
+- Accept session configuration and validate UTF-8 identifier byte limits
+- Correct BM25 ranking and reject unsupported OpenClaw expert profiles
+- Stop stale clients on reload and restore buildable source archives
+
+* Wed Sep 09 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.7-1
+- Negotiate OpenClaw capability consent and effective installer flags
+- Fix corpus read routing and returned line-window metadata
+- Report invalid plugin configuration before probing for the binary
+- Declare RPM component identity for ANOLISA discovery
+- Detect Node.js and npm prerequisites in the unified source-build workflow
+
+* Thu Jul 30 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.6-1
+- fix(memory): recall partial short-token matches with OR fallback (#2040)
+
+* Mon Jul 27 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.5-1
+- fix(memory): improve auto-recall for long English and CJK prompts
+
+* Fri Jul 17 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.4-1
+- fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)
+- fix(memory): install.sh sets allowConversationAccess for hooks (#1521)
+
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.3-1
+- fix(memory): normalize OpenClaw content blocks to string before trigger matching (auto-capture was coercing array to "[object Object]")
+- fix(memory): add BM25 OR fallback when AND returns 0 rows (natural-language queries with unknown words now return partial matches)
+- fix(memory): sanitize audit_log to prevent user query content leakage (replace raw query prefix with len= format)
+
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.2-1
+- fix(memory): sanitize memory_observe hints with newline/control-char replacement so they round-trip through the frontmatter reader (Windows paths with backslashes)
+- feat(memory): add `max_hint_bytes` (default 512) with `MEMORY_MAX_HINT_BYTES` env override; propagate `&MemoryConfig` through memory_observe and the MCP server
+- fix(memory): honor `INSTALL_PROFILE` in Makefile so `make install INSTALL_PROFILE=user PREFIX=$HOME/.local` no longer needs root (adapter resources under `$(PREFIX)/share/anolisa`)
+- test(memory): add safe_fs security-boundary unit tests; fix cargo fmt drift on `tests/safe_fs_tests.rs`
+
+* Fri Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.1-1
+- fix(memory): unblock vector/hybrid search on tokio runtime (thread runtime handle into index worker, block_in_place in search)
+- fix(memory): stop leaking .git internals via memory_get_context (reserved-path filter covers .git/)
+- fix(memory): backfill vectors for preexisting files in full_scan
+- fix(memory): recall short CJK queries (< 3 chars) via LIKE fallback
+- refactor(memory): resolve embedding dimensions from first response (was hardcoded 1536)
+- feat(memory): add anolisa-cli adapter contract via component.toml
+
+* Mon Jun 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-1
+- Add semantic search (BM25/vector/hybrid via RRF) with OpenAI and Ollama
+  embedding providers; graceful fallback to BM25 when unconfigured
+- Add memory safety module: prompt-injection detection, secret detection
+  and PII redaction, with relevant-memories safety wrapper
+- Add auto-recall (before_prompt_build) and auto-capture (agent_end) hooks
+- Add memory sovereignty tools (memory_about/forget/auto_created/consent)
+  with consent.toml preferences
+- Add mem_export/mem_import (AMA archive) for cross-agent memory migration
+- Add memory_summary, memory_session_context, memory_sessions and
+  memory_timeline tools; MEMORY.md index with mem_index_refresh
+- Add 4-type closed memory classification (user/feedback/project/reference)
+- Add per-agent memory isolation via [memory].agent_scope (schema v5)
+- Add memory consolidation (L1 atomic facts, episodic extraction,
+  cross-session persistence, quality filters) with mem_consolidate tool
+- Add time-decay ranking, cold archival (mem_compact), conflict detection
+  and category subdirectories with memory_search category filter
+- Add user profile synthesis (Dreaming V3 mem_dream)
+
+* Thu May 28 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-3
+- Fix OPENCLAW_HOME double-nesting; normalize OPENCLAW_STATE_DIR across
+  lifecycle scripts (env -u OPENCLAW_HOME, trailing slash, state paths)
+- Fix uninstall using wrong plugin ID (memory-anolisa-openclaw-plugin
+  vs memory-anolisa); replace hardcoded string with $PLUGIN_ID
+- Eliminate child_process in config.ts: replace execSync("which") with
+  PATH traversal (searchPathEnv)
+- Flip install flag semantics: bypass OpenClaw security scanner by
+  default (--dangerously-force-unsafe-install), set
+  AGENT_MEMORY_SAFE_INSTALL=1 for the safe-install path
+- Fix .cargo/config.toml flattening in dist tarball; include
+  CHANGELOG.md and LICENSE
+- Drop npm BuildRequires; use pre-built OpenClaw plugin from source
+  tarball instead of rebuilding in %build — npm's signal-exit handler
+  crashes ("Exit handler never called!") inside mock/systemd-nspawn
+  due to SIGHUP propagation differences
+
+* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-2
+- Add OpenClaw plugin (memory-anolisa) with install/detect/uninstall
+  lifecycle scripts and config.ts binary resolution
+
+* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
+- Initial release

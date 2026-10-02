@@ -1,0 +1,61 @@
+FROM alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+
+ARG VERSION=unknown
+ARG TARGETARCH
+
+# Set the terminal type to xterm-256color
+ENV TERM=xterm-256color
+
+# Fix repo mirror
+RUN sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+
+# Copy pre-built RPMs (arch-specific + noarch merged per architecture)
+COPY rpms/${TARGETARCH}/*.rpm /tmp/rpms/
+
+# Install all components + runtime dependencies
+RUN dnf localinstall -y /tmp/rpms/*.rpm && \
+    dnf install -y \
+        bubblewrap \
+        gnupg2 \
+        wget \
+        curl \
+        git \
+        tar \
+        unzip \
+        openssh-server \
+        zip \
+        xz \
+        python3 \
+        python3-pip \
+        man-db \
+        which \
+        procps-ng \
+        iproute \
+        net-tools \
+        iputils \
+        bind-utils \
+        iotop \
+        iftop \
+        sysstat \
+        psmisc \
+        lsof \
+        strace \
+        make \
+        jq \
+        tree && \
+    dnf clean all && \
+    rm -rf /tmp/rpms /var/cache/dnf/*
+
+# Smart entrypoint script
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# OCI labels
+LABEL org.opencontainers.image.title="ANOLISA Agentic OS" \
+      org.opencontainers.image.description="AI-native OS with Copilot Shell, Agent Security, AgentSight, and OS Skills" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/alibaba/anolisa" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["cosh"]

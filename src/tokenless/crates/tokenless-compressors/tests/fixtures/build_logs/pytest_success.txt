@@ -1,0 +1,46 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+configfile: pyproject.toml
+collected 38 items
+
+tests/test_core.py::test_case_00 [1m[32mPASSED[0m [  2%]
+tests/test_core.py::test_case_01 [1m[32mPASSED[0m [  5%]
+tests/test_core.py::test_case_02 [1m[32mPASSED[0m [  7%]
+tests/test_core.py::test_case_03 [1m[32mPASSED[0m [ 10%]
+tests/test_core.py::test_case_04 [1m[32mPASSED[0m [ 13%]
+tests/test_core.py::test_case_05 [1m[32mPASSED[0m [ 15%]
+tests/test_core.py::test_case_06 [1m[32mPASSED[0m [ 18%]
+tests/test_core.py::test_case_07 [1m[32mPASSED[0m [ 21%]
+tests/test_core.py::test_case_08 [1m[32mPASSED[0m [ 23%]
+tests/test_core.py::test_case_09 [1m[32mPASSED[0m [ 26%]
+tests/test_core.py::test_case_10 [1m[32mPASSED[0m [ 28%]
+tests/test_core.py::test_case_11 [1m[32mPASSED[0m [ 31%]
+tests/test_core.py::test_case_12 [1m[32mPASSED[0m [ 34%]
+tests/test_core.py::test_case_13 [1m[32mPASSED[0m [ 36%]
+tests/test_core.py::test_case_14 [1m[32mPASSED[0m [ 39%]
+tests/test_core.py::test_case_15 [1m[32mPASSED[0m [ 42%]
+tests/test_core.py::test_case_16 [1m[32mPASSED[0m [ 44%]
+tests/test_core.py::test_case_17 [1m[32mPASSED[0m [ 47%]
+tests/test_core.py::test_case_18 [1m[32mPASSED[0m [ 50%]
+tests/test_core.py::test_case_19 [1m[32mPASSED[0m [ 52%]
+tests/test_core.py::test_case_20 [1m[32mPASSED[0m [ 55%]
+tests/test_core.py::test_case_21 [1m[32mPASSED[0m [ 57%]
+tests/test_core.py::test_case_22 [1m[32mPASSED[0m [ 60%]
+tests/test_core.py::test_case_23 [1m[32mPASSED[0m [ 63%]
+tests/test_core.py::test_case_24 [1m[32mPASSED[0m [ 65%]
+tests/test_core.py::test_case_25 [1m[32mPASSED[0m [ 68%]
+tests/test_core.py::test_case_26 [1m[32mPASSED[0m [ 71%]
+tests/test_core.py::test_case_27 [1m[32mPASSED[0m [ 73%]
+tests/test_core.py::test_case_28 [1m[32mPASSED[0m [ 76%]
+tests/test_core.py::test_case_29 [1m[32mPASSED[0m [ 78%]
+tests/test_core.py::test_case_30 [1m[32mPASSED[0m [ 81%]
+tests/test_core.py::test_case_31 [1m[32mPASSED[0m [ 84%]
+tests/test_core.py::test_case_32 [1m[32mPASSED[0m [ 86%]
+tests/test_core.py::test_case_33 [1m[32mPASSED[0m [ 89%]
+tests/test_core.py::test_case_34 [1m[32mPASSED[0m [ 92%]
+tests/test_core.py::test_case_35 [1m[32mPASSED[0m [ 94%]
+tests/test_core.py::test_case_36 [1m[32mPASSED[0m [ 97%]
+tests/test_core.py::test_case_37 [1m[32mPASSED[0m [100%]
+
+[1m[32m============================== 38 passed in 1.23s ===============================[0m
