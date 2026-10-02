@@ -1181,10 +1181,20 @@ pub(crate) fn extract_waste_candidates_from(
 
     // ── 上下文臃肿 ──
 
-    // 前缀缓存 (playbook #1): savings are a price discount — prefix replay ×
-    // (1 − cached price). 判据直接给命中率序列（对齐 perf 的 prefix_cache）：
-    // 持续为零/偏低即未在享受缓存；无 usage 本身就是"可能未开启 caching"的信号。
-    let cache_save = (cache_tok as f64 * (1.0 - CACHED_PRICE_RATIO)).round() as usize;
+    // 前缀缓存 (playbook #1): savings are a price discount — the share of the
+    // replayed prefix NOT already served from cache × (1 − cached price), the
+    // same correction compute_headroom applies; counting the raw cacheable
+    // sum advertised near-full savings on trajectories already hitting ~90%
+    // cache. 判据直接给命中率序列（对齐 perf 的 prefix_cache）：持续为零/偏低
+    // 即未在享受缓存；无 usage 本身就是"可能未开启 caching"的信号。
+    let incremental_cache_tok: usize = calls
+        .iter()
+        .map(|c| {
+            c.cacheable
+                .saturating_sub(c.real_cached_tokens.unwrap_or(0) as usize)
+        })
+        .sum();
+    let cache_save = (incremental_cache_tok as f64 * (1.0 - CACHED_PRICE_RATIO)).round() as usize;
     if cache_tok > 0 {
         let hit_seq: Vec<String> = calls
             .iter()
@@ -1883,5 +1893,41 @@ mod tests {
         assert_eq!(cost.usage_steps, 0);
         assert_eq!(cost.total_real_input_tok, 0);
         assert!(cost.calls[0].real_prompt_tokens.is_none());
+    }
+
+    /// Prefix caching saves only on the share not already served from cache.
+    /// compute_headroom applies exactly that correction (see its test
+    /// headroom_discounts_tokens_already_served_from_cache); the candidate
+    /// must not advertise the raw cacheable sum on the same cache-warm
+    /// trajectory, or the waste table contradicts the headroom card.
+    #[test]
+    fn fixed_overhead_candidate_discounts_already_cached_tokens() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "metrics":{"prompt_tokens":10100,"completion_tokens":200,"cached_tokens":9500},
+             "message":"a"},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z",
+             "metrics":{"prompt_tokens":10100,"completion_tokens":210,"cached_tokens":9500},
+             "message":"b"}
+        ]"#,
+        );
+        let set = extract_waste_candidates(&t).unwrap();
+        let c = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "fixed_overhead")
+            .expect("fixed_overhead candidate fires on a >2k static region");
+        // 9500 of each step's 10100 prompt tokens already come from cache, so
+        // only the ~500-600-token uncached remainder per turn is still to
+        // gain: the discounted savings stay far below the ~15k the raw
+        // prefix-replay sum would report.
+        assert!(
+            c.potential_save_tokens < 1_500,
+            "cache-warm trajectory must not advertise the full prefix replay, got {}",
+            c.potential_save_tokens
+        );
+        assert!(c.potential_save_tokens > 0);
     }
 }
