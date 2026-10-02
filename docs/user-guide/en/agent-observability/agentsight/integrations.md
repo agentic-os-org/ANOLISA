@@ -101,6 +101,15 @@ $ sudo journalctl -u agentsight-enforcer
 
 The default level is `info`; add `Environment=RUST_LOG=debug` to the unit for verbose output.
 
+Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
+the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
+(`bpf` listed in `/sys/kernel/security/lsm`). When a `block` rule matches on a backend that cannot
+deny that operation — for example a `block connect` rule while the `enforce_socket_connect` hook is
+not attached — the engine still reports the match as a violation with `effect=block` and
+`blocked=false`. Treat such degraded reports as a signal that the policy cannot actually deny;
+check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
+configuration.
+
 ## cosh: ask in natural language
 
 AgentSight ships a conversational Skill for cosh, so Token and audit questions can be asked in the

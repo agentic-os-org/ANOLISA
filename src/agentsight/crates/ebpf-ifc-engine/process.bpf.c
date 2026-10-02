@@ -117,11 +117,6 @@ const volatile unsigned int policy_features = 0;
  */
 #define TE_MMAP_INDEX_SLOTS           8
 
-#define TE_MODE_NOTIFY 0
-#define TE_MODE_BLOCK  1
-#define TE_MODE_KILL   2
-#define TE_MODE_UNSUPPORTED 3
-
 #define TE_ACCESS_READ    (1U << 0)
 #define TE_ACCESS_WRITE   (1U << 1)
 #define TE_ACCESS_EXEC    (1U << 2)
@@ -1350,23 +1345,11 @@ static __always_inline __u32 te_tracepoint_mode(void)
 	return TE_MODE_NOTIFY;
 }
 
-static __always_inline __u32 te_effect_mode(__u32 backend_mode, __u32 effect)
-{
-	if (effect == TEFFECT_NOTIFY)
-		return TE_MODE_NOTIFY;
-	if (effect == TEFFECT_KILL)
-		return TE_MODE_KILL;
-	if (effect == TEFFECT_BLOCK && backend_mode == TE_MODE_BLOCK)
-		return TE_MODE_BLOCK;
-	return TE_MODE_UNSUPPORTED;
-}
-
-static __always_inline __u32 te_supported_effects(__u32 backend_mode)
-{
-	if (backend_mode == TE_MODE_BLOCK)
-		return (1U << TEFFECT_BLOCK);
-	return (1U << TEFFECT_NOTIFY) | (1U << TEFFECT_KILL);
-}
+/* Degraded-backend decisions (which effects may match, what action a matched
+ * effect degrades to) live in process.h: te_supported_effects/te_effect_mode,
+ * unit-tested in test_taint.c. Tracepoint backends pass the eBPF globals
+ * through so block rules match with degraded notify semantics when the op's
+ * pre-operation LSM hook is not attached. */
 
 static __always_inline int exec_pipe_init(pid_t pid, __u32 mode)
 {
@@ -1508,7 +1491,9 @@ static __always_inline void exec_pipe_scan_rules(__u32 complex)
 	te_copy_target(eval->target, scratch->match);
 	eval->current_domain_id = current_domain_id;
 	eval->effect = TEFFECT_BLOCK;
-	eval->effect_mask = te_supported_effects(s->mode);
+	eval->effect_mask = te_supported_effects(s->mode, TOP_EXEC,
+						 policy_features,
+						 enforce_mode);
 	int rid = complex ? te_check_exec_complex(eval) :
 			    te_check_exec_simple(eval);
 	exec_pipe_merge_rule(s, eval, rid);
@@ -1751,7 +1736,9 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 		eval->current_labels = current_labels;
 		eval->current_domain_id = current_domain_id;
 		eval->effect = TEFFECT_BLOCK;
-		eval->effect_mask = te_supported_effects(ev->mode);
+		eval->effect_mask = te_supported_effects(ev->mode, TOP_EXEC,
+							 policy_features,
+							 enforce_mode);
 		eval->op = TOP_EXEC;
 		te_copy_target(eval->target, ev->target);
 		rid = te_check_labels(eval);
@@ -1765,7 +1752,11 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 		eval->current_labels = current_labels;
 		eval->current_domain_id = current_domain_id;
 		eval->effect = TEFFECT_BLOCK;
-		eval->effect_mask = te_supported_effects(ev->mode);
+		/* TOP_OPEN and TOP_WRITE share the file-block hooks, so one
+		 * mask covers both sub-scans below. */
+		eval->effect_mask = te_supported_effects(ev->mode, TOP_OPEN,
+							 policy_features,
+							 enforce_mode);
 		te_copy_target(eval->target, ev->target);
 		if (fid) {
 			eval->fid = *fid;
@@ -1803,8 +1794,10 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 		eval->current_labels = current_labels;
 		eval->current_domain_id = current_domain_id;
 		eval->effect = TEFFECT_BLOCK;
-		eval->effect_mask = te_supported_effects(ev->mode);
 		eval->op = (ev->access & TE_ACCESS_RECV) ? TOP_RECV : TOP_CONNECT;
+		eval->effect_mask = te_supported_effects(ev->mode, eval->op,
+							 policy_features,
+							 enforce_mode);
 		eval->ip = ev->ip;
 		rid = te_check_labels(eval);
 		effect = eval->effect;
@@ -1882,7 +1875,11 @@ static __always_inline int te_handle_file_event(pid_t pid, const char *target,
 	eval->current_labels = current_labels;
 	eval->current_domain_id = current_domain_id;
 	eval->effect = TEFFECT_BLOCK;
-	eval->effect_mask = te_supported_effects(mode);
+	/* TOP_OPEN and TOP_WRITE share the file-block hooks, so one mask
+	 * covers both sub-scans below. */
+	eval->effect_mask = te_supported_effects(mode, TOP_OPEN,
+						 policy_features,
+						 enforce_mode);
 	te_copy_target(eval->target, target);
 	if (fid) {
 		eval->fid = *fid;
@@ -2266,7 +2263,9 @@ static __always_inline int te_handle_exec_event(pid_t pid, const char *target,
 	eval->current_labels = current_labels;
 	eval->current_domain_id = current_domain_id;
 	eval->effect = TEFFECT_BLOCK;
-	eval->effect_mask = te_supported_effects(mode);
+	eval->effect_mask = te_supported_effects(mode, TOP_EXEC,
+						 policy_features,
+						 enforce_mode);
 	eval->op = TOP_EXEC;
 	te_copy_target(eval->target, target);
 	rid = te_check_labels_no_args(eval);
@@ -2331,7 +2330,9 @@ static __always_inline int te_handle_exec_event_with_args(pid_t pid,
 	eval->current_labels = current_labels;
 	eval->current_domain_id = current_domain_id;
 	eval->effect = TEFFECT_BLOCK;
-	eval->effect_mask = te_supported_effects(mode);
+	eval->effect_mask = te_supported_effects(mode, TOP_EXEC,
+						 policy_features,
+						 enforce_mode);
 	eval->op = TOP_EXEC;
 	te_copy_target(eval->target, target);
 	rid = te_check_labels(eval);

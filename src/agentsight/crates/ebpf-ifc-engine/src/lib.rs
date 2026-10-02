@@ -4257,6 +4257,18 @@ mod tests {
         config_blob(&cfg)
     }
 
+    fn block_connect_endpoint_config_blob(ipv4: u32) -> Vec<u8> {
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_CONNECT;
+        cfg.rules[0].m = 3; // TAINT_MATCH_ANY
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        cfg.rules[0].rule_id = 0;
+        cfg.rules[0].ipv4 = ipv4;
+        cfg.rules[0].ipv4_mask = u32::MAX;
+        config_blob(&cfg)
+    }
+
     fn notify_exec_if_label_config_blob(name: &str, label: u64) -> Vec<u8> {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
@@ -8111,6 +8123,85 @@ finally:
             .expect("join ring thread")
             .expect("run loop");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[ignore = "requires root/CAP_BPF and loads live eBPF tracepoints"]
+    fn tracepoint_block_connect_degrades_to_unblocked_violation_smoke() {
+        let _guard = live_bpf_test_guard();
+        let caller_pid = std::process::id() as i32;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let loopback = 127u32 | (1u32 << 24);
+        let policy = block_connect_endpoint_config_blob(loopback);
+        let old_force = std::env::var_os("ACTPLANE_FORCE_TRACEPOINT");
+        std::env::set_var("ACTPLANE_FORCE_TRACEPOINT", "1");
+        let loaded = Loader::load(&policy);
+        if let Some(v) = old_force {
+            std::env::set_var("ACTPLANE_FORCE_TRACEPOINT", v);
+        } else {
+            std::env::remove_var("ACTPLANE_FORCE_TRACEPOINT");
+        }
+        let mut loader = loaded.expect("load tracepoint eBPF engine");
+        assert!(
+            !loader.enforce_mode(),
+            "forced tracepoint mode should not attach BPF LSM"
+        );
+        loader
+            .bind_state(
+                caller_pid,
+                caller_pid as u32,
+                CapState {
+                    scope_id: 1,
+                    target_mask: TARGET_SELF | TARGET_CHILD,
+                    ..CapState::default()
+                },
+            )
+            .expect("bind active unlabeled caller domain");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let run_stop = std::sync::Arc::clone(&stop);
+        let run_thread = std::thread::spawn(move || {
+            loader.run(&run_stop, |v| {
+                let _ = tx.send(v);
+            })
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // A connect the rule does not match must stay invisible even though the
+        // sys_enter_connect tracepoint fires for it (connection refused is
+        // fine: the tracepoint rides syscall entry).
+        let _ = std::net::TcpStream::connect(("127.0.0.2", port));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "non-matching connect reported a violation"
+        );
+
+        // The matching connect must succeed (tracepoints cannot deny) but be
+        // reported as a degraded block violation: effect=block, blocked=false.
+        let hit = std::net::TcpStream::connect(("127.0.0.1", port))
+            .expect("tracepoint backend must not deny the connect");
+        drop(hit);
+        let v = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("degraded connect block violation");
+        assert_eq!(v.op, OP_CONNECT as u32, "unexpected op: {v:?}");
+        assert_eq!(v.effect, EFFECT_BLOCK as u32, "unexpected effect: {v:?}");
+        assert!(
+            !v.blocked,
+            "tracepoint backend cannot block; expected degraded report: {v:?}"
+        );
+        assert!(!v.killed, "block rule must not kill: {v:?}");
+        assert_eq!(v.rule_id, 0, "unexpected rule id: {v:?}");
+        assert_eq!(v.target, "127.0.0.1", "unexpected target: {v:?}");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        run_thread
+            .join()
+            .expect("join ring thread")
+            .expect("run loop");
     }
 
     #[test]
