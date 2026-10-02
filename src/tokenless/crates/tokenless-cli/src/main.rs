@@ -680,7 +680,17 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            println!("{emit_text}");
+            // Byte-exact stdout: passthrough and no-savings runs must
+            // reproduce the input verbatim (the same detection contract
+            // documented for compress-toon), and the recorded `after` is
+            // measured on `emit_text` without a trailing newline.
+            {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(emit_text.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
+            }
 
             record_compression_stats(
                 &config,
@@ -771,7 +781,16 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             let output_text = stats_after_text(&result, &input);
-            println!("{}", result.output);
+            // Byte-exact stdout: the recorded `after` is measured on
+            // `output_text` without a trailing newline, and passthrough runs
+            // must reproduce the input verbatim for stdout-based detection.
+            {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(result.output.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
+            }
 
             record_compression_stats(
                 &config,
