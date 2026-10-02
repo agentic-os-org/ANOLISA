@@ -14,6 +14,7 @@ import { SessionResourceChart } from '../components/SessionResourceChart';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { formatNsPadded as nsToDate } from '../utils/datetime';
+import { fillModelBuckets, fillTokenBuckets } from '../utils/timeseriesBuckets';
 import {
   fetchSessions,
   fetchTraces,
@@ -464,6 +465,10 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
 // ─── Time-series chart helpers ────────────────────────────────────────────────
 
+// Dense gap-filling for the two charts lives in utils/timeseriesBuckets (see
+// the import above) so its ns-rounding boundary behavior is unit-testable
+// without a browser.
+
 /** Palette for model colors */
 const MODEL_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6',
@@ -478,61 +483,6 @@ function nsToLabel(ns: number, spanMs: number): string {
     return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
   }
   return hm;
-}
-
-/**
- * Fill sparse bucket array to a full dense series.
- * Backend only returns buckets that have events; missing ones become 0-value entries.
- */
-function fillTokenBuckets(
-  data: TimeseriesBucket[],
-  startNs: number,
-  endNs: number,
-  bucketCount: number,
-): TimeseriesBucket[] {
-  const bucketNs = Math.floor((endNs - startNs) / Math.max(bucketCount, 1));
-  if (bucketNs <= 0) return data;
-  const byIdx = new Map<number, TimeseriesBucket>();
-  for (const b of data) {
-    const idx = Math.floor((b.bucket_start_ns - startNs) / bucketNs);
-    byIdx.set(idx, b);
-  }
-  const result: TimeseriesBucket[] = [];
-  for (let i = 0; i < bucketCount; i++) {
-    result.push(byIdx.get(i) ?? {
-      bucket_start_ns: startNs + i * bucketNs,
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-    });
-  }
-  return result;
-}
-
-function fillModelBuckets(
-  data: ModelTimeseriesBucket[],
-  startNs: number,
-  endNs: number,
-  bucketCount: number,
-  models: string[],
-): ModelTimeseriesBucket[] {
-  const bucketNs = Math.floor((endNs - startNs) / Math.max(bucketCount, 1));
-  if (bucketNs <= 0) return data;
-  const byIdxModel = new Map<number, Map<string, number>>();
-  for (const b of data) {
-    const idx = Math.floor((b.bucket_start_ns - startNs) / bucketNs);
-    if (!byIdxModel.has(idx)) byIdxModel.set(idx, new Map());
-    byIdxModel.get(idx)!.set(b.model, b.total_tokens);
-  }
-  const result: ModelTimeseriesBucket[] = [];
-  for (let i = 0; i < bucketCount; i++) {
-    const bucketStartNs = startNs + i * bucketNs;
-    const modelMap = byIdxModel.get(i);
-    for (const model of models) {
-      result.push({ bucket_start_ns: bucketStartNs, model, total_tokens: modelMap?.get(model) ?? 0 });
-    }
-  }
-  return result;
 }
 
 // ─── Token Time-series Chart ──────────────────────────────────────────────────
