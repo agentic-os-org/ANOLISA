@@ -928,6 +928,132 @@ def test_mock_server_paces_h2_sse_chunks(tmp_path: Path) -> None:
     )
 
 
+def test_mock_server_streams_large_h2_sse_response(tmp_path: Path) -> None:
+    """h2 responses larger than the initial flow-control window (~64 KiB)
+    must stream, not crash the connection thread.
+
+    python-h2 raises FlowControlError when a send exceeds the remaining
+    window; the server only replenishes its window by reading the client's
+    WINDOW_UPDATE frames, so a ~131 KiB response (1200 chunks x 64 B plus
+    SSE framing) needs the window-aware send path. On the unpatched server
+    the connection thread dies and the client receives nothing.
+    """
+    import h2.config
+    import h2.connection
+    import h2.events
+
+    cert = tmp_path / "server.crt"
+    key = tmp_path / "server.key"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    server = mock_llm_server.BenchmarkHTTPServer(
+        ("127.0.0.1", 0), mock_llm_server.BenchmarkHandler
+    )
+    recorder = mock_llm_server.RequestRecorder(tmp_path / "request-logs")
+    chunks = 1200
+    server.settings = SimpleNamespace(
+        chunks=chunks,
+        chunk_bytes=64,
+        chunk_delay=0,
+        sse=True,
+        request_recorder=recorder,
+    )
+    server.verbose = False
+    tls_context = __import__("ssl").SSLContext(__import__("ssl").PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(cert, key)
+    tls_context.set_alpn_protocols(["h2"])
+    server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+
+    def h2_collect_frames() -> bytes:
+        client_context = __import__("ssl")._create_unverified_context()
+        client_context.set_alpn_protocols(["h2"])
+        raw = client_context.wrap_socket(
+            __import__("socket").create_connection(("127.0.0.1", port), timeout=30),
+            server_hostname="localhost",
+        )
+        config = h2.config.H2Configuration(client_side=True)
+        connection = h2.connection.H2Connection(config=config)
+        connection.initiate_connection()
+        raw.sendall(connection.data_to_send())
+        connection.send_headers(
+            1,
+            [
+                (":method", "POST"),
+                (":path", "/v1/chat/completions"),
+                (":authority", "localhost"),
+                (":scheme", "https"),
+                ("content-type", "application/json"),
+            ],
+            end_stream=False,
+        )
+        connection.send_data(
+            1, b'{"request_id":"h2-flow","stream":true}', end_stream=True
+        )
+        raw.sendall(connection.data_to_send())
+        received = bytearray()
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            raw.settimeout(10.0)
+            try:
+                data = raw.recv(65535)
+            except TimeoutError:  # pragma: no cover - streaming keeps this live
+                break
+            if not data:
+                break
+            ended = False
+            for event in connection.receive_data(data):
+                if isinstance(event, h2.events.DataReceived):
+                    received.extend(event.data)
+                    connection.acknowledge_received_data(
+                        event.flow_controlled_length, event.stream_id
+                    )
+                elif isinstance(event, h2.events.StreamEnded):
+                    ended = True
+            pending = connection.data_to_send()
+            if pending:
+                raw.sendall(pending)
+            if ended:
+                break
+        raw.close()
+        return bytes(received)
+
+    try:
+        stream = h2_collect_frames()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        recorder.close()
+
+    data_frames = stream.count(b"data: ")
+    assert data_frames >= chunks, (
+        f"expected at least {chunks} SSE events, got {data_frames}: "
+        "the connection was likely reset by an uncaught FlowControlError"
+    )
+    assert stream.endswith(b"data: [DONE]\n\n")
+
+
 def test_runner_shell_contract_is_valid() -> None:
     runner = SINGLE_RUN_DIR / "run.sh"
     check = subprocess.run(
