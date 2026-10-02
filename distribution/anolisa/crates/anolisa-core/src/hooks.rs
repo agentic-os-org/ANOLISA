@@ -32,8 +32,10 @@
 //! want the hook outcome reflected in state (e.g. record `last_run_at`
 //! per phase) take care of it themselves under the install lock.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -282,10 +284,15 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
     // spawn_retry_etxtbsy: hook scripts are files ANOLISA itself wrote;
     // a concurrent fork elsewhere can hold the write descriptor for a
     // moment and fail exec with ETXTBSY.
+    //
+    // stdout goes to the null device: the runner never inspects it, and
+    // a piped-but-unread stream is what lets a chatty hook block forever
+    // on a full pipe. stderr is captured for diagnostics and therefore
+    // must be drained concurrently with the poll loop below.
     let mut child = match crate::process::spawn_retry_etxtbsy(
         Command::new(&spec.script)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
     ) {
         Ok(c) => c,
@@ -303,27 +310,26 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
         }
     };
 
+    // Drain stderr on its own thread while the poll loop waits for the
+    // child. Without a concurrent reader a hook that writes more than the
+    // OS pipe buffer (~64 KiB on Linux) blocks in write(2), never exits,
+    // and is killed by the timeout even though it would have succeeded.
+    // The drain also bounds captured bytes, where reading to EOF after
+    // exit would have grown without limit.
+    let stderr_drain = child.stderr.take().map(spawn_stderr_drain);
+
     // Lightweight polling loop avoids pulling in a full async runtime
     // for what amounts to "wait <30s for one short script". 25ms gives
     // sub-second responsiveness for fast hooks without burning CPU.
     let poll = Duration::from_millis(25);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return HookOutcome {
-                        component: spec.component.clone(),
-                        phase: spec.phase,
-                        script: spec.script.clone(),
-                        success: false,
-                        exit_code: None,
-                        duration: started.elapsed(),
-                        stderr_tail: String::new(),
-                        skip: Some(HookSkipReason::Timeout),
-                    };
+                    break None;
                 }
                 std::thread::sleep(poll);
             }
@@ -340,27 +346,32 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
                 };
             }
         }
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(err) => {
-            return HookOutcome {
-                component: spec.component.clone(),
-                phase: spec.phase,
-                script: spec.script.clone(),
-                success: false,
-                exit_code: None,
-                duration: started.elapsed(),
-                stderr_tail: String::new(),
-                skip: Some(HookSkipReason::NotExecutable(err.to_string())),
-            };
-        }
     };
 
-    let stderr_tail = tail_lossy(&output.stderr, 4096);
-    let exit_code = output.status.code();
-    let success = output.status.success();
+    // Reap the drain before reporting: the exited child has no open write
+    // end left, so the reader observes EOF and finishes.
+    let Some(status) = status else {
+        // A timed-out hook's descendants can still hold the stderr write
+        // end; joining the drain would wait for them and defeat the
+        // timeout. Detach it — the output of a killed hook is not worth
+        // more waiting.
+        drop(stderr_drain);
+        return HookOutcome {
+            component: spec.component.clone(),
+            phase: spec.phase,
+            script: spec.script.clone(),
+            success: false,
+            exit_code: None,
+            duration: started.elapsed(),
+            stderr_tail: String::new(),
+            skip: Some(HookSkipReason::Timeout),
+        };
+    };
+    let stderr = collect_drain(stderr_drain);
+
+    let stderr_tail = tail_lossy(&stderr, STDERR_TAIL_BYTES);
+    let exit_code = status.code();
+    let success = status.success();
     HookOutcome {
         component: spec.component.clone(),
         phase: spec.phase,
@@ -382,6 +393,44 @@ fn reason_for(err: &PathBoundaryError) -> String {
             format!("'{}' contains '.' or '..'", path.display())
         }
     }
+}
+
+/// Bytes of hook stderr kept by the drain ([`STDERR_TAIL_BYTES`] of them
+/// are surfaced; the rest only bounds memory for chatty hooks).
+const STDERR_DRAIN_CAP: usize = 64 * 1024;
+/// Bytes of captured stderr surfaced in [`HookOutcome::stderr_tail`].
+const STDERR_TAIL_BYTES: usize = 4096;
+
+/// Drain one child pipe on its own thread, keeping at most the last
+/// [`STDERR_DRAIN_CAP`] bytes. Reading concurrently with the poll loop in
+/// [`execute`] is what keeps a full pipe from blocking the child forever.
+fn spawn_stderr_drain(mut reader: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut tail = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&chunk[..n]);
+                    let excess = tail.len().saturating_sub(STDERR_DRAIN_CAP);
+                    if excess > 0 {
+                        tail.drain(..excess);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        tail
+    })
+}
+
+/// Join a drain thread, returning its captured bytes (empty on panic or
+/// absent pipe).
+fn collect_drain(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
 }
 
 fn tail_lossy(bytes: &[u8], max: usize) -> String {
@@ -724,6 +773,47 @@ mod tests {
         assert!(
             outcome.duration < Duration::from_secs(5),
             "should not wait full 5s"
+        );
+    }
+
+    #[test]
+    fn chatty_hook_exceeding_pipe_capacity_still_succeeds() {
+        // A hook that writes more than the OS pipe buffer (~64 KiB on
+        // Linux) to stdout and stderr must still run to completion: the
+        // runner has to drain the child streams while it polls, or the
+        // child blocks in write(2) on a full pipe, never exits, and gets
+        // killed by the timeout even though it would have succeeded.
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let script = layout.datadir.join("hooks/foo/pre_enable.sh");
+        // 128 KiB per stream — twice the default Linux pipe capacity.
+        write_script(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "line=012345678901234567890123456789012345678901234567890123456789012\n",
+                "i=0\n",
+                "while [ \"$i\" -lt 2048 ]; do\n",
+                "  printf '%s\\n' \"$line\"\n",
+                "  printf '%s\\n' \"$line\" 1>&2\n",
+                "  i=$((i + 1))\n",
+                "done\n",
+                "echo last-line 1>&2\n",
+                "exit 0\n",
+            ),
+        );
+
+        let mut spec = HookSpec::new("foo", HookPhase::PreEnable, script);
+        spec.timeout_secs = 10;
+        let outcome = run_hook(&spec, &layout, None, "op-test-9", "tester", "system");
+
+        assert!(outcome.success, "chatty hook should succeed: {outcome:?}");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.skip.is_none());
+        assert!(
+            outcome.stderr_tail.contains("last-line"),
+            "stderr tail should keep the most recent output: {:?}",
+            outcome.stderr_tail
         );
     }
 
