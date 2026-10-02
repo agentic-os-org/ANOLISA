@@ -11,9 +11,32 @@ use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(crate) const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Kernel identity (device, inode) of one directory entry.
+///
+/// Captured through the handle the creator opened, it attributes an artifact
+/// to the invocation that created it: an error cleanup may only remove an
+/// entry while it still carries the identity recorded at creation, so a name
+/// reused by a competing writer is never deleted by someone else's failure.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl EntryIdentity {
+    /// Captures the identity of the entry behind an already-open handle.
+    pub(crate) fn of(file: &File, path: &Path) -> Result<Self, SkillSecError> {
+        let metadata = file.metadata().map_err(|e| io_error(path, e))?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
 
 pub(crate) struct Directory {
     pub file: File,
@@ -64,11 +87,24 @@ impl Directory {
         validate_name(name)?;
         mkdirat(&self.file, name, Mode::from_raw_mode(0o755))
             .map_err(|e| io_error(self.path.join(name), e))?;
-        self.sync()?;
-        let child = self.child(name, false)?;
-        rustix::fs::fchmod(&child.file, Mode::from_raw_mode(0o755))
-            .map_err(|e| io_error(&child.path, e))?;
-        Ok(child)
+        let child = (|| {
+            self.sync()?;
+            let child = self.child(name, false)?;
+            rustix::fs::fchmod(&child.file, Mode::from_raw_mode(0o755))
+                .map_err(|e| io_error(&child.path, e))?;
+            Ok(child)
+        })();
+        if child.is_err() {
+            // The directory was created by this call and nothing was published
+            // into it, so it must not outlive the failed call: a leaked empty
+            // child turns the next fresh_child for the same name into EEXIST
+            // (or blocks an exported name's empty-directory guard). Nothing
+            // else can have written into the still-daemon-owned directory, so
+            // the removal is a plain rmdir; it stays best effort because the
+            // filesystem that broke the first step may refuse it too.
+            let _ = unlinkat(&self.file, name, AtFlags::REMOVEDIR);
+        }
+        child
     }
 
     pub fn names(&self, deadline: Instant) -> Result<Vec<String>, SkillSecError> {
@@ -149,7 +185,26 @@ impl Directory {
                 },
             )
             .map_err(|e| io_error(self.path.join(name), e))?;
-            self.sync()?;
+            if let Err(failure) = self.sync() {
+                if !replace {
+                    // The NOREPLACE rename already succeeded, so the entry at
+                    // `name` is the one this call just created. A caller that
+                    // sees the error must not also find a half-committed
+                    // record blocking its next NOREPLACE attempt with EEXIST:
+                    // remove it, still identity-checked through the pinned
+                    // handle in case another writer already replaced it.
+                    // Replacing writes keep the entry — removing it would
+                    // destroy the record that was overwritten.
+                    if let Ok(identity) = EntryIdentity::of(&file, &self.path.join(name)) {
+                        let _ = self.remove_child_if_same(
+                            name,
+                            &identity,
+                            Instant::now() + Duration::from_secs(5),
+                        );
+                    }
+                }
+                return Err(failure);
+            }
             Ok(file)
         })();
         let _ = unlinkat(&self.file, temporary.as_str(), AtFlags::empty());
@@ -225,6 +280,36 @@ impl Directory {
         unlinkat(&self.file, name, flags).map_err(|e| io_error(self.path.join(name), e))?;
         self.sync()
     }
+
+    /// Removes `name` only while it is still the entry `identity` describes.
+    ///
+    /// Returns `Ok(false)` — touching nothing — when the name is already gone
+    /// or was replaced by a different inode, so an error cleanup can never
+    /// delete an artifact another invocation created at the same name (for
+    /// example a concurrent export that raced past an empty-destination
+    /// check). The check and the removal both go through the pinned directory
+    /// handle, so they agree on the same directory even if the path was
+    /// swapped; the residual window between the two syscalls only matters to
+    /// an actor racing the cleanup itself.
+    pub fn remove_child_if_same(
+        &self,
+        name: &str,
+        identity: &EntryIdentity,
+        deadline: Instant,
+    ) -> Result<bool, SkillSecError> {
+        validate_name(name)?;
+        check_deadline(deadline)?;
+        let stat = match statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(false),
+            Err(error) => return Err(io_error(self.path.join(name), error)),
+        };
+        if (stat.st_dev, stat.st_ino) != (identity.device, identity.inode) {
+            return Ok(false);
+        }
+        self.remove_child(name, deadline)?;
+        Ok(true)
+    }
 }
 
 pub(crate) fn missing(error: &SkillSecError) -> bool {
@@ -254,4 +339,97 @@ pub(crate) fn set_owner(file: &File, uid: u32, path: &Path) -> Result<(), SkillS
     rustix::fs::fchown(file, Some(rustix::process::Uid::from_raw(uid)), None)
         .map_err(|e| io_error(path, e))?;
     file.sync_all().map_err(|e| io_error(path, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
+
+    #[test]
+    fn fresh_child_refuses_an_existing_name_without_touching_it() {
+        // A competing writer already created the child: the caller gets
+        // EEXIST and the existing entry — partial output of that other
+        // invocation — must survive untouched.
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = Directory::open(temporary.path()).unwrap();
+        let existing = parent.fresh_child("snapshot").unwrap();
+        fs::write(existing.path.join("partial"), b"other export").unwrap();
+
+        let error = parent
+            .fresh_child("snapshot")
+            .err()
+            .expect("fresh_child must fail on an existing name");
+        assert!(
+            matches!(error, SkillSecError::Io { ref source, .. }
+                if source.kind() == std::io::ErrorKind::AlreadyExists),
+            "expected EEXIST, got: {error}"
+        );
+        assert_eq!(
+            fs::read(existing.path.join("partial")).unwrap(),
+            b"other export"
+        );
+        assert_eq!(
+            parent.names(deadline()).unwrap(),
+            vec!["snapshot".to_owned()]
+        );
+    }
+
+    #[test]
+    fn remove_child_if_same_never_deletes_a_replaced_entry() {
+        // The entry this invocation created was swapped for another writer's
+        // tree at the same name: the identity no longer matches, so the
+        // cleanup must skip it, and only the matching identity removes it.
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = Directory::open(temporary.path()).unwrap();
+        let ours = parent.fresh_child("snapshot").unwrap();
+        let identity = EntryIdentity::of(&ours.file, &ours.path).unwrap();
+
+        // Competing writer: move ours away and put a fresh tree at the name.
+        fs::rename(&ours.path, temporary.path().join("moved")).unwrap();
+        let foreign = parent.fresh_child("snapshot").unwrap();
+        fs::write(foreign.path.join("marker"), b"foreign").unwrap();
+
+        assert!(
+            !parent
+                .remove_child_if_same("snapshot", &identity, deadline())
+                .unwrap()
+        );
+        assert_eq!(
+            fs::read(foreign.path.join("marker")).unwrap(),
+            b"foreign",
+            "the replaced entry must survive"
+        );
+        assert!(temporary.path().join("moved").exists());
+
+        // The current entry's own identity removes it.
+        let current = EntryIdentity::of(&foreign.file, &foreign.path).unwrap();
+        assert!(
+            parent
+                .remove_child_if_same("snapshot", &current, deadline())
+                .unwrap()
+        );
+        assert!(!foreign.path.exists());
+        assert!(temporary.path().join("moved").exists());
+    }
+
+    #[test]
+    fn remove_child_if_same_treats_a_missing_entry_as_removed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = Directory::open(temporary.path()).unwrap();
+        let ours = parent.fresh_child("manifest.json").unwrap();
+        let identity = EntryIdentity::of(&ours.file, &ours.path).unwrap();
+        fs::remove_dir(&ours.path).unwrap();
+
+        assert!(
+            !parent
+                .remove_child_if_same("manifest.json", &identity, deadline())
+                .unwrap()
+        );
+    }
 }

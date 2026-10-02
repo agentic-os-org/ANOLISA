@@ -629,3 +629,159 @@ fn scan_reports_special_files_instead_of_skipping_them() {
     );
     fs::remove_file(&fifo).unwrap();
 }
+
+#[test]
+fn failed_export_does_not_leave_partial_output() {
+    // Swap the output directory after the snapshot write starts: the final
+    // verify_path() then fails after snapshot/, manifest.json and
+    // findings.json were written, exercising the write-phase failure path.
+    // A failed export must clean up its partial tree, otherwise the same
+    // --output is permanently blocked by the "must be empty" guard with a
+    // misleading error.
+    let (_temporary, service, root) = fixture();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export");
+    fs::create_dir(&output).unwrap();
+    let moved = output.with_file_name("export-moved");
+    let uid = rustix::process::geteuid().as_raw();
+    let watcher_output = output.clone();
+    let moved_for_watcher = moved.clone();
+    let watcher = std::thread::spawn(move || {
+        while !watcher_output.join("snapshot").exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::rename(&watcher_output, &moved_for_watcher).unwrap();
+        fs::create_dir(&watcher_output).unwrap();
+    });
+    let result = service.export(&root, "latest", &output, uid, deadline());
+    watcher.join().unwrap();
+    assert!(result.is_err(), "swapped output must fail verify_path");
+    assert!(
+        fs::read_dir(&moved).unwrap().next().is_none(),
+        "the partial tree written through the pinned handle must be removed"
+    );
+    assert!(
+        fs::read_dir(&output).unwrap().next().is_none(),
+        "the replacement directory must stay untouched"
+    );
+}
+
+#[test]
+fn failed_export_keeps_a_competing_writers_parallel_artifacts() {
+    // A competing writer (for example an export that raced past the same
+    // empty-destination guard) publishes manifest.json while this export is
+    // still writing its snapshot tree. The NOREPLACE write then fails with
+    // EEXIST and the error cleanup must remove only this call's snapshot —
+    // never the foreign record.
+    let (_temporary, service, root) = fixture();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export-foreign");
+    fs::create_dir(&output).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let watcher_output = output.clone();
+    let watcher = std::thread::spawn(move || {
+        while !watcher_output.join("snapshot").exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::write(
+            watcher_output.join("manifest.json"),
+            b"{\"foreign\": true}\n",
+        )
+        .unwrap();
+    });
+    let result = service.export(&root, "latest", &output, uid, deadline());
+    watcher.join().unwrap();
+    let error = result.expect_err("the NOREPLACE manifest write must fail");
+    assert!(
+        matches!(error, SkillSecError::Io { ref source, .. }
+            if source.kind() == std::io::ErrorKind::AlreadyExists),
+        "expected EEXIST on manifest.json, got: {error}"
+    );
+    assert!(
+        !output.join("snapshot").exists(),
+        "this invocation's snapshot must be removed"
+    );
+    assert_eq!(
+        fs::read(output.join("manifest.json")).unwrap(),
+        b"{\"foreign\": true}\n",
+        "the competing writer's record must survive"
+    );
+    assert!(!output.join("findings.json").exists());
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+}
+
+#[test]
+fn failed_export_spares_a_competing_exports_completed_output() {
+    // Two exports race into the same empty --output (a concurrent retry for
+    // the same workspace). The per-skill lock serializes them, so the export
+    // that loses the race fails fresh_child("snapshot") with EEXIST because
+    // the directory belongs to the winner. The loser's error cleanup must
+    // delete nothing: the completed output is owned by the winning call.
+    let (_temporary, service, root) = fixture();
+    // Bulk content widens the window between the winner's empty-destination
+    // guard and its snapshot creation, letting the loser pass the same guard
+    // before the winner holds the lock.
+    let bulk = vec![7_u8; 32 * 1024 * 1024];
+    fs::write(root.io_dir.join("bulk.bin"), &bulk).unwrap();
+    // The loser blocks on the per-skill lock while the winner writes the
+    // bulk content, so every call needs a deadline well above the default.
+    let slow = || Instant::now() + Duration::from_secs(120);
+    service
+        .certify(&root, "fixture", None, &json!([]), slow())
+        .unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+
+    for attempt in 0..5 {
+        let output = root.io_dir.with_file_name(format!("export-race-{attempt}"));
+        fs::create_dir(&output).unwrap();
+        let winner_service = Arc::clone(&service);
+        let winner_root = root.clone();
+        let winner_output = output.clone();
+        let winner = std::thread::spawn(move || {
+            winner_service.export(&winner_root, "latest", &winner_output, uid, slow())
+        });
+        // The competing export passes the empty-destination guard while the
+        // first export is still reading the ledger snapshot, then blocks on
+        // the per-skill lock until the first export completes.
+        std::thread::sleep(Duration::from_millis(12));
+        let loser = service.export(&root, "latest", &output, uid, slow());
+        let winner = winner.join().unwrap();
+        assert!(winner.is_ok(), "the winning export must complete");
+
+        if matches!(&loser, Err(SkillSecError::Invalid(message)) if message.contains("must be empty"))
+        {
+            // The loser lost the guard race: this attempt cannot exercise
+            // the EEXIST cleanup, so try again with a fresh output.
+            assert!(output.join("snapshot/bulk.bin").exists());
+            continue;
+        }
+        let error = loser.expect_err("one export must fail with EEXIST");
+        assert!(
+            matches!(error, SkillSecError::Io { ref source, .. }
+                if source.kind() == std::io::ErrorKind::AlreadyExists),
+            "expected EEXIST on snapshot, got: {error}"
+        );
+        // The winner's completed output must be untouched.
+        assert_eq!(
+            fs::metadata(output.join("snapshot/bulk.bin"))
+                .unwrap()
+                .len(),
+            bulk.len() as u64
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["versionId"], "v000001");
+        assert!(output.join("findings.json").exists());
+        assert_eq!(
+            fs::read_dir(output.join("snapshot")).unwrap().count(),
+            3,
+            "SKILL.md, run.sh and bulk.bin must all survive"
+        );
+        return;
+    }
+    panic!("the competing export never raced past the empty-destination guard");
+}

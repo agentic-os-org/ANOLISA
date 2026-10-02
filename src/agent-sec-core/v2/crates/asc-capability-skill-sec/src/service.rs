@@ -5,7 +5,7 @@ pub(crate) use commands::{batch, require_batch_roots, with_key};
 
 use crate::ledger::Ledger;
 use crate::ledger::content::Content;
-use crate::ledger::storage::{Directory, MAX_RECORD_BYTES, missing, set_owner};
+use crate::ledger::storage::{Directory, EntryIdentity, MAX_RECORD_BYTES, missing, set_owner};
 use crate::scanner::{ScanTree, ScannerRegistry, requested_names, scan_entry};
 use crate::{
     DecisionAction, HashDiff, KeyStore, Manifest, ScanEntry, ScanStatus, SigningIdentity,
@@ -451,18 +451,51 @@ impl SkillSecService {
                 ledger.latest(key, &root.identity, true, deadline)?.ok_or_else(|| SkillSecError::Integrity("Skill has no latest version".into()))?
             } else { ledger.version(selector, key, &root.identity, deadline)? };
             let content = ledger.snapshot(&manifest, deadline)?;
-            let snapshot = destination.fresh_child("snapshot")?;
-            content.write_owned(&snapshot, deadline, Some(caller_uid))?;
-            if Content::capture(&snapshot, true, deadline)?.hashes() != manifest.file_hashes {
-                return Err(SkillSecError::Integrity("export content changed during creation".into()));
+            // Artifacts this invocation created, paired with the filesystem
+            // identity observed at creation. The cleanup below removes only
+            // entries still carrying a recorded identity: a competing export
+            // that raced past the empty-destination check owns the names it
+            // created (fresh_child and the NOREPLACE write_atomic fail with
+            // EEXIST instead of claiming them), so its output — partial or
+            // complete — is never deleted by this call's error path.
+            let mut created: Vec<(&'static str, EntryIdentity)> = Vec::new();
+            let outcome = (|| {
+                let snapshot = destination.fresh_child("snapshot")?;
+                if let Ok(identity) = EntryIdentity::of(&snapshot.file, &snapshot.path) {
+                    created.push(("snapshot", identity));
+                }
+                content.write_owned(&snapshot, deadline, Some(caller_uid))?;
+                if Content::capture(&snapshot, true, deadline)?.hashes() != manifest.file_hashes {
+                    return Err(SkillSecError::Integrity("export content changed during creation".into()));
+                }
+                let record = destination.write_atomic("manifest.json", &serde_json::to_vec(&manifest)?, false)?;
+                if let Ok(identity) = EntryIdentity::of(&record, &output.join("manifest.json")) {
+                    created.push(("manifest.json", identity));
+                }
+                set_owner(&record, caller_uid, &output.join("manifest.json"))?;
+                let report = destination.write_atomic("findings.json", &serde_json::to_vec(&findings(&manifest))?, false)?;
+                if let Ok(identity) = EntryIdentity::of(&report, &output.join("findings.json")) {
+                    created.push(("findings.json", identity));
+                }
+                set_owner(&report, caller_uid, &output.join("findings.json"))?;
+                destination.verify_path()?;
+                Ok(json!({"canonicalSkillDir":root.identity,"skillName":root.identity.name(),"versionId":manifest.version_id,
+                    "output":output,"snapshot":output.join("snapshot"),"manifest":output.join("manifest.json"),"findings":output.join("findings.json")}))
+            })();
+            if outcome.is_err() {
+                // A failed export must not leave a partial tree that blocks
+                // the same --output with the "must be empty" guard. Removals
+                // go through the pinned directory handle, so they clean up
+                // the entries this call created even if the path was swapped;
+                // each removal is identity-checked so artifacts owned by a
+                // competing writer survive, and failures are swallowed so the
+                // original error is returned.
+                let cleanup = Instant::now() + Duration::from_secs(5);
+                while let Some((name, identity)) = created.pop() {
+                    let _ = destination.remove_child_if_same(name, &identity, cleanup);
+                }
             }
-            let record = destination.write_atomic("manifest.json", &serde_json::to_vec(&manifest)?, false)?;
-            set_owner(&record, caller_uid, &output.join("manifest.json"))?;
-            let report = destination.write_atomic("findings.json", &serde_json::to_vec(&findings(&manifest))?, false)?;
-            set_owner(&report, caller_uid, &output.join("findings.json"))?;
-            destination.verify_path()?;
-            Ok(json!({"canonicalSkillDir":root.identity,"skillName":root.identity.name(),"versionId":manifest.version_id,
-                "output":output,"snapshot":output.join("snapshot"),"manifest":output.join("manifest.json"),"findings":output.join("findings.json")}))
+            outcome
         })
     }
 
