@@ -1,0 +1,66 @@
+# Copyright 2026 Alibaba Cloud
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tokenless Benchmark Suite — L2 module-comparison layer (standalone Cargo
+# workspace).
+#
+# Split out of the L1 compressor workspace so the L2-only deps (tiktoken-rs,
+# reqwest, ...) do not leak into the L1 `cargo test` cycle, and so each layer
+# can evolve independently. Kept OUT of the main tokenless workspace (see the
+# l1-compressor Cargo.toml for the same rationale).
+#
+# Depends on the tokenless crates by path so it always benchmarks the exact
+# working-tree sources next to it.
+[workspace]
+
+[package]
+name = "tokenless-l2-bench"
+version = "0.7.1"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "L2 module-level comparison benchmark harness (tokenless vs headroom) for tokenless compression"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokenless-compressors = { path = "../../crates/tokenless-compressors" }
+# tiktoken-rs gives real o200k_base/cl100k_base counts — the L2 headline
+# metric — instead of the bytes/4 heuristic used by the L0/L1 suite.
+tiktoken-rs = "0.11"
+# blocking + rustls keeps the probe client free of tokio and OpenSSL; L2
+# concurrency needs are tiny (<=10 threads) so an async runtime is overkill.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+sha2 = "0.10"
+rand = "0.8"
+thiserror = "2"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+
+# No criterion benches at the L2 layer; quality/adversarial coverage is the
+# `l2_`-prefixed integration tests under tests/.
+
+# criterion needs unwinding; keep the default (no panic=abort) here.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "l2_compare"
+path = "src/bin/l2_compare.rs"

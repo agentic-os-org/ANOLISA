@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/capabilities/context.projection.prepare/output/v1",
+  "title": "context.projection.prepare/v1 output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate"],
+  "properties": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_artifact_id",
+        "source_digest",
+        "content",
+        "media_type",
+        "transform_chain",
+        "reversibility"
+      ],
+      "properties": {
+        "source_artifact_id": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "content": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
+        },
+        "transform_chain": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[!-~]+$"
+          }
+        },
+        "reversibility": {
+          "enum": ["lossless", "retrievable", "unrecoverable"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "anolisa-tokenless",
+  "version": "0.8.4",
+  "private": true,
+  "description": "Token-Less — LLM token optimization toolkit (schema/response compression, command rewriting, tool readiness)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "src/tokenless"
+  },
+  "homepage": "https://github.com/alibaba/anolisa/tree/main/src/tokenless",
+  "keywords": [
+    "anolisa",
+    "tokenless",
+    "llm",
+    "token-optimization",
+    "compression",
+    "cli"
+  ],
+  "bin": {
+    "tokenless": "bin/tokenless",
+    "rtk": "bin/rtk"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "adapters/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=16.7.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "optionalDependencies": {
+    "@anolisa/tokenless-linux-x64": "0.8.4",
+    "@anolisa/tokenless-linux-arm64": "0.8.4",
+    "@anolisa/tokenless-darwin-x64": "0.8.4",
+    "@anolisa/tokenless-darwin-arm64": "0.8.4"
+  }
+}

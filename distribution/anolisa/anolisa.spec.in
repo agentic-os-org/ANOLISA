@@ -1,0 +1,651 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+# Default OSS mirror / channel used to interpolate the OSS-targeted
+# distribution-index template at install time. Override at build-time with:
+#   rpmbuild --define '_anolisa_mirror https://my.mirror/...' ...
+%{!?_anolisa_mirror:%define _anolisa_mirror https://anolisa.oss-cn-hangzhou.aliyuncs.com}
+%{!?_anolisa_channel:%define _anolisa_channel stable}
+
+Name:           anolisa
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        ANOLISA - Agentic OS helper CLI
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+BuildRequires:  rust >= 1.93
+BuildRequires:  cargo >= 1.93
+BuildRequires:  gcc
+BuildRequires:  make
+
+# Runtime: the `anolisa` CLI stages/downloads OS components on demand and has
+# no hard runtime dependencies. `curl` and `tar` are used by the install
+# helper script; they are practically always present on a base install.
+
+%define _datadir_anolisa %{_datadir}/anolisa
+
+%description
+ANOLISA - Agentic Nexus Operating Layer & Interface System Architecture.
+Command-line tool that manages capabilities, runtime components, and OS-base
+layers (kernel / sandbox / security) for AI-agent workloads on Anolis OS and
+Alibaba Cloud Linux.
+
+#%package doc
+#Summary:   Documentation and license files for %%{name}
+#License:   Apache-2.0
+#BuildArch: noarch
+
+#%description doc
+#Documentation and license files for %%{name}.
+
+%prep
+# Source0 unpacks into top-level directory `anolisa/` (no version suffix),
+# so override the default %{name}-%{version} target with -n anolisa.
+%setup -q -n anolisa
+# Unpack the offline vendor tree (Source1) alongside the source.
+%setup -q -T -D -n anolisa -a 1
+
+# Pin cargo to the vendored sources so the build is fully offline.
+mkdir -p .cargo
+cat > .cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+
+%build
+# `rust-toolchain.toml` is rustup-only metadata; the system cargo (dnf-installed
+# rust-1.93) ignores it and uses the system rustc directly.
+export CARGO_HOME=$(pwd)/.cargo-home
+mkdir -p "$CARGO_HOME"
+cp .cargo/config.toml "$CARGO_HOME/config.toml"
+
+cargo build --release --offline --locked -p anolisa-cli
+
+%install
+rm -rf %{buildroot}
+
+# -- main binary --
+install -d %{buildroot}%{_bindir}
+install -m 0755 target/release/anolisa %{buildroot}%{_bindir}/anolisa
+
+# -- default repo config --
+install -d %{buildroot}%{_sysconfdir}/anolisa
+install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
+
+# -- manifests (osbase) --
+# NOTE: data files under %{_datadir_anolisa} are intentionally NOT installed.
+# Component manifests are downloaded from the distribution backend at install
+# time and the CLI fetches + caches the distribution index from the mirror at
+# runtime, so a datadir copy of either would never be read. Re-enable the
+# block below if you need to bundle the osbase manifests into the RPM.
+#install -d %{buildroot}%{_datadir_anolisa}/manifests/osbase
+#cp -pR manifests/osbase/. %{buildroot}%{_datadir_anolisa}/manifests/osbase/
+#find %{buildroot}%{_datadir_anolisa}/manifests -type d -exec chmod 0755 {} \;
+#find %{buildroot}%{_datadir_anolisa}/manifests -type f -exec chmod 0644 {} \;
+
+# -- templates (execution policy is consumed by the CLI's scope gate) --
+#install -d %{buildroot}%{_datadir_anolisa}/templates
+#install -m 0644 templates/execution-policy.toml \
+#    %{buildroot}%{_datadir_anolisa}/templates/execution-policy.toml
+
+# -- documentation --
+#install -d %{buildroot}%{_docdir}/%{name}
+#install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
+#install -m 0644 LICENSE   %{buildroot}%{_docdir}/%{name}/LICENSE
+
+%files
+%{_bindir}/anolisa
+%dir %{_sysconfdir}/anolisa
+%config(noreplace) %{_sysconfdir}/anolisa/repo.toml
+# Data files under %%{_datadir_anolisa} are not shipped in this build.
+#%%{_datadir_anolisa}
+
+#%files doc
+#%%license %%{_docdir}/%%{name}/LICENSE
+#%%doc %%{_docdir}/%%{name}/README.md
+
+%post
+# ANOLISA telemetry is opt-out: it collects by default. On install and upgrade,
+# wire up the resident upload service unless the user has explicitly opted out
+# via the persistent marker below. The CLI writes and enables the systemd unit
+# itself (the unit is not shipped in %files). A telemetry failure must never
+# abort the package transaction, hence `|| :`.
+if [ ! -e %{_sysconfdir}/anolisa/.telemetry_disabled ]; then
+    echo "ANOLISA: enabling telemetry (opt-out). To disable: sudo anolisa telemetry disable"
+    %{_bindir}/anolisa telemetry enable >/dev/null 2>&1 || :
+fi
+
+%preun
+# Full removal ($1 == 0): stop and disable the resident telemetry service while
+# the binary is still present. Upgrades ($1 >= 1) leave it running.
+if [ $1 -eq 0 ]; then
+    systemctl disable --now anolisa-telemetry.service >/dev/null 2>&1 || :
+fi
+
+%postun
+# Full removal ($1 == 0): drop the unit written at runtime by `telemetry enable`
+# (it lives in the CLI's system unit dir, not tracked by %files) so no dangling
+# unit points at the removed binary.
+#
+# The path below is hardcoded because the binary is already removed by the time
+# %postun runs, so we cannot call `anolisa` to resolve FsLayout::SYSTEMD_UNITS.
+# It must stay in sync with the CLI default: /usr/local/lib/systemd/system
+# (see crates/anolisa-platform/src/fs_layout.rs → fhs::SYSTEMD_UNITS).
+if [ $1 -eq 0 ]; then
+    rm -f /usr/local/lib/systemd/system/anolisa-telemetry.service
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+
+%changelog
+* Wed Sep 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Synchronize version metadata for the Intel macOS CLI release.
+- Recognize Intel macOS cosh-ng releases in the component catalog.
+
+* Tue Sep 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.15-1
+- Verify RPM adapter bundles and shared skills across declared subpackages.
+- Redact repository credentials and paths from RPM transaction diagnostics.
+
+* Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.14-1
+- Manage OpenCode local plugins with recoverable enable and disable operations.
+- Include local cosh-ng diagnostic bundle summaries in bug reports.
+- Diagnose visible system installations and warn on unreadable cross-scope logs.
+
+* Sun Sep 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.13-1
+- Support Yum 3 and DNF 4 with exact-version RPM transactions and preflight checks.
+- Query validated RPM metadata with proxy and private CA support.
+- Recognize derivative distributions and explain unavailable Raw platforms.
+- Preserve available cloud metadata after individual HTTP errors.
+
+* Wed Sep 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.12-1
+- Preflight upgrade RPM installs and restore explicit OpenClaw plugin activation.
+- Distinguish package, runtime dependency, and service probe failures from absence.
+- Require manual recovery for incomplete dpkg states and honor DNF failures.
+- Require OpenClaw 2026.2.13 or newer for the bundled ws-ckpt adapter.
+
+* Wed Sep 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.11-1
+- Allow editable raw configs and record post-hook file digests.
+- Accept OpenClaw capability consent and recover verified plugin cleanup.
+- Preflight RPM conflicts and align installed package observations with the catalog.
+- Allow index previews with a private cache and register ktuner in both catalogs.
+
+* Sun Sep 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.10-1
+- Manage QwenPaw plugin adapters through the framework CLI with verified cleanup.
+- Log limits now return recent matches without blocking new log appends during scans.
+
+* Wed Sep 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.9-1
+- Dry-runs now preview supported commands and reject unsupported requests before effects.
+- Self-updates now write redacted central operation-log records.
+- Raw repository defaults no longer advertise inactive cache settings.
+- The installer now reports CLI installations shadowed by PATH.
+
+* Wed Aug 26 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.8-1
+- GitHub releases now include verified prebuilt CLI archives for three supported targets.
+- Raw installs now preserve runtime ${VAR} references in rendered file content.
+
+* Tue Aug 25 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.7-1
+- Restart dry-runs now remain read-only and never invoke systemd.
+- Source and RPM builds now require Rust 1.93.
+
+* Sat Aug 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.6-1
+- Quiet adapter inspection now suppresses all non-error human output.
+- Forget dry-runs now refuse components with enabled adapters.
+
+* Thu Aug 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.5-1
+- Component uninstall now stops every loaded systemd template instance.
+
+* Wed Aug 19 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.4-1
+- Component commands now validate new identities through the component index.
+- Missing local Raw index errors now identify the active repository source.
+
+* Tue Aug 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.3-1
+- Telemetry snapshots now report the detected container runtime flavor.
+- Component status now validates targets and redirects telemetry service queries.
+- Raw adapter bundle installs now preserve per-file archive modes.
+
+* Mon Aug 17 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.2-1
+- Native DSH adapters now support explicit multi-profile lifecycle.
+- Component availability and batch installs now match exact OS and architecture targets.
+- Raw dry-runs now validate metadata for the resolved artifact target.
+- Logs now accept --level as an alias for --severity.
+- System-helper status now distinguishes unit failures from systemctl launch failures.
+
+* Thu Aug 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.1-1
+- Adapter discovery now ignores undeclared shared resource directories.
+
+* Wed Aug 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.0-1
+- Adapter integrity now verifies package-owned files and ignores unmanaged runtime data.
+- Re-enabling adapters now prunes only receipt-owned stale outputs and preserves runtime files.
+
+* Tue Aug 11 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.20-1
+- Component listing now reports host-aware availability in human and JSON output.
+- npm installs now keep the public command link under the root package.
+
+* Mon Aug 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.19-1
+- Raw dependency provisioning now recognizes RPM and DEB family hints without `which`.
+- Sandbox-list and registration-status JSON now use the standard response envelope.
+- OpenClaw adapters now honor configured state directories and migrate legacy installs safely.
+
+* Thu Aug 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.18-1
+- Raw installs now use bounded-memory, disk-backed payload staging.
+- Telemetry now derives region-specific SLS projects from a project prefix.
+- Large intact artifacts no longer cause false integrity failures.
+- Codex adapter enablement now trusts installed plugin hooks.
+
+* Wed Aug 05 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.17-1
+- Raw installs now render relocatable templates and reject incompatible contracts.
+- Generation-2 indexes prevent silent downgrade from unreadable entries.
+- RPM adapters now use package-owned roots and preserve external symlink trust.
+- Native Qoder plugins now use the framework lifecycle and protect existing registrations.
+
+* Mon Aug 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.16-1
+- Component updates now report adapter bundles that need follow-up.
+- Raw installs now work without rpm tooling on deb-family hosts that have no rpm database.
+
+* Thu Jul 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.15-1
+- Interactive install and uninstall commands now report phase-based activity.
+- Human errors now use conventional labels while JSON retains machine codes.
+- Update notices now quote their recommended commands.
+
+* Wed Jul 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.14-1
+- Status and doctor now detect managed file mode and capability drift.
+- Repair now restores declared metadata without granting unconfirmed capabilities.
+
+* Tue Jul 28 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.13-1
+- Raw installs now protect packages reserved by pending RPM operations.
+- `cosh-ng` RPM installations now keep their stable component identity.
+- Raw rollback now restores file permissions and capabilities.
+- Tokenless adapters now support Qwencode and resolve Qoder hook paths.
+- The npm distribution now supports macOS arm64.
+
+* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.12-1
+- Missing installed components now report `NOT_INSTALLED` in structured output.
+- Adapter status now ignores stale source directories and reports missing bundles as degraded.
+- Raw install dry-runs now validate component conflicts before execution.
+
+* Fri Jul 24 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.11-1
+- Raw `anolisa install --version` now installs the exact published component version.
+- Raw `anolisa install --version` output now reports requested and resolved versions, artifact URL, and source repository.
+- Raw `anolisa install --version` now lists published alternatives when the requested version is unavailable.
+- Raw `anolisa install --version` no longer installs another version when the requested version is unavailable.
+- Raw component uninstalls with many files now complete faster and write substantially less data.
+- Recovery now preserves installed state when operation recovery data is missing or corrupted.
+
+* Thu Jul 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.10-1
+- `anolisa telemetry` now lets administrators enable or disable data collection.
+- `anolisa telemetry` now lets administrators link or unlink named reporting.
+- `anolisa telemetry status` now reports collection and named-reporting states in text or JSON.
+- Adapter enable and disable commands now display component-provided follow-up notices.
+- Adapter JSON output now includes structured component-provided notices.
+- `anolisa install --version` JSON output now includes requested and resolved versions, source repository, and exact RPM.
+- Fresh ANOLISA RPM installations now enable anonymous telemetry by default.
+- RPM installation output now explains how to disable telemetry.
+- Enabled telemetry now resumes automatically after restarts on supported hosts.
+- `anolisa register` now warns that the command is deprecated.
+- `anolisa register` now enables telemetry without prompting.
+- `anolisa register status` now directs users to `anolisa telemetry status`.
+- `anolisa unregister` now disables telemetry while preserving local logs.
+- `anolisa install --version` now selects the exact host-compatible RPM matching the requested version.
+- `anolisa install --dry-run --version` now validates availability and displays the resolved RPM details.
+- Adapter dry-runs now preview component-provided notices without changing the host.
+- Adapter quiet output now suppresses component-provided notices.
+- `anolisa register` now prevents duplicate uploads from earlier telemetry configurations.
+- `anolisa unregister` no longer leaves earlier telemetry configurations reporting.
+- `anolisa install --version` no longer changes the host when the requested RPM is unavailable or incompatible.
+- `anolisa install --version` no longer records success when a different RPM version is installed.
+- `anolisa repair` now rejects interrupted RPM installs whose installed version differs from the original request.
+- `anolisa repair` now reports when an interrupted RPM install's architecture cannot be verified.
+- `anolisa adapter disable` now shows saved follow-up notices even when component files are unavailable.
+- Adapter notices can no longer inject terminal formatting into human-readable output.
+
+* Wed Jul 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.9-1
+- `anolisa update all` now updates every tracked raw and RPM component while leaving the CLI unchanged.
+- `anolisa repair` now restores damaged raw installations from their recorded versions.
+- `anolisa repair` now supports user-scope installations without root privileges.
+- `anolisa repair` now recovers interrupted install, update, adopt, uninstall, and batch operations.
+- `anolisa repair` now reinstalls missing managed RPM packages.
+- `anolisa status` now reports unclassified legacy records as needs-attention with scope-aware repair and forget guidance.
+- `anolisa status` and `anolisa doctor` now run health checks from each installation's saved component manifest.
+- User-mode adapter commands can now target visible system installations.
+- `anolisa repair` can now restore unclassified legacy records from installed packages or intact files.
+- `anolisa forget` can now remove unclassified legacy records without touching installed files or packages.
+- `anolisa install` now refuses unmanaged system RPMs and directs users to `anolisa adopt`.
+- `anolisa install` now succeeds without changes when the component is already tracked.
+- `anolisa adopt` now makes existing RPMs updatable while keeping package removal opt-in.
+- `anolisa adopt` now succeeds without changes for already adopted packages.
+- `anolisa update` now requires observed-only RPMs to be adopted first.
+- `anolisa install --all` now applies new RPM packages in one package transaction.
+- `anolisa upgrade` now applies planned RPM updates in one package transaction.
+- `anolisa upgrade` now applies planned RPM installs in one package transaction.
+- `anolisa list` and `anolisa status` now show separate user and system rows for shadowed components.
+- `anolisa list` now labels tracked installations as owned, managed, adopted, or observed.
+- `anolisa --install-mode user install` can now create a user installation beside a visible system installation.
+- Lifecycle mutations now remain within the selected scope, including package aliases.
+- The first modifying command now upgrades legacy state and preserves `installed.toml.v4.bak`.
+- Newer state formats now produce an error instead of appearing empty.
+- `install-anolisa.sh` now leaves distribution index retrieval to the CLI, keeping mirror data current.
+- `install-anolisa.sh` now stages only OS-base manifests because component manifests are fetched when needed.
+- `install-anolisa.sh --strict` now validates only binary and manifest bundle checksums.
+- `ANOLISA_INDEX_URL` and `ANOLISA_INDEX_SHA256` no longer affect `install-anolisa.sh`.
+- Lifecycle JSON output now includes explicit plans across install, adopt, update, repair, and uninstall.
+- Uninstall JSON output now uses one schema for raw and RPM components, including package removal and plans.
+- `anolisa uninstall --dry-run` now reports missing components as errors instead of empty successful plans.
+- `anolisa forget` and `anolisa restart` now stop while an earlier component operation needs recovery.
+- `anolisa doctor` now reports incomplete operations even without an active component record.
+- RPM-managed components no longer fail `status` or `doctor` because of raw-install health checks.
+- RPM component updates now refresh saved component manifests before reporting success.
+- Incomplete RPM manifest refreshes now appear in `anolisa logs --severity warn`.
+- Interrupted RPM updates now remain repairable instead of appearing successful with stale settings.
+- `anolisa doctor` no longer recommends lifecycle commands when recovery data is unreadable or ambiguous.
+- `anolisa doctor` no longer duplicates recovery findings across components sharing one state location.
+- `anolisa doctor --help` now states that `--fix` remains unavailable.
+- Batch RPM failures now preserve repairable state for packages that changed.
+- Component aliases no longer redirect lifecycle changes into a different installation scope.
+- Health checks for user services now use the correct service manager across installation scopes.
+- Failed batch RPM operations now retry unaffected components individually.
+
+* Tue Jul 21 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.8-1
+- `anolisa adapter enable` now supports `--allow-unsafe-plugin-install` for explicitly authorized OpenClaw plugin installation.
+- OpenClaw adapter settings can now target specific OpenClaw versions.
+- `anolisa adapter enable` now checks OpenClaw compatibility before making changes.
+- `anolisa adapter enable` now verifies OpenClaw plugins are loaded before reporting success.
+- When OpenClaw blocks an unsafe plugin, ANOLISA now shows the reported findings.
+- When supported, OpenClaw safety errors now suggest retrying with explicit unsafe authorization.
+- Failed OpenClaw setting updates can now be retried without losing track of affected settings.
+- Re-enabling an OpenClaw adapter no longer loses track of settings applied by an earlier successful enable.
+- `anolisa adapter disable` now warns when OpenClaw settings may remain after an uncertain update.
+
+* Sat Jul 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.7-1
+- `anolisa adapter` now manages Qwen Code extensions through the `qwen` CLI for Qwen Code 0.17 and newer.
+- `anolisa upgrade` and `anolisa repair` now explain component manifest reconciliation in human and JSON output.
+- `anolisa upgrade` now refreshes component manifests after RPM package upgrades.
+- `anolisa upgrade` now reconciles same-version RPM component manifest changes.
+- `anolisa repair` now refreshes stale component manifests from the installed RPM.
+- Failed component manifest refreshes now keep RPM components repairable and report the affected component.
+
+* Thu Jul 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.6-1
+- `anolisa status` no longer reports healthy RPM-managed components as failed.
+
+* Tue Jul 14 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.5-1
+- `anolisa repair` now recovers interrupted fresh RPM installs after the package has been installed.
+- `anolisa update --check` now reports RPM components whose saved state requires reconciliation.
+- Install, adopt, and upgrade commands now require interrupted RPM installs to be repaired before continuing.
+- Concurrent RPM installs now fail safely instead of overwriting another operation's component state.
+- Reinstalling a missing ANOLISA-managed RPM now preserves the component's settings and history.
+- `anolisa uninstall --dry-run --json` now includes `dry_run: true` and omits removal phases for components that are not installed.
+- `anolisa upgrade` now refreshes saved RPM versions and package details after upgrades.
+- `anolisa upgrade` now reconciles older RPM records that lack package details.
+
+* Mon Jul 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.4-1
+- `anolisa update --check` now shows progress while checking for updates in interactive terminals.
+- `anolisa upgrade` now shows progress while planning and applying upgrades in interactive terminals.
+- Raw component installs and updates now choose installable archives even when binary releases are also listed.
+
+* Sun Jul 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.3-1
+- Package installation and removal progress now uses stderr, keeping command output safe for redirection.
+- ANOLISA commands now exit cleanly when a downstream pipeline closes standard output early.
+- ANOLISA commands now report standard output write failures instead of silently succeeding.
+
+* Thu Jul 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.2-1
+- `anolisa update --check` now reports RPM upgrade opportunities without changing state.
+- `anolisa update --check --motd` now prints a short login-friendly upgrade summary.
+- `anolisa upgrade` now applies RPM image upgrades for RPM-managed toolchains.
+- `anolisa upgrade` now installs missing default components from the selected target profile.
+- `anolisa adapter scan` now marks enabled receipts with missing sources as orphaned.
+- `anolisa adapter status` now reports missing adapter sources as degraded receipts.
+- `anolisa list` now shows component scope for visible user and system records.
+- `anolisa status` now shows scope, mutability, shadowing, and state path metadata.
+- `anolisa doctor` now includes readable system components in user-mode diagnostics.
+- `anolisa doctor` now suggests system-mode commands for read-only system records.
+- `anolisa update --check` now uses the latest target profile when `--target` is omitted.
+- `anolisa update --check --motd` now points users to `sudo anolisa upgrade` when action is needed.
+- `anolisa uninstall`, `forget`, and `update` now reject read-only system targets with system-mode guidance.
+- `anolisa upgrade` now reports unresolved target defaults as check errors.
+- `anolisa upgrade` now warns when refreshed RPM details are unavailable after an upgrade.
+
+* Wed Jul 08 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.1-1
+- `anolisa adapter enable` now supports Tokenless adapters for cosh, Codex, and Claude Code.
+- `anolisa adapter enable` now supports Tokenless adapters for Qoder.
+- Claude Code adapters now use per-component marketplaces to avoid affecting other ANOLISA plugins.
+- `anolisa adapter enable` now rejects invalid framework and `adapter_type` combinations before changing settings.
+- Codex adapters now work when component resources come from packaged data directories.
+- Qoder adapter enable now keeps malformed `settings.json` unchanged instead of replacing it.
+- Qoder adapter disable now removes only hook entries previously added by ANOLISA.
+- Qoder adapters now prefer stable qodercli releases over matching prereleases.
+
+* Tue Jul 07 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.0-1
+- Raw components can now declare `conflicts` to block incompatible raw installs.
+- `anolisa install` now rejects raw component conflicts before changing the host.
+- `anolisa install --dry-run` now reports raw component conflicts instead of showing an invalid plan.
+
+* Fri Jul 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.20-1
+- ANOLISA can now be distributed as `@anolisa/cli` with Linux x64 and arm64 binaries.
+- `repo.toml` now enables the npm backend for component distribution.
+- `anolisa list` now shows local state, ownership, and next action for each component.
+- `anolisa list --json` now includes RPM package, version, architecture, and source repository details.
+- RPM installs and updates now keep system repositories available for dependencies.
+- Adapter commands now distinguish missing component manifests from invalid manifests.
+
+* Thu Jul 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.19-1
+- `anolisa adapter disable --dry-run` now previews cleanup without removing adapter receipts or resources.
+- Read-only commands now use downloaded repo config when saving `repo.toml` fails.
+- Component commands now accept package aliases consistently when targeting installed components.
+- Ambiguous package aliases no longer choose an arbitrary installed component.
+- Unknown component names now report no match without querying packages.
+
+* Wed Jul 01 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.18-1
+- `anolisa install` now auto-installs missing system packages for raw components in system mode.
+- `anolisa install --dry-run` now labels unresolved dependencies as auto-install or manual.
+- `anolisa install` now reports packages auto-installed during raw component installs.
+- `anolisa status --verbose` now shows packages auto-installed for each component.
+- Commands that need repo access now download and validate `repo.toml` on first use.
+- Repo config dry-runs now fetch and validate without writing `repo.toml`.
+- RPM install and update now use only the `repo.toml` RPM repository.
+- User-mode raw installs now report missing dependencies with install commands before changing files.
+- Failed raw installs now list any auto-installed packages left on the system.
+- `anolisa update self` no longer fetches repo config before checking CLI updates.
+- `anolisa list --installed` now includes adopted RPM components.
+- `anolisa list` now shows adopted, failed, and disabled component statuses.
+- Adapter commands now prefer resources from the datadir that supplied the component contract.
+- RPM installs now fail before `dnf` when `[backends.rpm]` is missing.
+- RPM updates now explain missing `[backends.rpm]` instead of using host repositories.
+
+* Tue Jun 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.17-1
+- Repository components.toml can now define component names, package aliases, and raw/RPM package mappings.
+- `anolisa list --installed` now filters installed components.
+- `anolisa list` and `install --all` now read components from components.toml instead of catalog.json.
+- `anolisa list` now shows NAME, SUMMARY, BACKENDS, and STATUS.
+- `anolisa list --enabled` is now a hidden alias for `--installed`.
+- ANOLISA_CATALOG_URL no longer changes list sources; configure repo.toml instead.
+- `anolisa install`, `status`, `adopt`, and `repair` now resolve RPM package aliases from components.toml.
+- `anolisa status` now suggests `sudo anolisa adopt <component>` for untracked RPM components.
+- `anolisa status <RPM package>` now reports the canonical component row when an alias is installed.
+- `anolisa repair <RPM package>` now refreshes the canonical component row when an alias is used.
+- Non-root `anolisa osbase` mutations now reach the system helper instead of failing install-mode checks.
+- Commands now reject root `--install-mode user` before writing ambiguous user-mode state.
+- System-mode write commands now fail before changes when sudo is missing.
+- Existing installs with managed symlinks no longer show false symlink integrity failures after upgrade.
+- `anolisa status` now reports `referent_mismatch` when managed symlinks point elsewhere.
+
+* Mon Jun 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.16-1
+- `anolisa osbase sandbox install runc` now installs runc, containerd, Docker, and Docker client.
+- `anolisa osbase sandbox install` now enables services declared by sandbox scenarios.
+- `anolisa osbase sandbox install` now runs scenario verification commands after installation.
+- `anolisa osbase sandbox install` now records sandbox scenarios in `installed.toml`.
+- `anolisa osbase sandbox install` now reports optional scenario packages as hints.
+- `rund`, `firecracker`, and `gvisor` sandbox scenarios now define post-install checks.
+- `anolisa adapter enable` now supports `adapter_type = "skill_bundle"` for OpenClaw and Hermes skills.
+- The RPM package now installs default `repo.toml` to `/etc/anolisa/repo.toml`.
+- ANOLISA telemetry setup now installs log rotation for ops `.jsonl` files.
+- `anolisa osbase sandbox install --dry-run` now shows preflight, package, service, verify, and state phases.
+- `anolisa osbase sandbox install runc` now requires Linux kernel 4.18 or newer.
+- `anolisa osbase sandbox install` now reports verification failures as warnings when other phases succeed.
+- `repo.toml` now points RPM installs to the agentic-os repository path.
+- `anolisa update self --json` now reports apply mode, RPM package, and RPM version observations.
+- `anolisa adapter status` now treats skill bundles as healthy without plugin registration.
+- `anolisa adapter enable` now rejects skill bundles that declare framework config entries.
+- RPM-backed commands now use the component name as the default package name.
+- `anolisa update self` now delegates RPM-owned CLI updates to `dnf`.
+- Non-root sandbox installs now show package, service, verify, and state phases.
+- Telemetry setup now runs the ilogtail installer with bash-compatible script handling.
+- `anolisa adapter disable` now cleans skill bundles without plugin unregister errors.
+
+* Thu Jun 25 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.15-1
+- `anolisa doctor` now reports component health, dependency status, and suggested fixes.
+- Raw components can now declare runtime dependencies for install and update preflight checks.
+- `anolisa install --dry-run` now previews runtime dependency status for raw components.
+- `anolisa install` and `update <component>` now refuse raw components with missing runtime dependencies before changing files.
+- `anolisa restart <component>` now restarts service units shipped by RPM-backed components.
+- `anolisa restart <component>` now shows guidance for RPM-backed template services instead of failing.
+- `anolisa adapter enable` now expands `{datadir}` from the package that provided the adapter metadata.
+- After `anolisa uninstall` or `forget`, adapter commands no longer see stale component metadata.
+
+* Wed Jun 24 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.14-1
+- Raw components can now place systemd unit files with `{unitdir}`.
+- Raw components can now place user service unit files with `{userunitdir}`.
+- User-mode `anolisa install` now activates declared user-scope services.
+- User-mode `anolisa install` now resolves `%%u` service templates to the current user.
+- System-mode `anolisa install` now preserves `%%u` user service templates for later per-user activation.
+- `anolisa uninstall` now reloads systemd after removing declared service unit files.
+- `anolisa restart <component>` now restarts user-scope services from user-mode installs.
+- `anolisa install` now starts freshly installed service units without a manual systemd reload.
+- `anolisa uninstall` now deactivates user-scope services from user-mode installs.
+- `anolisa adapter enable` now finds `{datadir}` skills from the package directory that provides the adapter.
+
+* Tue Jun 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.13-1
+- `anolisa adapter enable` now supports Hermes plugins.
+- `anolisa adapter enable` now installs declared OpenClaw skills.
+- `anolisa adapter enable` now applies declared OpenClaw config values.
+- `anolisa install` now starts declared services for raw components.
+- `anolisa install` now applies declared file capabilities for raw components.
+- `anolisa install` now runs declared hooks for raw components.
+- `anolisa update <component>` now restarts declared services for raw components.
+- `anolisa update <component>` now reapplies declared file capabilities for raw components.
+- `anolisa uninstall` now runs declared hooks for raw components.
+- `anolisa uninstall` now disables declared services after stopping them.
+- `anolisa adapter scan` now honors declared adapter resource locations.
+- `anolisa adapter enable` now reads package-installed adapter resources.
+- `anolisa install --dry-run` now previews declared capabilities for raw components.
+- `anolisa register status` now reports the latest registration after repeated changes.
+- Cancelled `anolisa register` and `unregister` prompts now exit successfully.
+- `anolisa adapter status` now detects OpenClaw plugins from wrapped table output.
+- `anolisa adapter status` now ignores bundled Hermes plugins during checks.
+- `anolisa adapter` commands now find metadata shipped by RPM-installed components.
+- `anolisa register status` now reports sysom console registrations as active.
+
+* Mon Jun 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.12-1
+- `anolisa update <component>` can update raw-managed components from the raw backend.
+- `anolisa osbase sandbox list` shows scenarios from `sandbox.toml`.
+- `anolisa osbase sandbox uninstall <scenario>` can remove packages for a sandbox scenario.
+- `anolisa system setup` can install the helper service for non-root osbase commands.
+- `anolisa system status` can show helper health, version, uptime, and last operation.
+- `anolisa system teardown` can remove the helper service and sandbox config.
+- `anolisa env --json` includes distro identity fields.
+- `anolisa osbase sandbox install <scenario>` now installs scenarios defined in `sandbox.toml`.
+- Omitting `--install-mode` now selects `system` for root and `user` otherwise.
+- `anolisa update <component> --dry-run` now lists raw backend candidate versions.
+- Legacy `yum` backend names in `repo.toml` and `--backend` now resolve to `rpm`.
+- Raw components installed with `--package` now update from the same package name.
+- `anolisa update <component>` now refuses raw updates that would downgrade a component.
+- `anolisa update <component>` now refuses raw updates when versions cannot be safely compared.
+
+* Thu Jun 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.11-1
+- `anolisa adopt <component>` can track a pre-installed system RPM without installing it.
+- `anolisa repair <component>` can refresh RPM component state after package details change.
+- `anolisa forget <component>` can stop tracking a component without removing packages or files.
+- `anolisa status <component>` now reports drifted RPM components when system package details change.
+- `anolisa uninstall` now keeps observed system RPMs unless `--remove-system-package` is used.
+- `anolisa install` now preserves adapter package resources when adopting RPM components.
+
+* Wed Jun 17 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.10-1
+- `anolisa install --backend rpm` can install missing RPM components through `dnf` and track them as managed.
+- `anolisa install` can adopt matching pre-installed system RPMs without downloading a raw package.
+- `anolisa update <component>` can update RPM-managed and RPM-observed components through `dnf`.
+- `anolisa status` now shows package, version, architecture, and source repo for RPM-backed components.
+- `anolisa status <component>` now reports matching untracked system RPMs as observed.
+- `anolisa update runtime <component>` is now `anolisa update <component>`; `self` and `all` stay subcommands.
+- `repo.toml` now uses `[backends.rpm]` instead of `[backends.yum]`.
+- `anolisa install --all` now lists adopted RPM components in the batch summary.
+- `anolisa install --all` now prints the reason for each failed component in human output.
+- `anolisa install` now refuses automatic RPM detection when `rpm` or `dnf` is missing, with a `--backend raw` hint.
+- `anolisa install` no longer replaces a raw install if another install finishes first.
+
+* Tue Jun 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.9-1
+- `anolisa install --all` can install every available component from the catalog.
+- `anolisa install --all --fail-fast` can stop after the first failed component.
+- `anolisa install --all --json` returns one batch summary with per-component results.
+- `anolisa status` now shows adapter summaries for installed components.
+- `installed.toml` now distinguishes ANOLISA-managed packages from observed system RPMs.
+
+* Mon Jun 15 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.8-1
+- `anolisa adapter enable` can now register installed adapters with OpenClaw.
+- `anolisa adapter disable` can now remove OpenClaw adapter registrations.
+- `anolisa adapter status` can now report OpenClaw adapter health.
+- `anolisa adapter scan` can now show installed adapter resources.
+- `anolisa install` now places adapter resources needed by later enablement.
+- `anolisa uninstall` now blocks components that still have enabled adapters.
+
+* Sat Jun 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.7-1
+- User-mode library paths now resolve to `~/.local/lib/anolisa`; other directories continue to follow `XDG_*` overrides.
+- `anolisa install` no longer requires a local catalog entry before downloading from the remote repository.
+- `anolisa install --dry-run` can preview files and services without downloading the full package.
+
+* Fri Jun 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.6-1
+- `anolisa osbase sandbox install gvisor` now supports standalone, containerd, and substrate deployments. (#851)
+- `anolisa list` can derive the component catalog from `repo.toml` configuration. (#854)
+- Replaced the legacy "capability" model with a unified component lifecycle; old state auto-migrates on next write. (#876)
+- `anolisa list --enabled` now correctly shows installed components instead of an empty list. (#872)
+- `anolisa list` no longer requires a separate local catalog file when `repo.toml` is configured. (#854)
+
+* Thu Jun 11 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.5-1
+- `anolisa list` reads from a remote or local component catalog and returns structured JSON. (#850)
+- `anolisa install <component>` downloads, verifies, and installs components from the remote repository. (#852)
+- `anolisa uninstall` supports the new component model while preserving legacy fallback. (#852)
+- Simplified CLI help around `list`, `install`, `uninstall`, `status`, `doctor`, `logs`, `restart`, `update`. (#850)
+- `anolisa list` returns an empty list with a config hint when no catalog is configured. (#850)
+- Failed installs now automatically roll back partially-written files. (#852)
+
+* Wed Jun 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.4-1
+- `anolisa adapter scan` detects available framework integrations. (#808)
+- `anolisa adapter install` downloads verified packages and registers adapters with the target framework.
+- `anolisa adapter remove` safely removes only ANOLISA-managed files, with dry-run and JSON preview support.
+- `anolisa adapter install tokenless openclaw` wires up the tokenless adapter via the OpenClaw CLI.
+- `anolisa enable` fetches component metadata from the remote repository, with offline fallback.
+- `anolisa status` now includes component health check results.
+- Renamed subscription commands to top-level `anolisa register` / `unregister`.
+- Adapter install/remove failures now roll back or preserve state for retry.
+
+* Tue Jun 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.3-1
+- `anolisa --help` now groups commands by category.
+- `list` command shows its `ls` alias in help output.
+- `anolisa update self` prints a changelog link on success.
+- Corrected package license metadata to Apache-2.0.
+
+* Mon Jun 08 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.2-1
+- `anolisa bug` generates a local diagnostic report with environment info and recent error logs.
+- `anolisa self update` added as an alias for `anolisa update self`.
+- Restored the bug report issue template.
+
+* Sun Jun 07 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.1-1
+- `anolisa osbase sandbox install` provisions sandbox environments.
+- `anolisa register` and `unregister` manage data-upload consent with 30-day deferral.
+- `anolisa enable` can configure log upload with automatic region detection.
+- `anolisa update self` downloads and applies CLI updates with integrity verification and rollback.
+- Real dnf/apt package manager backends replaced placeholder stubs.
+- Install script uses portable bash expansion instead of `sed`.
+
+* Thu Jun 04 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.1.0-1
+- Init package: ship the `anolisa` CLI binary, capabilities/osbase/runtime
+  manifests, OSS-targeted distribution index (built with default mirror/channel
+  overridable via `--define '_anolisa_mirror ...'` / `'_anolisa_channel ...'`),
+  and the execution-policy template.
+- CLI commands include `env`, `list`, `status`, `logs`, `enable`, `disable`, `uninstall`, `restart`, `update`, `info`, and `doctor`.
+- Environment detection covers OS, arch, kernel, distro, container runtime, and user identity.
+- Component lifecycle includes preview-then-execute, integrity checks, and audit logging.
+- Component manifests are declarative TOML files with multi-architecture support.
+- `install-anolisa.sh` supports local, checkout, and URL modes with checksum verification and `--dry-run`.

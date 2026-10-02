@@ -1,0 +1,203 @@
+{
+  "type": "function",
+  "function": {
+    "name": "create_payment_intent",
+    "description": "Creates a PaymentIntent object for processing payments. A PaymentIntent guides you through the process of collecting a payment from your customer. It tracks charge attempts and payment state changes throughout the payment lifecycle.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "integer",
+          "title": "Amount",
+          "description": "Amount intended to be collected by this PaymentIntent. A positive integer representing how much to charge in the smallest currency unit (e.g., 100 cents for $1.00).",
+          "minimum": 50,
+          "examples": [1000, 2500, 10000]
+        },
+        "currency": {
+          "type": "string",
+          "title": "Currency Code",
+          "description": "Three-letter ISO currency code, in lowercase. Must be a supported currency.",
+          "enum": ["usd", "eur", "gbp", "jpy", "cad", "aud", "chf", "cny", "hkd", "sgd", "sek", "nok", "dkk", "pln", "czk", "huf", "ron", "bgn", "hrk", "inr", "mxn", "brl", "myr", "php", "thb", "idr", "krw", "nzd", "zar"],
+          "examples": ["usd", "eur", "gbp"]
+        },
+        "customer": {
+          "type": "string",
+          "title": "Customer ID",
+          "description": "ID of the Customer this PaymentIntent belongs to, if one exists. Must be a valid Stripe customer ID starting with 'cus_'.",
+          "pattern": "^cus_[a-zA-Z0-9]+$"
+        },
+        "payment_method": {
+          "type": "string",
+          "title": "Payment Method ID",
+          "description": "ID of the payment method to attach to this PaymentIntent. Must be a valid Stripe payment method ID starting with 'pm_'.",
+          "pattern": "^pm_[a-zA-Z0-9]+$"
+        },
+        "payment_method_types": {
+          "type": "array",
+          "title": "Payment Method Types",
+          "description": "The list of payment method types that this PaymentIntent is allowed to use. If not provided, defaults to ['card'].",
+          "items": {
+            "type": "string",
+            "enum": ["card", "card_present", "acss_debit", "affirm", "afterpay_clearpay", "alipay", "au_becs_debit", "bacs_debit", "bancontact", "blik", "boleto", "eps", "fpx", "giropay", "grabpay", "ideal", "klarna", "konbini", "link", "oxxo", "p24", "paynow", "pix", "promptpay", "sepa_debit", "sofort", "us_bank_account", "wechat_pay"]
+          },
+          "default": ["card"]
+        },
+        "confirm": {
+          "type": "boolean",
+          "title": "Confirm Payment",
+          "description": "Set to true to attempt to confirm this PaymentIntent immediately. If the PaymentIntent has a payment_method attached and requires confirmation, setting confirm=true will attempt to confirm and capture.",
+          "default": false
+        },
+        "automatic_payment_methods": {
+          "type": "object",
+          "title": "Automatic Payment Methods",
+          "description": "When enabled, this PaymentIntent will accept payment methods enabled in the Dashboard and compatible with this PaymentIntent's parameters.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether automatic payment methods are enabled for this PaymentIntent.",
+              "default": true
+            },
+            "allow_redirects": {
+              "type": "string",
+              "description": "Controls whether redirect-based payment methods should be enabled.",
+              "enum": ["always", "never"]
+            }
+          }
+        },
+        "capture_method": {
+          "type": "string",
+          "title": "Capture Method",
+          "description": "Controls when the funds will be captured. 'automatic' captures immediately, 'manual' requires a separate capture request.",
+          "enum": ["automatic", "automatic_async", "manual"],
+          "default": "automatic"
+        },
+        "confirmation_method": {
+          "type": "string",
+          "title": "Confirmation Method",
+          "description": "How the PaymentIntent will be confirmed. 'automatic' is used when confirming from client-side, 'manual' from server-side.",
+          "enum": ["automatic", "manual"],
+          "default": "automatic"
+        },
+        "description": {
+          "type": "string",
+          "title": "Description",
+          "description": "An arbitrary string attached to the object. Often useful for displaying to users.",
+          "maxLength": 1000
+        },
+        "metadata": {
+          "type": "object",
+          "title": "Metadata",
+          "description": "Set of key-value pairs that you can attach to an object. Useful for storing additional information.",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "maxProperties": 50
+        },
+        "receipt_email": {
+          "type": "string",
+          "title": "Receipt Email",
+          "description": "Email address to send the receipt to. If set, a receipt will be sent when the payment succeeds.",
+          "format": "email"
+        },
+        "setup_future_usage": {
+          "type": "string",
+          "title": "Setup Future Usage",
+          "description": "Indicates that you intend to make future payments with this PaymentIntent's payment method. This will attach the payment method to the customer.",
+          "enum": ["off_session", "on_session"]
+        },
+        "shipping": {
+          "type": "object",
+          "title": "Shipping Information",
+          "description": "Shipping information for this PaymentIntent.",
+          "properties": {
+            "address": {
+              "type": "object",
+              "description": "Shipping address.",
+              "properties": {
+                "city": { "type": "string", "maxLength": 100 },
+                "country": { "type": "string", "maxLength": 2 },
+                "line1": { "type": "string", "maxLength": 200 },
+                "line2": { "type": "string", "maxLength": 200 },
+                "postal_code": { "type": "string", "maxLength": 20 },
+                "state": { "type": "string", "maxLength": 100 }
+              },
+              "required": ["line1"]
+            },
+            "name": {
+              "type": "string",
+              "description": "Recipient name.",
+              "maxLength": 100
+            },
+            "carrier": {
+              "type": "string",
+              "description": "Carrier for this shipment.",
+              "maxLength": 100
+            },
+            "phone": {
+              "type": "string",
+              "description": "Recipient phone number.",
+              "maxLength": 20
+            },
+            "tracking_number": {
+              "type": "string",
+              "description": "Tracking number for this shipment.",
+              "maxLength": 100
+            }
+          },
+          "required": ["address", "name"]
+        },
+        "statement_descriptor": {
+          "type": "string",
+          "title": "Statement Descriptor",
+          "description": "For non-card charges, the statement description. For card charges, use statement_descriptor_suffix.",
+          "maxLength": 22
+        },
+        "statement_descriptor_suffix": {
+          "type": "string",
+          "title": "Statement Descriptor Suffix",
+          "description": "Provides information about a card payment that customers see on their statements.",
+          "maxLength": 22
+        },
+        "application_fee_amount": {
+          "type": "integer",
+          "title": "Application Fee",
+          "description": "The amount of the application fee in cents to be applied to the payment. Only for Connect.",
+          "minimum": 0
+        },
+        "transfer_data": {
+          "type": "object",
+          "title": "Transfer Data",
+          "description": "The parameters used to automatically create a Transfer when the payment succeeds. Connect only.",
+          "properties": {
+            "destination": {
+              "type": "string",
+              "description": "ID of the connected account to transfer funds to.",
+              "pattern": "^acct_[a-zA-Z0-9]+$"
+            },
+            "amount": {
+              "type": "integer",
+              "description": "Amount to transfer. If not set, the entire amount is transferred.",
+              "minimum": 0
+            }
+          },
+          "required": ["destination"]
+        },
+        "on_behalf_of": {
+          "type": "string",
+          "title": "On Behalf Of",
+          "description": "The Stripe account ID for which these funds are intended. Connect only.",
+          "pattern": "^acct_[a-zA-Z0-9]+$"
+        },
+        "return_url": {
+          "type": "string",
+          "title": "Return URL",
+          "description": "The URL to redirect your customer back to after they authenticate or cancel on the payment method's app or site.",
+          "format": "uri"
+        }
+      },
+      "required": ["amount", "currency"]
+    }
+  }
+}

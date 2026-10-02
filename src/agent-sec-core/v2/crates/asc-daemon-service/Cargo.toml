@@ -1,0 +1,16 @@
+[package]
+name = "asc-daemon-service"
+description = "Protocol-independent UDS service framework for AgentSecCore V2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

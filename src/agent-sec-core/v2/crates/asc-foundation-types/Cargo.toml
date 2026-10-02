@@ -1,0 +1,19 @@
+[package]
+name = "asc-foundation-types"
+description = "Small transport-independent primitives shared by AgentSecCore V2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

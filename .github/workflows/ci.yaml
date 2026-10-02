@@ -1,0 +1,1460 @@
+name: CI / Components
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+    inputs:
+      run_copilot_shell:
+        description: 'Force run copilot-shell tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_agent_sec:
+        description: 'Force run agent-sec-core tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_agentsight:
+        description: 'Force run agentsight tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_tokenless:
+        description: 'Force run tokenless tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_ws_ckpt:
+        description: 'Force run ws-ckpt tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_agent_memory:
+        description: 'Force run agent-memory tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_anolisa:
+        description: 'Force run anolisa tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_ktuner:
+        description: 'Force run ktuner tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_blaze:
+        description: 'Force run blaze tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_skillfs:
+        description: 'Force run SkillFS tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+      run_cosh_ng:
+        description: 'Force run cosh-ng tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  # =========================================================================
+  # Step 1: Detect which components have changed
+  # =========================================================================
+  detect-changes:
+    name: Detect Changes
+    runs-on: anolisa-k8s-general-ci-x64
+    outputs:
+      copilot_shell: ${{ steps.changes.outputs.copilot_shell }}
+      agent_sec_core: ${{ steps.changes.outputs.agent_sec_core }}
+      agentsight: ${{ steps.changes.outputs.agentsight }}
+      tokenless: ${{ steps.changes.outputs.tokenless }}
+      ws_ckpt: ${{ steps.changes.outputs.ws_ckpt }}
+      agent_memory: ${{ steps.changes.outputs.agent_memory }}
+      anolisa: ${{ steps.changes.outputs.anolisa }}
+      skillfs: ${{ steps.changes.outputs.skillfs }}
+      cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
+      ktuner: ${{ steps.changes.outputs.ktuner }}
+      blaze: ${{ steps.changes.outputs.blaze }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check which components changed
+        id: changes
+        run: |
+          set -e
+          echo "=== Detect Changes ==="
+
+          # Get changed files
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+          else
+            CHANGED=$(git diff --name-only --diff-filter=ACMRT HEAD || true)
+          fi
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          COPILOT_SHELL=false
+          AGENT_SEC=false
+          AGENTSIGHT=false
+          TOKENLESS=false
+          WS_CKPT=false
+          AGENT_MEMORY=false
+          ANOLISA=false
+          SKILLFS=false
+          COSH_NG=false
+          KTUNER=false
+          BLAZE=false
+
+          # Path-based detection
+          if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
+            COPILOT_SHELL=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/agent-sec-core/"; then
+            AGENT_SEC=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/agentsight/"; then
+            AGENTSIGHT=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/tokenless/"; then
+            TOKENLESS=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/ws-ckpt/"; then
+            WS_CKPT=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
+            AGENT_MEMORY=true
+          fi
+          if echo "$CHANGED" | grep -q "^distribution/anolisa/"; then
+            ANOLISA=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/skillfs/"; then
+            SKILLFS=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/cosh-ng/"; then
+            COSH_NG=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/ktuner/"; then
+            KTUNER=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/blaze/"; then
+            BLAZE=true
+          fi
+
+          # Manual override via workflow_dispatch
+          if [[ "${{ inputs.run_copilot_shell }}" == "true" ]]; then
+            COPILOT_SHELL=true
+          fi
+          if [[ "${{ inputs.run_agent_sec }}" == "true" ]]; then
+            AGENT_SEC=true
+          fi
+          if [[ "${{ inputs.run_agentsight }}" == "true" ]]; then
+            AGENTSIGHT=true
+          fi
+          if [[ "${{ inputs.run_tokenless }}" == "true" ]]; then
+            TOKENLESS=true
+          fi
+          if [[ "${{ inputs.run_ws_ckpt }}" == "true" ]]; then
+            WS_CKPT=true
+          fi
+          if [[ "${{ inputs.run_agent_memory }}" == "true" ]]; then
+            AGENT_MEMORY=true
+          fi
+          if [[ "${{ inputs.run_anolisa }}" == "true" ]]; then
+            ANOLISA=true
+          fi
+          if [[ "${{ inputs.run_skillfs }}" == "true" ]]; then
+            SKILLFS=true
+          fi
+          if [[ "${{ inputs.run_cosh_ng }}" == "true" ]]; then
+            COSH_NG=true
+          fi
+          if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
+            KTUNER=true
+          fi
+          if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
+            BLAZE=true
+          fi
+
+          echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
+          echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
+          echo "agentsight=$AGENTSIGHT" >> $GITHUB_OUTPUT
+          echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
+          echo "ws_ckpt=$WS_CKPT" >> $GITHUB_OUTPUT
+          echo "agent_memory=$AGENT_MEMORY" >> $GITHUB_OUTPUT
+          echo "anolisa=$ANOLISA" >> $GITHUB_OUTPUT
+          echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
+          echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
+          echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
+          echo "blaze=$BLAZE" >> $GITHUB_OUTPUT
+
+          echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| copilot-shell | $COPILOT_SHELL |" >> $GITHUB_STEP_SUMMARY
+          echo "| agent-sec-core | $AGENT_SEC |" >> $GITHUB_STEP_SUMMARY
+          echo "| agentsight | $AGENTSIGHT |" >> $GITHUB_STEP_SUMMARY
+          echo "| tokenless | $TOKENLESS |" >> $GITHUB_STEP_SUMMARY
+          echo "| ws-ckpt | $WS_CKPT |" >> $GITHUB_STEP_SUMMARY
+          echo "| agent-memory | $AGENT_MEMORY |" >> $GITHUB_STEP_SUMMARY
+          echo "| anolisa | $ANOLISA |" >> $GITHUB_STEP_SUMMARY
+          echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
+          echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
+          echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
+          echo "| blaze | $BLAZE |" >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # Step 2: Validate component version metadata
+  # =========================================================================
+  check-component-versions:
+    name: Check component versions
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check component version metadata
+        run: python3 scripts/check-component-versions.py
+
+      - name: Regression test tokenless catalog version mismatch detection
+        run: bash tests/test-check-component-versions.sh
+
+  check-build-runtime-deps:
+    name: Check build runtime dependencies
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test aggregated runtime dependency preflight
+        run: bash tests/test-build-all-runtime-deps.sh
+
+  # =========================================================================
+  # Step 3: Build & Lint copilot-shell
+  # =========================================================================
+  build-copilot-shell:
+    name: Build copilot-shell
+    needs: detect-changes
+    if: needs.detect-changes.outputs.copilot_shell == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
+
+      - name: Install dependencies
+        run: cd deprecated/copilot-shell && npm ci
+
+      - name: Check formatting
+        run: |
+          cd deprecated/copilot-shell
+          npm run format
+          git diff --exit-code
+
+      - name: Lint
+        run: cd deprecated/copilot-shell && npm run lint:ci
+
+      - name: Build
+        run: cd deprecated/copilot-shell && npm run build
+
+      - name: Type check
+        run: cd deprecated/copilot-shell && npm run typecheck
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-dist-nodejs20
+          path: |
+            deprecated/copilot-shell/packages/*/dist/**/*
+            deprecated/copilot-shell/package-lock.json
+          retention-days: 1
+
+  # =========================================================================
+  # Step 3: Test copilot-shell (cli + core in parallel)
+  # =========================================================================
+  test-copilot-shell-cli:
+    name: Test copilot-shell/cli
+    needs: [detect-changes, build-copilot-shell]
+    if: needs.detect-changes.outputs.copilot_shell == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-dist-nodejs20
+          path: '.'
+
+      - name: Install and build
+        run: |
+          cd deprecated/copilot-shell
+          npm ci
+          npm run build
+
+      - name: Run cli tests
+        run: |
+          cd deprecated/copilot-shell
+          NO_COLOR=true npm run test:ci --workspace=@copilot-shell/cli
+
+  test-copilot-shell-core:
+    name: Test copilot-shell/core
+    needs: [detect-changes, build-copilot-shell]
+    if: needs.detect-changes.outputs.copilot_shell == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: deprecated/copilot-shell/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-dist-nodejs20
+          path: '.'
+
+      - name: Install and build
+        run: |
+          cd deprecated/copilot-shell
+          npm ci
+          npm run build
+
+      - name: Run core tests
+        run: |
+          cd deprecated/copilot-shell
+          NO_COLOR=true npm run test:ci --workspace=@copilot-shell/core
+
+  # =========================================================================
+  # Step 4: Test agent-sec-core (Linux only)
+  # =========================================================================
+  test-agent-sec-core:
+    name: Test agent-sec-core
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_sec_core == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+          components: llvm-tools-preview, rustfmt, clippy
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: astral-sh/setup-uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agent-sec-core/linux-sandbox
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libssl-dev libseccomp-dev bubblewrap
+
+      - name: Install diff-cover
+        run: uv tool install --force diff-cover
+
+      - name: Check formatting
+        run: |
+          cd src/agent-sec-core
+          make python-code-pretty
+          if ! git diff-index --quiet HEAD --; then
+              echo "ERROR: Code style check failed. Please run 'make python-code-pretty' locally." >&2
+              git status --porcelain >&2
+              exit 1
+          fi
+          echo "Code style check passed."
+
+      - name: Lint check (incremental)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd src/agent-sec-core
+          uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml --output-format=concise . > ruff_report.txt || true
+          # Prefix paths to match git-diff repo-root-relative paths
+          sed -i 's|^\([^: ]*\.py\)|src/agent-sec-core/\1|' ruff_report.txt
+          cd "$GITHUB_WORKSPACE"
+          LINT_OUTPUT=$(diff-quality --violations=flake8 --fail-under=100 src/agent-sec-core/ruff_report.txt 2>&1) || true
+          rm -f src/agent-sec-core/ruff_report.txt
+          echo "$LINT_OUTPUT"
+          # Extract violation count from diff-quality output
+          if echo "$LINT_OUTPUT" | grep -q "Failure"; then
+            {
+              echo "### ⚠️ agent-sec-core Lint Warnings (incremental)"
+              echo ""
+              echo '以下为 PR 变更行中的 ruff lint 违规（不卡点，仅提示）：'
+              echo ""
+              echo '```'
+              echo "$LINT_OUTPUT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Lint violations found in changed lines. See step summary for details."
+          else
+            echo "### ✅ agent-sec-core Lint Check Passed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run Python tests with coverage
+        run: |
+          cd src/agent-sec-core
+          make test-python-coverage
+
+      - name: Generate coverage summary
+        if: always()
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          if [ -f coverage.xml ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' coverage.xml | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' coverage.xml | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' coverage.xml | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' coverage.xml | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' coverage.xml | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' coverage.xml | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core (Python) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ Coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check uv.lock in sync with pyproject.toml
+        run: |
+          cd src/agent-sec-core/agent-sec-cli
+          uv lock --check
+
+      - name: Check requirements.txt in sync with uv.lock
+        run: |
+          cd src/agent-sec-core
+          make export-requirements
+          if ! git diff --quiet -- agent-sec-cli/requirements.txt; then
+              echo "ERROR: agent-sec-cli/requirements.txt is out of sync with uv.lock." >&2
+              echo "Please run 'make export-requirements' locally and commit the result." >&2
+              git diff -- agent-sec-cli/requirements.txt >&2
+              exit 1
+          fi
+          echo "requirements.txt is in sync with uv.lock."
+
+      - name: Rust format & lint check
+        run: |
+          cd src/agent-sec-core
+          make rust-fmt-check
+          make rust-lint
+          # cargo-llvm-cov cannot instrument doctests on stable, so the coverage
+          # step below skips them; run the crate's public examples here instead.
+          cd agent-sec-cli && cargo test --doc -p prompt-scanner
+
+      - name: Run AgentSecCore V2 Rust tests
+        run: |
+          cd src/agent-sec-core/v2
+          cargo test --workspace --locked
+          cargo doc --workspace --no-deps --locked
+
+      - name: Run Rust tests with coverage
+        run: |
+          cd src/agent-sec-core
+          make test-rust-coverage
+
+      - name: Generate Rust coverage summary
+        if: always()
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          # One row per Rust workspace: linux-sandbox and the agent-sec-cli
+          # library crates are separate cargo workspaces with separate reports.
+          emit_rust_cov_row() {
+            local cov_file="$1" label="agent-sec-core/$2"
+            if [ ! -f "$cov_file" ]; then
+              echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            local line_rate lines_valid lines_covered line_pct
+            line_rate=$(grep -oP 'line-rate="\K[^"]+' "$cov_file" | head -1)
+            lines_valid=$(grep -oP 'lines-valid="\K[^"]+' "$cov_file" | head -1)
+            lines_covered=$(grep -oP 'lines-covered="\K[^"]+' "$cov_file" | head -1)
+            line_pct=$(echo "$line_rate * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 ${label} (Rust) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${line_pct}%** | ${lines_covered}/${lines_valid} lines |"
+              echo ""
+              echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
+          emit_rust_cov_row rust-coverage.xml linux-sandbox
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Run openclaw-plugin tests with coverage
+        run: |
+          cd src/agent-sec-core
+          cd openclaw-plugin && npm install
+          cd ..
+          make test-openclaw-plugin-coverage
+
+      - name: Generate openclaw-plugin coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Incremental coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          COMPARE_BRANCH="origin/${{ github.base_ref }}"
+          echo "=== Diff-cover: comparing against $COMPARE_BRANCH ==="
+
+          DIFF_COV_SUMMARY=""
+          GATE_FAILED=false
+          THRESHOLD=80
+
+          # Helper: extract coverage stats from diff-cover output
+          extract_diff_cov_stats() {
+            local output="$1"
+            local pct missing total covered
+            pct=$(echo "$output" | grep -oP 'Coverage:\s*\K[0-9.]+(?=%)' || echo "")
+            total=$(echo "$output" | grep -oP 'Total:\s+\K[0-9]+' || echo "")
+            missing=$(echo "$output" | grep -oP 'Missing:\s*\K[0-9]+' || echo "")
+            if [ -n "$total" ] && [ -n "$missing" ]; then
+              covered=$((total - missing))
+              echo "${pct}|${covered}/${total} lines"
+            elif [ -n "$pct" ]; then
+              echo "${pct}|-"
+            else
+              echo "N/A|-"
+            fi
+          }
+
+          # --- Python ---
+          if [ -f coverage.xml ]; then
+            echo "--- Python incremental coverage ---"
+            PYTHON_OUTPUT=$(diff-cover coverage.xml --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+            echo "$PYTHON_OUTPUT"
+            PYTHON_STATS=$(extract_diff_cov_stats "$PYTHON_OUTPUT")
+            PYTHON_PCT=$(echo "$PYTHON_STATS" | cut -d'|' -f1)
+            PYTHON_DETAIL=$(echo "$PYTHON_STATS" | cut -d'|' -f2)
+            DIFF_COV_SUMMARY="${DIFF_COV_SUMMARY}| Python | ${PYTHON_PCT}% | ${PYTHON_DETAIL} | ${THRESHOLD}% |\n"
+          fi
+
+          # --- Rust ---
+          # One Cobertura report per Rust workspace (cargo-llvm-cov cannot merge
+          # profiles across workspaces).  diff-cover accepts several reports and
+          # unions them, so every workspace report lands in a single Rust row.
+          shopt -s nullglob
+          RUST_REPORTS=(rust*-coverage.xml)
+          shopt -u nullglob
+          if [ "${#RUST_REPORTS[@]}" -gt 0 ]; then
+            echo "--- Rust incremental coverage (${RUST_REPORTS[*]}) ---"
+            RUST_OUTPUT=$(diff-cover "${RUST_REPORTS[@]}" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+            echo "$RUST_OUTPUT"
+            RUST_STATS=$(extract_diff_cov_stats "$RUST_OUTPUT")
+            RUST_PCT=$(echo "$RUST_STATS" | cut -d'|' -f1)
+            RUST_DETAIL=$(echo "$RUST_STATS" | cut -d'|' -f2)
+            DIFF_COV_SUMMARY="${DIFF_COV_SUMMARY}| Rust | ${RUST_PCT}% | ${RUST_DETAIL} | ${THRESHOLD}% |\n"
+          fi
+
+          # --- TypeScript ---
+          TS_COV="openclaw-plugin/coverage/cobertura-coverage.xml"
+          if [ -f "$TS_COV" ]; then
+            echo "--- TypeScript incremental coverage ---"
+            TS_OUTPUT=$(diff-cover "$TS_COV" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+            echo "$TS_OUTPUT"
+            TS_STATS=$(extract_diff_cov_stats "$TS_OUTPUT")
+            TS_PCT=$(echo "$TS_STATS" | cut -d'|' -f1)
+            TS_DETAIL=$(echo "$TS_STATS" | cut -d'|' -f2)
+            DIFF_COV_SUMMARY="${DIFF_COV_SUMMARY}| TypeScript | ${TS_PCT}% | ${TS_DETAIL} | ${THRESHOLD}% |\n"
+          fi
+
+          # --- Summary ---
+          {
+            echo "### 🚦 Incremental Coverage Gate (new/changed code)"
+            echo ""
+            echo "| Language | New Code Coverage | Detail | Threshold |"
+            echo "|----------|-------------------|--------|-----------|" 
+            echo -e "$DIFF_COV_SUMMARY"
+            if [ "$GATE_FAILED" = true ]; then
+              echo ""
+              echo "> ❌ **Gate FAILED**: New code coverage is below ${THRESHOLD}%. Please add tests for uncovered changes."
+            else
+              echo ""
+              echo "> ✅ **Gate PASSED**: All new code meets the ${THRESHOLD}% coverage threshold."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$GATE_FAILED" = true ]; then
+            echo "::error::Incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
+            exit 1
+          fi
+
+  # =========================================================================
+  # Step 5: Test agentsight (Linux only)
+  # =========================================================================
+  test-agentsight:
+    name: Test agentsight
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agentsight == 'true'
+    runs-on: anolisa-agentsight-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy, llvm-tools-preview'
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agentsight
+
+      - name: astral-sh/setup-uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/agentsight/dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: src/agentsight/dashboard
+        run: npm ci --no-audit --no-fund
+
+      - name: Run dashboard i18n regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:i18n
+
+      - name: Run dashboard navigation regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:navigation
+
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config
+          sudo apt-get install -y perl
+
+      - name: Check formatting
+        run: |
+          cd src/agentsight
+          cargo fmt --all --check
+
+      - name: Check architecture boundaries
+        run: |
+          cd src/agentsight
+          python3 scripts/check-arch-boundaries.py
+
+      - name: Check SQLite entry points
+        run: |
+          cd src/agentsight
+          python3 scripts/check-sqlite-entrypoints.py --self-test
+          python3 scripts/check-sqlite-entrypoints.py
+
+      - name: Lint
+        run: |
+          cd src/agentsight
+          cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
+
+      - name: Build enforcer (actplane feature + attested build)
+        run: |
+          cd src/agentsight
+          cargo build -p agentsight-enforcer --no-default-features --features actplane
+          ./scripts/build-enforcer.sh
+
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
+      - name: Test doctests
+        run: |
+          cd src/agentsight
+          cargo test --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --doc
+
+      - name: Run tests with coverage
+        run: |
+          cd src/agentsight
+          # Cap parallelism: full-core parallel compile/link/test of instrumented
+          # binaries has OOM-killed the self-hosted runner mid-step.
+          JOBS=$(( ($(nproc) + 1) / 2 ))
+          cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
+
+      - name: Generate coverage summary
+        if: always()
+        shell: python3 {0}
+        run: |
+          import xml.etree.ElementTree as ET, os, pathlib
+          cov = pathlib.Path("src/agentsight/coverage.xml")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+          with open(summary, "a") as f:
+              if cov.exists():
+                  root = ET.parse(cov).getroot()
+                  rate = float(root.get("line-rate", "0"))
+                  valid = root.get("lines-valid", "0")
+                  covered = root.get("lines-covered", "0")
+                  pct = f"{rate * 100:.1f}"
+                  f.write("### agentsight (Rust) Test Coverage\n\n")
+                  f.write("| Metric | Coverage | Detail |\n")
+                  f.write("|--------|----------|--------|\n")
+                  f.write(f"| Line Coverage | **{pct}%** | {covered}/{valid} lines |\n")
+              else:
+                  f.write("### agentsight coverage report not found\n")
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsight-coverage
+          path: src/agentsight/coverage.xml
+          retention-days: 30
+
+      - name: Install diff-cover
+        if: github.event_name == 'pull_request'
+        run: uv tool install --force diff-cover
+
+      - name: Incremental coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          COMPARE_BRANCH: "origin/${{ github.base_ref }}"
+        run: |
+          cd src/agentsight
+          THRESHOLD=80
+          GATE_FAILED=false
+          echo "=== Diff-cover: comparing against $COMPARE_BRANCH ==="
+          DIFF_OUTPUT=$(diff-cover coverage.xml --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+          echo "$DIFF_OUTPUT"
+
+          PCT=$(echo "$DIFF_OUTPUT" | grep -oP 'Coverage:\s*\K[0-9.]+(?=%)' || echo "N/A")
+          TOTAL=$(echo "$DIFF_OUTPUT" | grep -oP 'Total:\s+\K[0-9]+' || echo "-")
+          MISSING=$(echo "$DIFF_OUTPUT" | grep -oP 'Missing:\s*\K[0-9]+' || echo "-")
+
+          {
+            echo "### Incremental Coverage Gate (agentsight)"
+            echo ""
+            echo "| New Code Coverage | Total New Lines | Missing | Threshold |"
+            echo "|-------------------|-----------------|---------|-----------|"
+            echo "| ${PCT}% | ${TOTAL} | ${MISSING} | ${THRESHOLD}% |"
+            if [ "${GATE_FAILED:-}" = "true" ]; then
+              echo ""
+              echo "> **Gate FAILED**: New code coverage is below ${THRESHOLD}%. Please add tests for uncovered changes."
+              echo ""
+              echo "<details><summary>Uncovered files (click to expand)</summary>"
+              echo ""
+              echo '```'
+              echo "$DIFF_OUTPUT" | grep -E '^\S.*Missing lines' || true
+              echo '```'
+              echo "</details>"
+            else
+              echo ""
+              echo "> **Gate PASSED**: All new code meets the ${THRESHOLD}% coverage threshold."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${GATE_FAILED:-}" = "true" ]; then
+            echo "::error::Incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
+            exit 1
+          fi
+
+  # =========================================================================
+  # Step 6: Test tokenless
+  # =========================================================================
+  test-tokenless:
+    name: Test tokenless
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tokenless == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/tokenless
+            src/tokenless/benchmark/l1-compressor
+            src/tokenless/benchmark/l2-module
+
+      - name: Check formatting
+        run: |
+          cd src/tokenless
+          cargo fmt --all -- --check
+
+      - name: Lint
+        run: |
+          cd src/tokenless
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/tokenless
+          cargo test --workspace -- --test-threads=1
+
+      # The benchmark suite is split into two standalone workspaces (each with an
+      # empty [workspace] table in its Cargo.toml), so the --workspace commands
+      # above never touch them. Exercise both explicitly: fmt, clippy and the
+      # quality/adversarial tests, all with --locked so a stale Cargo.lock fails
+      # fast. Criterion benches stay a manual/periodic task.
+      - name: Check L1 benchmark suite formatting
+        run: |
+          cd src/tokenless/benchmark/l1-compressor
+          cargo fmt --all -- --check
+
+      - name: Lint L1 benchmark suite
+        run: |
+          cd src/tokenless/benchmark/l1-compressor
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test L1 benchmark suite
+        env:
+          # Deep-recursion adversarial tests overflow the default Linux
+          # thread stack; give test threads 16 MiB.
+          RUST_MIN_STACK: '16777216'
+        run: |
+          cd src/tokenless/benchmark/l1-compressor
+          cargo test --release --locked
+
+      - name: Check L2 benchmark suite formatting
+        run: |
+          cd src/tokenless/benchmark/l2-module
+          cargo fmt --all -- --check
+
+      - name: Lint L2 benchmark suite
+        run: |
+          cd src/tokenless/benchmark/l2-module
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test L2 benchmark suite
+        env:
+          # Deep-recursion adversarial tests overflow the default Linux
+          # thread stack; give test threads 16 MiB.
+          RUST_MIN_STACK: '16777216'
+        run: |
+          cd src/tokenless/benchmark/l2-module
+          cargo test --release --locked
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python integration tests
+        run: |
+          make -C src/tokenless test-integration
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install RTK Rust toolchain
+        run: rustup toolchain install 1.91.0 --profile minimal
+
+      - name: Test bundled RTK integration
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: make -C src/tokenless test-rtk-integration
+
+      - name: Build and test Tokenless Python packages
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: |
+          make -C src/tokenless \
+            test-python-runtime test-agentscope-integration
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Adapter lifecycle tests (install / detect / uninstall for openclaw,
+      # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
+      # which no CI job ever called: a broken adapter installer only showed
+      # up on a developer machine. They need node (the openclaw plugin build
+      # plus two `node --test` suites) and python3 (installer probes), both
+      # already set up above.
+      - name: Test adapter installers
+        run: |
+          make -C src/tokenless test-adapters
+
+      - name: npm packaging smoke test (native Linux)
+        # rtk v0.49.0 declares rust-version = "1.91", above the 1.89.0 pin
+        # used by the workspace MSRV checks earlier in this job. Packaging
+        # runs on its own 1.91 toolchain while the MSRV pin stays intact.
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: |
+          set -euo pipefail
+          make -C src/tokenless npm-package
+          # Install root + platform tarballs into a scratch project and verify
+          # both binaries actually run. The root install omits registry
+          # optional deps (unpublished during CI); the platform tarball
+          # installed in step 1 satisfies the platform lookup instead.
+          DIST="$GITHUB_WORKSPACE/src/tokenless/npm/dist"
+          SMOKE=$(mktemp -d)
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$DIST"/tokenless-linux-x64/*.tgz
+          npm install --no-audit --no-fund --omit=optional \
+            --install-strategy=nested "$DIST"/tokenless/*.tgz
+          ./node_modules/.bin/tokenless --version
+          ./node_modules/.bin/rtk --version
+          # Verify the bundled OpenClaw adapter was built and packaged
+          test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
+          # Verify adapter install scripts are executable
+          test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
+
+  # =========================================================================
+  # Step 7: Test ws-ckpt
+  # =========================================================================
+  test-ws-ckpt:
+    name: Test ws-ckpt
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ws_ckpt == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/ws-ckpt/src
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs rsync
+
+      - name: Check formatting
+        run: |
+          cd src/ws-ckpt/src
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/ws-ckpt/src
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/ws-ckpt/src
+          cargo test --workspace
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run OpenClaw script tests
+        working-directory: src/ws-ckpt
+        run: make test-openclaw-scripts
+
+      # ── Rust coverage gate ──────────────────────────────────────────────
+      - name: Rust coverage gate (≥45%)
+        run: |
+          cargo install cargo-tarpaulin --version 0.37.2 --locked
+          cd src/ws-ckpt/src
+          cargo tarpaulin --workspace --out Stdout --fail-under 45
+
+      # ── Plugin tests + coverage gates ───────────────────────────────────
+      - name: OpenClaw plugin coverage gate (≥90%)
+        working-directory: src/ws-ckpt/src/plugins/openclaw
+        run: |
+          npm install -g npm@10.9.0
+          npm ci --registry=https://registry.npmmirror.com --replace-registry-host=always
+          ./node_modules/.bin/vitest run --coverage
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Hermes plugin coverage gate (≥90%)
+        run: |
+          pip install pytest pytest-cov pyyaml
+          cd src/ws-ckpt/src/plugins
+          python -m pytest hermes/tests/ --cov=hermes --cov-report=term --cov-fail-under=90
+
+
+  # =========================================================================
+  # Step 8: Test agent-memory (Linux-only Rust crate)
+  # =========================================================================
+  test-agent-memory:
+    name: Test agent-memory
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_memory == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      # scripts/install.sh talks to the openclaw CLI, which cargo cannot
+      # cover; the stub-based negotiation test needs no Node/npm and runs
+      # in ~1 s using only the runner's bash + make, so it precedes all
+      # toolchain setup — cheapest check fails fastest.
+      - name: Test OpenClaw adapter installer script
+        run: |
+          cd src/agent-memory
+          make test-openclaw-install
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agent-memory
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsystemd-dev cmake
+
+      - name: Check formatting
+        run: |
+          cd src/agent-memory
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/agent-memory
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/agent-memory
+          cargo test --locked
+
+      - name: Setup Node.js (agent-memory plugin tests)
+        uses: actions/setup-node@v4
+        with:
+          # Match the packaging suite's OpenClaw runtime requirement.
+          node-version: '22.23.2'
+
+      - name: Test OpenClaw plugin (TypeScript unit suite)
+        run: |
+          cd src/agent-memory
+          make test-openclaw-plugin
+
+  # =========================================================================
+  # Step 9: Test anolisa (Rust workspace)
+  # =========================================================================
+  test-anolisa:
+    name: Test anolisa
+    needs: detect-changes
+    if: needs.detect-changes.outputs.anolisa == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          components: 'rustfmt, clippy, llvm-tools-preview'
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: distribution/anolisa
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate npm packaging
+        run: |
+          cd distribution/anolisa
+          node npm/tests/platforms.test.js
+          node npm/scripts/package-npm.js --validate
+
+      - name: Validate nightly E2E harness
+        run: |
+          bash -n distribution/anolisa/tests/nightly/raw-lifecycle.sh
+          distribution/anolisa/tests/nightly/raw-lifecycle.sh --list
+          REPO_CONFIG=$(mktemp)
+          trap 'rm -f "$REPO_CONFIG"' EXIT
+          cp distribution/anolisa/manifests/repo.toml "$REPO_CONFIG"
+          ANOLISA_E2E_REPO_CONFIG_PATH="$REPO_CONFIG" \
+            ANOLISA_RAW_REPO_URL="https://mirror.example.com/raw/v1/" \
+            distribution/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
+          grep -Fx 'base_url = "https://mirror.example.com/raw/v1/"' \
+            "$REPO_CONFIG"
+
+      - name: Check formatting
+        run: |
+          cd distribution/anolisa
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd distribution/anolisa
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run documentation tests
+        run: |
+          cd distribution/anolisa
+          cargo test --workspace --doc --locked
+
+      - name: Run tests with coverage
+        run: |
+          cd distribution/anolisa
+          mkdir -p coverage
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --all-targets --locked --no-report
+          # Permission-path tests can leave their process profile write-only;
+          # llvm-profdata needs every emitted profile to be readable.
+          find target/llvm-cov-target -type f -name '*.profraw' \
+            -exec chmod u+r {} +
+          cargo llvm-cov report --json --output-path coverage/coverage.json
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+
+      - name: Publish coverage summary
+        id: coverage
+        run: |
+          cd distribution/anolisa
+          LINE_COVERAGE=$(node -e '
+            const report = require("./coverage/coverage.json");
+            process.stdout.write(String(report.data[0].totals.lines.percent));
+          ')
+          FUNCTION_COVERAGE=$(node -e '
+            const report = require("./coverage/coverage.json");
+            process.stdout.write(String(report.data[0].totals.functions.percent));
+          ')
+          echo "line-coverage=${LINE_COVERAGE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## anolisa code coverage"
+            echo ""
+            echo "| Metric | Coverage |"
+            echo "|--------|----------|"
+            printf '| Lines | **%.2f%%** |\n' "$LINE_COVERAGE"
+            printf '| Functions | %.2f%% |\n' "$FUNCTION_COVERAGE"
+            echo ""
+            echo "Coverage is reported for the full \`distribution/anolisa\` Rust workspace."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anolisa-coverage
+          path: |
+            distribution/anolisa/coverage/coverage.json
+            distribution/anolisa/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+  # =========================================================================
+  # Step 10: Test SkillFS (Rust workspace)
+  # =========================================================================
+  test-skillfs:
+    name: Test SkillFS
+    needs: detect-changes
+    if: needs.detect-changes.outputs.skillfs == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.86.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/skillfs
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev pkg-config
+
+      - name: Check formatting
+        run: |
+          cd src/skillfs
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/skillfs
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/skillfs
+          cargo test --workspace
+
+      - name: Run FUSE smoke test
+        run: |
+          cd src/skillfs
+          scripts/test.sh
+
+  # =========================================================================
+  # Step 11: Test cosh-ng (Rust workspace)
+  # =========================================================================
+  # Split into three parallel jobs so the critical path stays within the
+  # five-minute budget: integration (the longest gate, keeps the historical
+  # "Test cosh-ng" check name), fast checks (fmt/clippy/audits/fast gate,
+  # which repeats the audits run-test-gates.sh already performs), and the
+  # release build (no dependency on the test gates).
+  test-cosh-ng:
+    name: Test cosh-ng
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 15
+    env:
+      # This override takes precedence over the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.88.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config ripgrep zsh
+
+      - name: Run process and PTY integration tests
+        env:
+          # ZLE must decode the Unicode fixtures independently of runner locale.
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+          # Libtest still schedules 16 workers, while the harness gate bounds
+          # live PTY sessions to avoid oversubscribing loaded CI runners.
+          COSH_RAW_CLI_TEST_PARALLELISM: '8'
+        run: |
+          cd src/cosh-ng
+          bash --version
+          zsh --version
+          locale
+          test "$(locale charmap)" = UTF-8
+          scripts/run-test-gates.sh integration
+
+  test-cosh-ng-fast:
+    name: Test cosh-ng fast checks
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    env:
+      # Keep lint upgrades explicit; this overrides the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.97.1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config ripgrep shellcheck
+
+      - name: Check formatting
+        run: |
+          cd src/cosh-ng
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/cosh-ng
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Validate stage E2E contract
+        run: |
+          cd src/cosh-ng
+          python3 -m unittest discover -s e2e/tests -v
+          python3 e2e/run.py --plan --profile local
+
+      # run-test-gates.sh fast already runs the layout and inventory audits,
+      # so no separate audit step is needed here.
+      - name: Run fast regression tests
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh fast
+
+  test-cosh-ng-release-build:
+    name: Build cosh-ng release
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    env:
+      RUSTUP_TOOLCHAIN: '1.88.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
+
+      - name: Build release workspace
+        run: |
+          cd src/cosh-ng
+          cargo build --workspace --release --locked
+
+  # =========================================================================
+  # Step 12: Test ktuner (deterministic kernel-tuning engine)
+  # =========================================================================
+  test-ktuner:
+    name: Test ktuner
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ktuner == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/ktuner
+
+      - name: Check formatting
+        run: |
+          cd src/ktuner
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/ktuner
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/ktuner
+          cargo test
+
+  # =========================================================================
+  # Step 13: Test blaze (per-host sandbox daemon)
+  # =========================================================================
+  test-blaze:
+    name: Test blaze
+    needs: detect-changes
+    if: needs.detect-changes.outputs.blaze == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/blaze
+
+      - name: Check formatting
+        run: |
+          cd src/blaze
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/blaze
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/blaze
+          cargo test --workspace

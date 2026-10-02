@@ -1,0 +1,30 @@
+$ npm test
+PASS src/component-00.test.js completed successfully
+PASS src/component-01.test.js completed successfully
+PASS src/component-02.test.js completed successfully
+PASS src/component-03.test.js completed successfully
+PASS src/component-04.test.js completed successfully
+PASS src/component-05.test.js completed successfully
+PASS src/component-06.test.js completed successfully
+PASS src/component-07.test.js completed successfully
+PASS src/component-08.test.js completed successfully
+PASS src/component-09.test.js completed successfully
+FAIL src/critical.test.js
+  critical validation
+    Error: expected true to be false
+        at verify (/work/src/critical.test.js:14:9)
+        at runValidation (/work/src/runner.js:22:3)
+PASS src/component-10.test.js completed successfully
+PASS src/component-11.test.js completed successfully
+PASS src/component-12.test.js completed successfully
+PASS src/component-13.test.js completed successfully
+PASS src/component-14.test.js completed successfully
+PASS src/component-15.test.js completed successfully
+PASS src/component-16.test.js completed successfully
+PASS src/component-17.test.js completed successfully
+PASS src/component-18.test.js completed successfully
+PASS src/component-19.test.js completed successfully
+Test Suites: 1 failed, 20 passed, 21 total
+Tests:       1 failed, 200 passed, 201 total
+Snapshots:   0 total
+Time:        9.711 s

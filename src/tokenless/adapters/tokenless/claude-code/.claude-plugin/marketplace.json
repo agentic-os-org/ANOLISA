@@ -1,0 +1,15 @@
+{
+  "name": "anolisa-tokenless",
+  "description": "ANOLISA local marketplace — bundles the Token-Less plugin for Claude Code",
+  "owner": {
+    "name": "ANOLISA"
+  },
+  "plugins": [
+    {
+      "name": "tokenless",
+      "source": "./",
+      "description": "Token-Less context compression for Claude Code — RTK command rewriting, response/TOON compression, and Tool Ready environment pre-check",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ExecCommandPreview — rootCommand visibility > hides header when rootCommand equals command (snapshot) 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ rm -rf /tmp                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`ExecCommandPreview — rootCommand visibility > hides header when rootCommand is undefined (snapshot) 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ echo hello                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`ExecCommandPreview — rootCommand visibility > shows header when rootCommand differs from command (snapshot) 1`] = `
+"rm
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ rm -rf /tmp/test-dir                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;

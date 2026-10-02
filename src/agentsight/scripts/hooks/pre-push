@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# AgentSight pre-push hook — mirror the `test-agentsight` CI gates locally so a
+# failing push is caught in ~30s instead of after a ~4min push + CI cycle.
+#
+# Agent-agnostic: git fires this for every push, whether by a human or any AI
+# agent — no per-agent config needed.
+# Opt-in: enabled only via `make install-hooks` (sets core.hooksPath); inert on
+# bare clones and for contributors who don't install it.
+# Monorepo citizen: no-op unless the pushed commits touch src/agentsight/.
+# Fast by default: the coverage gate (~1min llvm-cov) runs only when
+# PREPUSH_COVERAGE=1, so ordinary pushes stay quick.
+#
+# Fidelity: this catches CI's common HARD failures; CI stays authoritative (it
+# also lints commit bodies/footers and may differ on edge rules). The Rust gates
+# run against the WORKING TREE (that is how cargo works), which matches the usual
+# commit-then-push flow; if your worktree differs from the pushed tip the result
+# may not match the pushed commit exactly.
+set -uo pipefail
+
+ZERO='0000000000000000000000000000000000000000'
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Resolve origin/main once. touches-detection mirrors CI's change-detection
+# (branch-vs-base), NOT the incremental push range — so a reword/force-push of a
+# branch that still differs from main under src/agentsight/ is not skipped.
+main_sha="$(git rev-parse -q --verify origin/main 2>/dev/null || true)"
+
+# ── Determine: does the branch touch src/agentsight/, and which commits to lint? ──
+touches=0
+lint_shas=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue # ref deletion: nothing to push
+
+  # touches = branch differs from main under src/agentsight/ (matches CI). If
+  # main is unresolvable (shallow/disjoint clone) we cannot tell -> run the gate.
+  if [ -n "$main_sha" ]; then
+    [ -n "$(git diff --name-only "$main_sha...$local_sha" -- src/agentsight/ 2>/dev/null)" ] && touches=1
+  else
+    touches=1
+  fi
+
+  # commits to lint = the NEW commits in THIS push. Prefer the remote range when
+  # the remote tip object is present locally; else main..tip; else just the tip.
+  if [ "$remote_sha" != "$ZERO" ] && git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null 2>&1; then
+    lint_shas="$lint_shas $(git rev-list "$remote_sha..$local_sha" 2>/dev/null)"
+  elif [ -n "$main_sha" ]; then
+    lint_shas="$lint_shas $(git rev-list "$main_sha..$local_sha" 2>/dev/null)"
+  else
+    echo "[pre-push] note: cannot resolve a base (try: git fetch origin main); linting the pushed tip only"
+    lint_shas="$lint_shas $local_sha"
+  fi
+done
+
+[ "$touches" -eq 0 ] && exit 0 # branch has no agentsight changes -> good monorepo citizen
+
+echo "[pre-push] agentsight changes detected — running CI-mirror checks"
+
+# ── 1. Commit-message lint ──
+# Mirrors CI commitlint's HARD rules; scope-empty is the one that has bitten us.
+# defaultIgnores (Merge / Revert / fixup! / squash! / amend!) are skipped, just
+# like the CI action. subject-case is intentionally NOT checked here — a cheap
+# approximation false-positives on acronym-led subjects (CJK/SSE/API/…); CI owns it.
+type_re='(feat|fix|refactor|perf|docs|chore|test|ci|build|style|revert)'
+for sha in $lint_shas; do
+  subject="$(git log -1 --format='%s' "$sha" 2>/dev/null)"
+  [ -z "$subject" ] && continue
+  case "$subject" in
+    "Merge "* | "Revert "* | "fixup!"* | "squash!"* | "amend!"*) continue ;;
+  esac
+  if ! printf '%s' "$subject" | grep -qE "^${type_re}(\([^)]+\))?!?: .+"; then
+    echo "[pre-push] FAIL: not a conventional commit (need 'type(scope): subject'): $subject"
+    exit 1
+  fi
+  if ! printf '%s' "$subject" | grep -qE "^${type_re}\([^)]+\)!?: "; then
+    echo "[pre-push] FAIL: commit message missing required scope: $subject"
+    exit 1
+  fi
+  # char count under a UTF-8 locale (the common case); counts bytes under C/POSIX,
+  # which could over-count a CJK subject — set a UTF-8 locale if that bites you.
+  if [ "${#subject}" -gt 120 ]; then
+    echo "[pre-push] FAIL: commit header exceeds 120 chars: $subject"
+    exit 1
+  fi
+  if printf '%s' "$subject" | grep -qE '\.$'; then
+    echo "[pre-push] FAIL: subject must not end with '.' (commitlint subject-full-stop): $subject"
+    exit 1
+  fi
+  # body/footer lines must be <=100 chars (commitlint body-max-line-length /
+  # footer-max-line-length, level-2 errors from config-conventional). %b is the
+  # body+footer (everything after the subject and its blank line).
+  if [ -n "$(git log -1 --format='%b' "$sha" 2>/dev/null | awk 'length > 100 { print NR; exit }')" ]; then
+    echo "[pre-push] FAIL: commit body/footer has a line over 100 chars: $sha"
+    exit 1
+  fi
+done
+
+# ── 2. Fast gates (every push) ──
+# fmt/clippy pin CI's toolchain because lint rules are version-sensitive (a
+# different default toolchain flags different uninlined_format_args etc.).
+cd "$REPO_ROOT/src/agentsight" || exit 1
+if ! rustup run 1.89.0 true 2>/dev/null; then
+  echo "[pre-push] FAIL: rust toolchain 1.89.0 not installed (CI pins it)"
+  echo "           run: rustup toolchain install 1.89.0 --component rustfmt --component clippy --component llvm-tools-preview"
+  exit 1
+fi
+echo "[pre-push] arch-boundaries"
+python3 scripts/check-arch-boundaries.py || {
+  echo "[pre-push] FAIL: arch boundary violation"
+  exit 1
+}
+echo "[pre-push] cargo +1.89.0 fmt --all --check"
+cargo +1.89.0 fmt --all --check || {
+  echo "[pre-push] FAIL: formatting (run: cargo +1.89.0 fmt --all)"
+  exit 1
+}
+echo "[pre-push] cargo +1.89.0 clippy --all-targets -- -D warnings"
+cargo +1.89.0 clippy --all-targets -- -D warnings || {
+  echo "[pre-push] FAIL: clippy warnings"
+  exit 1
+}
+
+# ── 3. Incremental coverage gate (slow; opt-in via PREPUSH_COVERAGE=1) ──
+# llvm-cov uses the default toolchain on purpose: coverage line-mapping is stable
+# enough across toolchains for the diff gate, and pinning +1.89.0 would demand
+# llvm-tools-preview on that exact toolchain (dev machines often have it on stable).
+if [ "${PREPUSH_COVERAGE:-0}" = "1" ]; then
+  echo "[pre-push] coverage gate: llvm-cov + diff-cover (>=80%)"
+  cargo llvm-cov --cobertura --output-path coverage.xml \
+    --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)' || {
+    echo "[pre-push] FAIL: llvm-cov"
+    exit 1
+  }
+  git fetch -q origin main
+  diff-cover coverage.xml --compare-branch=origin/main --fail-under=80 || {
+    echo "[pre-push] FAIL: incremental coverage < 80%"
+    exit 1
+  }
+else
+  echo "[pre-push] coverage gate skipped (set PREPUSH_COVERAGE=1 to run it)"
+fi
+
+echo "[pre-push] all checks passed"
+exit 0

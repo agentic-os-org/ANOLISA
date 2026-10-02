@@ -1,0 +1,32 @@
+{
+  "id": "selective-claw",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["expand_turn"]
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enabled",
+      "help": "Enable or disable selective-claw"
+    },
+    "freshTailTurns": {
+      "label": "Fresh Tail Turns",
+      "help": "Number of recent turns always included in full (default 3)"
+    },
+    "dbPath": {
+      "label": "Database Path",
+      "help": "Path to selective-claw SQLite database"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "freshTailTurns": { "type": "integer", "minimum": 1 },
+      "dbPath": { "type": "string" }
+    }
+  }
+}

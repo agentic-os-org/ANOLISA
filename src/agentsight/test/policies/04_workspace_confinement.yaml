@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule confine-writes:
+    block write file "/**" if AGENT unless target "/work/**"
+    block unlink file "/**" if AGENT unless target "/work/**"
+    because "agent may only modify /work"

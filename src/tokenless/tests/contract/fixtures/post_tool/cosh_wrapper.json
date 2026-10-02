@@ -1,0 +1,16 @@
+{
+  "session_id": "sess-parity",
+  "tool_use_id": "toolu_parity_cosh",
+  "tool_name": "run_shell_command",
+  "tool_response": {
+    "llmContent": {
+      "stdout": "total 96\n-rw-r--r-- 1 user user 4096 Aug 20 10:00 src/module_00.rs\n-rw-r--r-- 1 user user 4103 Aug 20 10:01 src/module_01.rs\n-rw-r--r-- 1 user user 4110 Aug 20 10:02 src/module_02.rs\n-rw-r--r-- 1 user user 4117 Aug 20 10:03 src/module_03.rs\n-rw-r--r-- 1 user user 4124 Aug 20 10:04 src/module_04.rs\n-rw-r--r-- 1 user user 4131 Aug 20 10:05 src/module_05.rs",
+      "stderr": "",
+      "exitCode": 0,
+      "debug": "spawn pid=4242 pty=allocated cwd=/work/project shell=/bin/zsh env_filtered=42",
+      "signals": [],
+      "annotations": null
+    },
+    "returnDisplay": "ran `ls -l src/` (exit 0)"
+  }
+}

@@ -1,0 +1,55 @@
+name: Feature Request
+description: Suggest an improvement
+labels: ["type:enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the problem and the outcome you need. An implementation proposal is optional.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Optional hint only. Leave this unanswered when the boundary is unclear.
+      options:
+        - anolisa
+        - tokenless
+        - cosh-ng
+        - cosh
+        - skillfs
+        - sight
+        - sec-core
+        - memory
+        - ckpt
+        - skill
+        - project-wide
+        - not sure
+        - other
+    validations:
+      required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: |
+        Today, when I ...
+        I have to ...
+        This is difficult because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would a useful outcome look like?
+      description: Describe the user or Agent experience rather than the internal implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: approach
+    attributes:
+      label: Possible approach
+      description: Optional. Share an implementation idea or workaround if you already have one.

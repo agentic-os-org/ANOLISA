@@ -1,0 +1,6 @@
+{
+  "session_id": "sess-parity",
+  "tool_use_id": "toolu_parity_wrap",
+  "tool_name": "list_items",
+  "tool_response": "\"{\\\"items\\\":[{\\\"id\\\":0,\\\"label\\\":\\\"item-0\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":1,\\\"label\\\":\\\"item-1\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":2,\\\"label\\\":\\\"item-2\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":3,\\\"label\\\":\\\"item-3\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":4,\\\"label\\\":\\\"item-4\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":5,\\\"label\\\":\\\"item-5\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":6,\\\"label\\\":\\\"item-6\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":7,\\\"label\\\":\\\"item-7\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":8,\\\"label\\\":\\\"item-8\\\",\\\"note\\\":null,\\\"tags\\\":[]},{\\\"id\\\":9,\\\"label\\\":\\\"item-9\\\",\\\"note\\\":null,\\\"tags\\\":[]}],\\\"cursor\\\":null,\\\"has_more\\\":false}\""
+}

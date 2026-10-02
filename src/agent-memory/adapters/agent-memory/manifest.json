@@ -1,0 +1,19 @@
+{
+  "component": "agent-memory",
+  "version": "0.2.8",
+  "targets": {
+    "openclaw": {
+      "compatibleVersions": ">=5.0.0",
+      "capabilities": {
+        "plugins": [
+          "memory-anolisa"
+        ]
+      },
+      "actions": {
+        "detect": "openclaw/scripts/detect.sh",
+        "install": "openclaw/scripts/install.sh",
+        "uninstall": "openclaw/scripts/uninstall.sh"
+      }
+    }
+  }
+}

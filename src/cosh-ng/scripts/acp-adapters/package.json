@@ -1,0 +1,10 @@
+{
+  "name": "cosh-ng-acp-adapter-validation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned official ACP adapters used only by cosh-ng conformance validation",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.66.0",
+    "@agentclientprotocol/codex-acp": "1.6.2"
+  }
+}

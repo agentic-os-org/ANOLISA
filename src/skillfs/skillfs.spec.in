@@ -1,0 +1,99 @@
+%define anolis_release 1
+%global         rustflags -C opt-level=3 -C codegen-units=1
+%global         debug_package %{nil}
+%global         _localbindir /usr/local/bin
+
+Name:           skillfs
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        AI agent skill management via virtual filesystem
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# Cargo.toml specifies rust-version = "1.86", edition = "2024".
+BuildRequires:  rust >= 1.86
+BuildRequires:  cargo
+# Required by Rust crates with C build scripts and fuser/libfuse bindings.
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pkgconfig(fuse3)
+
+Requires:       fuse3
+Requires:       fuse3-libs%{?_isa}
+Provides:       anolisa-component(skillfs)
+
+%description
+SkillFS is a FUSE-based filesystem that exposes AI agent skills through
+filesystem views, while preserving ordinary POSIX passthrough behavior and
+SkillFS-specific security boundaries.
+
+%prep
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+export RUSTFLAGS="%{rustflags}"
+cargo build --release --workspace --locked --offline
+
+%install
+rm -rf %{buildroot}
+
+install -d -m 0755 %{buildroot}%{_localbindir}
+install -p -m 0755 target/release/skillfs %{buildroot}%{_localbindir}/skillfs
+
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/skillfs
+install -p -m 0644 component.toml \
+    %{buildroot}%{_datadir}/anolisa/components/skillfs/component.toml
+
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs
+cp -rp docs/skills/skillfs-mount/. \
+    %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs/
+
+%files
+%license LICENSE
+%doc README.md CHANGELOG.md
+%attr(0755,root,root) %{_localbindir}/skillfs
+%dir %{_datadir}/anolisa/components/skillfs
+%{_datadir}/anolisa/components/skillfs/component.toml
+%dir %{_datadir}/anolisa/runtime
+%dir %{_datadir}/anolisa/runtime/skills
+%{_datadir}/anolisa/runtime/skills/skillfs/
+
+%changelog
+* Sun Sep 20 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.0-1
+- Add multi-source mounts and read-only Ledger deployment support.
+- Supervise sidecar mounts with bounded recovery retries.
+- Keep transformed reads stable per open and cache results across opens.
+
+* Thu Aug 27 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.4.2-1
+- Add an optional Alibaba Cloud Linux 4 sidecar image and operator guidance.
+- Retry startup reconciles after transient notify daemon endpoint failures.
+- Fix flat writes and renames for categorized Skill sources.
+
+* Fri Aug 21 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.4.1-1
+- Add Kubernetes sidecar deployment and authenticated container peers.
+- Fix nested Hermes activation and harden metadata and backing aliases.
+- Tighten sidecar health recovery without restarting the workload.
+
+* Fri Jul 24 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.4.0-1
+- Release read-time OS transforms and live Skill Ledger integration.
+
+* Thu Jul 16 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.4-1
+- Preserve SLS ops records when CLI output pipes close early.
+
+* Fri Jul 10 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.3-1
+- Release Hermes workspace layout compatibility and SkillFS reliability fixes.
+
+* Fri Jul 03 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.2-1
+- Fix SLS ops logging and runtime metric delta reporting.
+
+* Fri Jul 03 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.1-1
+- Release managed mount recovery and installer hardening updates.
+
+* Fri Jun 26 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.0-1
+- Release SkillFS runtime security and installer compatibility updates.
+
+* Wed Jun 24 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.2.0-1
+- Package SkillFS from the ANOLISA monorepo.

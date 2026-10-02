@@ -1,0 +1,25 @@
+# Release-owned latest target profile for `anolisa update --check`.
+#
+# When `--target` is omitted, `update --check` evaluates against this profile so
+# a plain check (and the MOTD summary) can report default components that the
+# current Agentic OS baseline expects but that are not yet installed.
+#
+# Entries are ANOLISA component names (as resolved by manifests/components.toml),
+# not backend package names — the check matches them against installed component
+# identities. The owning RPM package is noted in the trailing comment where it
+# differs from the component name. The `anolisa` CLI package is intentionally
+# omitted: its upgrade is handled by the CLI self-check path, not as a component
+# default.
+schema_version = 1
+name = "agentic_os-latest"
+
+default_components = [
+    "cosh",
+    "os-skills",
+    "sec-core",
+    "agentsight",
+    "tokenless",
+    "ws-ckpt",
+    "skillfs",
+    "agent-memory",
+]

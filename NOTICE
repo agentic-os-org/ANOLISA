@@ -1,0 +1,170 @@
+ANOLISA
+Copyright 2026 Alibaba Cloud
+
+This product includes software developed at Alibaba Cloud.
+
+=========================================================================
+Derived Works
+=========================================================================
+
+copilot-shell (deprecated/copilot-shell/)
+  Based on Qwen Code (https://github.com/QwenLM/qwen-code),
+  which is itself derived from Gemini CLI.
+  Copyright 2025 Google LLC
+  Copyright 2025 Qwen Team
+  Licensed under the Apache License, Version 2.0
+
+linux-sandbox (src/agent-sec-core/linux-sandbox/)
+  Based on Codex linux-sandbox
+  (https://github.com/openai/codex/tree/main/codex-rs/linux-sandbox)
+  Copyright 2025 OpenAI
+  Licensed under the Apache License, Version 2.0
+
+agentsight (src/agentsight/)
+  Based on agentsight (https://github.com/eunomia-bpf/agentsight)
+  Copyright eunomia-bpf contributors
+  Licensed under the MIT License
+
+tokenless (src/tokenless/)
+  Based on tokenless (https://github.com/open-compress/token-less)
+  Copyright Token-less Contributors
+  Licensed under the MIT License
+
+=========================================================================
+Rust Dependencies (src/tokenless/)
+=========================================================================
+
+The tokenless component includes the following Rust crate dependencies:
+
+serde (v1.0)
+  Source: https://crates.io/crates/serde
+  Licensed under the MIT License
+
+serde_json (v1.0)
+  Source: https://crates.io/crates/serde_json
+  Licensed under the MIT License
+
+regex (v1.10)
+  Source: https://crates.io/crates/regex
+  Licensed under the MIT License
+
+thiserror (v2.0)
+  Source: https://crates.io/crates/thiserror
+  Licensed under the MIT License
+
+clap (v4.5)
+  Source: https://crates.io/crates/clap
+  Licensed under the MIT License
+
+toon-format (v0.5)
+  Source: https://crates.io/crates/toon-format
+  Copyright (c) 2025-PRESENT Shreyas S Bhat
+  Copyright (c) 2025-PRESENT Johann Schopplich
+  Licensed under the MIT License
+
+  TOON (Token-Oriented Object Notation) is a lossless JSON re-encoding
+  that eliminates JSON syntax overhead (quotes, commas, colons,
+  braces), achieving 30-60% token savings on structured/tabular data.
+  Statically linked into the tokenless binaries as a sequential second
+  stage after ResponseCompressor.
+
+All dependencies are used in compliance with their original license terms.
+
+=========================================================================
+Third-Party Software
+=========================================================================
+
+rtk (src/tokenless/third_party/rtk/)
+  Git submodule from https://github.com/rtk-ai/rtk.git
+  Copyright RTK Contributors
+  Licensed under the Apache License, Version 2.0
+
+  RTK (Rust Token Killer) is a high-performance CLI proxy for LLM
+  token optimization, providing command rewriting and output filtering
+  to achieve 60-90% token savings on common development commands.
+  Included in the tokenless component.
+
+ripgrep (deprecated/copilot-shell/dist/)
+  Vendored binary
+  Copyright Andrew Gallant
+  Licensed under the MIT License / The Unlicense
+
+shell-scripting skill (src/os-skills/system-admin/shell-scripting/)
+  Copyright maddhruv (https://github.com/maddhruv)
+  Source: https://github.com/AbsolutelySkilled/AbsolutelySkilled
+  Licensed under the MIT License
+
+regex-mastery skill (src/os-skills/system-admin/regex-mastery/)
+  Copyright maddhruv (https://github.com/maddhruv)
+  Source: https://github.com/AbsolutelySkilled/AbsolutelySkilled
+  Licensed under the MIT License
+
+humanizer skill (src/os-skills/others/humanizer/)
+  Based on Wikipedia's "Signs of AI writing" guide
+  (https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing)
+  Licensed under the MIT License
+
+xlsx skill (src/os-skills/others/xlsx/)
+  Based on MiniMax's xlsx skill
+  (https://github.com/MiniMax-AI/skills)
+  Copyright 2025 MiniMax AI
+  Licensed under the MIT License
+
+=========================================================================
+Test Assets
+=========================================================================
+
+terminal-bench (deprecated/copilot-shell/integration-tests/terminal-bench/)
+  Copyright 2025 Laude Institute
+  Source: https://github.com/laude-institute/terminal-bench
+  Licensed under the Apache License, Version 2.0
+
+  The swe-bench-astropy-1 test case contains derived content from:
+  - Astropy Project (BSD-3-Clause License)
+    https://github.com/astropy/astropy
+
+=========================================================================
+Rust Dependencies (src/agentsight/)
+=========================================================================
+
+The agentsight component includes the following Rust crate dependencies:
+
+libbpf-rs (v0.23.3)
+  Source: https://crates.io/crates/libbpf-rs
+  Licensed under the BSD 2-Clause License
+  (Original dual license: LGPL-2.1-only OR BSD-2-Clause; BSD-2-Clause elected)
+
+tokenizers (v0.21)
+  Source: https://crates.io/crates/tokenizers
+  Licensed under the Apache License, Version 2.0
+
+log-mdc (v0.1.0)
+  Source: https://crates.io/crates/log-mdc
+  Licensed under the Apache License, Version 2.0
+  (Original dual license: MIT/Apache-2.0; Apache-2.0 elected)
+
+cached_proc_macro_types
+  Source: https://crates.io/crates/cached_proc_macro_types
+  Licensed under the MIT License
+
+tagptr
+  Source: https://crates.io/crates/tagptr
+  Licensed under the Apache License, Version 2.0
+  (Original dual license: MIT/Apache-2.0; Apache-2.0 elected)
+
+unicode_categories
+  Source: https://crates.io/crates/unicode_categories
+  Licensed under the Apache License, Version 2.0
+  (Original dual license: MIT OR Apache-2.0; Apache-2.0 elected)
+
+unicode-normalization-alignments
+  Source: https://crates.io/crates/unicode-normalization-alignments
+  Licensed under the Apache License, Version 2.0
+  (Original dual license: MIT/Apache-2.0; Apache-2.0 elected)
+
+unsafe-any-ors
+  Source: https://crates.io/crates/unsafe-any-ors
+  Licensed under the MIT License
+
+Additional Rust dependencies are listed in Cargo.toml with their respective licenses.
+All dependencies are used in compliance with their original license terms.

@@ -1,0 +1,19 @@
+[package]
+name = "asc-policy-repository"
+description = "Binding aggregate storage contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-foundation-types = { workspace = true }
+asc-policy-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

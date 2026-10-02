@@ -1,0 +1,34 @@
+[Unit]
+Description=AgentSight - eBPF-based AI Agent Observability Tool
+Wants=agentsight-enforcer.service
+After=network.target agentsight-enforcer.service
+# No start rate limit: hitting StartLimitBurst puts the unit in failed state
+# permanently until someone runs `systemctl reset-failed`, which is exactly how
+# a host ended up unobserved for the rest of its life after a recurring OOM
+# (#2888). A restart loop that keeps complaining in the journal every
+# RestartSec is the lesser evil for an observability agent.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+UMask=0077
+# Always, not on-failure: observability must come back after any exit, including
+# a clean one triggered by a worker dying.
+Restart=always
+RestartSec=10
+# systemd's default OOMPolicy=stop tears the cgroup down as soon as one worker
+# is OOM-killed, so agentsight-start never gets to reap its sibling worker.
+# With continue, the wrapper stops the sibling and exits, and Restart=always
+# brings the unit back through a single, predictable path.
+# Requires systemd 243+; older releases (e.g. Anolis 8 / systemd 239) log an
+# unknown-key warning and ignore it, falling back to the default behaviour.
+OOMPolicy=continue
+CPUQuota=30%
+MemoryMax=350M
+ExecStart=/usr/local/bin/agentsight-start
+ExecStop=/bin/kill -15 $MAINPID
+ExecReload=/bin/kill -1 $MAINPID
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

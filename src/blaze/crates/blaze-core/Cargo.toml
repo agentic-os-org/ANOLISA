@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "blaze-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+semver = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

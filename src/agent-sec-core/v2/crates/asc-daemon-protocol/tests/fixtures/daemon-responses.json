@@ -1,0 +1,19 @@
+[
+  {
+    "name": "success",
+    "response": {
+      "requestId": "request-1",
+      "result": {"policyId": "policy-1"}
+    }
+  },
+  {
+    "name": "error",
+    "response": {
+      "requestId": "request-2",
+      "error": {
+        "code": "not_found",
+        "message": "requested policy resource was not found"
+      }
+    }
+  }
+]

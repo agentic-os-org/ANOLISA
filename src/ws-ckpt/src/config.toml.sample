@@ -1,0 +1,39 @@
+# ws-ckpt configuration
+#
+# The package installs this file as the live /etc/ws-ckpt/config.toml.
+# Uncomment/edit fields in place — the copy at config.toml.sample stays
+# as the canonical commented reference.
+#
+# Any field left unset falls back to its built-in default; a missing
+# /etc/ws-ckpt/config.toml is equivalent to all defaults.
+#
+# Apply edits without restart: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Most fields can also be updated via `ws-ckpt config --<flag>`, which writes
+# /etc/ws-ckpt/config.toml without comments — this sample stays as the
+# canonical reference for available options.
+
+# ── Scheduling ──
+# auto_cleanup = false                # Switch for periodic auto-cleanup (true = enabled, false = disabled)
+# auto_cleanup_keep = 20              # integer = count mode (keep N unpinned); 
+                                      # string = age mode (delete older than duration, e.g. auto_cleanup_keep = "30d"; units s/m/h/d/w).
+# auto_cleanup_interval_secs = 86400  # Auto-cleanup interval (seconds, default 24h)
+# health_check_interval_secs = 300    # Health check interval (seconds)
+
+# ── Backend selection ──
+# Section headers below are always active so that uncommenting a single
+# field below them takes effect immediately. Empty sections behave exactly
+# the same as omitted sections (all fields fall back to defaults).
+[backend]
+# type = "auto"                       # "auto" | "btrfs-base" | "btrfs-loop"
+
+# ── BtrfsLoop backend ──
+# NOTE: The following fields only take effect during daemon bootstrap.
+# To apply changes you MUST run `systemctl restart ws-ckpt` to restart the daemon.
+[backend.btrfs-loop]
+# img_size = 30                               # Absolute cap: image size (GB)
+# img_max_percent = 40                        # Percentage cap: % of host partition total capacity
+#                                             # Actual target = min(img_size GB, total * img_max_percent%)
+
+# ── BtrfsBase backend ──
+[backend.btrfs-base]
+# btrfs_mount = "/data"               # (reserved) Target btrfs partition

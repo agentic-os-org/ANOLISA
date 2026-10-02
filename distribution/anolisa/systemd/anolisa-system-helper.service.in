@@ -1,0 +1,16 @@
+[Unit]
+Description=ANOLISA System Helper — privileged operations daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@@HELPER_PATH@@ system serve --socket @@SOCKET_PATH@@
+Restart=on-failure
+RestartSec=5
+#WatchdogSec=30  # TODO: enable after implementing sd_notify(WATCHDOG=1)
+Group=anolisa
+RuntimeDirectory=anolisa
+RuntimeDirectoryMode=2750
+
+[Install]
+WantedBy=multi-user.target

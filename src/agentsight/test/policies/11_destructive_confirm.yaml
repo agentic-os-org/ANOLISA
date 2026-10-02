@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source AGENT = exec "**/codex"
+
+  rule confirm-destructive:
+    block exec "git" "--force" if AGENT unless after exec "**/confirm"
+    block unlink file "/data/**" if AGENT unless after exec "**/confirm"
+    because "destructive action needs confirmation"

@@ -1,0 +1,9 @@
+{
+  "session_id": "sess-parity",
+  "tool_use_id": "toolu_parity_small",
+  "tool_name": "WebFetch",
+  "tool_response": {
+    "ok": true,
+    "id": 7
+  }
+}

@@ -1,0 +1,11 @@
+version: 1
+policy: |
+  source PARENT = exec "**/codex"
+  source CHILD = exec "**/worker"
+  source POLICY = file "**/actplane.yaml"
+
+  rule parent-defines-child-policy:
+    block write file "**/actplane.yaml" if CHILD
+    block exec "actplane" "setup" if CHILD
+    notify read file "**/actplane.yaml" if PARENT and POLICY
+    because "parent can define policy, child can read but not mutate it"

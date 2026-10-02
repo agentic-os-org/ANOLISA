@@ -1,0 +1,16 @@
+version: 1
+rules:
+  r:
+    ifc: |
+      rule r:
+        kill exec "git"
+        because "r"
+domains:
+  alpha:
+    bind:
+      - rule: r
+        mode: default
+  beta:
+    bind:
+      - rule: r
+        mode: default

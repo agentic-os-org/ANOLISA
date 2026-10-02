@@ -1,0 +1,23 @@
+{
+  "function": {
+    "description": "Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. Search the codebase for a query string. ",
+    "name": "search_code",
+    "parameters": {
+      "properties": {
+        "limit": {
+          "description": "Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. Max results. ",
+          "type": "integer"
+        },
+        "query": {
+          "description": "The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. The query. ",
+          "examples": [
+            "foo"
+          ],
+          "type": "string"
+        }
+      },
+      "title": "SearchParams",
+      "type": "object"
+    }
+  }
+}

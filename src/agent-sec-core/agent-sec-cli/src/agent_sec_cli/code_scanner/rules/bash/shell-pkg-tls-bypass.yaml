@@ -1,0 +1,14 @@
+rule_id: shell-pkg-tls-bypass
+cwe_id: CWE-295
+desc_en: >-
+  Package manager command disables TLS/SSL certificate
+  verification, enabling man-in-the-middle attacks.
+desc_zh: >-
+  包管理器命令禁用 TLS/SSL 证书验证，存在中间人攻击风险。
+regex: |-
+  \b(pip3?|python3?\s+-m\s+pip)\b[^;|&\n]*install[^;|&\n]*--trusted-host
+  |\buv\b[^;|&\n]*--trusted-host
+  |\bnpm_config_strict_ssl\s*=\s*false
+  |\bcomposer\b[^;|&\n]*(disable-tls|--no-verify)
+  |\bCARGO_HTTP_CHECK_REVOKE\s*=\s*false
+severity: warn

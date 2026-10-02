@@ -1,0 +1,23 @@
+# Agent-memory RPM component contract (source template).
+# The version field below is substituted from Cargo.toml by `make` (sed).
+# This is publishing/plugin metadata only — framework execution (config
+# writes, skill delivery, CLI argv, scripts) belongs to built-in framework
+# drivers, not generic manifest keys.
+# Installed to: %{_datadir}/anolisa/components/agent-memory/component.toml
+[component]
+name = "agent-memory"
+version = "@VERSION@"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "memory-anolisa"
+source = "adapters/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.bundle]
+# Entry-point manifest inside the bundle directory (the file the OpenClaw
+# driver reads to identify the plugin). Declared explicitly rather than
+# relying on the driver's "openclaw.plugin.json" default, so the contract is
+# self-describing and survives driver default changes.
+entry = "openclaw.plugin.json"

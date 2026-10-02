@@ -1,0 +1,91 @@
+# Template: DistributionIndex v1 (flat `[[entries]]` schema).
+#
+# Concrete artifact URL / checksum / signature / backend live here, never in
+# component manifests. One `[[entries]]` row per (component, version, channel,
+# target) artifact binding. Consumed by
+# `anolisa_core::distribution::DistributionIndex`.
+#
+# `artifact_type` values use snake_case (`rpm`, `deb`, `tar_gz`, `zip`, `oci`,
+# `file`, `binary`). Legacy `tar.gz` / `tar` strings are still accepted by the
+# loader but normalized to `tar_gz`; new templates should use `tar_gz`.
+#
+# Do not use `os_version` to express installation requirements: it is retained
+# for compatibility with existing indexes but does not participate in matching.
+# Raw runtime dependencies belong in `[[component.dependencies]]` in the
+# artifact's `component.toml` and are handled by the install workflow. OS,
+# architecture, and other target selectors still apply.
+#
+# IMPORTANT: This file is a TEMPLATE. Every value wrapped in
+# `<REPLACE_WITH_...>` (and every `example.invalid` URL) is a placeholder
+# meant to be substituted before the file is published as an actual
+# distribution index on the mirror. Do NOT publish this file verbatim —
+# the host `example.invalid` is reserved by RFC 2606 and will never
+# resolve, so a copy-paste mistake will fail loudly instead of silently
+# fetching the wrong artifact.
+
+schema_version = 1
+channel = "stable"
+generated_at = "<REPLACE_WITH_ISO8601_GENERATED_AT>"
+expires_at = "<REPLACE_WITH_ISO8601_EXPIRES_AT>"
+publisher = "anolisa"
+signature = "cosign"
+
+# -----------------------------------------------------------------------------
+# agentsight 0.5.0 — Alinux x86_64 RPM (system mode)
+# -----------------------------------------------------------------------------
+[[entries]]
+component = "agentsight"
+version = "0.5.0"
+channel = "stable"
+artifact_id = "agentsight-0.5.0-alinux4-x86_64-rpm"
+manifest_digest = "sha256:<REPLACE_WITH_COMPONENT_MANIFEST_DIGEST>"
+artifact_type = "rpm"             # rpm | deb | tar_gz | zip | oci | file | binary
+backend = "github-release"        # github-release | yum-repo | apt-repo | aliyun-oss | internal-registry | local-file
+url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0.alinux4.x86_64.rpm"
+os = "alinux"
+arch = "x86_64"
+libc = "glibc"
+pkg_base = "rpm"
+install_modes = ["system"]
+sha256 = "<REPLACE_WITH_SHA256>"
+signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0.alinux4.x86_64.rpm.sig"
+size = 12345678
+
+# -----------------------------------------------------------------------------
+# agentsight 0.5.0 — generic Linux x86_64 tarball (user + system mode)
+# -----------------------------------------------------------------------------
+[[entries]]
+component = "agentsight"
+version = "0.5.0"
+channel = "stable"
+artifact_id = "agentsight-0.5.0-linux-x86_64-tar"
+manifest_digest = "sha256:<REPLACE_WITH_COMPONENT_MANIFEST_DIGEST>"
+artifact_type = "tar_gz"
+backend = "aliyun-oss"
+url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-linux-x86_64.tar.gz"
+os = "linux"
+arch = "x86_64"
+libc = "glibc"
+install_modes = ["user", "system"]
+sha256 = "<REPLACE_WITH_SHA256>"
+signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-linux-x86_64.tar.gz.sig"
+size = 9876543
+
+# -----------------------------------------------------------------------------
+# agentsight 0.5.0 — macOS aarch64 tarball (user mode only)
+# -----------------------------------------------------------------------------
+[[entries]]
+component = "agentsight"
+version = "0.5.0"
+channel = "stable"
+artifact_id = "agentsight-0.5.0-macos-aarch64-tar"
+manifest_digest = "sha256:<REPLACE_WITH_COMPONENT_MANIFEST_DIGEST>"
+artifact_type = "tar_gz"
+backend = "github-release"
+url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-macos-aarch64.tar.gz"
+os = "macos"
+arch = "aarch64"
+install_modes = ["user"]
+sha256 = "<REPLACE_WITH_SHA256>"
+signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-macos-aarch64.tar.gz.sig"
+size = 8765432

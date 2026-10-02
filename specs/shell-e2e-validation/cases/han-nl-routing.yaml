@@ -1,0 +1,262 @@
+version: 1
+suite: han-nl-routing
+defaults:
+  execution: ci
+  shell_mode: isolated
+  adapter: cosh-core
+  approval_mode: ask
+  analysis_mode: smart
+  render: terminal
+  timeout_ms: 30000
+  real_provider: false
+  command:
+    - bash
+    - -lc
+    - >-
+      cd /work/repo/src/cosh-ng &&
+      cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+      exec env TERM=xterm-256color COSH_SHELL_WIDTH=96
+      COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0
+      COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0
+      COSH_SHELL_LANG=zh-CN COSH_SHELL_RAW_SHELL=bash
+      COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+      "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+cases:
+  - id: HAN-NL-001
+    title: Bash routes Han Tier-A, question, and quoted-word prompts to Agent
+    tags: [shell, bash, issue-1990, issue-1992, han, natural-language]
+    shell: bash
+    env:
+      TERM: xterm-256color
+      COSH_SHELL_WIDTH: "96"
+      COSH_SHELL_ISOLATED: "1"
+      COSH_SHELL_BOOTSTRAP_PATH: "0"
+      COSH_SHELL_HEALTH_SCAN: disabled
+      COSH_RECOMMENDATIONS_ENABLED: "0"
+      COSH_SHELL_LANG: zh-CN
+      COSH_SHELL_RAW_SHELL: bash
+      COSH_SHELL_DEFAULT_SHELL: bash
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: bash-issue-1990
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        timeout_ms: 10000
+      - type: line
+        text: '你还好吗? 我想问问'
+      - id: bash-issue-1992
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: line
+        text: '子曰" 三人行必有我师"'
+      - id: bash-issue-1992-quote
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: delay
+        ms: 1000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "failed to run cosh-core: No such file or directory"
+      not_contains:
+        - "command not found"
+    evidence:
+      points:
+        - id: bash-issue-1990
+          trigger_event: bash-issue-1990
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: bash-issue-1992
+          trigger_event: bash-issue-1992
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: bash-issue-1992-quote
+          trigger_event: bash-issue-1992-quote
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: HAN-NL-002
+    title: Zsh routes Han Tier-A, question, and quoted-word prompts to Agent
+    tags: [shell, zsh, issue-1990, issue-1992, han, natural-language]
+    shell: zsh
+    skip_if_shell_missing: true
+    command: [$COSH_SHELL, raw, cosh-core]
+    env:
+      TERM: xterm-256color
+      COSH_SHELL_WIDTH: "96"
+      COSH_SHELL_ISOLATED: "1"
+      COSH_SHELL_BOOTSTRAP_PATH: "0"
+      COSH_SHELL_HEALTH_SCAN: disabled
+      COSH_RECOMMENDATIONS_ENABLED: "0"
+      COSH_SHELL_LANG: zh-CN
+      COSH_SHELL_RAW_SHELL: zsh
+      COSH_SHELL_DEFAULT_SHELL: zsh
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: zsh-issue-1990
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        timeout_ms: 10000
+      - type: line
+        text: '你还好吗? 我想问问'
+      - id: zsh-issue-1992
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: line
+        text: '子曰" 三人行必有我师"'
+      - id: zsh-issue-1992-quote
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: delay
+        ms: 1000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "failed to run cosh-core: No such file or directory"
+      not_contains:
+        - "command not found"
+    evidence:
+      points:
+        - id: zsh-issue-1990
+          trigger_event: zsh-issue-1990
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-issue-1992
+          trigger_event: zsh-issue-1992
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-issue-1992-quote
+          trigger_event: zsh-issue-1992-quote
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: HAN-NL-003
+    title: Zsh preserves historical draft, slash, and native-path behavior
+    tags: [shell, zsh, regression, issue-1721, issue-1811, issue-1919, issue-1932]
+    shell: zsh
+    skip_if_shell_missing: true
+    command: [$COSH_SHELL, raw, cosh-core]
+    env:
+      TERM: xterm-256color
+      COSH_SHELL_WIDTH: "96"
+      COSH_SHELL_ISOLATED: "1"
+      COSH_SHELL_BOOTSTRAP_PATH: "0"
+      COSH_SHELL_HEALTH_SCAN: disabled
+      COSH_RECOMMENDATIONS_ENABLED: "0"
+      COSH_SHELL_LANG: zh-CN
+      COSH_SHELL_RAW_SHELL: zsh
+      COSH_SHELL_DEFAULT_SHELL: zsh
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: /draft
+      - id: zsh-issue-1932-draft
+        type: wait_for
+        text: "Prompt 草稿"
+        timeout_ms: 10000
+      - type: bytes
+        text: "analyze load"
+      - type: bytes
+        hex: 1b5b31333b3275
+      - type: wait_for
+        text: "Shift+Enter 换行"
+        timeout_ms: 10000
+      - type: delay
+        ms: 300
+      - type: bytes
+        text: "and suggest fixes"
+      - type: key
+        name: enter
+      - id: zsh-issue-1721-multiline
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        timeout_ms: 10000
+      - type: line
+        text: /mode
+      - type: wait_for
+        text: "审批: auto"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - id: zsh-issue-1811-slash
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 5000
+      - type: line
+        text: "/bin/echo ISSUE_1919_EXISTING_PATH_NATIVE_OK"
+      - id: zsh-issue-1919-existing-path
+        type: wait_for
+        text: "ISSUE_1919_EXISTING_PATH_NATIVE_OK"
+        occurrence: 2
+        timeout_ms: 10000
+      - type: line
+        text: "/usr/bin/printf 'COSH_SESSION_%s\\n' RECOVERED"
+      - id: zsh-session-recovery
+        type: wait_for
+        text: "COSH_SESSION_RECOVERED"
+        occurrence: 1
+        timeout_ms: 10000
+      - type: delay
+        ms: 1000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "Prompt 草稿"
+        - "failed to run cosh-core: No such file or directory"
+        - "审批: auto"
+        - "ISSUE_1919_EXISTING_PATH_NATIVE_OK"
+        - "COSH_SESSION_RECOVERED"
+      not_contains:
+        - "command not found"
+        - ";2u"
+    evidence:
+      points:
+        - id: zsh-issue-1932-draft
+          trigger_event: zsh-issue-1932-draft
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-issue-1721-multiline
+          trigger_event: zsh-issue-1721-multiline
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-issue-1811-slash
+          trigger_event: zsh-issue-1811-slash
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-issue-1919-existing-path
+          trigger_event: zsh-issue-1919-existing-path
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: zsh-session-recovery
+          trigger_event: zsh-session-recovery
+          layout_sensitive: true
+          required_types: [screenshot]
