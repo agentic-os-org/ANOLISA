@@ -235,6 +235,17 @@ agentsight serve --db /path/to/genai_events.db
 
 打开 `http://127.0.0.1:7396` 即可浏览已记录的对话和 Trace。
 
+### Dashboard 开发
+
+如需在不重新编译 Rust 二进制的情况下迭代前端：
+
+```bash
+cd src/agentsight/dashboard
+npm install
+npm run dev          # 启动 webpack-dev-server，访问 http://localhost:3004
+```
+
+完成后运行 `make build-frontend && cargo build --release`，将更新后的 UI 嵌入二进制。
 
 ## 快速开始
 
@@ -340,6 +351,8 @@ make build-all
 `make build-all` 还会调用 `scripts/build-enforcer.sh`，以构建经验证的
 ActPlane `target/release/agentsight-enforcer` 二进制。`make build-mac` 不会构建
 enforcer。
+
+> `cargo build --release` 只编译 Rust，不会重新构建内嵌的 Dashboard UI，因此面向用户的构建请使用 `make build-all`。
 
 ### macOS 构建
 
