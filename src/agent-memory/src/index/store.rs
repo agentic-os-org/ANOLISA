@@ -211,6 +211,16 @@ impl BM25Store {
     /// Insert or replace a file's index entry. `body` is the extracted
     /// text. All writes happen inside one transaction so a crash mid-
     /// upsert can't leave `files` and `files_fts` out of sync.
+    ///
+    /// Both branches leave the row warm (`is_cold = 0`): the INSERT path
+    /// via the column default, the UPDATE path explicitly. An upsert means
+    /// the file was just (re)written or re-observed, and `compact()` only
+    /// ever marks files whose `mtime_ms` is older than its cutoff — so a
+    /// row holding a fresh mtime behind `is_cold = 1` contradicts the
+    /// store's own cold invariant. Before the UPDATE path reset the flag,
+    /// a compacted file that was later edited kept it forever (nothing
+    /// else ever clears `is_cold`), staying invisible to every
+    /// exclude_cold search despite its fresh content.
     pub fn upsert(
         &mut self,
         rel_path: &str,
@@ -232,7 +242,8 @@ impl BM25Store {
         match existing_rowid {
             Some(rowid) => {
                 tx.execute(
-                    "UPDATE files SET mtime_ms=?1, size=?2, indexed_at=?3, agent_id=COALESCE(agent_id, ?4) WHERE rowid=?5",
+                    "UPDATE files SET mtime_ms=?1, size=?2, indexed_at=?3, agent_id=COALESCE(agent_id, ?4), \
+                     is_cold=0 WHERE rowid=?5",
                     params![mtime_ms, size as i64, now, agent_id, rowid],
                 )?;
                 tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rowid])?;
@@ -1836,6 +1847,83 @@ mod tests {
         let hits = s.search("unique", 5, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "old.md");
+    }
+
+    #[test]
+    fn rewriting_a_cold_file_rewarms_it() {
+        // Regression: `compact()` is the only writer of `is_cold` and
+        // nothing ever cleared it, so a compacted file that was later
+        // rewritten kept the flag — the upsert UPDATE path didn't touch
+        // it — and stayed invisible to every exclude_cold search even
+        // though its body and mtime were fresh. `compact()` itself would
+        // never mark such a row cold (`mtime_ms < cutoff` fails for a
+        // fresh mtime), so the surviving flag contradicted the store's
+        // own cold criteria. This is the watcher's flush path replayed by
+        // hand: a modify event turns into exactly this upsert.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "ancient unique keyword",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.compact(30).unwrap(), 1);
+        assert!(s.search("unique", 5, true).unwrap().is_empty());
+
+        // The file is rewritten: new body, fresh mtime.
+        s.upsert("old.md", now_ms, 25, "fresh unique keyword", None)
+            .unwrap();
+
+        let hits = s.search("unique", 5, true).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a rewritten file must leave cold storage and be searchable again"
+        );
+        assert_eq!(hits[0].path, "old.md");
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn rewriting_one_file_does_not_rewarm_other_cold_files() {
+        // Only the file's own rewrite may re-warm it: compacting old.md and
+        // then upserting a different file must leave old.md cold.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "ancient unique keyword",
+            None,
+        )
+        .unwrap();
+        s.upsert("warm.md", now_ms, 20, "current other keyword", None)
+            .unwrap();
+        assert_eq!(s.compact(30).unwrap(), 1);
+
+        // Rewrite the warm file (UPDATE path on a warm row).
+        s.upsert("warm.md", now_ms, 22, "current newer keyword", None)
+            .unwrap();
+
+        assert!(
+            s.search("ancient", 5, true).unwrap().is_empty(),
+            "old.md must stay cold when only warm.md is rewritten"
+        );
+        let hits = s.search("newer", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 1));
     }
 
     #[test]
