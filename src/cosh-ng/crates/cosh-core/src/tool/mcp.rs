@@ -1049,16 +1049,22 @@ fn configure_child_environment(
 }
 
 fn expand_env_vars(value: &str) -> String {
-    let mut expanded = value.to_string();
-    while let Some(start) = expanded.find("${") {
-        let Some(end_offset) = expanded[start..].find('}') else {
+    // Single pass over the input: text inserted by a replacement is never
+    // re-scanned, so a value that references itself cannot loop or grow.
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let Some(end_offset) = rest[start..].find('}') else {
             break;
         };
         let end = start + end_offset;
-        let variable = &expanded[start + 2..end];
+        let variable = &rest[start + 2..end];
         let replacement = std::env::var(variable).unwrap_or_default();
-        expanded.replace_range(start..=end, &replacement);
+        expanded.push_str(&rest[..start]);
+        expanded.push_str(&replacement);
+        rest = &rest[end + 1..];
     }
+    expanded.push_str(rest);
     expanded
 }
 
@@ -1205,6 +1211,23 @@ mod tests {
             exposed_tool_name("github tools", "read/issue"),
             "mcp__github_tools__read_issue"
         );
+    }
+
+    #[test]
+    fn expand_env_vars_terminates_on_self_referential_value() {
+        // Re-scanning replacement text made any env value that references
+        // itself loop forever while preparing MCP server commands.
+        std::env::set_var("TEST_COSH_MCP_CYCLE", "${TEST_COSH_MCP_CYCLE}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = expand_env_vars("${TEST_COSH_MCP_CYCLE}");
+            let _ = tx.send(result);
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("expand_env_vars must terminate on a self-referential value");
+        std::env::remove_var("TEST_COSH_MCP_CYCLE");
+        assert_eq!(result, "${TEST_COSH_MCP_CYCLE}");
     }
 
     #[test]

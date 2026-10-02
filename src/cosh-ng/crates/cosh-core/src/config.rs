@@ -596,21 +596,22 @@ struct PartialLoggingConfig {
 }
 
 fn expand_env_vars(s: &str) -> String {
-    let mut result = s.to_string();
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
+    // Single pass over the input: text inserted by a replacement is never
+    // re-scanned, so a value that references itself cannot loop or grow.
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        if let Some(end) = rest[start..].find('}') {
+            let var_name = &rest[start + 2..start + end];
             let replacement = std::env::var(var_name).unwrap_or_default();
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[start + end + 1..]
-            );
+            result.push_str(&rest[..start]);
+            result.push_str(&replacement);
+            rest = &rest[start + end + 1..];
         } else {
             break;
         }
     }
+    result.push_str(rest);
     result
 }
 
@@ -1752,6 +1753,31 @@ model = "qwen-max"
     fn expand_env_vars_no_match() {
         let result = expand_env_vars("plain-text");
         assert_eq!(result, "plain-text");
+    }
+
+    #[test]
+    fn expand_env_vars_keeps_refs_from_replacement_text() {
+        // Re-scanning replacement text made any env value that references
+        // itself loop forever (and unbounded growth for expanding values),
+        // hanging startup before any diagnostic output.
+        std::env::set_var("TEST_COSH_KEY_A", "${TEST_COSH_KEY_B}");
+        std::env::set_var("TEST_COSH_KEY_B", "b-value");
+        let result = expand_env_vars("x=${TEST_COSH_KEY_A}");
+        assert_eq!(result, "x=${TEST_COSH_KEY_B}");
+    }
+
+    #[test]
+    fn expand_env_vars_terminates_on_self_referential_value() {
+        std::env::set_var("TEST_COSH_KEY_CYCLE", "${TEST_COSH_KEY_CYCLE}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = expand_env_vars("${TEST_COSH_KEY_CYCLE}");
+            let _ = tx.send(result);
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("expand_env_vars must terminate on a self-referential value");
+        assert_eq!(result, "${TEST_COSH_KEY_CYCLE}");
     }
 
     #[test]
