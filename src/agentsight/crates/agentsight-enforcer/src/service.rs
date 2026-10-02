@@ -83,7 +83,8 @@ impl<B: EnforcementBackend> EnforcerService<B> {
     /// # Errors
     ///
     /// Returns an I/O error when accepting a connection fails for a reason
-    /// other than the non-blocking listener having no pending client.
+    /// other than the non-blocking listener having no pending client or a
+    /// transient, peer-driven failure such as descriptor exhaustion.
     pub fn serve_until(self, stop: &AtomicBool) -> Result<(), ServiceError> {
         let required_subscriptions = Arc::new(RequiredSubscriptions::default());
         while !stop.load(Ordering::Acquire) {
@@ -103,12 +104,37 @@ impl<B: EnforcementBackend> EnforcerService<B> {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
+                Err(error) if is_transient_accept_error(&error) => {
+                    log::warn!("agentsight-enforcer accept failed; retrying: {error}");
+                    thread::sleep(Duration::from_millis(100));
+                }
                 Err(error) => return Err(ServiceError::Io(error)),
             }
         }
         self.backend.shutdown()?;
         Ok(())
     }
+}
+
+/// Reports accept failures caused by peer behavior rather than a broken
+/// listener.
+///
+/// Every accepted connection holds a descriptor until its handler thread
+/// finishes, so a peer that keeps enough sockets open drives `accept(2)`
+/// into `EMFILE`/`ENFILE`. Aborting the daemon on those errors would tear
+/// down every active binding, so the service logs and retries instead.
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOMEM
+                | libc::ENOBUFS
+                | libc::ECONNABORTED
+                | libc::EINTR
+        )
+    )
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<(), std::io::Error> {
@@ -724,6 +750,29 @@ mod tests {
 
     use super::*;
     use crate::MockBackend;
+
+    #[test]
+    fn peer_driven_accept_errors_are_transient() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::ENOBUFS,
+            libc::ECONNABORTED,
+            libc::EINTR,
+        ] {
+            assert!(
+                is_transient_accept_error(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} must be retried"
+            );
+        }
+        assert!(!is_transient_accept_error(
+            &std::io::Error::from_raw_os_error(libc::EACCES)
+        ));
+        assert!(!is_transient_accept_error(&std::io::Error::other(
+            "synthetic error carries no errno"
+        )));
+    }
 
     struct DetachRaceBackend {
         active: Arc<AtomicBool>,
