@@ -483,6 +483,17 @@ impl ComponentIndex {
                     reason: "component name must not be empty".to_string(),
                 });
             }
+            // Identity fields are matched by exact equality (resolution,
+            // targets_for_component, BackendKind::from_name): a padded value
+            // would pass the empty check yet never match any input, leaving
+            // the entry silently unusable. Reject at load instead.
+            if name != entry.name {
+                return Err(ComponentIndexError::Invalid {
+                    reason: format!(
+                        "component name '{name}' must not carry leading or trailing whitespace"
+                    ),
+                });
+            }
             if !names.insert(name.to_string()) {
                 return Err(ComponentIndexError::Invalid {
                     reason: format!("duplicate component '{name}'"),
@@ -518,9 +529,23 @@ impl ComponentIndex {
                         reason: format!("component '{name}' has an empty backend kind"),
                     });
                 }
+                if backend.kind.trim() != backend.kind {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' backend kind must not carry leading or trailing whitespace"
+                        ),
+                    });
+                }
                 if backend.package.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!("component '{name}' has an empty backend package"),
+                    });
+                }
+                if backend.package.trim() != backend.package {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' backend package must not carry leading or trailing whitespace"
+                        ),
                     });
                 }
                 if let Some(provides) = backend.provides.as_deref()
@@ -539,6 +564,16 @@ impl ComponentIndex {
                 if alias.kind.trim().is_empty() || alias.name.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!("component '{name}' has an empty alias kind or name"),
+                    });
+                }
+                // Identity resolution matches alias names, not kinds. Keep the
+                // previously accepted kind padding for input compatibility;
+                // other consumers, such as RPM discovery, compare kinds exactly.
+                if alias.name.trim() != alias.name {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' alias name must not carry leading or trailing whitespace"
+                        ),
                     });
                 }
             }
@@ -1009,6 +1044,77 @@ targets = {targets}
                 "unexpected error for {targets}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn whitespace_padded_identity_fields_are_rejected() {
+        // Identity lookups match these fields by exact equality, so a padded
+        // value would pass the empty check yet never match any input — the
+        // entry is silently unusable. Reject at load instead. Alias kind is
+        // excluded to preserve accepted input; identity resolution ignores it.
+        // See `padded_alias_kind_stays_usable`.
+        let targets = r#"targets = [{ os = "linux", arch = "x86_64" }]"#;
+        for source in [
+            format!("\nschema_version = 2\n\n[[components]]\nname = \" cosh\"\n{targets}\n"),
+            format!("\nschema_version = 2\n\n[[components]]\nname = \"cosh \"\n{targets}\n"),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw \"\npackage = \"cosh\"\n"
+            ),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw\"\npackage = \"cosh \"\n"
+            ),
+            format!(
+                "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell \"\n"
+            ),
+        ] {
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("padded identity fields must be rejected");
+            assert!(
+                matches!(err, ComponentIndexError::Invalid { ref reason }
+                    if reason.contains("whitespace")),
+                "unexpected error: {err}"
+            );
+        }
+
+        let canonical = format!(
+            "\nschema_version = 2\n\n[[components]]\nname = \"cosh\"\n{targets}\n\n[[components.backends]]\nkind = \"raw\"\npackage = \"cosh\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n"
+        );
+        ComponentIndex::from_toml_str(&canonical, "components.toml")
+            .expect("canonical index must still load");
+    }
+
+    #[test]
+    fn padded_alias_kind_stays_usable() {
+        // An alias kind is a label: `resolve_index_identity` matches canonical
+        // names, alias names and backend packages and deliberately skips kinds.
+        // Rejecting the whole index over `" rpm-package"` would take every
+        // unrelated component down with it, so an otherwise canonical entry must
+        // keep loading and resolving exactly as it did before.
+        let source = r#"
+schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
+
+[[components.backends]]
+kind = "raw"
+package = "cosh"
+
+[[components.aliases]]
+kind = " rpm-package"
+name = "copilot-shell"
+"#;
+        let index = ComponentIndex::from_toml_str(source, "components.toml")
+            .expect("padded alias kind must not invalidate the index");
+        assert_eq!(
+            resolve_index_identity("cosh", Some(&index)),
+            IndexIdentity::Resolved("cosh".to_string())
+        );
+        assert_eq!(
+            resolve_index_identity("copilot-shell", Some(&index)),
+            IndexIdentity::Resolved("cosh".to_string())
+        );
     }
 
     #[test]
