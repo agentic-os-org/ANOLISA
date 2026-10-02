@@ -1,0 +1,394 @@
+name: Release / Publish
+
+on:
+  push:
+    tags:
+      - 'cosh/v*'
+      - 'cosh-ng/v*'
+      - 'sec-core/v*'
+      - 'sight/v*'
+      - 'skill/v*'
+      - 'tokenless/v*'
+      - 'ckpt/v*'
+      - 'memory/v*'
+      - 'skillfs/v*'
+      - 'ktuner/v*'
+      - 'anolisa/v*'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  # =========================================================================
+  # Step 1: Parse tag and package
+  # Triggered by push tag; produces official artifacts retained 28 days.
+  # =========================================================================
+  package:
+    name: Package ${{ github.ref_name }}
+    runs-on: anolisa-k8s-amd-release
+    outputs:
+      component: ${{ steps.parse.outputs.component }}
+      version: ${{ steps.parse.outputs.version }}
+      tag: ${{ steps.parse.outputs.tag }}
+      archive-sha256: ${{ steps.package-source.outputs.archive-sha256 }}
+      prebuilt-enabled: ${{ steps.plan-prebuilt.outputs.enabled }}
+      prebuilt-matrix: ${{ steps.plan-prebuilt.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          SCOPE="${TAG%%/v*}"
+          VERSION="${TAG#*/v}"
+
+          case "$SCOPE" in
+            cosh)     COMPONENT="copilot-shell" ;;
+            cosh-ng)  COMPONENT="cosh-ng" ;;
+            sec-core) COMPONENT="agent-sec-core" ;;
+            sight)    COMPONENT="agentsight" ;;
+            skill)    COMPONENT="os-skills" ;;
+            tokenless) COMPONENT="tokenless" ;;
+            ckpt)     COMPONENT="ws-ckpt" ;;
+            memory)   COMPONENT="agent-memory" ;;
+            skillfs)  COMPONENT="skillfs" ;;
+            ktuner)   COMPONENT="ktuner" ;;
+            anolisa)  COMPONENT="anolisa" ;;
+            *)
+              echo "Unknown scope: $SCOPE"
+              exit 1
+              ;;
+          esac
+
+          echo "component=$COMPONENT" >> $GITHUB_OUTPUT
+          echo "version=$VERSION"     >> $GITHUB_OUTPUT
+          echo "tag=$TAG"             >> $GITHUB_OUTPUT
+
+          echo "### Parsed Tag" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`$TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify agent-sec-core V2 version matches tag
+        if: steps.parse.outputs.component == 'agent-sec-core'
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          workspace_version=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$workspace_version"
+          test "$workspace_version" = "$TAG_VERSION" || {
+            echo "sec-core tag version $TAG_VERSION differs from V2 workspace version $workspace_version" >&2
+            exit 1
+          }
+
+      - name: Plan precompiled packages
+        id: plan-prebuilt
+        env:
+          COMPONENT: ${{ steps.parse.outputs.component }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
+            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+
+      - name: Package source archive
+        id: package-source
+        uses: ./.github/actions/package-source
+        with:
+          component: ${{ steps.parse.outputs.component }}
+          version: ${{ steps.parse.outputs.version }}
+          artifact-suffix: ''
+          retention-days: 28
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: ${{ steps.parse.outputs.component }}
+          version: ${{ steps.parse.outputs.version }}
+          artifact-suffix: ''
+          retention-days: 28
+
+  build_prebuilt:
+    name: Build precompiled packages
+    needs: package
+    if: needs.package.outputs.prebuilt-enabled == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package.outputs.prebuilt-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build cosh-ng precompiled package
+        id: cosh-ng-prebuilt
+        if: matrix.component == 'cosh-ng'
+        uses: ./.github/actions/build-cosh-ng-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build Tokenless precompiled package
+        id: tokenless-prebuilt
+        if: matrix.component == 'tokenless'
+        uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build ANOLISA CLI precompiled package
+        id: anolisa-prebuilt
+        if: matrix.component == 'anolisa'
+        uses: ./.github/actions/build-anolisa-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Select precompiled package output
+        id: prebuilt
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+          ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
+          COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
+          TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+        run: |
+          case "$COMPONENT" in
+            anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
+            tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
+          esac
+          if [ -z "$ARTIFACT_DIRECTORY" ]; then
+            echo "::error::Missing prebuilt output for $COMPONENT"
+            exit 1
+          fi
+          echo "artifact-directory=$ARTIFACT_DIRECTORY" >> "$GITHUB_OUTPUT"
+
+      - name: Upload precompiled package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.component }}-prebuilt-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
+      - name: Upload Tokenless Python wheels
+        if: matrix.component == 'tokenless'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-python-wheels-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.tokenless-prebuilt.outputs.wheel-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
+  # =========================================================================
+  # Step 2: Publish (requires manual approval via GitHub Environment)
+  #
+  # If reviewer rejects, no Release is created.
+  # =========================================================================
+  publish:
+    name: Publish ${{ needs.package.outputs.tag }}
+    needs: [package, build_prebuilt]
+    if: >-
+      always() &&
+      needs.package.result == 'success' &&
+      (needs.package.outputs.prebuilt-enabled != 'true' ||
+       needs.build_prebuilt.result == 'success')
+    permissions:
+      contents: write
+      actions: read
+    environment: release
+    runs-on: anolisa-k8s-amd-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download official artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}
+          path: /tmp/archives
+
+      - name: Verify official artifact checksum
+        run: |
+          COMPONENT="${{ needs.package.outputs.component }}"
+          VERSION="${{ needs.package.outputs.version }}"
+          ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
+          EXPECTED="${{ needs.package.outputs.archive-sha256 }}"
+          ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::Checksum mismatch for ${ARCHIVE}"
+            echo "::error::Expected: $EXPECTED"
+            echo "::error::Actual:   $ACTUAL"
+            exit 1
+          fi
+          echo "Checksum verified: $ACTUAL"
+
+      - name: Download vendor artifact (if exists)
+        id: download-vendor
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
+          path: /tmp/archives
+
+      - name: Download precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ needs.package.outputs.component }}-prebuilt-${{ needs.package.outputs.version }}-*
+          path: /tmp/prebuilt
+
+      - name: Verify precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
+        env:
+          COMPONENT: ${{ needs.package.outputs.component }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
+            --directory /tmp/prebuilt \
+            --component "$COMPONENT" \
+            --version "$VERSION" \
+            --layout actions
+
+      - name: Download Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tokenless-python-wheels-${{ needs.package.outputs.version }}-*
+          merge-multiple: true
+          path: /tmp/python-wheels
+
+      - name: Verify Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
+            --directory /tmp/python-wheels \
+            --version "$VERSION" \
+            --layout aggregate \
+            --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PREBUILT_ENABLED: ${{ needs.package.outputs.prebuilt-enabled }}
+        run: |
+          COMPONENT="${{ needs.package.outputs.component }}"
+          VERSION="${{ needs.package.outputs.version }}"
+          TAG="${{ needs.package.outputs.tag }}"
+          ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
+
+          case "$COMPONENT" in
+            copilot-shell)  PREFIX="cosh/v" ;;
+            cosh-ng)        PREFIX="cosh-ng/v" ;;
+            agent-sec-core) PREFIX="sec-core/v" ;;
+            agentsight)     PREFIX="sight/v" ;;
+            os-skills)      PREFIX="skill/v" ;;
+            tokenless)      PREFIX="tokenless/v" ;;
+            ws-ckpt)        PREFIX="ckpt/v" ;;
+            agent-memory)   PREFIX="memory/v" ;;
+            skillfs)        PREFIX="skillfs/v" ;;
+            ktuner)         PREFIX="ktuner/v" ;;
+            anolisa)        PREFIX="anolisa/v" ;;
+          esac
+
+          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
+          else
+            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+          fi
+
+          NOTES="## ${COMPONENT} v${VERSION}\n\n<!-- Add release notes here -->\n\n## What's Changed\n\n<!-- List the key changes in this release -->\n\n**Full Changelog**: ${COMPARE_URL}"
+
+          # Collect all assets to upload
+          ASSETS=("$ARCHIVE")
+          VENDOR_ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}-vendor.tar.gz"
+          if [ -f "$VENDOR_ARCHIVE" ]; then
+            ASSETS+=("$VENDOR_ARCHIVE")
+          fi
+          if [ "$PREBUILT_ENABLED" = "true" ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
+                LC_ALL=C sort
+            )
+          fi
+          if [ "$COMPONENT" = tokenless ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/python-wheels -maxdepth 1 -type f \
+                \( -name '*.whl' -o -name 'SHA256SUMS-python-wheels.txt' \) \
+                -print | LC_ALL=C sort
+            )
+          fi
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release '$TAG' already exists."
+            echo "::error::If you need to re-publish, delete the existing release first, then re-run this workflow."
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            --title "${COMPONENT} v${VERSION}" \
+            --notes "$(printf '%b' "${NOTES}")" \
+            --target "$(git rev-list -n 1 $TAG)" \
+            "${ASSETS[@]}"
+
+          RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
+
+          echo "### Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | \`${COMPONENT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | [View Release](${RELEASE_URL}) |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "$VENDOR_ARCHIVE" ]; then
+            echo "| Vendor | \`${COMPONENT}-${VERSION}-vendor.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| Changelog | [Compare](${COMPARE_URL}) |" >> $GITHUB_STEP_SUMMARY

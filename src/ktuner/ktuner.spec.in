@@ -1,0 +1,55 @@
+%define anolis_release 1
+%global         rustflags -C opt-level=3 -C codegen-units=1
+%global         debug_package %{nil}
+%global         _localbindir /usr/local/bin
+
+Name:           ktuner
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Deterministic kernel-tuning engine for ANOLISA agents
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# Cargo.toml does not pin rust-version; build with the repo toolchain.
+BuildRequires:  rust
+BuildRequires:  cargo
+# Required by Rust crates with C build scripts (libc bindings).
+BuildRequires:  gcc
+
+Provides:       anolisa-component(ktuner)
+
+%description
+ktuner is a deterministic kernel-tuning engine that diagnoses the running
+system against a curated rule set and outputs structured JSON tuning
+recommendations, with apply/rollback support for ANOLISA agents.
+
+%prep
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+export RUSTFLAGS="%{rustflags}"
+cargo build --release --locked --offline
+
+%install
+rm -rf %{buildroot}
+
+install -d -m 0755 %{buildroot}%{_localbindir}
+install -p -m 0755 target/release/ktuner %{buildroot}%{_localbindir}/ktuner
+
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/ktuner
+install -p -m 0644 component.toml \
+    %{buildroot}%{_datadir}/anolisa/components/ktuner/component.toml
+
+%files
+%license LICENSE
+%doc README.md CHANGELOG.md
+%attr(0755,root,root) %{_localbindir}/ktuner
+%dir %{_datadir}/anolisa/components/ktuner
+%{_datadir}/anolisa/components/ktuner/component.toml
+
+%changelog
+* Sat Jul 25 2026 Jiangtian Feng <jiangtianf97@163.com> - 0.1.0-1
+- Package ktuner from the ANOLISA monorepo.

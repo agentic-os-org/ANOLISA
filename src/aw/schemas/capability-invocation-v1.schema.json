@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/capability-invocation/v1",
+  "title": "Policy-bound capability invocation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_id",
+    "provider_id",
+    "provider_version",
+    "manifest_digest",
+    "capability",
+    "scope",
+    "boundary_id",
+    "boundary_revision",
+    "idempotency_key",
+    "policy_revision",
+    "deadline_at_ms",
+    "budget",
+    "input_schema",
+    "output_schema",
+    "input_digest",
+    "input",
+    "plan_ref"
+  ],
+  "properties": {
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "provider_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "provider_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "boundary_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "boundary_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "policy_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "deadline_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_bytes",
+        "output_bytes",
+        "wall_time_ms"
+      ],
+      "properties": {
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "wall_time_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "input_schema": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+    },
+    "output_schema": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/schema_ref"
+    },
+    "input_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "input": {
+      "type": "object"
+    },
+    "plan_ref": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/plan_ref"
+    }
+  }
+}

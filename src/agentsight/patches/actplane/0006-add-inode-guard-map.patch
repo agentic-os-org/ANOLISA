@@ -1,0 +1,229 @@
+--- a/bpf/src/lib.rs	2026-09-15 17:00:00.000000000 +0800
++++ b/bpf/src/lib.rs	2026-09-15 17:00:00.000000000 +0800
+@@ -186,6 +186,34 @@
+     hi: u64,
+ }
+ 
++// Mirrors bpf/taint_engine.bpf.h `struct file_id`.
++// Used as HASH key — _pad MUST be explicitly zeroed.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct FileId {
++    pub ino: u64,
++    pub dev: u32,
++    pub _pad: u32,
++}
++
++/// Inode guard flag: block unlink.
++pub const INODE_GUARD_UNLINK: u32 = 1;
++/// Inode guard flag: block rename.
++pub const INODE_GUARD_RENAME: u32 = 2;
++/// Inode guard flag: block write.
++pub const INODE_GUARD_WRITE: u32 = 4;
++
++/// Value stored in te_inode_guard map: flags + owning domain_id.
++/// Must match BPF `struct inode_guard_val` layout.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct InodeGuardVal {
++    pub flags: u32,
++    pub domain_id: u32,
++}
++
++unsafe impl aya::Pod for FileId {}
++unsafe impl aya::Pod for InodeGuardVal {}
+ unsafe impl aya::Pod for CUpdate {}
+ unsafe impl aya::Pod for CRule {}
+ unsafe impl aya::Pod for ProcState {}
+@@ -1708,10 +1736,7 @@
+             block_connect: true,
+             suppress_dataflow_tracepoints: true,
+             file_open_only: true,
+-            policy_features: FEAT_FILE_FLOW
+-                | FEAT_CONNECT
+-                | FEAT_BLOCK_FILE
+-                | FEAT_BLOCK_CONNECT,
++            policy_features: FEAT_FILE_FLOW | FEAT_CONNECT | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT,
+             ..HookReserve::default()
+         }
+     }
+@@ -1794,6 +1819,38 @@
+     }
+ }
+ 
++/// Parse a dotted kernel release string (e.g. "7.1.10-...") and return
++/// `(major, minor)`.  Returns `None` when the format is unexpected.
++fn parse_kernel_major_minor(release: &str) -> Option<(u32, u32)> {
++    let mut parts = release.split('.');
++    let major: u32 = parts.next()?.parse().ok()?;
++    // The minor may be followed by a patch component, so split on '-' as well.
++    let minor_str = parts.next()?;
++    let minor: u32 = minor_str
++        .split(|c: char| !c.is_ascii_digit())
++        .next()?
++        .parse()
++        .ok()?;
++    Some((major, minor))
++}
++
++/// Returns `true` when the running kernel is expected to support `bpf_d_path`
++/// inside LSM hooks (Alibaba Cloud Linux kernel >= 7.1).
++fn kernel_supports_bpf_d_path_in_lsm() -> bool {
++    let mut buf: libc::utsname = unsafe { std::mem::zeroed() };
++    if unsafe { libc::uname(&mut buf) } != 0 {
++        return false;
++    }
++    let release = unsafe { std::ffi::CStr::from_ptr(buf.release.as_ptr()) };
++    let Ok(release) = release.to_str() else {
++        return false;
++    };
++    match parse_kernel_major_minor(release) {
++        Some((major, minor)) => major > 7 || (major == 7 && minor >= 1),
++        None => false,
++    }
++}
++
+ impl PinnedEngine {
+     pub fn open_or_install_singleton() -> io::Result<Self> {
+         let paths = PinnedEnginePaths::from_env();
+@@ -1870,6 +1927,55 @@
+         Ok(())
+     }
+ 
++    /// Add an inode to the guard map. Files matching `(ino, dev)` will be
++    /// blocked from unlink/rename/write according to `flags`, but only for
++    /// processes in the specified `domain_id`.
++    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32, domain_id: u32) -> io::Result<()> {
++        let key = FileId { ino, dev, _pad: 0 };
++        let val = InodeGuardVal { flags, domain_id };
++        let mut guard: HashMap<_, FileId, InodeGuardVal> =
++            pinned_hash_map(&self.paths, "te_inode_guard")?;
++        guard
++            .insert(key, val, 0)
++            .map_err(|e| err(format!("guard inode {ino}:{dev}: {e}")))?;
++        Ok(())
++    }
++
++    /// Remove an inode from the guard map.
++    pub fn unguard_inode(&self, ino: u64, dev: u32) -> io::Result<()> {
++        let key = FileId { ino, dev, _pad: 0 };
++        let mut guard: HashMap<_, FileId, InodeGuardVal> =
++            pinned_hash_map(&self.paths, "te_inode_guard")?;
++        ignore_missing_remove(guard.remove(&key), "unguard inode")
++    }
++
++    /// Remove all entries from the inode guard map.
++    pub fn clear_inode_guards(&self) -> io::Result<()> {
++        let mut guard: HashMap<_, FileId, InodeGuardVal> =
++            pinned_hash_map(&self.paths, "te_inode_guard")?;
++        let keys: Vec<FileId> = guard
++            .keys()
++            .map(|k| k.map_err(|e| err(format!("list inode guards: {e}"))))
++            .collect::<io::Result<_>>()?;
++        for key in keys {
++            ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
++        }
++        Ok(())
++    }
++
++    /// Returns `true` if the current kernel supports `bpf_d_path` in LSM hooks
++    /// (Alibaba Cloud Linux kernel >= 7.1). When `false`, inode guard mode is
++    /// the only option for file-delete-guard.
++    pub fn bpf_d_path_in_lsm_available(&self) -> bool {
++        kernel_supports_bpf_d_path_in_lsm()
++    }
++
++    /// Whether the engine should operate in inode guard mode (vs path mode).
++    /// Returns `true` when `bpf_d_path` is unavailable in LSM hooks.
++    pub fn inode_guard_mode(&self) -> bool {
++        !self.bpf_d_path_in_lsm_available()
++    }
++
+     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
+         Ok(ReloadHandle {
+             cap_req_fd: dup_pinned_map_fd(&self.paths, "cap_req")?,
+@@ -3032,6 +3138,7 @@
+ 
+         Ok(())
+     }
++
+ }
+ 
+ fn cstr(buf: &[u8]) -> String {
+@@ -3398,12 +3505,18 @@
+     #[test]
+     fn agent_file_guard_enables_write_rules_and_unlink_lsm_without_dataflow_tracepoints() {
+         let reserve = HookReserve::agent_file_guard();
++        // Write-rule matcher class + file-block LSM hooks are reserved, so a
++        // `block unlink/write file "X" if <label>` rule can be evaluated inside
++        // the LSM hook.
+         assert!(reserve.policy_features & FEAT_WRITE_RULES != 0);
+         assert!(reserve.policy_features & FEAT_BLOCK_FILE != 0);
++        // File-flow dataflow is suppressed (LSM-only): no openat tracepoints.
+         assert!(reserve.suppress_dataflow_tracepoints);
+         assert!(!reserve.file_flow);
+         assert!(!reserve.file_open_only);
++
+         let budget = HookBudget::for_pinned_reserve(reserve);
++        // The path_unlink LSM gate must be attached so deletions are blocked.
+         assert!(lsm_link_expected("enforce_path_unlink", budget, true));
+         assert!(budget.suppress_dataflow_tracepoints);
+     }
+@@ -3567,6 +3680,57 @@
+     }
+ 
+     #[test]
++    fn write_block_rule_alone_does_not_reserve_file_flow() {
++        // A pure label-conditioned `block unlink/write file "X"` rule is evaluated
++        // synchronously in the LSM hook and must NOT pull in the file-flow dataflow
++        // tracepoints (regression guard for the OP_WRITE feature decoupling).
++        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
++        cfg.n_rules = 1;
++        cfg.rules[0].op = OP_WRITE;
++        cfg.rules[0].effect = EFFECT_BLOCK;
++
++        let features = config_features(&cfg);
++        assert_eq!(
++            features & FEAT_FILE_FLOW,
++            0,
++            "a label-conditioned OP_WRITE block rule must not reserve FEAT_FILE_FLOW"
++        );
++        assert!(
++            features & FEAT_WRITE_RULES != 0,
++            "a label-conditioned OP_WRITE block rule must reserve FEAT_WRITE_RULES"
++        );
++        assert!(
++            features & FEAT_BLOCK_FILE != 0,
++            "a label-conditioned OP_WRITE block rule must reserve FEAT_BLOCK_FILE"
++        );
++    }
++
++    #[test]
++    fn write_block_rule_with_file_source_reserves_file_flow() {
++        // Adding a file taint source (source X = file "...") re-introduces the
++        // dataflow requirement, so FEAT_FILE_FLOW must be reserved again even when
++        // the same OP_WRITE block rule is present.
++        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
++        cfg.n_rules = 1;
++        cfg.rules[0].op = OP_WRITE;
++        cfg.rules[0].effect = EFFECT_BLOCK;
++        cfg.n_updates = 1;
++        cfg.updates[0].op = OP_OPEN; // file taint source
++        cfg.updates[0].m = 3; // TAINT_MATCH_ANY
++        cfg.updates[0].add = 1;
++
++        let features = config_features(&cfg);
++        assert!(
++            features & FEAT_FILE_FLOW != 0,
++            "adding a file taint source must re-reserve FEAT_FILE_FLOW for the config"
++        );
++        assert!(
++            features & FEAT_WRITE_RULES != 0,
++            "the OP_WRITE block rule must still reserve FEAT_WRITE_RULES"
++        );
++    }
++
++    #[test]
+     fn block_delta_requires_matching_lsm_hook_profile() {
+         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+         cfg.n_rules = 1;

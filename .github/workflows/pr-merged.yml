@@ -1,0 +1,71 @@
+# PR Merged Notification
+# ======================
+# Sends a DingTalk notification when a pull request is merged into main or release branches.
+# Requires secrets: DINGTALK_WEBHOOK, DINGTALK_SECRET
+
+name: Automation / PR Merged
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main, 'release/**']
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: DingTalk Notification
+    if: github.event.pull_request.merged == true
+    runs-on: anolisa-k8s-general-ci-x64
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+
+    steps:
+      - name: 📣 Send DingTalk message
+        if: env.DINGTALK_WEBHOOK != ''
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_TARGET: ${{ github.event.pull_request.base.ref }}
+        run: |
+          python3 << 'PYEOF'
+          import hmac, hashlib, base64, urllib.parse, time, os, subprocess, json
+
+          ts = str(round(time.time() * 1000))
+          secret = os.environ.get('DINGTALK_SECRET', '')
+          string_to_sign = ts + '\n' + secret
+          sig = hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).digest()
+          sign = urllib.parse.quote_plus(base64.b64encode(sig).decode())
+
+          webhook = os.environ.get('DINGTALK_WEBHOOK', '')
+          pr_number = os.environ.get('PR_NUMBER', '')
+          pr_title  = os.environ.get('PR_TITLE', '')
+          pr_url    = os.environ.get('PR_URL', '')
+          pr_author = os.environ.get('PR_AUTHOR', '')
+          pr_branch = os.environ.get('PR_BRANCH', '')
+          pr_target = os.environ.get('PR_TARGET', 'main')
+
+          text = (
+            f"## ✅ ANOLISA PR Merged\n\n"
+            f"**PR**: [#{pr_number} {pr_title}]({pr_url})\n\n"
+            f"**Branch**: `{pr_branch}` → `{pr_target}`\n\n"
+            f"**Author**: {pr_author}\n\n"
+            f"> 🤖 ANOLISA CI Bot"
+          )
+
+          payload = json.dumps({
+            "msgtype": "markdown",
+            "markdown": {"title": f"PR #{pr_number} Merged", "text": text}
+          })
+
+          url = f"{webhook}&timestamp={ts}&sign={sign}"
+          subprocess.run(
+            ["curl", "-s", "-X", "POST", url, "-H", "Content-Type: application/json", "-d", payload],
+            check=True
+          )
+          PYEOF

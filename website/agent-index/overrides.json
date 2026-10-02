@@ -1,0 +1,47 @@
+{
+  "repository": "https://github.com/agentic-os-org/ANOLISA",
+  "license": "Apache-2.0",
+  "components": {
+    "copilot-shell": {
+      "install_name": "cosh"
+    },
+    "agent-memory": {
+      "install_name": "agent-memory"
+    },
+    "agent-sec-core": {
+      "install_name": "sec-core"
+    },
+    "tokenless": {
+      "install": "anolisa install tokenless",
+      "install_method": "cli",
+      "install_variants": [
+        {
+          "method": "cli",
+          "preferred": true,
+          "command": "anolisa install tokenless",
+          "platforms": [
+            {
+              "os": "linux",
+              "architectures": ["x86_64", "aarch64"]
+            },
+            {
+              "os": "macos",
+              "architectures": ["aarch64"]
+            }
+          ],
+          "requires": ["anolisa"],
+          "preflight": [
+            "anolisa --json env",
+            "anolisa --json list",
+            "anolisa --dry-run install tokenless"
+          ],
+          "verify": [
+            "anolisa --json adapter scan",
+            "anolisa --json status tokenless",
+            "anolisa --json doctor tokenless"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+rule_id: shell-self-protect-hermes
+cwe_id: CWE-284
+desc_en: >-
+  Command disables or removes the agent-sec-core plugin in Hermes,
+  which would remove all agent-sec-core security guardrails.
+desc_zh: >-
+  命令禁用或移除了 Hermes 中的 agent-sec-core 插件，将移除 agent-sec-core 所有的安全防护。
+regex: |-
+  \bhermes\s+plugins\s+(disable|remove|uninstall|rm)\s+agent-sec-core-hermes-plugin(?:[\s;&|><)]|$)
+severity: warn

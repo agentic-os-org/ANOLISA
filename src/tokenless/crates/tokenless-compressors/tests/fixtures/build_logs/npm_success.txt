@@ -1,0 +1,52 @@
+$ npm install
+npm http fetch GET 200 https://registry.npmjs.org/express 231ms
+⠧
+⠏
+⠹
+npm http fetch GET 200 https://registry.npmjs.org/accepts 17ms
+npm http fetch GET 200 https://registry.npmjs.org/array-flatten 20ms
+npm http fetch GET 200 https://registry.npmjs.org/body-parser 23ms
+npm http fetch GET 200 https://registry.npmjs.org/bytes 26ms
+npm http fetch GET 200 https://registry.npmjs.org/content-disposition 29ms
+npm http fetch GET 200 https://registry.npmjs.org/content-type 32ms
+npm http fetch GET 200 https://registry.npmjs.org/cookie 35ms
+npm http fetch GET 200 https://registry.npmjs.org/cookie-signature 38ms
+npm http fetch GET 200 https://registry.npmjs.org/debug 41ms
+npm http fetch GET 200 https://registry.npmjs.org/depd 44ms
+npm http fetch GET 200 https://registry.npmjs.org/destroy 47ms
+npm http fetch GET 200 https://registry.npmjs.org/ee-first 50ms
+npm http fetch GET 200 https://registry.npmjs.org/encodeurl 53ms
+npm http fetch GET 200 https://registry.npmjs.org/escape-html 56ms
+npm http fetch GET 200 https://registry.npmjs.org/etag 59ms
+npm http fetch GET 200 https://registry.npmjs.org/express 62ms
+npm http fetch GET 200 https://registry.npmjs.org/finalhandler 65ms
+npm http fetch GET 200 https://registry.npmjs.org/forwarded 68ms
+npm http fetch GET 200 https://registry.npmjs.org/fresh 71ms
+npm http fetch GET 200 https://registry.npmjs.org/http-errors 74ms
+npm http fetch GET 200 https://registry.npmjs.org/iconv-lite 77ms
+npm http fetch GET 200 https://registry.npmjs.org/inherits 80ms
+npm http fetch GET 200 https://registry.npmjs.org/ipaddr.js 83ms
+npm http fetch GET 200 https://registry.npmjs.org/media-typer 86ms
+npm http fetch GET 200 https://registry.npmjs.org/merge-descriptors 89ms
+npm http fetch GET 200 https://registry.npmjs.org/methods 92ms
+npm http fetch GET 200 https://registry.npmjs.org/mime 95ms
+npm http fetch GET 200 https://registry.npmjs.org/mime-db 98ms
+npm http fetch GET 200 https://registry.npmjs.org/mime-types 101ms
+npm http fetch GET 200 https://registry.npmjs.org/ms 104ms
+npm http fetch GET 200 https://registry.npmjs.org/negotiator 107ms
+npm http fetch GET 200 https://registry.npmjs.org/on-finished 110ms
+npm http fetch GET 200 https://registry.npmjs.org/parseurl 113ms
+npm http fetch GET 200 https://registry.npmjs.org/path-to-regexp 116ms
+npm http fetch GET 200 https://registry.npmjs.org/proxy-addr 119ms
+npm http fetch GET 200 https://registry.npmjs.org/qs 122ms
+npm http fetch GET 200 https://registry.npmjs.org/range-parser 125ms
+npm http fetch GET 200 https://registry.npmjs.org/raw-body 128ms
+npm http fetch GET 200 https://registry.npmjs.org/safe-buffer 131ms
+npm http fetch GET 200 https://registry.npmjs.org/send 134ms
+
+added 41 packages, and audited 42 packages in 3s
+
+7 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities

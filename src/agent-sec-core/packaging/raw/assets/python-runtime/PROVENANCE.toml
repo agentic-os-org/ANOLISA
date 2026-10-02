@@ -1,0 +1,9 @@
+schema_version = 1
+provider = "astral-sh/python-build-standalone"
+python_version = "3.11.6"
+build = "20231002"
+target = "x86_64-unknown-linux-gnu"
+archive_flavor = "install_only"
+archive_filename = "cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz"
+source_url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20231002/cpython-3.11.6%2B20231002-x86_64-unknown-linux-gnu-install_only.tar.gz"
+archive_sha256 = "ee37a7eae6e80148c7e3abc56e48a397c1664f044920463ad0df0fc706eacea8"

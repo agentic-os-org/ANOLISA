@@ -1,0 +1,20 @@
+[package]
+name = "tokenless-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Statistics tracking for tokenless - SQLite-based metrics storage"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+rusqlite.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+libc.workspace = true
+similar.workspace = true
+tokenless-protocol = { path = "../tokenless-protocol" }
+
+[dev-dependencies]
+tempfile.workspace = true

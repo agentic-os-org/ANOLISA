@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/provider-request/v1alpha1",
+  "title": "External AW Provider request v1alpha1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "method"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "method": {
+          "const": "describe"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "method",
+        "config"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "method": {
+          "const": "validate_config"
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "method",
+        "operation",
+        "config_revision",
+        "budget_ms",
+        "allowed_effects",
+        "input_digest",
+        "config",
+        "event"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "method": {
+          "const": "invoke"
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "allowed_effects": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "observe",
+              "block",
+              "ask",
+              "replace_input",
+              "replace_result"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "input_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "minLength": 71,
+          "maxLength": 71
+        },
+        "config": {
+          "type": "object"
+        },
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "agent",
+            "session_id",
+            "tool",
+            "native"
+          ],
+          "properties": {
+            "name": {
+              "enum": [
+                "tool.before",
+                "tool.after"
+              ]
+            },
+            "agent": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "adapter",
+                "binding_id",
+                "instance_id"
+              ],
+              "properties": {
+                "adapter": {
+                  "enum": [
+                    "qoder",
+                    "openclaw",
+                    "hermes",
+                    "qwenpaw"
+                  ]
+                },
+                "binding_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "instance_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              }
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "tool": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "native_name",
+                "call_id",
+                "input",
+                "result"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "native_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "call_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "input": {},
+                "result": {}
+              }
+            },
+            "native": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

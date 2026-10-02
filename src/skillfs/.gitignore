@@ -1,0 +1,7 @@
+/target
+# Cargo.lock is intentionally tracked for reproducible builds (binary project).
+# See: https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
+*.swp
+*.swo
+*~
+.DS_Store

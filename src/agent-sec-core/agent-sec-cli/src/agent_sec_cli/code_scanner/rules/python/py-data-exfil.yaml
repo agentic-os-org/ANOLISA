@@ -1,0 +1,12 @@
+rule_id: py-data-exfil
+cwe_id: CWE-200
+desc_en: >-
+  Code uploads local data to a remote destination via HTTP file
+  upload, FTP, or SMTP, potentially exfiltrating sensitive data.
+desc_zh: >-
+  代码通过 HTTP 文件上传、FTP 或 SMTP 将本地数据发送到远程目标，可能导致敏感数据外泄。
+regex: |-
+  \brequests\.(post|put|patch)\s*\([^)]*files\s*=
+  |\b(storbinary|storlines)\s*\(
+  |\bsmtplib\.SMTP\s*\(
+severity: warn

@@ -1,0 +1,55 @@
+# =============================================================================
+# CODEOWNERS — automatic review request on pull requests
+#
+# GitHub requests a review from the listed owners whenever a PR touches
+# the matched path. Combined with Branch Protection "Require review from
+# Code Owners", this enforces sub-project ownership.
+#
+# Syntax: <pattern>  <@github-user> ...  # auto-label: <label>
+# Patterns are evaluated top-to-bottom; the LAST matching rule wins.
+# The "# auto-label:" annotation is parsed by .github/actions/codeowners-labels
+# to drive automatic PR/Issue labeling. Adding a new component here is
+# sufficient — no workflow changes are required.
+# =============================================================================
+
+# Global fallback — catches anything not matched below
+*                                       @casparant
+
+# ---------------------------------------------------------------------------
+# Component paths
+# ---------------------------------------------------------------------------
+/deprecated/copilot-shell/              @kongche-jbw @samchu-zsl    # auto-label: component:cosh
+/src/agentsight/                        @chengshuyi @jfeng18 @viron-xiao # auto-label: component:sight
+/src/agent-sec-core/                    @edonyzpc @kid9             # auto-label: component:sec-core
+/src/agent-sec-core/agent-sec-cli/      @RemindD @edonyzpc          # auto-label: component:sec-core
+/src/agent-sec-core/cosh-extension/     @yangdao479                 # auto-label: component:sec-core
+/src/agent-sec-core/linux-sandbox/      @haosanzi                   # auto-label: component:sec-core
+/src/agent-sec-core/openclaw-plugin/    @RemindD                    # auto-label: component:sec-core
+/src/agent-sec-core/skills/             @1570005763                 # auto-label: component:sec-core
+/src/agent-sec-core/Makefile             @yangdao479                 # auto-label: component:sec-core
+/src/agent-sec-core/*.spec.in           @yangdao479                 # auto-label: component:sec-core
+/src/os-skills/                         @Ziqi002                    # auto-label: component:skill
+/src/ws-ckpt/                           @yummypeng                  # auto-label: component:ckpt
+/src/blaze/                             @casparant                  # auto-label: component:blaze
+/src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
+/src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
+/src/agent-memory/                      @ikunkun-sys                # auto-label: component:memory
+/distribution/anolisa/                  @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
+/src/cosh-ng/                           @zkl123                     # auto-label: component:cosh-ng
+/src/cosh-ng/crates/cosh-shell/         @SunnyQjm                   # auto-label: component:cosh-ng
+
+# ---------------------------------------------------------------------------
+# Scope paths
+# ---------------------------------------------------------------------------
+/.github/                               @kongche-jbw                # auto-label: scope:ci
+/docs/                                  @casparant                  # auto-label: scope:documentation
+*.md                                    @casparant                  # auto-label: scope:documentation
+/NOTICE                                 @casparant                  # auto-label: scope:documentation
+/scripts/                               @samchu-zsl                 # auto-label: scope:scripts
+/cliff.toml                             @samchu-zsl                 # auto-label: scope:ci
+/Makefile                               @casparant                  # auto-label: scope:scripts
+
+# SkillFS is listed after generic Markdown scope rules so all files under
+# src/skillfs request the default SkillFS reviewers.
+/src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs
+/src/aw/                                @kongche-jbw                # auto-label: component:aw

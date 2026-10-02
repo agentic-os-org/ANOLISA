@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolResponse": "matches[16]{file,line,column,symbol}:\n  src/deep/nested/module_00.rs,100,5,handle_case_00\n  src/deep/nested/module_01.rs,113,6,handle_case_01\n  src/deep/nested/module_02.rs,126,7,handle_case_02\n  src/deep/nested/module_03.rs,139,8,handle_case_03\n  src/deep/nested/module_04.rs,152,9,handle_case_04\n  src/deep/nested/module_05.rs,165,10,handle_case_05\n  src/deep/nested/module_06.rs,178,11,handle_case_06\n  src/deep/nested/module_07.rs,191,12,handle_case_07\n  src/deep/nested/module_08.rs,204,13,handle_case_08\n  src/deep/nested/module_09.rs,217,5,handle_case_09\n  src/deep/nested/module_10.rs,230,6,handle_case_10\n  src/deep/nested/module_11.rs,243,7,handle_case_11\n  src/deep/nested/module_12.rs,256,8,handle_case_12\n  src/deep/nested/module_13.rs,269,9,handle_case_13\n  src/deep/nested/module_14.rs,282,10,handle_case_14\n  src/deep/nested/module_15.rs,295,11,handle_case_15\ntotal: 16\ntruncated: false"
+    },
+    "suppressOutput": true
+  }
+}

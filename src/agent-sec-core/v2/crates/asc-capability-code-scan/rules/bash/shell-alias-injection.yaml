@@ -1,0 +1,9 @@
+rule_id: shell-alias-injection
+cwe_id: CWE-78
+desc_en: >-
+  Shell alias definition hijacks a common command with a destructive or
+  data-exfiltrating payload.
+desc_zh: >-
+  Shell alias 定义劫持常用命令为破坏性或数据外泄的恶意载荷。
+regex: 'alias\s+\w+\s*=\s*["''].*(?:rm\s+-rf|chmod|chown|dd|wget|curl)'
+severity: warn

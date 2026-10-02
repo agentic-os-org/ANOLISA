@@ -1,0 +1,30 @@
+[package]
+name = "cosh-gateway-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cosh-gateway"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+clap = { workspace = true }
+cosh-gateway = { path = "../cosh-gateway" }
+cosh-gateway-contracts = { path = "../cosh-gateway-contracts" }
+cosh-platform = { path = "../cosh-platform" }
+cosh-types = { path = "../cosh-types" }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+signal-hook = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }

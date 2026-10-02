@@ -1,0 +1,29 @@
+# Benchmark suite report artifacts, for every layer.
+#
+# Each layer (l1-compressor, l2-module, l3-scenario, and any later l4-*) also
+# carries its own .gitignore, because each is a standalone Cargo workspace that
+# must stay self-contained. This file is the suite-wide backstop so a new layer
+# cannot leak reports before someone remembers to add its ignore rules, and so
+# the policy lives in one reviewable place.
+#
+# Reports are run- and machine-specific: they carry timestamps, host paths,
+# server addresses and provenance of whichever checkout happened to be on the
+# runner. Committing them creates diff noise and, more importantly, is how
+# environment details end up in a public repository. Generate them locally or in
+# CI and attach them to the PR instead.
+**/reports/
+**/*_REPORT.md
+**/*_REPORT_zh.md
+**/*_REPORT_DIFF.md
+**/report.json
+
+# Probe caches hold model responses keyed by prompt, which means payload
+# contents; they are rebuildable and stay local.
+**/.probe_cache.json
+
+# Build output of the per-layer workspaces.
+**/target/
+
+# Python bytecode from the scenario generators and workers.
+**/__pycache__/
+*.pyc

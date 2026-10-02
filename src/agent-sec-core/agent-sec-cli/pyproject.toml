@@ -1,0 +1,161 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "agent-sec-cli"
+version = "0.13.2"
+description = "Agent Security Core CLI - System hardening, sandbox isolation, and asset integrity verification for AI Agents"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = "==3.11.6"
+authors = [
+    {name = "YiZheng Yang", email = "YiZheng.Yang@linux.alibaba.com"},
+    {name = "Xingdong Li", email = "XingDong.Li@linux.alibaba.com"},
+]
+keywords = ["security", "agent", "hardening", "sandbox", "integrity", "verification"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+    "cryptography>=50.0.1",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "regex>=2026.4.4",
+    "sqlalchemy>=2.0",
+    "textual>=0.80",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+pgpy = ["pgpy>=0.5"]
+
+[dependency-groups]
+dev = [
+    "black==26.3.1",
+    "isort==8.0.1",
+    "maturin>=1.0,<2.0",
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff>=0.11",
+]
+
+[project.scripts]
+agent-sec-cli = "agent_sec_cli.cli:main"
+agent-sec-daemon = "agent_sec_cli.daemon.server:main"
+
+[project.urls]
+Homepage = "https://github.com/alibaba/anolisa"
+Documentation = "https://github.com/alibaba/anolisa/tree/main/src/agent-sec-core"
+Repository = "https://github.com/alibaba/anolisa.git"
+Issues = "https://github.com/alibaba/anolisa/issues"
+Changelog = "https://github.com/alibaba/anolisa/blob/main/src/agent-sec-core/CHANGELOG.md"
+
+[tool.maturin]
+# Python source directory
+python-source = "src"
+# Include Python package data files
+include = [
+    "src/agent_sec_cli/asset_verify/config.conf",
+    "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
+    "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
+    "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
+    "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
+    "src/agent_sec_cli/skill_ledger/analyze.schema.json",
+]
+# Native module name (must match lib.rs function name)
+module-name = "agent_sec_cli._native"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "../tests/unit-test",
+    "../tests/integration-test",
+    "../tests/e2e/cli",
+    "../tests/e2e/daemon",
+]
+addopts = "-v"
+
+[tool.coverage.run]
+branch = true
+source = ["agent_sec_cli"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/backend-skill/templates/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["**/backend-skill/templates"]
+
+[tool.ruff.lint]
+select = [
+    "F",        # pyflakes
+    "E", "W",   # pycodestyle
+    "I",        # isort
+    "TID252",   # 禁止相对导入
+    "PLC0415",  # 禁止函数体内导入
+    "ANN001",   # 函数参数必须标注类型
+    "ANN201",   # 公有函数必须标注返回类型
+    "ANN202",   # 私有函数必须标注返回类型
+    "S602",     # 禁止 subprocess shell=True
+    "S605",     # 禁止 os.system()
+    "S606",     # 禁止 os.popen()
+    "S108",     # 禁止硬编码 /tmp 路径
+    "PLW1510",  # subprocess.run() 必须指定 check
+    "SIM115",   # open() 必须使用 with
+    "B006",     # 禁止可变默认参数
+    "B008",     # 禁止默认参数中调用函数
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_sec_cli"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"importlib.import_module".msg = "禁止动态导入（若为 lazy import 请加 # noqa: TID251）"
+"builtins.__import__".msg = "禁止动态导入（若为 lazy import 请加 # noqa: TID251）"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = "/backend-skill/templates/"
+
+[tool.isort]
+profile = "black"
+line_length = 80
+known_first_party = ["agent_sec_cli"]
+extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"

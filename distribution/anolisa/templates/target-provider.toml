@@ -1,0 +1,54 @@
+# Template: target provider / adapter binding manifest.
+# This can later move to manifests/target-providers when the loader supports it.
+
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[target_provider]
+name = "openclaw"
+display_name = "OpenClaw"
+kind = "third-party" # first-party | third-party | protocol
+stability = "experimental"
+
+[detect]
+strategy = "path-or-config"
+binaries = ["openclaw"]
+config_paths = ["~/.openclaw/config.toml", "~/.config/openclaw/config.toml"]
+env_keys = ["OPENCLAW_HOME"]
+
+[layout]
+plugin_dir = "{target_home}/plugins"
+config_file = "{target_home}/config.toml"
+backup_policy = "anolisa-managed"
+
+[[actions]]
+name = "install"
+side_effects = ["filesystem-write", "external-config-write"]
+requires_backup = true
+restart_hint = "target-managed"
+
+[[actions.steps]]
+kind = "copy-tree"
+source = "{adapter_source}"
+dest = "{target_home}/plugins/{plugin_id}"
+
+[[actions.steps]]
+kind = "patch-config"
+path = "{target_home}/config.toml"
+format = "toml"
+operation = "upsert"
+key = "plugins.{plugin_id}.path"
+value = "{target_home}/plugins/{plugin_id}"
+
+[[actions]]
+name = "remove"
+side_effects = ["filesystem-write", "external-config-write"]
+requires_backup = true
+
+[[actions.steps]]
+kind = "restore-config"
+path = "{target_home}/config.toml"
+
+[[actions.steps]]
+kind = "remove-owned-path"
+path = "{target_home}/plugins/{plugin_id}"

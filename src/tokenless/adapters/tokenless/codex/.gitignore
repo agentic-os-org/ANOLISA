@@ -1,0 +1,6 @@
+# Generated config from plugin.json.in (VERSION from Cargo.toml)
+.codex-plugin/plugin.json
+
+# Python bytecode cache
+__pycache__/
+*.pyc

@@ -1,0 +1,9 @@
+{
+  "name": "agent-sec",
+  "plugins": [
+    {
+      "name": "agent-sec-core",
+      "source": "./hooks-plugin"
+    }
+  ]
+}

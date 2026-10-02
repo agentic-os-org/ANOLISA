@@ -1,0 +1,18 @@
+[package]
+name = "asc-policy-target-contracts"
+description = "PEP-neutral policy Adapter and deployment Client ports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-policy-types = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,184 @@
+name: Package Vendor
+description: >
+  Auto-detect Rust projects in the build tree left by package-source, run cargo
+  vendor, and upload a dependency archive. Agent-sec-core additionally vendors
+  its locked OpenClaw npm cache for the V2 offline RPM build.
+
+inputs:
+  component:
+    description: 'Component name (must match package-source output)'
+    required: true
+  version:
+    description: 'Version string without v prefix (e.g. 2.1.0)'
+    required: true
+  artifact-suffix:
+    description: 'Suffix appended to filenames (e.g. ".preview"). Leave empty for official builds.'
+    required: false
+    default: ''
+  retention-days:
+    description: 'Number of days to retain the uploaded artifact'
+    required: false
+    default: '14'
+  upload-artifact:
+    description: 'Whether to upload the completed archive as a GitHub Actions artifact'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # -----------------------------------------------------------------
+    # Step 1: Detect Rust projects
+    #
+    # Scan the build tree for directories containing both Cargo.toml
+    # and Cargo.lock. Directories under vendor/ are excluded to avoid
+    # false positives. If none found, set VENDOR_SKIP=true and exit.
+    # -----------------------------------------------------------------
+    - name: Detect Rust projects
+      shell: bash
+      run: |
+        BUILD_DIR="/tmp/build/${{ inputs.component }}-${{ inputs.version }}"
+
+        if [ ! -d "$BUILD_DIR" ]; then
+          echo "::error::Build directory not found: $BUILD_DIR"
+          echo "::error::package-source must run before package-vendor in the same job."
+          exit 1
+        fi
+
+        CARGO_ROOTS=()
+        if [ "${{ inputs.component }}" = "agent-sec-core" ]; then
+          # V2 packages these two workspaces only; V1 agent-sec-cli is not part
+          # of the V2 RPM and must not inflate Source1.
+          for dir in "$BUILD_DIR/v2" "$BUILD_DIR/linux-sandbox"; do
+            if [ ! -f "${dir}/Cargo.toml" ] || [ ! -f "${dir}/Cargo.lock" ]; then
+              echo "ERROR: missing locked V2 Cargo workspace: ${dir}" >&2
+              exit 1
+            fi
+            CARGO_ROOTS+=("$dir")
+          done
+          if [ ! -f "$BUILD_DIR/openclaw-plugin/package-lock.json" ]; then
+            echo "ERROR: missing locked OpenClaw npm project" >&2
+            exit 1
+          fi
+        else
+          while IFS= read -r toml; do
+            dir=$(dirname "$toml")
+            if [ -f "${dir}/Cargo.lock" ]; then
+              CARGO_ROOTS+=("$dir")
+            fi
+          done < <(find "$BUILD_DIR" -name 'Cargo.toml' -not -path '*/vendor/*')
+        fi
+
+        if [ ${#CARGO_ROOTS[@]} -eq 0 ]; then
+          echo "No Rust projects detected (no Cargo.toml + Cargo.lock pairs found), skipping vendor."
+          echo "VENDOR_SKIP=true" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        echo "Detected ${#CARGO_ROOTS[@]} Rust project(s):"
+        printf '  %s\n' "${CARGO_ROOTS[@]}"
+        printf '%s\n' "${CARGO_ROOTS[@]}" > /tmp/cargo-roots.txt
+        echo "BUILD_DIR=${BUILD_DIR}" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 2: Setup Rust toolchain
+    # -----------------------------------------------------------------
+    - name: Setup Rust toolchain
+      if: env.VENDOR_SKIP != 'true' && inputs.component != 'agent-sec-core'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Setup Agent-Sec-Core Rust toolchain
+      if: env.VENDOR_SKIP != 'true' && inputs.component == 'agent-sec-core'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: '1.93.1'
+
+    - name: Setup Agent-Sec-Core Node.js
+      if: env.VENDOR_SKIP != 'true' && inputs.component == 'agent-sec-core'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.23.2'
+
+    # -----------------------------------------------------------------
+    # Step 3: Cargo vendor + create vendor archive
+    #
+    # For each detected Rust project, run cargo vendor and collect
+    # vendor/ + .cargo/config.toml into a staging directory.
+    # -----------------------------------------------------------------
+    - name: Cargo vendor
+      if: env.VENDOR_SKIP != 'true'
+      shell: bash
+      run: |
+        VENDOR_STAGING="/tmp/vendor-staging"
+        mkdir -p "$VENDOR_STAGING"
+
+        if [ "${{ inputs.component }}" = "agent-sec-core" ]; then
+          bash "$BUILD_DIR/scripts/package-v2-rpm-vendor.sh" "$BUILD_DIR" "$VENDOR_STAGING"
+        else
+          while IFS= read -r cargo_root; do
+            cd "$cargo_root"
+            REL_PATH=$(realpath --relative-to="$BUILD_DIR" "$cargo_root")
+
+            mkdir -p .cargo
+            cargo vendor --locked > .cargo/config.toml
+
+            SIZE_HUMAN=$(du -sh vendor/ | cut -f1)
+            echo "  ${REL_PATH}: vendor size ${SIZE_HUMAN}"
+
+            # Stage vendor/ and .cargo/ preserving relative path
+            DEST="${VENDOR_STAGING}/${REL_PATH}"
+            mkdir -p "$DEST"
+            mv vendor/ "$DEST/"
+            mv .cargo/ "$DEST/"
+          done < /tmp/cargo-roots.txt
+        fi
+
+        # Include every staged dependency input, including the sec-core npm cache.
+        TOTAL_VENDOR_SIZE=$(du -sb "$VENDOR_STAGING" | cut -f1)
+        TOTAL_HUMAN=$(du -sh "$VENDOR_STAGING" | cut -f1)
+        echo "VENDOR_SIZE_HUMAN=${TOTAL_HUMAN}" >> $GITHUB_ENV
+
+        # Warn if total vendor exceeds 100 MB (104857600 bytes)
+        if [ "$TOTAL_VENDOR_SIZE" -gt 104857600 ]; then
+          echo "::warning::Total vendor size (${TOTAL_HUMAN}) exceeds 100MB threshold"
+          echo "VENDOR_OVERSIZED=true" >> $GITHUB_ENV
+        fi
+
+        VENDOR_FILE="${{ inputs.component }}-${{ inputs.version }}${{ inputs.artifact-suffix }}-vendor.tar.gz"
+        mkdir -p /tmp/archives
+        tar -czf "/tmp/archives/${VENDOR_FILE}" -C "$VENDOR_STAGING" .
+        echo "VENDOR_FILE=${VENDOR_FILE}" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 4: Summarize
+    # -----------------------------------------------------------------
+    - name: Summarize
+      if: env.VENDOR_SKIP != 'true'
+      shell: bash
+      run: |
+        echo "### Vendor Result" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | \`${{ inputs.component }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Version | \`${{ inputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Vendor Size | ${VENDOR_SIZE_HUMAN} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Archive | \`${VENDOR_FILE}\` ($(du -sh /tmp/archives/${VENDOR_FILE} | cut -f1)) |" >> $GITHUB_STEP_SUMMARY
+        if [ "${VENDOR_OVERSIZED:-false}" = "true" ]; then
+          echo "| Warning | Exceeds 100MB threshold |" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Packages (top-level only):**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        tar -tzf /tmp/archives/${VENDOR_FILE} | sed 's|^\./||' | grep -oE '(^[^/]+/)?vendor/[^/]+/' | sort -u >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+    # -----------------------------------------------------------------
+    # Step 5: Upload vendor artifact
+    # -----------------------------------------------------------------
+    - name: Upload vendor artifact
+      if: env.VENDOR_SKIP != 'true' && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.component }}-${{ inputs.version }}${{ inputs.artifact-suffix }}-vendor
+        path: /tmp/archives/${{ env.VENDOR_FILE }}
+        retention-days: ${{ inputs.retention-days }}

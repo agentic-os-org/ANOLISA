@@ -1,0 +1,195 @@
+%define anolis_release 2
+%global debug_package %{nil}
+%global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
+%define cosh_replacement_ready ( [ -x "%{_bindir}/cosh" ] && rpm -q --qf '%%{NAME}\\n' -f "%{_bindir}/cosh" 2>/dev/null | awk '$0 == "copilot-shell" { found=1 } END { exit found ? 0 : 1 }' )
+
+Name:           cosh-ng
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Computable Operating System Harness - deterministic Agent-OS interface
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+BuildRequires:  rust >= 1.88
+BuildRequires:  cargo
+BuildRequires:  gcc
+BuildRequires:  systemd-rpm-macros
+Requires(post):   lua
+Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
+Requires(postun): /usr/bin/awk /usr/bin/cp /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm
+Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
+Provides:       anolisa-component(cosh-ng)
+Conflicts:      copilot-shell
+
+%description
+Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface
+providing cross-distro structured system operations with JSON output for AI Agents.
+
+%prep
+%setup -q
+
+%build
+cargo build --workspace --release
+
+%install
+rm -rf %{buildroot}
+
+# Install internal binaries to libexec
+install -d %{buildroot}%{_libexecdir_cosh}
+install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
+install -m 0755 target/release/cosh-gateway %{buildroot}%{_libexecdir_cosh}/cosh-gateway
+install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
+
+# Install the rendered system-level Gateway template.
+install -d %{buildroot}%{_unitdir}
+sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
+    packaging/systemd/cosh-gateway@.service.in \
+    > %{buildroot}%{_unitdir}/cosh-gateway@.service
+chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
+
+# Install CLI binary
+install -d %{buildroot}%{_bindir}
+install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
+
+# /usr/bin/cosh is the compiled entry: a symlink onto cosh-shell, which
+# dispatches on argv[0]. A script launcher would lose the login argv[0]
+# (binfmt_script) and add an interpreter hop to the execve chain; the
+# TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
+ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
+
+# Install cosh-switch script
+cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
+#!/bin/bash
+set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
+case "$current" in
+  cosh-ng)
+    echo "Current: cosh-ng -> switching to copilot-shell"
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    echo "Current: copilot-shell -> switching to cosh-ng"
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac
+EOF
+chmod 0755 %{buildroot}%{_bindir}/cosh-switch
+
+# Install documentation
+install -d %{buildroot}%{_docdir}/%{name}
+install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
+install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
+
+# Install anolisa component manifest
+install -d %{buildroot}%{_datadir}/anolisa/components/cosh-ng
+install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-ng/component.toml
+
+# Install the managed Task checkpoint workflow for the outer COSH Agent.
+install -d %{buildroot}%{_datadir}/anolisa/skills/manage-task-checkpoints
+install -m 0644 skills/manage-task-checkpoints/SKILL.md \
+    %{buildroot}%{_datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md
+
+%files
+%license %{_docdir}/%{name}/LICENSE
+%doc %{_docdir}/%{name}/README.md
+%{_bindir}/cosh-cli
+%{_bindir}/cosh
+%{_bindir}/cosh-switch
+%dir %{_libexecdir_cosh}
+%{_libexecdir_cosh}/cosh-core
+%{_libexecdir_cosh}/cosh-gateway
+%{_libexecdir_cosh}/cosh-shell
+%{_unitdir}/cosh-gateway@.service
+%{_datadir}/anolisa/components/cosh-ng/component.toml
+%{_datadir}/anolisa/skills/manage-task-checkpoints/
+
+%preun
+if [ "$1" -eq 0 ]; then
+  if ! passwd_entries=$(getent passwd); then
+    echo "error: cannot uninstall cosh-ng: failed to enumerate passwd entries with getent." >&2
+    exit 1
+  fi
+  if [ -z "$passwd_entries" ]; then
+    echo "error: cannot uninstall cosh-ng: getent returned no passwd entries." >&2
+    exit 1
+  fi
+  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" { print $1 }'); then
+    echo "error: cannot uninstall cosh-ng: failed to inspect passwd login shells." >&2
+    exit 1
+  fi
+  if [ -n "$users" ] && ! %{cosh_replacement_ready}; then
+    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh as their login shell:" >&2
+    printf '%s\n' "$users" >&2
+    exit 1
+  fi
+  if [ -d /run/systemd/system ] && \
+      ! systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'; then
+    echo "error: cannot uninstall cosh-ng: failed to stop running Gateway instances." >&2
+    exit 1
+  fi
+fi
+%systemd_preun cosh-gateway@.service
+
+%post -p <lua>
+local nl = '\n'
+local cosh = '%{_bindir}/cosh'
+local f, err = io.open('/etc/shells', 'a+')
+if f then
+  f:seek('set')
+  local shells = f:read('*all') or ''
+  local normalized = nl..shells
+  if shells ~= '' and shells:sub(-1) ~= nl then normalized = normalized..nl end
+  if not normalized:find(nl..cosh..nl, 1, true) then
+    local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
+    f:write(separator, cosh, nl)
+  end
+  f:close()
+else
+  io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(err)..nl)
+end
+
+%postun
+# On final erase (not upgrade), drop cosh's own /etc/shells line -- but only
+# when /usr/bin/cosh is gone. If a replacement provider (e.g. copilot-shell)
+# still owns an executable there, its registration stays valid, so the line is
+# kept. Testing the file directly is fail-safe and avoids running rpm inside a
+# scriptlet: a nested query can fail under the transaction lock and would then
+# wrongly drop a still-valid line. A temp copy + atomic rename keeps a crash
+# from truncating the shared table, and cp --attributes-only preserves the
+# original mode/ownership/xattrs. If /etc/shells is an admin-managed symlink,
+# rewrite its target so the link relationship survives. The signal handler must
+# exit (not resume) -- otherwise the EXIT cleanup would delete the temp
+# mid-rewrite and the following cp/mv would clobber the file with an empty copy.
+if [ "$1" -eq 0 ] && [ ! -x "%{_bindir}/cosh" ]; then
+  shells="%{_sysconfdir}/shells"
+  if [ -f "$shells" ]; then
+    target="$shells"
+    if [ -L "$shells" ]; then
+      target="$(readlink -f "$shells")" || target="$shells"
+    fi
+    if ! tmp="$(mktemp "${target}.cosh-ng.XXXXXX")"; then
+      echo "error: cosh-ng: cannot update $shells: failed to create temporary file." >&2
+      exit 1
+    fi
+    trap 'rm -f "$tmp"' EXIT
+    trap 'exit 1' INT TERM HUP
+    if ! awk -v cosh="%{_bindir}/cosh" '$0 != cosh' "$target" > "$tmp"; then
+      echo "error: cosh-ng: cannot update $shells: failed to filter shell registration." >&2
+      exit 1
+    fi
+    if ! cp --attributes-only --preserve=mode,ownership,xattr "$target" "$tmp"; then
+      echo "error: cosh-ng: cannot update $shells: failed to preserve file metadata." >&2
+      exit 1
+    fi
+    if ! mv -f "$tmp" "$target"; then
+      echo "error: cosh-ng: cannot update $shells: failed to replace file." >&2
+      exit 1
+    fi
+    trap - EXIT INT TERM HUP
+  fi
+fi
+
+%changelog
+* Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.0-1
+- Initial RPM package

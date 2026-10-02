@@ -1,0 +1,33 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+cc -O2 -Wall -c src/parser.c -o build/parser.o
+cc -O2 -Wall -c src/lexer.c -o build/lexer.o
+cc -O2 -Wall -c src/codegen.c -o build/codegen.o
+cc -O2 -Wall -c src/optimizer.c -o build/optimizer.o
+cc -O2 -Wall -c src/linker.c -o build/linker.o
+cc -O2 -Wall -c src/loader.c -o build/loader.o
+cc -O2 -Wall -c src/symbol.c -o build/symbol.o
+cc -O2 -Wall -c src/types.c -o build/types.o
+cc -O2 -Wall -c src/scope.c -o build/scope.o
+cc -O2 -Wall -c src/diag.c -o build/diag.o
+cc -O2 -Wall -c src/source.c -o build/source.o
+cc -O2 -Wall -c src/token.c -o build/token.o
+cc -O2 -Wall -c src/ast.c -o build/ast.o
+cc -O2 -Wall -c src/ir.c -o build/ir.o
+cc -O2 -Wall -c src/pass.c -o build/pass.o
+cc -O2 -Wall -c src/target.c -o build/target.o
+cc -O2 -Wall -c src/emit.c -o build/emit.o
+cc -O2 -Wall -c src/debug_info.c -o build/debug_info.o
+cc -O2 -Wall -c src/runtime.c -o build/runtime.o
+cc -O2 -Wall -c src/alloc.c -o build/alloc.o
+cc -O2 -Wall -c src/gc.c -o build/gc.o
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+src/util.c:42:5: error: 'foo' undeclared (first use in this function)
+   42 |     foo(x);
+      |     ^~~
+src/util.c:42:5: note: each undeclared identifier is reported only once
+make: *** [Makefile:12: build/util.o] Error 1
+make: Leaving directory '/work/project'
+Exit code: 2

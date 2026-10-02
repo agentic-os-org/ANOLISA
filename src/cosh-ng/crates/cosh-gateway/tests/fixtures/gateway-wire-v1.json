@@ -1,0 +1,78 @@
+[
+  {
+    "command": "ping",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "command": "submit",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000002",
+    "idempotency_key": "gateway-golden-submit",
+    "intent": "inspect the failed service",
+    "target": {
+      "kind": "local",
+      "authority": "test",
+      "identifier": "host"
+    },
+    "runtime": {
+      "runtime": "acp",
+      "profile": "codex"
+    }
+  },
+  {
+    "command": "get",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000003",
+    "task_id": "tsk_00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "command": "events",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000004",
+    "task_id": "tsk_00000000-0000-0000-0000-000000000001",
+    "after_revision": null,
+    "limit": 64
+  },
+  {
+    "command": "cancel",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000005",
+    "idempotency_key": "gateway-golden-cancel",
+    "task_id": "tsk_00000000-0000-0000-0000-000000000001",
+    "run_id": "run_00000000-0000-0000-0000-000000000001",
+    "expected_revision": 2
+  },
+  {
+    "command": "resolve_approval",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000006",
+    "idempotency_key": "gateway-golden-approval",
+    "approval_id": "apr_00000000-0000-0000-0000-000000000001",
+    "decision": "approve"
+  },
+  {
+    "command": "retry",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000007",
+    "idempotency_key": "gateway-golden-retry",
+    "task_id": "tsk_00000000-0000-0000-0000-000000000001",
+    "previous_run_id": "run_00000000-0000-0000-0000-000000000001",
+    "expected_revision": 4
+  },
+  {
+    "command": "append_input",
+    "api_version": "cosh.gateway.v1",
+    "request_id": "req_00000000-0000-0000-0000-000000000008",
+    "idempotency_key": "gateway-golden-input",
+    "task_id": "tsk_00000000-0000-0000-0000-000000000001",
+    "input_request_id": "inp_00000000-0000-0000-0000-000000000001",
+    "response": {
+      "response": "options",
+      "selections": [
+        0
+      ]
+    },
+    "expected_revision": 5
+  }
+]

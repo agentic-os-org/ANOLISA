@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/boundary-descriptor/v1",
+  "title": "Native adapter boundary descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapter_id",
+    "adapter_version",
+    "boundary_id",
+    "revision",
+    "boundary",
+    "invocation_mode",
+    "can_replace_text",
+    "can_deny_dispatch",
+    "has_final_input_guard",
+    "proof_boundaries",
+    "ledger_policy",
+    "media_types",
+    "reversibility",
+    "composition"
+  ],
+  "properties": {
+    "adapter_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "adapter_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "boundary_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "boundary": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/boundary"
+    },
+    "invocation_mode": {
+      "enum": [
+        "awaitable",
+        "synchronous",
+        "observe_only"
+      ]
+    },
+    "can_replace_text": {
+      "type": "boolean"
+    },
+    "can_deny_dispatch": {
+      "type": "boolean"
+    },
+    "has_final_input_guard": {
+      "type": "boolean"
+    },
+    "proof_boundaries": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/proof_boundary"
+      },
+      "minItems": 0,
+      "maxItems": 3,
+      "uniqueItems": true
+    },
+    "ledger_policy": {
+      "enum": [
+        "required_before_delivery",
+        "best_effort"
+      ]
+    },
+    "media_types": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/media_type"
+      },
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true
+    },
+    "reversibility": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "lossless",
+          "retrievable",
+          "unrecoverable"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 3,
+      "uniqueItems": true
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_finality",
+        "gate",
+        "result_finality"
+      ],
+      "properties": {
+        "input_finality": {
+          "enum": [
+            "immutable_until_dispatch",
+            "revalidate_at_dispatch",
+            "uncontrolled"
+          ]
+        },
+        "gate": {
+          "enum": [
+            "required_final_guard",
+            "none"
+          ]
+        },
+        "result_finality": {
+          "enum": [
+            "final",
+            "subject_to_later_change"
+          ]
+        }
+      }
+    }
+  }
+}
