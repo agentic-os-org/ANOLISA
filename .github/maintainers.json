@@ -1,0 +1,146 @@
+{
+    "scopes": [
+        {
+            "label": "component:cosh",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                },
+                {
+                    "github": "samchu-zsl"
+                }
+            ]
+        },
+        {
+            "label": "component:sec-core",
+            "maintainers": [
+                {
+                    "github": "1570005763"
+                },
+                {
+                    "github": "kid9"
+                },
+                {
+                    "github": "yanrong-hsr"
+                },
+                {
+                    "github": "chenzongyao200127"
+                },
+                {
+                    "github": "yangdao479"
+                },
+                {
+                    "github": "uudiin"
+                },
+                {
+                    "github": "RemindD"
+                },
+                {
+                    "github": "edonyzpc"
+                }
+            ]
+        },
+        {
+            "label": "component:skill",
+            "maintainers": [
+                {
+                    "github": "Ziqi002"
+                }
+            ]
+        },
+        {
+            "label": "component:tokenless",
+            "maintainers": [
+                {
+                    "github": "Forrest-ly"
+                },
+                {
+                    "github": "ikunkun-sys"
+                }
+            ]
+        },
+        {
+            "label": "component:sight",
+            "maintainers": [
+                {
+                    "github": "chengshuyi"
+                },
+                {
+                    "github": "jfeng18"
+                },
+                {
+                    "github": "viron-xiao"
+                }
+            ]
+        },
+        {
+            "label": "component:ckpt",
+            "maintainers": [
+                {
+                    "github": "yummypeng"
+                }
+            ]
+        },
+        {
+            "label": "component:memory",
+            "maintainers": [
+                {
+                    "github": "ikunkun-sys"
+                }
+            ]
+        },
+        {
+            "label": "component:anolisa",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                },
+                {
+                    "github": "ikunkun-sys"
+                }
+            ]
+        },
+        {
+            "label": "component:skillfs",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                }
+            ]
+        },
+        {
+            "label": "component:cosh-ng",
+            "maintainers": [
+                {
+                    "github": "SunnyQjm"
+                },
+                {
+                    "github": "zkl123"
+                }
+            ]
+        },
+        {
+            "label": "component:blaze",
+            "maintainers": [
+                {
+                    "github": "casparant"
+                }
+            ]
+        },
+        {
+            "label": "component:ktuner",
+            "maintainers": [
+                {
+                    "github": "jfeng18"
+                }
+            ]
+        }
+    ],
+    "default": {
+        "maintainers": [
+            {
+                "github": "kongche-jbw"
+            }
+        ]
+    }
+}

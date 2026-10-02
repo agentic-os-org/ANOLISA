@@ -1,0 +1,12 @@
+rule_id: py-tls-bypass
+cwe_id: CWE-295
+desc_en: >-
+  Code disables TLS/SSL certificate verification, exposing
+  connections to man-in-the-middle attacks.
+desc_zh: >-
+  代码禁用了 TLS/SSL 证书验证，使连接面临中间人攻击风险。
+regex: |-
+  \bssl\._create_unverified_context\s*\(
+  |\burllib3\.disable_warnings\s*\(
+  |\bcert_reqs\s*=\s*['"]?CERT_NONE
+severity: warn

@@ -1,0 +1,24 @@
+{
+  "description": "Shared tool-name corpus for the cosh extension rewrite-matcher contract. Consumed by the Rust contract test (cosh_extension_matcher_contract in the tokenless-cli crate, embedded at compile time) and by tests/test_cosh_extension_matcher.py. matching_tools are shell-execution tool names agents fire PreToolUse with; non_matching_tools must never reach rtk. shell_prompt and my_shell probe anchoring (prefix/suffix overlap must not match); the empty string probes the empty-matcher guard.",
+  "matching_tools": [
+    "shell",
+    "run_shell_command",
+    "Bash",
+    "Shell",
+    "terminal",
+    "exec",
+    "process"
+  ],
+  "non_matching_tools": [
+    "read_file",
+    "write_file",
+    "edit",
+    "grep",
+    "todo",
+    "glob",
+    "web_search",
+    "shell_prompt",
+    "my_shell",
+    ""
+  ]
+}

@@ -1,0 +1,73 @@
+name: Bug Report
+description: Report something that is not working
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. A short, reproducible report is enough.
+        Please remove tokens, keys, private addresses, and other sensitive data.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Optional hint only. Leave this unanswered when the boundary is unclear.
+      options:
+        - anolisa
+        - tokenless
+        - cosh-ng
+        - cosh
+        - skillfs
+        - sight
+        - sec-core
+        - memory
+        - ckpt
+        - skill
+        - project-wide
+        - not sure
+        - other
+    validations:
+      required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Briefly include the command or operation, the result, and what you expected.
+      placeholder: |
+        I ran:
+          anolisa ...
+
+        What happened:
+          ...
+
+        What I expected:
+          ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: A minimal example is enough. Skip details that are not relevant.
+      placeholder: |
+        1. Install or configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic output
+      description: Optional. Run `anolisa bug` and remove any secrets or private addresses.
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+      description: Optional logs, screenshots, configuration, or context.

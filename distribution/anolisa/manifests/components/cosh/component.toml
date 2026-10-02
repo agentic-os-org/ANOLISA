@@ -1,0 +1,63 @@
+[component]
+name = "cosh"
+version = "2.7.0"
+layer = "runtime"
+domain = "tools"
+display_name = "Copilot Shell"
+description = "AI copilot shell - interactive terminal agent for Linux operations"
+owner = "copilot-shell-team"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+conflicts = ["cosh-ng"]
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[backends.rpm]
+package = "copilot-shell"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+
+[[component.dependencies]]
+name = "node"
+kind = "language-runtime"
+version = ">=20"
+probe = "node --version"
+source = "nodejs-official"
+packages = { rpm = "nodejs", deb = "nodejs" }
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/cosh/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/cosh"
+target = "{bindir}/cosh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "lib/copilot-shell/"
+target = "{libdir}/copilot-shell"
+
+[[component.layout.files]]
+source = "{bindir}/cosh"
+target = "{bindir}/co"
+type = "symlink"
+
+[[component.layout.files]]
+source = "{bindir}/cosh"
+target = "{bindir}/copilot"
+type = "symlink"
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/cosh"
+timeout_secs = 15

@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": "{\"url\":\"https://registry.example.com/packages\",\"status\":200,\"results\":[{\"name\":\"alpha\",\"version\":\"1.0.3\"},{\"name\":\"bravo\",\"version\":\"2.4.0\"},{\"name\":\"charlie\",\"version\":\"0.9.17\"},{\"name\":\"delta\",\"version\":\"3.1.2\"},{\"name\":\"echo\",\"version\":\"1.12.5\"},{\"name\":\"foxtrot\",\"version\":\"0.2.8\"}],\"count\":6}"
+    },
+    "suppressOutput": true
+  }
+}

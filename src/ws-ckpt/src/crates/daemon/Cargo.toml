@@ -1,0 +1,33 @@
+[package]
+name = "ws-ckpt-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ws-ckpt-common = { path = "../common" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "fs", "signal", "io-util", "macros", "sync", "time"] }
+tokio-util = "0.7"
+dashmap = "6"
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+async-trait = "0.1"
+nix = { version = "0.29", features = ["user", "fs", "ioctl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
+notify = "6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "fs", "signal", "io-util", "macros", "sync", "time", "test-util"] }

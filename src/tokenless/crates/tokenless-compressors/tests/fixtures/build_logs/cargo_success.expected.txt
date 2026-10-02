@@ -1,0 +1,14 @@
+$ cargo build --release
+    Updating crates.io index
+  Downloaded proc-macro2 v1.0.11
+  Downloaded unicode-ident v1.0.13
+  Downloaded quote v1.0.5
+  Downloaded syn v1.0.3
+  Downloaded serde v1.0.5
+  Downloaded libc v1.0.4
+   Compiling proc-macro2 v1.0.0
+   Compiling unicode-ident v1.0.1
+38 compilation progress lines omitted. If needed, run in shell: tokenless retrieve be4d220c3fe3c926b1eea879
+    Building [===                 ] 6/40: app    Building [=========           ] 18/40: app    Building [=================   ] 34/40: app
+   Compiling app v0.1.0 (/work/app)
+    Finished `release` profile [optimized] target(s) in 42.18s

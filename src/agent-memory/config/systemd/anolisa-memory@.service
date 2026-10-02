@@ -1,0 +1,77 @@
+[Unit]
+Description=Agent memory MCP server (user %i)
+Documentation=https://github.com/alibaba/anolisa
+After=default.target
+
+[Service]
+# Long-running per-user MCP server. Most clients (Claude Code, Cursor) prefer
+# to spawn their own short-lived instance over stdio; install this unit only
+# when you want one shared instance across multiple sessions.
+Type=simple
+ExecStart=/usr/bin/agent-memory serve
+Environment=MEMORY_MOUNT_STRATEGY=auto
+Environment=USER_ID=%i
+RuntimeDirectory=anolisa/sessions/%i
+RuntimeDirectoryMode=0700
+# Point the server at the runtime directory the two lines above create.
+# Without this it used the compiled-in default /run/anolisa/sessions, which
+# the RPM's tmpfiles.d snippet creates 0700 root:root and this *user* unit
+# can therefore neither traverse nor write — so the RuntimeDirectory= was
+# dead config and the session log (mem_promote / mem_session_log) was lost.
+# %t is $XDG_RUNTIME_DIR for a user unit.
+Environment=MEMORY_SESSION_DIR=%t/anolisa/sessions/%i
+
+# user namespace + mount namespace are both unprivileged, so no
+# AmbientCapabilities= are required. ProtectSystem/Home are off because the
+# server intentionally writes to ~/.anolisa/.
+NoNewPrivileges=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=2
+
+# --- Hardening: stdio-only server with minimal privileges ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# Server is stdio-only (no network needed); AF_UNIX covers the journald
+# socket fallback path if journald=true is configured.
+RestrictAddressFamilies=AF_UNIX
+# Allow CLONE_NEWUSER and CLONE_NEWNS for the userns mount strategy
+# (linux_userns calls unshare(CLONE_NEWUSER | CLONE_NEWNS)); deny all
+# others. NOTE: a leading `~` would invert the list to a denylist, so
+# we list namespace types directly to keep allowlist semantics.
+RestrictNamespaces=user mnt
+
+# ProtectControlGroups=yes is incompatible with Delegate= below (systemd
+# requires the delegate scope to manage its own cgroup subtree), so we
+# omit it intentionally and rely on Delegate to constrain cgroup writes
+# to our own scope.
+
+# Read-only root filesystem with explicit write paths for the memory
+# store (~/.anolisa), session scratch (the per-user runtime dir created by
+# RuntimeDirectory= above, plus the legacy /run/anolisa for operators who
+# point MEMORY_SESSION_DIR back at it), and cgroupfs (the Delegate=memory
+# subtree below requires cgroup.subtree_control and memory.max writes;
+# ReadOnlyPaths=/ would otherwise mount /sys/fs/cgroup read-only inside our
+# namespace and EROFS those writes).
+#
+# %t/anolisa has to be listed explicitly: ReadOnlyPaths=/ makes the whole
+# tree read-only inside the unit's namespace, so a RuntimeDirectory= that
+# systemd creates outside it is still unwritable from inside.
+ReadOnlyPaths=/
+ReadWritePaths=~/.anolisa /run/anolisa %t/anolisa /sys/fs/cgroup
+
+# P6.4: delegate cgroup controllers so [memory.cgroup].enabled=true can
+# create a child cgroup under our scope and apply memory.max. Without
+# this, the in-scope cgroup.subtree_control returns EBUSY (a cgroup with
+# member procs can't add controllers to its subtree), and the quota path
+# silently falls back to "no limit".
+Delegate=memory pids io
+MemoryAccounting=yes
+
+[Install]
+WantedBy=default.target

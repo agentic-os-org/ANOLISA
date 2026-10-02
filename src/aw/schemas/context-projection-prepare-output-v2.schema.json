@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/context-projection-prepare-output/v2",
+  "title": "context-projection-prepare output v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "candidate"
+  ],
+  "properties": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_artifact_id",
+        "source_digest",
+        "content",
+        "media_type",
+        "transform_chain",
+        "reversibility",
+        "recovery"
+      ],
+      "properties": {
+        "source_artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "content": {
+          "type": "string"
+        },
+        "media_type": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/media_type"
+        },
+        "transform_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "not": {
+              "pattern": "[^!-~]"
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "reversibility": {
+          "enum": [
+            "lossless",
+            "retrievable",
+            "unrecoverable"
+          ]
+        },
+        "recovery": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "decoder_id"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "self_contained"
+                },
+                "decoder_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "not": {
+                    "pattern": "[^!-~]"
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "resolver_id",
+                "reference",
+                "source_digest",
+                "expires_at_ms"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "external"
+                },
+                "resolver_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "not": {
+                    "pattern": "[^!-~]"
+                  }
+                },
+                "reference": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "not": {
+                    "pattern": "[^!-~]"
+                  }
+                },
+                "source_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "expires_at_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "none"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reversibility": {
+                "const": "lossless"
+              }
+            },
+            "required": [
+              "reversibility"
+            ]
+          },
+          "then": {
+            "properties": {
+              "recovery": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode",
+                  "decoder_id"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "self_contained"
+                  },
+                  "decoder_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reversibility": {
+                "const": "retrievable"
+              }
+            },
+            "required": [
+              "reversibility"
+            ]
+          },
+          "then": {
+            "properties": {
+              "recovery": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode",
+                  "resolver_id",
+                  "reference",
+                  "source_digest",
+                  "expires_at_ms"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "external"
+                  },
+                  "resolver_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    }
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "not": {
+                      "pattern": "[^!-~]"
+                    }
+                  },
+                  "source_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  },
+                  "expires_at_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reversibility": {
+                "const": "unrecoverable"
+              }
+            },
+            "required": [
+              "reversibility"
+            ]
+          },
+          "then": {
+            "properties": {
+              "recovery": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "none"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

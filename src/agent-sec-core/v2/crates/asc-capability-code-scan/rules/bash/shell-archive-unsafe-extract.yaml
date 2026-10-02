@@ -1,0 +1,13 @@
+rule_id: shell-archive-unsafe-extract
+cwe_id: CWE-22
+desc_en: >-
+  Archive extraction command uses unsafe options that may
+  allow path traversal and overwrite arbitrary files.
+desc_zh: >-
+  归档解压命令使用不安全选项，可能导致路径穿越和任意文件覆写。
+regex: |-
+  \bunzip\b[^;|&\n]*[ \t]-[a-zA-Z]*o\b
+  |\bunzip\b[^;|&\n]*[ \t]-[a-zA-Z]*:
+  |\bcpio\b[^;|&\n]*[ \t](-[a-zA-Z]*i[a-zA-Z]*\b|--extract)
+  |\b7z[ar]?\b[^;|&\n]*\bx\b
+severity: warn

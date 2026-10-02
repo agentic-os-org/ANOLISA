@@ -1,0 +1,69 @@
+{
+  "type": "function",
+  "function": {
+    "name": "create_issue",
+    "description": "Create a new issue in a GitHub repository. This tool allows you to create issues with titles, descriptions, labels, assignees, and milestones. Issues are used to track bugs, feature requests, and other tasks in a repository.",
+    "parameters": {
+      "type": "object",
+      "title": "Create Issue Parameters",
+      "properties": {
+        "owner": {
+          "type": "string",
+          "title": "Repository Owner",
+          "description": "The account owner of the repository. The name is not case sensitive."
+        },
+        "repo": {
+          "type": "string",
+          "title": "Repository Name",
+          "description": "The name of the repository without the .git extension. The name is not case sensitive."
+        },
+        "title": {
+          "type": "string",
+          "title": "Issue Title",
+          "description": "The title of the issue. This is a required field and should be a concise summary of the problem or feature request."
+        },
+        "body": {
+          "type": "string",
+          "title": "Issue Body",
+          "description": "The body text of the issue. Supports GitHub Flavored Markdown for formatting, including headers, lists, code blocks, and links."
+        },
+        "assignees": {
+          "type": "array",
+          "title": "Assignees",
+          "description": "An array of usernames to assign to this issue. Each user must have write access to the repository.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "labels": {
+          "type": "array",
+          "title": "Labels",
+          "description": "An array of label names to associate with this issue. Labels help categorize and filter issues.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestone": {
+          "type": "integer",
+          "title": "Milestone Number",
+          "description": "The number of the milestone to associate this issue with. Use null to remove any milestone."
+        },
+        "projects": {
+          "type": "array",
+          "title": "Projects",
+          "description": "An array of project board IDs to associate this issue with.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "string",
+          "title": "Priority",
+          "description": "The priority level of the issue, used for project management and triage.",
+          "enum": ["critical", "high", "medium", "low", "none"]
+        }
+      },
+      "required": ["owner", "repo", "title"]
+    }
+  }
+}

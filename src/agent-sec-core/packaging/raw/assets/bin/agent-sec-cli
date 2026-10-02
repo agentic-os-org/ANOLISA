@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launch agent-sec-cli through the raw package's bundled Python runtime.
+set -eu
+
+BINDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+exec "$BINDIR/agent-sec-python" \
+    -c 'import sys; sys.argv[0] = "agent-sec-cli"; from agent_sec_cli.cli import main; sys.exit(main())' \
+    "$@"

@@ -1,0 +1,9 @@
+rule_id: shell-find-delete
+cwe_id: CWE-78
+desc_en: >-
+  The find command with -delete flag performs recursive file deletion,
+  which is a high-risk operation that can cause irreversible data loss.
+desc_zh: >-
+  find 命令配合 -delete 标志执行递归文件删除，可能导致不可逆的数据丢失。
+regex: '\bfind\b[^;|&\n]+-delete\b'
+severity: warn

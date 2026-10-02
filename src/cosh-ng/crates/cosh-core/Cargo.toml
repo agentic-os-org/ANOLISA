@@ -1,0 +1,53 @@
+[package]
+name = "cosh-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified core component for cosh — agent core + interactive TUI + headless JSONL backend"
+
+[[bin]]
+name = "cosh-core"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+atty = "0.2"
+cosh-types = { path = "../cosh-types" }
+cosh-platform = { path = "../cosh-platform" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["full"] }
+uuid.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "stream", "json", "http2", "charset", "rustls-tls-native-roots", "system-proxy"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+dirs = "5"
+chrono = { workspace = true, features = ["clock"] }
+glob.workspace = true
+globset.workspace = true
+ignore.workspace = true
+which.workspace = true
+toml.workspace = true
+regex.workspace = true
+aes-gcm = "0.10"
+scrypt = "0.11"
+hmac = "0.12"
+sha2.workspace = true
+semver.workspace = true
+fs2.workspace = true
+keyring.workspace = true
+nix.workspace = true
+hex = "0.4"
+notify = "6"
+serde_yaml = "0.9"
+rustix.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+wait-timeout.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

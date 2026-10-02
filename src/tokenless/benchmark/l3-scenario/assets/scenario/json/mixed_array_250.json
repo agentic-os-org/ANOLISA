@@ -1,0 +1,45 @@
+{
+ "suite": "scenario",
+ "scenario": "mixed_array_250",
+ "display_name": "JSON: Mixed Array (250 items)",
+ "content_type": "json",
+ "size_label": "250 items",
+ "source": {
+  "reference": "headroom benchmarks/bench_latency.py::generate_scenarios()",
+  "headroom_native": true,
+  "headroom_revision": "e616dcf788e29e285b5ab5c17af49585c0d60613",
+  "headroom_dirty": false
+ },
+ "model_limit": 200000,
+ "message_count": 4,
+ "tool_message_count": 1,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful assistant.\n\nCurrent date: 2025-01-06"
+  },
+  {
+   "role": "user",
+   "content": "Analyze the following data."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_bench_1",
+     "type": "function",
+     "function": {
+      "name": "get_data",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_bench_1",
+   "content": "[{\"id\": 0, \"status\": \"active\"}, {\"id\": 1, \"status\": \"active\"}, {\"id\": 2, \"status\": \"active\"}, {\"id\": 3, \"status\": \"active\"}, {\"id\": 4, \"status\": \"active\"}, {\"id\": 5, \"status\": \"active\"}, {\"id\": 6, \"status\": \"active\"}, {\"id\": 7, \"status\": \"active\"}, {\"id\": 8, \"status\": \"active\"}, {\"id\": 9, \"status\": \"active\"}, {\"id\": 10, \"status\": \"active\"}, {\"id\": 11, \"status\": \"active\"}, {\"id\": 12, \"status\": \"active\"}, {\"id\": 13, \"status\": \"active\"}, {\"id\": 14, \"status\": \"active\"}, {\"id\": 15, \"status\": \"active\"}, {\"id\": 16, \"status\": \"active\"}, {\"id\": 17, \"status\": \"active\"}, {\"id\": 18, \"status\": \"active\"}, {\"id\": 19, \"status\": \"active\"}, {\"id\": 20, \"status\": \"active\"}, {\"id\": 21, \"status\": \"active\"}, {\"id\": 22, \"status\": \"active\"}, {\"id\": 23, \"status\": \"active\"}, {\"id\": 24, \"status\": \"active\"}, {\"id\": 25, \"status\": \"active\"}, {\"id\": 26, \"status\": \"active\"}, {\"id\": 27, \"status\": \"active\"}, {\"id\": 28, \"status\": \"active\"}, {\"id\": 29, \"status\": \"active\"}, {\"id\": 30, \"status\": \"active\"}, {\"id\": 31, \"status\": \"active\"}, {\"id\": 32, \"status\": \"active\"}, {\"id\": 33, \"status\": \"active\"}, {\"id\": 34, \"status\": \"active\"}, {\"id\": 35, \"status\": \"active\"}, {\"id\": 36, \"status\": \"active\"}, {\"id\": 37, \"status\": \"active\"}, {\"id\": 38, \"status\": \"active\"}, {\"id\": 39, \"status\": \"active\"}, {\"id\": 40, \"status\": \"active\"}, {\"id\": 41, \"status\": \"active\"}, {\"id\": 42, \"status\": \"active\"}, {\"id\": 43, \"status\": \"active\"}, {\"id\": 44, \"status\": \"active\"}, {\"id\": 45, \"status\": \"active\"}, {\"id\": 46, \"status\": \"active\"}, {\"id\": 47, \"status\": \"active\"}, {\"id\": 48, \"status\": \"active\"}, {\"id\": 49, \"status\": \"active\"}, {\"id\": 50, \"status\": \"active\"}, {\"id\": 51, \"status\": \"active\"}, {\"id\": 52, \"status\": \"active\"}, {\"id\": 53, \"status\": \"active\"}, {\"id\": 54, \"status\": \"active\"}, {\"id\": 55, \"status\": \"active\"}, {\"id\": 56, \"status\": \"active\"}, {\"id\": 57, \"status\": \"active\"}, {\"id\": 58, \"status\": \"active\"}, {\"id\": 59, \"status\": \"active\"}, {\"id\": 60, \"status\": \"active\"}, {\"id\": 61, \"status\": \"active\"}, {\"id\": 62, \"status\": \"active\"}, {\"id\": 63, \"status\": \"active\"}, {\"id\": 64, \"status\": \"active\"}, {\"id\": 65, \"status\": \"active\"}, {\"id\": 66, \"status\": \"active\"}, {\"id\": 67, \"status\": \"active\"}, {\"id\": 68, \"status\": \"active\"}, {\"id\": 69, \"status\": \"active\"}, {\"id\": 70, \"status\": \"active\"}, {\"id\": 71, \"status\": \"active\"}, {\"id\": 72, \"status\": \"active\"}, {\"id\": 73, \"status\": \"active\"}, {\"id\": 74, \"status\": \"active\"}, {\"id\": 75, \"status\": \"active\"}, {\"id\": 76, \"status\": \"active\"}, {\"id\": 77, \"status\": \"active\"}, {\"id\": 78, \"status\": \"active\"}, {\"id\": 79, \"status\": \"active\"}, {\"id\": 80, \"status\": \"active\"}, {\"id\": 81, \"status\": \"active\"}, {\"id\": 82, \"status\": \"active\"}, {\"id\": 83, \"status\": \"active\"}, {\"id\": 84, \"status\": \"active\"}, {\"id\": 85, \"status\": \"active\"}, {\"id\": 86, \"status\": \"active\"}, {\"id\": 87, \"status\": \"active\"}, {\"id\": 88, \"status\": \"active\"}, {\"id\": 89, \"status\": \"active\"}, {\"id\": 90, \"status\": \"active\"}, {\"id\": 91, \"status\": \"active\"}, {\"id\": 92, \"status\": \"active\"}, {\"id\": 93, \"status\": \"active\"}, {\"id\": 94, \"status\": \"active\"}, {\"id\": 95, \"status\": \"active\"}, {\"id\": 96, \"status\": \"active\"}, {\"id\": 97, \"status\": \"active\"}, {\"id\": 98, \"status\": \"active\"}, {\"id\": 99, \"status\": \"active\"}, \"log: request 0 completed\", \"log: request 1 completed\", \"log: request 2 completed\", \"log: request 3 completed\", \"log: request 4 completed\", \"log: request 5 completed\", \"log: request 6 completed\", \"log: request 7 completed\", \"log: request 8 completed\", \"log: request 9 completed\", \"log: request 10 completed\", \"log: request 11 completed\", \"log: request 12 completed\", \"log: request 13 completed\", \"log: request 14 completed\", \"log: request 15 completed\", \"log: request 16 completed\", \"log: request 17 completed\", \"log: request 18 completed\", \"log: request 19 completed\", \"log: request 20 completed\", \"log: request 21 completed\", \"log: request 22 completed\", \"log: request 23 completed\", \"log: request 24 completed\", \"log: request 25 completed\", \"log: request 26 completed\", \"log: request 27 completed\", \"log: request 28 completed\", \"log: request 29 completed\", \"log: request 30 completed\", \"log: request 31 completed\", \"log: request 32 completed\", \"log: request 33 completed\", \"log: request 34 completed\", \"log: request 35 completed\", \"log: request 36 completed\", \"log: request 37 completed\", \"log: request 38 completed\", \"log: request 39 completed\", \"log: request 40 completed\", \"log: request 41 completed\", \"log: request 42 completed\", \"log: request 43 completed\", \"log: request 44 completed\", \"log: request 45 completed\", \"log: request 46 completed\", \"log: request 47 completed\", \"log: request 48 completed\", \"log: request 49 completed\", \"log: request 50 completed\", \"log: request 51 completed\", \"log: request 52 completed\", \"log: request 53 completed\", \"log: request 54 completed\", \"log: request 55 completed\", \"log: request 56 completed\", \"log: request 57 completed\", \"log: request 58 completed\", \"log: request 59 completed\", \"log: request 60 completed\", \"log: request 61 completed\", \"log: request 62 completed\", \"log: request 63 completed\", \"log: request 64 completed\", \"log: request 65 completed\", \"log: request 66 completed\", \"log: request 67 completed\", \"log: request 68 completed\", \"log: request 69 completed\", \"log: request 70 completed\", \"log: request 71 completed\", \"log: request 72 completed\", \"log: request 73 completed\", \"log: request 74 completed\", \"log: request 75 completed\", \"log: request 76 completed\", \"log: request 77 completed\", \"log: request 78 completed\", \"log: request 79 completed\", \"log: request 80 completed\", \"log: request 81 completed\", \"log: request 82 completed\", \"log: request 83 completed\", \"log: request 84 completed\", \"log: request 85 completed\", \"log: request 86 completed\", \"log: request 87 completed\", \"log: request 88 completed\", \"log: request 89 completed\", \"log: request 90 completed\", \"log: request 91 completed\", \"log: request 92 completed\", \"log: request 93 completed\", \"log: request 94 completed\", \"log: request 95 completed\", \"log: request 96 completed\", \"log: request 97 completed\", \"log: request 98 completed\", \"log: request 99 completed\", 37.0880290381246, 48.91233560935488, 55.3244258679234, 34.20667262177786, 48.26726487706236, 56.74768959902477, 51.96947246622194, 68.11961358718645, 60.33437446765308, 61.032629645983064, 49.10144320594316, 64.1280238843893, 60.63020909678478, 68.72970696026684, 31.251243165295293, 42.00126135411124, 53.596757932229515, 43.81049682357143, 53.973516694408474, 29.020722654432713, 68.36307729222256, 69.95434264217947, 72.69054441229301, 49.86000399015726, 60.04106394405876, 33.77063796086492, 56.81589547642322, 52.10056283056826, 50.96244061497635, 68.72673097268917, 50.75359223246229, 54.03751339255973, 40.75178928174161, 44.19330119535108, 38.72310216583602, 41.03508370270274, 54.58635654456482, 42.13029163498417, 23.052741885189686, 52.451916470116586, 64.40992028285696, 46.491651848010015, 41.62854777439232, 55.11932468721632, 59.420184061056204, 71.20062069275116, 53.65708075639422, 55.03579529595526, 39.88138503865548, 50.74242650799264]"
+  }
+ ]
+}

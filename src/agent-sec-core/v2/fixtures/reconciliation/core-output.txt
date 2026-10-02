@@ -1,0 +1,209 @@
+Command: cargo test -p asc-pcp --locked --offline -- --nocapture --test-threads=1
+
+   Compiling asc-policy-types v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-policy-types)
+   Compiling asc-policy-target-contracts v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-policy-target-contracts)
+   Compiling asc-policy-repository v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-policy-repository)
+   Compiling asc-pap v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-pap)
+   Compiling asc-policy-adapter-agentsight v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/adapters/asc-policy-adapter-agentsight)
+   Compiling asc-agentsight-client v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/integrations/asc-agentsight-client)
+   Compiling asc-pcp v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-pcp)
+   Compiling asc-pap-repository-memory v0.1.0 (/home/xingdong/ANOLISA-rust-daemon/src/agent-sec-core/v2/crates/policy/asc-pap-repository-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running unittests src/lib.rs (target/debug/deps/asc_pcp-9b8f8b2fac0f0ac8)
+
+running 9 tests
+test state::tests::bounded_codes_and_backoff_reject_invalid_configuration ... ok
+test state::tests::due_time_attempt_increment_and_policy_are_one_transaction ... ok
+test state::tests::execution_slots_are_shared_but_distinct_bindings_are_independent ... ok
+test state::tests::invalid_partial_report_rolls_back_all_observations_and_lifecycle ... ok
+test state::tests::no_confirmation_cannot_complete_ready_or_deleted ... ok
+test state::tests::registration_failure_does_not_partially_save_prepared_or_targets ... ok
+test state::tests::registration_retries_runtime_cas_conflict_without_losing_concurrent_fields ... ok
+test state::tests::repeated_admitted_intent_preserves_budget_and_new_revision_keeps_targets ... ok
+test state::tests::retry_noop_does_not_reset_attempts_and_bad_cas_does_not_mutate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance.rs (target/debug/deps/acceptance-c814eedacc70fcbf)
+
+running 7 tests
+test actual_agentsight_adapter_uses_the_core_port_without_interface_changes ... ok
+test complete_serialized_core_cases ... PASS REC-CORE-001/create step 0
+PASS REC-CORE-002/replace-id step 0
+PASS REC-CORE-002/reuse-id step 0
+PASS REC-CORE-003/delete-before-B-runs step 0
+PASS REC-CORE-004/multiple step 0
+PASS REC-CORE-004/empty step 0
+PASS REC-CORE-005/success step 0
+PASS REC-CORE-005/success step 1
+PASS REC-CORE-005/retryable step 0
+PASS REC-CORE-005/retryable step 1
+PASS REC-CORE-005/rejected step 0
+PASS REC-CORE-005/rejected step 1
+PASS REC-CORE-007/status step 0
+PASS REC-CORE-007/revision step 0
+PASS REC-CORE-008/read-failure step 0
+PASS REC-CORE-008/claim-failure step 0
+PASS REC-CORE-008/claim-conflict step 0
+PASS REC-CORE-009/create-registration step 0
+PASS REC-CORE-009/create-registration step 1
+PASS REC-CORE-009/update-registration step 0
+PASS REC-CORE-009/update-registration step 1
+PASS REC-CORE-010/persist-only-retry step 0
+PASS REC-CORE-010/persist-only-retry step 1
+PASS REC-CORE-011/semantic-rejection step 0
+PASS REC-CORE-012/fault-retry-exhausted step 0
+PASS REC-CORE-012/fault-retry-exhausted step 1
+PASS REC-CORE-012/fault-retry-exhausted step 2
+PASS REC-CORE-013/retryable step 0
+PASS REC-CORE-013/rejected step 0
+PASS REC-CORE-014/unknown-reuses-bytes step 0
+PASS REC-CORE-014/unknown-reuses-bytes step 1
+PASS REC-CORE-014/unknown-reuses-bytes step 2
+PASS REC-CORE-015/B-unknown step 0
+PASS REC-CORE-015/B-unknown step 1
+PASS REC-CORE-015/B-rejected step 0
+PASS REC-CORE-016/retryable step 0
+PASS REC-CORE-016/retryable step 1
+PASS REC-CORE-016/rejected step 0
+PASS REC-CORE-016/exhausted step 0
+PASS REC-CORE-016/exhausted step 1
+PASS REC-CORE-016/exhausted step 2
+PASS REC-CORE-017/apply-budget step 0
+PASS REC-CORE-017/apply-budget step 1
+PASS REC-CORE-017/apply-budget step 2
+PASS REC-CORE-017/apply-budget step 3
+PASS REC-CORE-017/apply-budget step 4
+PASS REC-CORE-017/apply-budget step 5
+PASS REC-CORE-017/delete-budget step 0
+PASS REC-CORE-017/delete-budget step 1
+PASS REC-CORE-017/delete-budget step 2
+PASS REC-CORE-017/delete-budget step 3
+PASS REC-CORE-017/delete-budget step 4
+PASS REC-CORE-017/delete-budget step 5
+PASS REC-CORE-018/new-delete-budget step 0
+PASS REC-CORE-019/ready step 0
+PASS REC-CORE-019/apply_failed step 0
+PASS REC-CORE-019/delete_failed step 0
+PASS REC-CORE-019/applying step 0
+PASS REC-CORE-019/deleting step 0
+PASS REC-CORE-019/missing step 0
+PASS REC-CORE-019/not-due step 0
+PASS REC-CORE-019/old-notification step 0
+PASS REC-CORE-020/opaque-id step 0
+PASS REC-CORE-020/direct-seccore-id step 0
+PASS REC-CORE-020/missing-route step 0
+PASS REC-CORE-021/fresh-binding step 0
+PASS REC-CORE-014/missing-confirmation step 0
+PASS REC-CORE-014/foreign-target step 0
+PASS REC-CORE-014/duplicate-target step 0
+PASS REC-CORE-006/blocked-result-two-instances
+PASS REC-CORE-022/timeout-join-before-delete
+ok
+test fixtures::cyclic_references_are_rejected - should panic ...
+thread 'fixtures::cyclic_references_are_rejected' (1084625) panicked at crates/policy/asc-pcp/tests/support/fixtures.rs:24:17:
+cyclic fixture reference: a
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test fixtures::missing_nested_references_are_rejected - should panic ...
+thread 'fixtures::missing_nested_references_are_rejected' (1084626) panicked at crates/policy/asc-pcp/tests/support/fixtures.rs:30:40:
+missing fixture reference: missing
+ok
+test fixtures::nested_shared_objects_expand_to_complete_independent_values ... ok
+test fixtures::non_string_references_are_rejected - should panic ...
+thread 'fixtures::non_string_references_are_rejected' (1084628) panicked at crates/policy/asc-pcp/tests/support/fixtures.rs:23:22:
+fixture reference must be a string
+ok
+test fixtures::reference_overrides_are_rejected - should panic ...
+thread 'fixtures::reference_overrides_are_rejected' (1084629) panicked at crates/policy/asc-pcp/tests/support/fixtures.rs:17:17:
+reference must not silently override fields
+ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/agentsight_integration.rs (target/debug/deps/agentsight_integration-6cb40d3882a6f321)
+
+running 4 tests
+test completed_http_is_not_repeated_after_result_storage_failure ... ok
+test real_http_apply_then_uncertain_delete_and_retry ... ok
+test real_http_partial_update_retry_cleans_old_once_and_reuses_new_request ... ok
+test same_revision_delete_during_real_http_apply_preserves_target_for_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/panic_recovery.rs (target/debug/deps/panic_recovery-335d3b15ca6ab752)
+
+running 9 tests
+test delete_commit_response_failure_replays_absence_without_repeating_client_io ... ok
+test delete_completion_panic_replays_receipt_after_target_removal ...
+thread 'delete_completion_panic_replays_receipt_after_target_removal' (1084641) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test delete_panic_preserves_unknown_target_and_marks_delete_failed ...
+thread 'delete_panic_preserves_unknown_target_and_marks_delete_failed' (1084642) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test panic_before_claim_does_not_fail_unclaimed_intent ...
+thread 'panic_before_claim_does_not_fail_unclaimed_intent' (1084643) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test panic_does_not_overwrite_new_delete_and_same_slot_can_clean_up ...
+thread 'panic_does_not_overwrite_new_delete_and_same_slot_can_clean_up' (1084644) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test panic_during_completion_preserves_success_and_never_repeats_create ...
+thread 'panic_during_completion_preserves_success_and_never_repeats_create' (1084645) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+
+thread 'panic_during_completion_preserves_success_and_never_repeats_create' (1084645) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test panic_failure_waits_for_storage_repair_without_repeating_io ...
+thread 'panic_failure_waits_for_storage_repair_without_repeating_io' (1084646) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test panics_fail_claimed_apply_without_poisoning_or_losing_cleanup ...
+thread 'panics_fail_claimed_apply_without_poisoning_or_losing_cleanup' (1084647) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+
+thread 'panics_fail_claimed_apply_without_poisoning_or_losing_cleanup' (1084647) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+
+thread 'panics_fail_claimed_apply_without_poisoning_or_losing_cleanup' (1084647) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+
+thread 'panics_fail_claimed_apply_without_poisoning_or_losing_cleanup' (1084647) panicked at crates/policy/asc-pcp/tests/panic_recovery.rs:62:9:
+private injected panic payload
+ok
+test unknown_ids_do_not_allocate_execution_slots ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/pap_lifecycle.rs (target/debug/deps/pap_lifecycle-82670ca1c4c22004)
+
+running 4 tests
+test deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fresh_id ... ok
+test maximum_revision_allows_same_spec_retry_and_delete_but_rejects_spec_change ... ok
+test same_spec_failed_apply_reuses_prepared_bytes_and_resets_only_retry_controls ... ok
+test spec_change_clears_prepared_but_keeps_previous_target_for_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/repository_contract.rs (target/debug/deps/repository_contract-184973fd9e959afa)
+
+running 6 tests
+test concurrent_writes_from_one_snapshot_have_exactly_one_winner ... ok
+test mismatched_identity_cannot_partially_write_an_aggregate ... ok
+test removal_is_atomic_replayable_and_stale_writes_cannot_resurrect_revision_one ... ok
+test replay_after_pap_write_is_acknowledged_without_overwriting_new_intent ... ok
+test runtime_and_deployment_changes_invalidate_stale_snapshot ... ok
+test stale_removal_cannot_erase_a_newer_status_or_target_observation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests asc_pcp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

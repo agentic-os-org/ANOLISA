@@ -1,0 +1,18 @@
+[component]
+name = "kernel"
+version = "0.1.0"
+layer = "osbase"
+description = "ANOLISA kernel substrate — Agent-aware scheduling, eBPF control plane, memory optimization"
+
+[install]
+modes = ["system"]
+
+[environment]
+requires_os = "linux"
+requires_kernel = ">=5.4"
+
+[environment.requires_env]
+privilege = "root"
+
+[dependencies]
+runtime = ["kernel-devel", "bpftool"]

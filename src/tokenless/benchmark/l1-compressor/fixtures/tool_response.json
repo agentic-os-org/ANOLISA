@@ -1,0 +1,589 @@
+{
+  "logs": [
+    "log entry number 0",
+    "log entry number 1",
+    "log entry number 2",
+    "log entry number 3",
+    "log entry number 4",
+    "log entry number 5",
+    "log entry number 6",
+    "log entry number 7",
+    "log entry number 8",
+    "log entry number 9",
+    "log entry number 10",
+    "log entry number 11",
+    "log entry number 12",
+    "log entry number 13",
+    "log entry number 14",
+    "log entry number 15",
+    "log entry number 16",
+    "log entry number 17",
+    "log entry number 18",
+    "log entry number 19",
+    "log entry number 20",
+    "log entry number 21",
+    "log entry number 22",
+    "log entry number 23",
+    "log entry number 24",
+    "log entry number 25",
+    "log entry number 26",
+    "log entry number 27",
+    "log entry number 28",
+    "log entry number 29",
+    "log entry number 30",
+    "log entry number 31",
+    "log entry number 32",
+    "log entry number 33",
+    "log entry number 34",
+    "log entry number 35",
+    "log entry number 36",
+    "log entry number 37",
+    "log entry number 38",
+    "log entry number 39"
+  ],
+  "results": [
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 0,
+      "name": "item-0",
+      "path": "src/module_0/file_0.rs",
+      "score": 0.0,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 1,
+      "name": "item-1",
+      "path": "src/module_1/file_1.rs",
+      "score": 0.0769,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 2,
+      "name": "item-2",
+      "path": "src/module_2/file_2.rs",
+      "score": 0.1538,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 3,
+      "name": "item-3",
+      "path": "src/module_3/file_3.rs",
+      "score": 0.2308,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 4,
+      "name": "item-4",
+      "path": "src/module_4/file_4.rs",
+      "score": 0.3077,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 5,
+      "name": "item-5",
+      "path": "src/module_5/file_5.rs",
+      "score": 0.3846,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 6,
+      "name": "item-6",
+      "path": "src/module_6/file_6.rs",
+      "score": 0.4615,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 7,
+      "name": "item-7",
+      "path": "src/module_7/file_7.rs",
+      "score": 0.5385,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 8,
+      "name": "item-8",
+      "path": "src/module_8/file_8.rs",
+      "score": 0.6154,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 9,
+      "name": "item-9",
+      "path": "src/module_9/file_9.rs",
+      "score": 0.6923,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 10,
+      "name": "item-10",
+      "path": "src/module_10/file_10.rs",
+      "score": 0.7692,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 11,
+      "name": "item-11",
+      "path": "src/module_11/file_11.rs",
+      "score": 0.8462,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 12,
+      "name": "item-12",
+      "path": "src/module_12/file_12.rs",
+      "score": 0.9231,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 13,
+      "name": "item-13",
+      "path": "src/module_13/file_13.rs",
+      "score": 1.0,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 14,
+      "name": "item-14",
+      "path": "src/module_14/file_14.rs",
+      "score": 1.0769,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 15,
+      "name": "item-15",
+      "path": "src/module_15/file_15.rs",
+      "score": 1.1538,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 16,
+      "name": "item-16",
+      "path": "src/module_16/file_16.rs",
+      "score": 1.2308,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 17,
+      "name": "item-17",
+      "path": "src/module_17/file_17.rs",
+      "score": 1.3077,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 18,
+      "name": "item-18",
+      "path": "src/module_18/file_18.rs",
+      "score": 1.3846,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 19,
+      "name": "item-19",
+      "path": "src/module_19/file_19.rs",
+      "score": 1.4615,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 20,
+      "name": "item-20",
+      "path": "src/module_0/file_20.rs",
+      "score": 1.5385,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 21,
+      "name": "item-21",
+      "path": "src/module_1/file_21.rs",
+      "score": 1.6154,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 22,
+      "name": "item-22",
+      "path": "src/module_2/file_22.rs",
+      "score": 1.6923,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 23,
+      "name": "item-23",
+      "path": "src/module_3/file_23.rs",
+      "score": 1.7692,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 24,
+      "name": "item-24",
+      "path": "src/module_4/file_24.rs",
+      "score": 1.8462,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 25,
+      "name": "item-25",
+      "path": "src/module_5/file_25.rs",
+      "score": 1.9231,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 26,
+      "name": "item-26",
+      "path": "src/module_6/file_26.rs",
+      "score": 2.0,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 27,
+      "name": "item-27",
+      "path": "src/module_7/file_27.rs",
+      "score": 2.0769,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 28,
+      "name": "item-28",
+      "path": "src/module_8/file_28.rs",
+      "score": 2.1538,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 29,
+      "name": "item-29",
+      "path": "src/module_9/file_29.rs",
+      "score": 2.2308,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 30,
+      "name": "item-30",
+      "path": "src/module_10/file_30.rs",
+      "score": 2.3077,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 31,
+      "name": "item-31",
+      "path": "src/module_11/file_31.rs",
+      "score": 2.3846,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 32,
+      "name": "item-32",
+      "path": "src/module_12/file_32.rs",
+      "score": 2.4615,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 33,
+      "name": "item-33",
+      "path": "src/module_13/file_33.rs",
+      "score": 2.5385,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 34,
+      "name": "item-34",
+      "path": "src/module_14/file_34.rs",
+      "score": 2.6154,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 35,
+      "name": "item-35",
+      "path": "src/module_15/file_35.rs",
+      "score": 2.6923,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 36,
+      "name": "item-36",
+      "path": "src/module_16/file_36.rs",
+      "score": 2.7692,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 37,
+      "name": "item-37",
+      "path": "src/module_17/file_37.rs",
+      "score": 2.8462,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 38,
+      "name": "item-38",
+      "path": "src/module_18/file_38.rs",
+      "score": 2.9231,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 39,
+      "name": "item-39",
+      "path": "src/module_19/file_39.rs",
+      "score": 3.0,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 40,
+      "name": "item-40",
+      "path": "src/module_0/file_40.rs",
+      "score": 3.0769,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 41,
+      "name": "item-41",
+      "path": "src/module_1/file_41.rs",
+      "score": 3.1538,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 42,
+      "name": "item-42",
+      "path": "src/module_2/file_42.rs",
+      "score": 3.2308,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 43,
+      "name": "item-43",
+      "path": "src/module_3/file_43.rs",
+      "score": 3.3077,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 44,
+      "name": "item-44",
+      "path": "src/module_4/file_44.rs",
+      "score": 3.3846,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 45,
+      "name": "item-45",
+      "path": "src/module_5/file_45.rs",
+      "score": 3.4615,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 46,
+      "name": "item-46",
+      "path": "src/module_6/file_46.rs",
+      "score": 3.5385,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 47,
+      "name": "item-47",
+      "path": "src/module_7/file_47.rs",
+      "score": 3.6154,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 48,
+      "name": "item-48",
+      "path": "src/module_8/file_48.rs",
+      "score": 3.6923,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 49,
+      "name": "item-49",
+      "path": "src/module_9/file_49.rs",
+      "score": 3.7692,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 50,
+      "name": "item-50",
+      "path": "src/module_10/file_50.rs",
+      "score": 3.8462,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 51,
+      "name": "item-51",
+      "path": "src/module_11/file_51.rs",
+      "score": 3.9231,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 52,
+      "name": "item-52",
+      "path": "src/module_12/file_52.rs",
+      "score": 4.0,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 53,
+      "name": "item-53",
+      "path": "src/module_13/file_53.rs",
+      "score": 4.0769,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 54,
+      "name": "item-54",
+      "path": "src/module_14/file_54.rs",
+      "score": 4.1538,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 55,
+      "name": "item-55",
+      "path": "src/module_15/file_55.rs",
+      "score": 4.2308,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 56,
+      "name": "item-56",
+      "path": "src/module_16/file_56.rs",
+      "score": 4.3077,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 57,
+      "name": "item-57",
+      "path": "src/module_17/file_57.rs",
+      "score": 4.3846,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 58,
+      "name": "item-58",
+      "path": "src/module_18/file_58.rs",
+      "score": 4.4615,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "ok"
+    },
+    {
+      "debug": "verbose internal trace that should be dropped verbose internal trace that should be dropped ",
+      "id": 59,
+      "name": "item-59",
+      "path": "src/module_19/file_59.rs",
+      "score": 4.5385,
+      "snippet": "matched line of source code with some surrounding context matched line of source code with some surrounding context ",
+      "status": "pending"
+    }
+  ],
+  "status": "ok",
+  "tool": "search_code",
+  "trace": "step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation step-by-step debug trace of the tool invocation "
+}

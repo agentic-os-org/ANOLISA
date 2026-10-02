@@ -1,0 +1,23 @@
+# cosh-shell startup health fixture
+host=fixture-linux-critical
+score=24
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.available_mib u64 384 MiB
+fact memory memory.available_ratio f64 0.0117 -
+fact memory memory.used_ratio f64 0.9883 -
+fact memory memory.swap_total_mib u64 8192 MiB
+fact memory memory.swap_used_mib u64 7168 MiB
+fact memory memory.swap_used_ratio f64 0.875 -
+fact cpu cpu.load_1m f64 18.0 -
+fact cpu cpu.load_5m f64 8.8 -
+fact cpu cpu.cores u64 4 -
+fact cpu cpu.load_per_core_1m f64 4.5 -
+fact cpu cpu.load_per_core_5m f64 2.2 -
+fact disk filesystem.max_used_ratio f64 0.96 -
+fact disk filesystem.available_gib f64 1.5 GiB
+fact disk filesystem.riskiest_mount str / -
+fact disk filesystem.root_used_ratio f64 0.96 -
+fact disk filesystem.root_available_gib f64 1.5 GiB
+fact kernel kernel.oom_latest_age_seconds u64 120 seconds
+fact kernel kernel.oom_killed_process str java -

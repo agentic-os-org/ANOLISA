@@ -1,0 +1,388 @@
+{
+  "schemaVersion": 1,
+  "generatedValues": {
+    "resource_id_129": "129 ASCII identifier bytes",
+    "policy_name_257": "257 policy-name bytes",
+    "path_4097": "4097 absolute-path bytes"
+  },
+  "dynamicValues": {
+    "existing_policy_id": "the UUID returned by the fixture setup Policy"
+  },
+  "cases": [
+    {
+      "name": "create policy with an empty policy name",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy name: must contain a visible character"}
+    },
+    {
+      "name": "update policy with a whitespace-only policy name",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "   ", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy name: must contain a visible character"}
+    },
+    {
+      "name": "create policy with an oversized policy name",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "${policy_name_257}", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy name: must not exceed 256 bytes"}
+    },
+    {
+      "name": "update policy with a control character in its name",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid\nname", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy name: must not contain control characters"}
+    },
+    {
+      "name": "create policy template without a kind",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `kind`"}
+    },
+    {
+      "name": "create policy template with an unknown kind",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "unknown", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `unknown`, expected one of `high_sensitivity_read_deny`, `prevent_file_deletion`, `low_sensitivity_egress`"}
+    },
+    {
+      "name": "create deletion policy without files",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion"}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `files`"}
+    },
+    {
+      "name": "create deletion policy with non-array files",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": "/valid"}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: string \"/valid\", expected a sequence"}
+    },
+    {
+      "name": "update deletion policy with a non-string file",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "missing-policy", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": [1]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected a string"}
+    },
+    {
+      "name": "create deletion policy with an unknown template field",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/valid"], "unexpected": true}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown field `unexpected`, expected `files`"}
+    },
+    {
+      "name": "create unsupported high-sensitivity policy",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "unsupported", "template": {"kind": "high_sensitivity_read_deny", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.kind: the current compiler supports only prevent_file_deletion"}
+    },
+    {
+      "name": "update to an unsupported low-sensitivity policy",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "unsupported", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com", "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.kind: the current compiler supports only prevent_file_deletion"}
+    },
+    {
+      "name": "create low-sensitivity policy without trusted destinations",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `trustedDestinations`"}
+    },
+    {
+      "name": "create low-sensitivity policy with an unknown destination kind",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "unknown", "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `unknown`, expected `host` or `cidr`"}
+    },
+    {
+      "name": "create low-sensitivity policy with an overflowing port",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com", "ports": [65536]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid value: integer `65536`, expected u16"}
+    },
+    {
+      "name": "create low-sensitivity policy with a non-object destination",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [1]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected internally tagged enum TrustedDestination"}
+    },
+    {
+      "name": "create host destination with a non-string pattern",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": 1, "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected a string"}
+    },
+    {
+      "name": "create host destination with non-array ports",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com", "ports": "443"}]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: string \"443\", expected a sequence"}
+    },
+    {
+      "name": "create host destination with a non-numeric port",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com", "ports": ["443"]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: string \"443\", expected u16"}
+    },
+    {
+      "name": "create CIDR destination with a non-string CIDR",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "cidr", "cidr": 1, "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected a string"}
+    },
+    {
+      "name": "create deletion policy with no files",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": []}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files: must not be empty"}
+    },
+    {
+      "name": "create deletion policy with an empty path",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": [""]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must be absolute and contain no NUL, home expansion, or environment variables"}
+    },
+    {
+      "name": "update deletion policy with a relative path",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["relative/path"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must be absolute and contain no NUL, home expansion, or environment variables"}
+    },
+    {
+      "name": "create deletion policy with a NUL path",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid\u0000path"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must be absolute and contain no NUL, home expansion, or environment variables"}
+    },
+    {
+      "name": "create deletion policy with home expansion",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/home/~/invalid"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must be absolute and contain no NUL, home expansion, or environment variables"}
+    },
+    {
+      "name": "update deletion policy with environment expansion",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/$INVALID"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must be absolute and contain no NUL, home expansion, or environment variables"}
+    },
+    {
+      "name": "create deletion policy with an oversized path",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["${path_4097}"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path exceeds 4096 bytes"}
+    },
+    {
+      "name": "update deletion policy with a trailing separator",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid/"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path must not have a trailing separator"}
+    },
+    {
+      "name": "create deletion policy with repeated separators",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid//path"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path contains repeated separators"}
+    },
+    {
+      "name": "create deletion policy with a dot segment",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid/./path"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path contains a dot segment"}
+    },
+    {
+      "name": "update deletion policy with a parent segment",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid/../path"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: path contains a dot segment"}
+    },
+    {
+      "name": "create deletion policy with unsupported glob syntax",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid/[ab]*"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: glob supports only *, ?, and whole-segment **"}
+    },
+    {
+      "name": "update deletion policy with embedded double star",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "${existing_policy_id}", "policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/invalid/pre**post"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[0]: ** must occupy a complete path segment"}
+    },
+    {
+      "name": "create deletion policy with a duplicate matcher",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/duplicate", "/duplicate"]}}},
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.files[1]: duplicate matcher"}
+    },
+    {
+      "name": "create policy template with a non-string kind",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": 1, "files": ["/valid"]}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected variant identifier"}
+    },
+    {
+      "name": "create low-sensitivity policy with non-array destinations",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": {}}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: map, expected a sequence"}
+    },
+    {
+      "name": "create host destination without a pattern",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `pattern`"}
+    },
+    {
+      "name": "create host destination without ports",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com"}]}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `ports`"}
+    },
+    {
+      "name": "create CIDR destination without CIDR",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "cidr", "ports": [443]}]}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `cidr`"}
+    },
+    {
+      "name": "create host destination with an unknown field",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "low_sensitivity_egress", "files": ["/valid"], "trustedDestinations": [{"type": "host", "pattern": "example.com", "ports": [443], "unexpected": true}]}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown field `unexpected`, expected `pattern` or `ports`"}
+    },
+    {
+      "name": "create scope selector without kind",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"pid": 1}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `kind`"}
+    },
+    {
+      "name": "update scope with an unknown selector kind",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "unknown", "pid": 1}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `unknown`, expected `pid` or `cgroup_id`"}
+    },
+    {
+      "name": "create PID scope without a PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid"}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `pid`"}
+    },
+    {
+      "name": "update cgroup scope without a cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id"}}},
+      "expectedError": {"code": "invalid_request", "message": "missing field `cgroupId`"}
+    },
+    {
+      "name": "create PID scope with an unknown field",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": 1, "unexpected": true}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown field `unexpected`, expected `pid`"}
+    },
+    {
+      "name": "create scope with zero PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": 0}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid selector at pid: must be positive"}
+    },
+    {
+      "name": "update scope with zero cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 0}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid selector at cgroupId: must be positive"}
+    },
+    {
+      "name": "create scope with a negative PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": -1}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid value: integer `-1`, expected u32"}
+    },
+    {
+      "name": "create scope with an overflowing PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": 4294967296}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid value: integer `4294967296`, expected u32"}
+    },
+    {
+      "name": "create scope with a fractional PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": 1.5}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: floating point `1.5`, expected u32"}
+    },
+    {
+      "name": "create scope with a string PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": "one"}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: string \"one\", expected u32"}
+    },
+    {
+      "name": "create scope with a null PID",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": null}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: null, expected u32"}
+    },
+    {
+      "name": "create PID scope with a cgroup field",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "pid", "pid": 1, "cgroupId": 1}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown field `cgroupId`, expected `pid`"}
+    },
+    {
+      "name": "update cgroup scope with a PID field",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 1, "pid": 1}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown field `pid`, expected `cgroupId`"}
+    },
+    {
+      "name": "update scope with a negative cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": -1}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid value: integer `-1`, expected u64"}
+    },
+    {
+      "name": "update scope with an overflowing cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 18446744073709551616}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: floating point `1.8446744073709552e+19`, expected u64"}
+    },
+    {
+      "name": "update scope with a fractional cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 1.5}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: floating point `1.5`, expected u64"}
+    },
+    {
+      "name": "update scope with a string cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": "one"}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: string \"one\", expected u64"}
+    },
+    {
+      "name": "update scope with a null cgroup ID",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": null}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: null, expected u64"}
+    },
+    {
+      "name": "create scope with a legacy selector",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "legacy_execution_domain", "executionDomainId": "legacy-domain"}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `legacy_execution_domain`, expected `pid` or `cgroup_id`"}
+    },
+    {
+      "name": "update scope with a legacy selector",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "legacy_execution_domain", "executionDomainId": "legacy-domain"}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `legacy_execution_domain`, expected `pid` or `cgroup_id`"}
+    },
+    {
+      "name": "update a missing policy",
+      "request": {"method": "policy.templates.update", "params": {"policyId": "missing-policy", "policyName": "valid", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
+      "expectedError": {"code": "not_found", "message": "policy was not found"}
+    },
+    {
+      "name": "get a missing policy revision",
+      "request": {"method": "policy.templates.get", "params": {"id": "missing-policy", "revision": 1}},
+      "expectedError": {"code": "not_found", "message": "policy revision was not found"}
+    },
+    {
+      "name": "delete a missing policy revision",
+      "request": {"method": "policy.templates.delete", "params": {"id": "missing-policy", "revision": 1}},
+      "expectedError": {"code": "not_found", "message": "policy revision was not found"}
+    },
+    {
+      "name": "update a missing scope",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "pid", "pid": 1}}},
+      "expectedError": {"code": "not_found", "message": "scope was not found"}
+    },
+    {
+      "name": "get a missing scope revision",
+      "request": {"method": "policy.scopes.get", "params": {"id": "missing-scope", "revision": 1}},
+      "expectedError": {"code": "not_found", "message": "scope revision was not found"}
+    },
+    {
+      "name": "delete a missing scope revision",
+      "request": {"method": "policy.scopes.delete", "params": {"id": "missing-scope", "revision": 1}},
+      "expectedError": {"code": "not_found", "message": "scope revision was not found"}
+    },
+    {
+      "name": "create binding with a missing policy revision",
+      "request": {"method": "policy.bindings.create", "params": {"policyId": "missing-policy", "policyRevision": 1, "scopeId": "missing-scope", "scopeRevision": 1}},
+      "expectedError": {"code": "not_found", "message": "referenced policy revision was not found"}
+    },
+    {
+      "name": "create binding with a missing scope revision",
+      "request": {"method": "policy.bindings.create", "params": {"policyId": "${existing_policy_id}", "policyRevision": 1, "scopeId": "missing-scope", "scopeRevision": 1}},
+      "expectedError": {"code": "not_found", "message": "referenced scope revision was not found"}
+    },
+    {
+      "name": "update a missing binding",
+      "request": {"method": "policy.bindings.update", "params": {"bindingId": "missing-binding", "policyId": "missing-policy", "policyRevision": 1, "scopeId": "missing-scope", "scopeRevision": 1}},
+      "expectedError": {"code": "not_found", "message": "binding was not found"}
+    },
+    {
+      "name": "get a missing binding",
+      "request": {"method": "policy.bindings.get", "params": {"id": "missing-binding"}},
+      "expectedError": {"code": "not_found", "message": "binding was not found"}
+    },
+    {
+      "name": "delete a missing binding",
+      "request": {"method": "policy.bindings.delete", "params": {"id": "missing-binding"}},
+      "expectedError": {"code": "not_found", "message": "binding was not found"}
+    },
+    {
+      "name": "list policies with zero limit",
+      "request": {"method": "policy.templates.list", "params": {"limit": 0, "offset": 0}},
+      "expectedError": {"code": "invalid_request", "message": "limit must be between 1 and 1000"}
+    },
+    {
+      "name": "list scopes above the maximum limit",
+      "request": {"method": "policy.scopes.list", "params": {"limit": 1001, "offset": 0}},
+      "expectedError": {"code": "invalid_request", "message": "limit must be between 1 and 1000"}
+    },
+    {
+      "name": "list bindings with a negative offset",
+      "request": {"method": "policy.bindings.list", "params": {"limit": 1, "offset": -1}},
+      "expectedError": {"code": "invalid_request", "message": "invalid value: integer `-1`, expected u32"}
+    }
+  ]
+}

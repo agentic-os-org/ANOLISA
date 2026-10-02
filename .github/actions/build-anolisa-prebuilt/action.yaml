@@ -1,0 +1,54 @@
+name: Build ANOLISA CLI prebuilt package
+description: Build and package one ANOLISA CLI release target on the release Cross runner.
+
+inputs:
+  version:
+    description: Component version without the v prefix.
+    required: true
+  target-os:
+    description: Package target operating system.
+    required: true
+  target-arch:
+    description: Package target architecture.
+    required: true
+  profile:
+    description: Prepared Cross release profile.
+    required: true
+  tag:
+    description: Release tag to bind to the checked-out commit. Empty for previews.
+    required: false
+    default: ''
+
+outputs:
+  artifact-directory:
+    description: Directory containing the tar, checksums, and CycloneDX SBOM.
+    value: ${{ steps.build.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Build precompiled package
+      id: build
+      shell: bash
+      env:
+        ANOLISA_OUTPUT_DIR: ${{ runner.temp }}/anolisa-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        ANOLISA_VERSION: ${{ inputs.version }}
+        ANOLISA_TARGET_OS: ${{ inputs.target-os }}
+        ANOLISA_TARGET_ARCH: ${{ inputs.target-arch }}
+        ANOLISA_PROFILE: ${{ inputs.profile }}
+        ANOLISA_TAG: ${{ inputs.tag }}
+      run: |
+        "$GITHUB_ACTION_PATH/build.sh" \
+          --source-repo "$GITHUB_WORKSPACE" \
+          --output-dir "$ANOLISA_OUTPUT_DIR" \
+          --version "$ANOLISA_VERSION" \
+          --target-os "$ANOLISA_TARGET_OS" \
+          --target-arch "$ANOLISA_TARGET_ARCH" \
+          --profile "$ANOLISA_PROFILE" \
+          --tag "$ANOLISA_TAG"
+        echo "artifact-directory=$ANOLISA_OUTPUT_DIR" >> "$GITHUB_OUTPUT"

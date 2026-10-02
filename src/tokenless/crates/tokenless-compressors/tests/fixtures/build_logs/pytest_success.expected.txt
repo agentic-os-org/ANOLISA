@@ -1,0 +1,13 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+configfile: pyproject.toml
+collected 38 items
+
+tests/test_core.py::test_case_00 PASSED [  2%]
+tests/test_core.py::test_case_01 PASSED [  5%]
+34 passing test lines omitted. If needed, run in shell: tokenless retrieve 41224042da659ef8033ac770
+tests/test_core.py::test_case_36 PASSED [ 97%]
+tests/test_core.py::test_case_37 PASSED [100%]
+
+============================== 38 passed in 1.23s ===============================

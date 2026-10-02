@@ -1,0 +1,915 @@
+//! GenAI Semantic Builder
+//!
+//! This module builds GenAI semantic events from AnalysisResult.
+//! It reuses already-extracted data to avoid redundant parsing.
+
+use super::helpers::PidAgentNameCache;
+use super::id_resolver::IdResolver;
+use super::semantic::GenAISemanticEvent;
+use crate::aggregator::{ConnectionId, ParsedRequest};
+use crate::analyzer::AnalysisResult;
+use crate::analyzer::token::{TokenParser, merge_usage};
+use crate::parser::sse::ParsedSseEvent;
+use crate::response_map::ResponseSessionMapper;
+use crate::runtime_metrics::StageTimer;
+use crate::storage::sqlite::{PendingCallInfo, PendingOrigin, SseEnrichment};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Output from `GenAIBuilder::build()`, containing built events and deferred resolution info.
+pub struct BuildOutput {
+    /// Built GenAI semantic events (ready to export, may have fallback session_id)
+    pub events: Vec<GenAISemanticEvent>,
+    /// If set, the session_id was NOT resolved from the ResponseSessionMapper and
+    /// the caller should retry the lookup later using this response ID.
+    /// When the lookup succeeds, update the `session_id` metadata of all events.
+    pub pending_response_id: Option<String>,
+}
+
+/// Builder that constructs GenAI semantic events from AnalysisResult
+pub struct GenAIBuilder {
+    /// Session ID prefix (timestamp-based, unique per agentsight run)
+    session_prefix: String,
+    /// Counter for generating unique IDs within a session
+    call_counter: AtomicU64,
+    /// Resolver for `session_id` fallback / `conversation_id` based on the
+    /// earliest `response_id` observed within a session / conversation.
+    pub(super) id_resolver: IdResolver,
+}
+
+impl Default for GenAIBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GenAIBuilder {
+    /// Create a new GenAI builder
+    pub fn new() -> Self {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        GenAIBuilder {
+            session_prefix: format!("{ts:x}_{pid:x}"),
+            call_counter: AtomicU64::new(0),
+            id_resolver: IdResolver::new(),
+        }
+    }
+
+    pub(super) fn pending_match_key(
+        pid: u32,
+        start_timestamp_ns: u64,
+        method: &str,
+        path: &str,
+        request_body: Option<&str>,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"agentsight-pending-v1\0");
+        hasher.update(pid.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(start_timestamp_ns.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(method.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        if let Some(body) = request_body {
+            hasher.update(body.as_bytes());
+        }
+        format!("pmk-{:x}", hasher.finalize())
+    }
+
+    fn parsed_request_match_body(
+        request: &ParsedRequest,
+        body: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        body.map(|v| serde_json::to_string(v).unwrap_or_default())
+            .or_else(|| {
+                let raw = request.body();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(raw).to_string())
+                }
+            })
+    }
+
+    /// Build GenAI semantic events AND a `PendingCallInfo` to be written to DB
+    /// before the response arrives.
+    ///
+    /// Returns `(output, Some(pending_info))` where `pending_info.call_id` matches
+    /// the `call_id` embedded inside the returned `LLMCall` event, so the caller can
+    /// first `insert_pending(pending_info)` and later `complete_pending(event)`.
+    ///
+    /// The `BuildOutput` also carries `pending_response_id` when the session_id
+    /// could not be resolved from the `ResponseSessionMapper` so the caller can
+    /// queue the events for deferred resolution.
+    ///
+    /// Returns `(output, None)` when no LLM API call was detected in `results`.
+    pub fn build_with_pending(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        let timer = StageTimer::start("genai");
+        let mut events = Vec::new();
+        let mut pending: Option<PendingCallInfo> = None;
+        let mut pending_response_id = None;
+
+        if let Some(llm_call) = self.build_llm_call(results, response_mapper, pid_agent_name_cache)
+        {
+            // Build PendingCallInfo from the same LLMCall before moving it
+            let http_record = results.iter().find_map(|r| match r {
+                AnalysisResult::Http(h) => Some(h.clone()),
+                _ => None,
+            });
+
+            // Extract input messages for the pending record
+            let (input_messages_json, system_instructions_json) = {
+                let sys: Vec<_> = llm_call
+                    .request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "system")
+                    .collect();
+                let latest =
+                    crate::genai::semantic::latest_round_input_messages(&llm_call.request.messages);
+                (
+                    if latest.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&latest).ok()
+                    },
+                    if sys.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&sys).ok()
+                    },
+                )
+            };
+
+            // Determine response_id from call metadata (may come from parsed_message
+            // or SSE body fallback), and check if mapper resolved it (either via
+            // response_id mapping, or via pid → session fallback for agents like
+            // Codex CLI whose rollout file does not embed a response_id).
+            let response_id = llm_call.metadata.get("response_id").cloned();
+            let mapper_hit = response_id
+                .as_deref()
+                .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+                .is_some()
+                || response_mapper
+                    .get_session_by_pid(llm_call.pid as u32)
+                    .is_some();
+
+            // If response_id exists but mapper didn't resolve session_id, queue
+            // for deferred resolution so the next FileWrite event can fix it.
+            if response_id.is_some() && !mapper_hit {
+                pending_response_id = response_id;
+                log::debug!(
+                    "GenAI response_id {} not yet in mapper, will defer session_id resolution",
+                    pending_response_id.as_deref().unwrap_or_default()
+                );
+            }
+
+            pending = Some(PendingCallInfo {
+                call_id: llm_call.call_id.clone(),
+                trace_id: llm_call.metadata.get("response_id").cloned(),
+                conversation_id: llm_call.metadata.get("conversation_id").cloned(),
+                session_id: llm_call.metadata.get("session_id").cloned(),
+                start_timestamp_ns: llm_call.start_timestamp_ns,
+                pid: llm_call.pid,
+                process_name: llm_call.process_name.clone(),
+                agent_name: llm_call.agent_name.clone(),
+                http_method: http_record.as_ref().map(|h| h.method.clone()),
+                http_path: http_record.as_ref().map(|h| h.path.clone()),
+                input_messages: input_messages_json,
+                system_instructions: system_instructions_json,
+                user_query: llm_call.metadata.get("user_query").cloned(),
+                is_sse: llm_call.request.stream,
+                model: Some(llm_call.model.clone()),
+                provider: Some(llm_call.provider.clone()),
+                call_kind: llm_call
+                    .metadata
+                    .get("call_kind")
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string()),
+                pending_origin: PendingOrigin::RequestCapture,
+                pending_match_key: llm_call.metadata.get("pending_match_key").cloned(),
+            });
+
+            events.push(GenAISemanticEvent::LLMCall(llm_call));
+        }
+
+        let output = BuildOutput {
+            events,
+            pending_response_id,
+        };
+        timer.record_outputs(output.events.len());
+        (output, pending)
+    }
+
+    /// Build a `PendingCallInfo` directly from a raw `ParsedRequest` and
+    /// `ConnectionId`, without needing a full `AnalysisResult`.
+    ///
+    /// This is used when the event loop detects that a PID has died while its
+    /// connection was still in `RequestPending` or `SseActive` state.  By
+    /// writing a pending record to `genai_events`, the HealthChecker can later
+    /// find it via `list_pending_for_pid` and create a properly correlated
+    /// `InterruptionEvent`.
+    ///
+    /// Returns `None` if the request path is not a known LLM API endpoint or
+    /// the body cannot be parsed at all.
+    ///
+    /// 本函数只会在调用方已经判定"这次追踪的调用不会再正常收到 `finish_reason`"
+    /// 的场景下被调用，覆盖两类情况：
+    /// 1. 进程已确认退出（`ProcMon::Exit` 触发的即时崩溃检测、定期扫描发现的
+    ///    死 PID 清理）；
+    /// 2. 进程仍存活，但连接/SSE 流已超过空闲超时（默认 60s 无数据）被判定为
+    ///    手动中断或流已放弃（`snapshot_idle_connections`）。
+    ///
+    /// 因此本函数总是会额外驱逐 `(agent_name, pid, last_user_text)` 对应的
+    /// conversation anchor，给这两类中断场景提供与 `call_builder.rs` 中
+    /// `finish_reason` 终止态同等的轮结束信号：避免未来该 PID 复用相同固定
+    /// 文案（如系统 recap nudge，或用户重发一模一样的 prompt）时，被误判成
+    /// 同一轮尚未结束的旧对话。
+    ///
+    /// 即使原连接后续意外恢复并正常完成（空闲超时属于启发式判断，可能误判），
+    /// 驱逐锚点也不会产生错误结果：该调用完成时仍会通过正常路径重新调用
+    /// `resolve_conversation_id`，用它自己的 `response_id` 重新锚定，效果与
+    /// 未驱逐时一致——只要驱逐后、真正完成前没有其他调用抢占了这个 key。
+    pub fn build_pending_from_request(
+        &self,
+        request: &ParsedRequest,
+        conn_id: &ConnectionId,
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+    ) -> Option<PendingCallInfo> {
+        // Only process known LLM API paths
+        let path_match = self.is_llm_api_path(&request.path);
+        let body_str = if request.body_len > 0 {
+            Some(request.body_str().to_string())
+        } else {
+            None
+        };
+        let body_match = !path_match && Self::is_sysom_pop_request(&body_str);
+        if !path_match && !body_match {
+            return None;
+        }
+
+        let call_id = self.generate_id();
+        let body = request.json_body();
+        let match_body = Self::parsed_request_match_body(request, body.as_ref());
+        let pending_match_key = Self::pending_match_key(
+            conn_id.pid,
+            request.source_event.timestamp_ns,
+            &request.method,
+            &request.path,
+            match_body.as_deref(),
+        );
+
+        // Determine if streaming
+        let is_sse = body
+            .as_ref()
+            .and_then(|v| v.get("stream"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Parse messages from body to extract user_query / input_messages /
+        // system_instructions / first_user_text / last_user_text。session_id 与
+        // conversation_id 在 request 阶段采用双层兑底：
+        //   1. 优先走 IdResolver::peek_*（同 PID 之前有过正常完成的调用 →
+        //      LRU 已 anchor 首个 response_id，复用后与正常路径完全对齐）。
+        //   2. 未命中时 → `crash_fallback_id`以 (agent_name, pid, user_text) 作为
+        //      兑底 ID 输入，保证 crash-drain 路径同 PID 同 user_query 的
+        //      crash 记录归一桶，不同 user_query 分桶。
+        //
+        // 正常响应到达后 `complete_pending` 仍会用 `IdResolver::resolve_*`
+        // 重新计算并 UPDATE 正常 ID，只有 crash 路径才会保留这里写入的
+        // peek/fallback 值。
+        let (
+            user_query,
+            input_messages,
+            system_instructions,
+            first_user_text,
+            last_user_text,
+            user_message_count,
+        ) = if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+            let (messages, instructions_text) = view;
+
+            // First user message raw text — used as `session_key` material
+            // for IdResolver peek / crash fallback.
+            let first_user_text = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text)
+                .unwrap_or_default();
+
+            // Last user message raw text — used for user_query (display text)
+            // 以及 conversation_key (peek / crash fallback)。
+            let last_user_raw = messages
+                .iter()
+                .rev()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text);
+            let last_user_text = last_user_raw.clone().unwrap_or_default();
+
+            let user_message_count = Self::count_real_user_messages_from_json(&messages);
+
+            // user_query: last user message text, stripped of metadata prefix
+            let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
+
+            // Serialise message subsets for the pending record
+            let sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .collect();
+            let non_sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                .collect();
+
+            let input_messages = if non_sys.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&non_sys).ok()
+            };
+            let system_instructions = if sys.is_empty() {
+                // Responses API carries the system prompt at the top level
+                // via "instructions". Fall back to that when the messages
+                // array has no system role.
+                instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
+            } else {
+                serde_json::to_string(&sys).ok()
+            };
+
+            (
+                user_query,
+                input_messages,
+                system_instructions,
+                first_user_text,
+                last_user_text,
+                user_message_count,
+            )
+        } else {
+            (None, None, None, String::new(), String::new(), 0)
+        };
+
+        // Classify call_kind from request content
+        let call_kind =
+            super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
+
+        // Extract model from request body JSON "model" field
+        let model = body
+            .as_ref()
+            .and_then(|v| v.get("model"))
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        // Extract provider from request path
+        let provider = self.extract_provider_from_path(&request.path);
+
+        // Resolve agent_name: cache → cmdline rule → *process* comm
+        // (`<procfs root>/<pid>/comm`). Only if the entry is unreadable do we
+        // fall back to the SSL event's per-event thread comm, which may be a
+        // library worker-thread name such as "HTTP client".
+        let agent_name = Self::resolve_agent_name_from_comm(
+            &request.source_event.comm,
+            conn_id.pid,
+            pid_agent_name_cache,
+        )
+        .or_else(|| crate::discovery::scanner::read_comm(conn_id.pid))
+        .or_else(|| Some(request.source_event.comm_str()));
+
+        // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
+        let metadata_session: Option<String> = body
+            .as_ref()
+            .and_then(|b| b.get("metadata"))
+            .and_then(crate::analyzer::message::types::session_id_from_metadata);
+
+        // 双层兜底计算 session_id / conversation_id（详见上方注释）。
+        // 这里不使用 unwrap_or_else(|| "") 是为了让“同 PID 同 agent”上下文下
+        // crash_fallback_id 输入始终相同。
+        let agent_name_str = agent_name.as_deref().unwrap_or("");
+        let pid_i32 = conn_id.pid as i32;
+
+        let session_id = metadata_session
+            .or_else(|| {
+                // Mapper first (same order as call_builder.rs): a FileWrite
+                // from this pid already revealed the real session UUID, which
+                // groups the crash-drain record with the normal calls of the
+                // same session instead of an isolated crash bucket (#2059).
+                //
+                // Known limitation: pid_map has no lifecycle bound, so a
+                // recycled pid whose new process has not yet written a session
+                // file can surface the previous process's mapping here. This
+                // mis-groups only orphan calls that would otherwise get a
+                // synthetic crash hash, and needs pid reuse + zero FileWrite +
+                // drain to coincide — accepted instead of lifecycle tracking.
+                response_mapper
+                    .get_session_by_pid(conn_id.pid)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                self.id_resolver
+                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+            })
+            .or_else(|| {
+                Some(super::id_resolver::crash_fallback_id(
+                    "session",
+                    agent_name_str,
+                    pid_i32,
+                    &first_user_text,
+                    0,
+                ))
+            });
+        let conversation_id = self
+            .id_resolver
+            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
+            .or_else(|| {
+                Some(super::id_resolver::crash_fallback_id(
+                    "conversation",
+                    agent_name_str,
+                    pid_i32,
+                    &last_user_text,
+                    user_message_count,
+                ))
+            });
+
+        // 若调用方已确认本次调用不会再有后续 finish_reason（进程崩溃 /
+        // 本函数只在中断场景下被调用（进程崩溃/异常退出，或连接空闲超时被
+        // 判定为中断），此轮对话不会再有后续 finish_reason 信号。在这里显式
+        // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
+        // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
+        // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
+        self.id_resolver.finish_conversation(
+            agent_name_str,
+            pid_i32,
+            &last_user_text,
+            user_message_count,
+        );
+
+        Some(PendingCallInfo {
+            call_id,
+            trace_id: None, // LLM API response_id, not available until response
+            // session_id / conversation_id 在请求阶段采用双层兑底：
+            // 1) IdResolver::peek_* 复用同 PID 之前正常完成调用的 anchor，
+            //    响应到达后 `complete_pending` 会用同样的值覆盖；
+            // 2) LRU miss 时走 `crash_fallback_id`（`crash-` 前缀与正常 ID 隔离），
+            //    进程崩溃不会走到 complete_pending 时该值会保留，供
+            //    handle_agent_crash_detection 按 (sid, cid) 分组。
+            conversation_id,
+            session_id,
+            start_timestamp_ns: request.source_event.timestamp_ns,
+            pid: pid_i32,
+            // Process name = the *process* comm, not the per-event thread comm.
+            process_name: crate::discovery::scanner::read_comm(conn_id.pid)
+                .unwrap_or_else(|| request.source_event.comm.clone()),
+            agent_name,
+            http_method: Some(request.method.clone()),
+            http_path: Some(request.path.clone()),
+            input_messages,
+            system_instructions,
+            user_query,
+            is_sse,
+            model,
+            provider,
+            call_kind: call_kind.to_string(),
+            pending_origin: PendingOrigin::DeadPidDrain,
+            pending_match_key: Some(pending_match_key),
+        })
+    }
+
+    /// Extract enrichment data from SSE events captured before the process died.
+    ///
+    /// Parses sse_events for:
+    /// - model name (from first chunk's "model" field)
+    /// - trace_id / response_id (from first chunk's "id" field)
+    /// - token usage (via TokenParser, from DashScope-style usage chunks)
+    /// - output content (merged content deltas)
+    ///
+    /// Returns `None` if sse_events is empty.
+    pub fn extract_sse_enrichment(sse_events: &[ParsedSseEvent]) -> Option<SseEnrichment> {
+        if sse_events.is_empty() {
+            return None;
+        }
+
+        let token_parser = TokenParser::new();
+        let mut model: Option<String> = None;
+        let mut trace_id: Option<String> = None;
+        let mut content_buf = String::new();
+
+        // Forward scan for model, trace_id, and content deltas
+        for event in sse_events {
+            if let Some(json) = event.json_body() {
+                // Extract model from first chunk that has it
+                if model.is_none() {
+                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
+                // Extract response id (trace_id) from first chunk that has it
+                if trace_id.is_none() {
+                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            trace_id = Some(id.to_string());
+                        }
+                    }
+                }
+                // Accumulate content deltas
+                if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
+                    for choice in choices {
+                        if let Some(delta) = choice.get("delta") {
+                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                                content_buf.push_str(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge token usage across every event. Anthropic splits it: the
+        // `message_start` event carries input_tokens plus the cache counters
+        // while the terminal `message_delta` carries only output_tokens, so
+        // keeping the last usage-bearing event would record input as 0.
+        let usage = sse_events
+            .iter()
+            .filter_map(|e| token_parser.parse_event(e))
+            .fold(None, merge_usage);
+
+        let (input_tokens, output_tokens) = match &usage {
+            Some(u) => (Some(u.input_tokens as i64), Some(u.output_tokens as i64)),
+            None => (None, None),
+        };
+
+        // Use model from usage if not found in content chunks
+        if model.is_none() {
+            if let Some(ref u) = usage {
+                model = u.model.clone();
+            }
+        }
+
+        // Build output_messages JSON from accumulated content
+        let output_messages = if !content_buf.is_empty() {
+            // Format as a JSON array matching OutputMessage structure
+            serde_json::to_string(&serde_json::json!([{
+                "role": "assistant",
+                "parts": [{"Text": {"content": content_buf}}]
+            }]))
+            .ok()
+        } else {
+            None
+        };
+
+        let event_count = sse_events.len() as i64;
+
+        Some(SseEnrichment {
+            model,
+            trace_id,
+            provider: None, // provider already set from request path in insert_pending
+            output_messages,
+            sse_event_count: Some(event_count),
+            input_tokens,
+            output_tokens,
+        })
+    }
+
+    /// Count "real" user messages from a raw JSON messages array.
+    ///
+    /// A real user message has `role="user"` AND content that is either a
+    /// non-empty string, or an array containing at least one item with type
+    /// `"text"`, `"input_text"`, or `"output_text"` and non-empty text.
+    /// Mirrors the text detection logic from `extract_message_text`.
+    fn count_real_user_messages_from_json(messages: &[serde_json::Value]) -> usize {
+        messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    && Self::extract_message_text(m).is_some()
+            })
+            .count()
+    }
+
+    /// Generate globally unique ID (unique across restarts)
+    pub(super) fn generate_id(&self) -> String {
+        let seq = self.call_counter.fetch_add(1, Ordering::Relaxed);
+        format!("{}_{}", self.session_prefix, seq)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probes::sslsniff::SslEvent;
+    use std::rc::Rc;
+
+    fn make_request(path: &str, body: &str) -> ParsedRequest {
+        let buf = body.as_bytes().to_vec();
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 1,
+            comm: "test".to_string(),
+            buf,
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        });
+        ParsedRequest {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            version: 11,
+            headers: std::collections::HashMap::new(),
+            body_offset: 0,
+            body_len: body.len(),
+            source_event: ssl_event,
+            reassembled_body: None,
+        }
+    }
+
+    /// Build a zero-copy `ParsedSseEvent` whose single `data:` line is `data`.
+    fn make_sse_event(data: &str) -> ParsedSseEvent {
+        let buf = data.as_bytes().to_vec();
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 0,
+            comm: "test".to_string(),
+            buf,
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        });
+        ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
+
+    /// Anthropic splits usage across SSE events: `message_start` carries
+    /// input_tokens plus the cache counters, while the terminal
+    /// `message_delta` carries only output_tokens. The drain path must merge
+    /// both, exactly like the analyzer's SSE token extractor, instead of
+    /// letting the last usage-bearing event win and recording input as 0.
+    #[test]
+    fn test_extract_sse_enrichment_merges_anthropic_split_usage() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1,"cache_creation_input_tokens":5678,"cache_read_input_tokens":90}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+        assert_eq!(
+            enrichment.input_tokens,
+            Some(1234),
+            "input_tokens from message_start must survive the message_delta"
+        );
+        assert_eq!(enrichment.output_tokens, Some(42));
+    }
+
+    #[test]
+    fn test_generate_id_unique() {
+        let builder = GenAIBuilder::new();
+        let id1 = builder.generate_id();
+        let id2 = builder.generate_id();
+        assert_ne!(id1, id2);
+        assert!(id1.contains('_'));
+    }
+
+    #[test]
+    fn test_default_builder() {
+        let b1 = GenAIBuilder::default();
+        let b2 = GenAIBuilder::new();
+        // Both should have different session prefixes (different timestamps)
+        // But both should generate valid IDs
+        let id1 = b1.generate_id();
+        let id2 = b2.generate_id();
+        assert!(id1.contains('_'));
+        assert!(id2.contains('_'));
+    }
+
+    #[test]
+    fn test_build_pending_from_request_chat_completions() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .unwrap();
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert_eq!(pending.provider.as_deref(), Some("openai"));
+        assert!(pending.system_instructions.is_some());
+        assert!(pending.user_query.as_deref() == Some("hello"));
+        assert_eq!(pending.call_kind, "main");
+    }
+
+    #[test]
+    fn test_build_pending_from_request_responses_api() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","input":[{"role":"user","content":"hello"}],"instructions":"sys prompt"}"#;
+        let req = make_request("/v1/responses", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .unwrap();
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert_eq!(pending.provider.as_deref(), Some("openai"));
+        assert!(pending.system_instructions.is_some());
+        assert!(pending.user_query.as_deref() == Some("hello"));
+    }
+
+    #[test]
+    fn test_build_pending_from_request_non_llm_path() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[]}"#;
+        let req = make_request("/api/health", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_build_pending_from_request_llm_path_no_messages_view() {
+        let builder = GenAIBuilder::new();
+        // LLM path but body lacks both "messages" and "input".
+        let body = r#"{"model":"gpt-4","stream":true}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("LLM path should still create pending even without messages");
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert!(pending.user_query.is_none());
+        assert!(pending.input_messages.is_none());
+        assert!(pending.system_instructions.is_none());
+    }
+
+    #[test]
+    fn test_build_pending_from_request_evicts_conversation_anchor() {
+        // build_pending_from_request 只在中断场景（进程崩溃或空闲超时）下被
+        // 调用，因此总是会驱逐 conversation 锚点：固定文本先通过正常路径
+        // 锁定一个 conversation_id，然后该轮调用确认不会再有 finish_reason，
+        // 再次调用 `build_pending_from_request` 应驱逐该锚点，使同 PID
+        // 同固定文本的下一轮对话重新锚定。
+        let builder = GenAIBuilder::new();
+        let pid = 1i32;
+        let text = "hello";
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        // 先跑一次拿到 build_pending_from_request 实际解析出的 agent_name
+        // （测试环境下可能因为 `/proc/1/comm` 真实存在而解析成实际进程名，
+        // 不一定是 make_request 里设置的 "test"，所以直接从返回值里读，
+        // 保证后面手动调用 `resolve_conversation_id` 时用的 key 与它一致）。
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("LLM path should create pending");
+        let agent_name = pending.agent_name.clone().unwrap_or_default();
+
+        // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
+        let turn1 = builder
+            .id_resolver
+            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
+            .unwrap();
+
+        // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
+        builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("LLM path should create pending");
+
+        // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
+        let turn2 = builder
+            .id_resolver
+            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
+            .unwrap();
+        assert_ne!(
+            turn1, turn2,
+            "build_pending_from_request 应驱逐锚点，让相同文本开启新的一轮对话"
+        );
+    }
+
+    /// A pid → session UUID mapping registered by a FileWrite event must win
+    /// over the peek/crash-fallback chain in the crash-drain path (#2059).
+    /// Reverting the mapper lookup in `build_pending_from_request` makes this
+    /// test fail (session_id would become the 32-hex crash fallback).
+    #[test]
+    fn test_build_pending_from_request_uses_mapper_pid_session() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+
+        // Pre-seed pid 4242 → session UUID via a cosh-core atomic-write temp
+        // file, the same way the filewrite probe feeds the mapper at runtime.
+        let mut mapper = ResponseSessionMapper::new();
+        mapper.process_filewrite(&crate::probes::FileWriteEvent {
+            pid: 4242,
+            tid: 4242,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh-core".to_string(),
+            filename:
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: Vec::new(),
+        });
+
+        let pending = builder
+            .build_pending_from_request(
+                &req,
+                &ConnectionId {
+                    pid: 4242,
+                    ssl_ptr: 2,
+                },
+                &mapper,
+                &cache,
+            )
+            .expect("LLM path should create pending");
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            "mapper pid → session UUID must win over the crash fallback"
+        );
+    }
+
+    /// Without a mapper hit the crash-drain path must keep its previous
+    /// behavior: fall back to the 32-hex `crash_fallback_id` (peek misses on
+    /// a fresh builder).
+    #[test]
+    fn test_build_pending_from_request_falls_back_without_mapper_hit() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+        // Mapper knows a different pid only.
+        let mut mapper = ResponseSessionMapper::new();
+        mapper.process_filewrite(&crate::probes::FileWriteEvent {
+            pid: 9999,
+            tid: 9999,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh-core".to_string(),
+            filename:
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: Vec::new(),
+        });
+
+        let pending = builder
+            .build_pending_from_request(
+                &req,
+                &ConnectionId {
+                    pid: 4242,
+                    ssl_ptr: 2,
+                },
+                &mapper,
+                &cache,
+            )
+            .expect("LLM path should create pending");
+        let session_id = pending.session_id.expect("fallback session_id");
+        assert_eq!(
+            session_id.len(),
+            32,
+            "unmapped pid must keep the 32-hex crash fallback, got {session_id}"
+        );
+    }
+}

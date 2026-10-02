@@ -1,0 +1,24 @@
+{
+  "id": "tokenless",
+  "name": "Tokenless",
+  "version": "@VERSION@",
+  "description": "Protocol v2 PreTool RTK rewriting and PostTool optimization. Wraps the tokenless system binary via child_process — this is expected and not malicious.",
+  "activation": {
+    "onCapabilities": ["hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "rtk_enabled": { "type": "boolean", "default": true },
+      "tool_ready_enabled": { "type": "boolean", "default": true },
+      "post_tool_enabled": { "type": "boolean", "default": true },
+      "verbose": { "type": "boolean", "default": false }
+    }
+  },
+  "uiHints": {
+    "rtk_enabled": { "label": "Enable RTK command rewriting" },
+    "tool_ready_enabled": { "label": "Register Tool Ready hook (hard-disabled)" },
+    "post_tool_enabled": { "label": "Enable PostTool optimization" },
+    "verbose": { "label": "Verbose logging" }
+  }
+}

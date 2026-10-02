@@ -1,0 +1,937 @@
+name: AI / Qoder Review
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request number to review'
+        required: true
+        type: number
+      component:
+        description: 'Primary component to emphasize during review'
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - general
+          - docs
+          - ci
+          - anolisa
+          - tokenless
+          - agent-sec-core
+          - agentsight
+          - agent-memory
+          - skillfs
+          - ws-ckpt
+          - os-skills
+          - copilot-shell
+          - cosh-ng
+          - blaze
+          - ktuner
+      review_scope:
+        description: 'auto reviews new commits, falls back to full when needed, and skips an already-reviewed head; full always reviews all; incremental requires a reliable delta'
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - full
+          - incremental
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qoder-review-${{ github.event.issue.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    name: Check review eligibility
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        (
+          startsWith(github.event.comment.body, '@qoder review') ||
+          startsWith(github.event.comment.body, '/qoder review')
+        )
+      )
+    runs-on: [self-hosted, Linux, anolisa-agent-review]
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      allowed: ${{ steps.resolve.outputs.allowed }}
+      reason: ${{ steps.resolve.outputs.reason }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      component: ${{ steps.resolve.outputs.component }}
+      review_scope: ${{ steps.resolve.outputs.review_scope }}
+    steps:
+      - name: Resolve PR and actor permission
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number || '' }}
+          INPUT_COMPONENT: ${{ inputs.component || 'auto' }}
+          INPUT_REVIEW_SCOPE: ${{ inputs.review_scope || 'auto' }}
+          TRIGGER_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          allow() {
+            local pr_number="$1"
+            local component="$2"
+            local review_scope="$3"
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+            echo "reason=allowed" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+            echo "component=${component}" >> "$GITHUB_OUTPUT"
+            echo "review_scope=${review_scope}" >> "$GITHUB_OUTPUT"
+          }
+
+          deny() {
+            local reason="$1"
+            local pr_number="${2:-}"
+            local component="${3:-auto}"
+            local review_scope="${4:-${INPUT_REVIEW_SCOPE:-auto}}"
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+            echo "component=${component}" >> "$GITHUB_OUTPUT"
+            echo "review_scope=${review_scope}" >> "$GITHUB_OUTPUT"
+            echo "Qoder review skipped: ${reason}"
+          }
+
+          permission_for() {
+            local user="$1"
+            gh api "repos/${REPO}/collaborators/${user}/permission" --jq '.permission' 2>/dev/null || echo "none"
+          }
+
+          has_write_access() {
+            case "$1" in
+              admin|maintain|write) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            pr_number="$(jq -r '.issue.number // ""' "$GITHUB_EVENT_PATH")"
+            actor="$(jq -r '.comment.user.login // ""' "$GITHUB_EVENT_PATH")"
+            component="auto"
+            body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+            first_line="${body%%$'\n'*}"
+            first_line="${first_line%$'\r'}"
+
+            if [[ "$(jq -r '.issue.pull_request != null' "$GITHUB_EVENT_PATH")" != "true" ]]; then
+              deny "comment-not-on-pr" "$pr_number" "$component"
+              exit 0
+            fi
+
+            if [[ "$first_line" =~ ^(@qoder|/qoder)[[:space:]]+review[[:space:]]*$ ]]; then
+              review_scope="auto"
+            elif [[ "$first_line" =~ ^(@qoder|/qoder)[[:space:]]+review[[:space:]]+full[[:space:]]*$ ]]; then
+              review_scope="full"
+            else
+              deny "unsupported-review-command" "$pr_number" "$component"
+              exit 0
+            fi
+
+            if ! gh api "repos/${REPO}/pulls/${pr_number}" --jq '.number' >/dev/null 2>&1; then
+              deny "pr-not-found" "$pr_number" "$component" "$review_scope"
+              exit 0
+            fi
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            pr_number="$INPUT_PR_NUMBER"
+            actor="$TRIGGER_ACTOR"
+            component="$INPUT_COMPONENT"
+            review_scope="${INPUT_REVIEW_SCOPE:-auto}"
+
+            if ! gh api "repos/${REPO}/pulls/${pr_number}" --jq '.number' >/dev/null 2>&1; then
+              deny "pr-not-found" "$pr_number" "$component"
+              exit 0
+            fi
+          else
+            deny "unsupported-event"
+            exit 0
+          fi
+
+          actor_permission="$(permission_for "$actor")"
+          if ! has_write_access "$actor_permission"; then
+            deny "actor-${actor}-permission-${actor_permission}" "$pr_number" "$component" "$review_scope"
+            exit 0
+          fi
+
+          pr_state="$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.state' 2>/dev/null || echo "unknown")"
+          if [[ "$pr_state" != "open" ]]; then
+            deny "pr-state-${pr_state}" "$pr_number" "$component" "$review_scope"
+            exit 0
+          fi
+
+          allow "$pr_number" "$component" "$review_scope"
+
+  qoder-review:
+    name: Run Qoder review
+    needs: review-gate
+    if: needs.review-gate.outputs.allowed == 'true'
+    runs-on: [self-hosted, Linux, anolisa-agent-review]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      # Qoder Action requests a GitHub OIDC token with audience qoder-action,
+      # then exchanges it with QODER_PERSONAL_ACCESS_TOKEN for a short-lived
+      # Qoder GitHub App installation token used by the pinned action.
+      id-token: write
+    env:
+      PR_NUMBER: ${{ needs.review-gate.outputs.pr_number }}
+      REQUESTED_COMPONENT: ${{ needs.review-gate.outputs.component }}
+      REQUESTED_REVIEW_SCOPE: ${{ needs.review-gate.outputs.review_scope }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js for Qoder Action
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ensure Qoder Action dependencies
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v curl >/dev/null 2>&1 || missing+=(curl)
+          command -v jq >/dev/null 2>&1 || missing+=(jq)
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            sudo apt-get update
+            sudo apt-get install -y "${missing[@]}"
+          fi
+
+      - name: Resolve review scope and context
+        id: review-context
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          REQUESTED_REVIEW_SCOPE: ${{ env.REQUESTED_REVIEW_SCOPE }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = Number(process.env.PR_NUMBER);
+            const requestedScope = process.env.REQUESTED_REVIEW_SCOPE || 'auto';
+            const qoderLogins = new Set(['qoderai', 'qoderai[bot]']);
+
+            const compact = (value, limit) => String(value || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, limit);
+            const bounded = (value, limit) => String(value || '').trim().slice(0, limit);
+            const isQoder = (login) => qoderLogins.has(String(login || '').toLowerCase());
+            const isBot = (login) => String(login || '').toLowerCase().endsWith('[bot]');
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+
+            let prComments = [];
+            let reviewNodes = [];
+            let threadNodes = [];
+            let linkedIssues = [];
+            let discussionContextAvailable = false;
+            let linkedIssueContextStatus = 'unavailable';
+            let reviewHistoryStatus = 'unavailable';
+            let threadContextStatus = 'unavailable';
+            let reviewHistoryHasPreviousPage = false;
+            let reviewHistoryCursor = null;
+
+            try {
+              const contextData = await github.graphql(
+                `query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      comments(last: 20) {
+                        nodes { author { login } authorAssociation body createdAt }
+                      }
+                      reviews(last: 100) {
+                        pageInfo { hasPreviousPage startCursor }
+                        nodes {
+                          author { login }
+                          authorAssociation
+                          body
+                          state
+                          submittedAt
+                          commit { oid }
+                        }
+                      }
+                      reviewThreads(last: 100) {
+                        pageInfo { hasPreviousPage }
+                        nodes {
+                          isResolved
+                          path
+                          initialComments: comments(first: 1) {
+                            nodes { id author { login } authorAssociation body createdAt }
+                          }
+                          recentComments: comments(last: 20) {
+                            pageInfo { hasPreviousPage }
+                            nodes { id author { login } authorAssociation body createdAt }
+                          }
+                        }
+                      }
+                      closingIssuesReferences(first: 5) {
+                        pageInfo { hasNextPage }
+                        nodes {
+                          number
+                          title
+                          body
+                          state
+                          url
+                          repository { nameWithOwner }
+                          comments(last: 5) {
+                            nodes { author { login } authorAssociation body createdAt }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`,
+                { owner, repo, number: prNumber },
+              );
+              const pullRequest = contextData?.repository?.pullRequest;
+              if (!pullRequest) {
+                throw new Error('pull request context was null');
+              }
+              prComments = pullRequest.comments?.nodes || [];
+              reviewNodes = pullRequest.reviews?.nodes || [];
+              reviewHistoryHasPreviousPage = Boolean(
+                pullRequest.reviews?.pageInfo?.hasPreviousPage,
+              );
+              reviewHistoryCursor = pullRequest.reviews?.pageInfo?.startCursor || null;
+              reviewHistoryStatus = 'complete';
+              threadNodes = pullRequest.reviewThreads?.nodes || [];
+              threadContextStatus = (
+                pullRequest.reviewThreads?.pageInfo?.hasPreviousPage ||
+                threadNodes.some((thread) =>
+                  thread.recentComments?.pageInfo?.hasPreviousPage)
+              ) ? 'partial' : 'complete';
+              linkedIssues = pullRequest.closingIssuesReferences?.nodes || [];
+              discussionContextAvailable = true;
+              linkedIssueContextStatus = pullRequest.closingIssuesReferences?.pageInfo?.hasNextPage
+                ? 'partial'
+                : 'complete';
+            } catch (error) {
+              core.warning(`Unable to load PR discussion context: ${error.message}`);
+            }
+
+            if (discussionContextAvailable) {
+              try {
+                let qoderReviewCount = reviewNodes.filter((review) =>
+                  isQoder(review.author?.login) &&
+                  review.commit?.oid &&
+                  review.state !== 'PENDING').length;
+
+                while (reviewHistoryHasPreviousPage && qoderReviewCount < 10) {
+                  if (!reviewHistoryCursor) {
+                    throw new Error('review history cursor was missing');
+                  }
+                  const olderData = await github.graphql(
+                    `query($owner: String!, $repo: String!, $number: Int!, $before: String!) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $number) {
+                          reviews(last: 100, before: $before) {
+                            pageInfo { hasPreviousPage startCursor }
+                            nodes {
+                              author { login }
+                              authorAssociation
+                              body
+                              state
+                              submittedAt
+                              commit { oid }
+                            }
+                          }
+                        }
+                      }
+                    }`,
+                    { owner, repo, number: prNumber, before: reviewHistoryCursor },
+                  );
+                  const olderReviews = olderData?.repository?.pullRequest?.reviews;
+                  if (!olderReviews) {
+                    throw new Error('older review history was null');
+                  }
+                  const olderNodes = olderReviews.nodes || [];
+                  reviewNodes = [...olderNodes, ...reviewNodes];
+                  qoderReviewCount += olderNodes.filter((review) =>
+                    isQoder(review.author?.login) &&
+                    review.commit?.oid &&
+                    review.state !== 'PENDING').length;
+                  reviewHistoryHasPreviousPage = Boolean(
+                    olderReviews.pageInfo?.hasPreviousPage,
+                  );
+                  reviewHistoryCursor = olderReviews.pageInfo?.startCursor || null;
+                }
+              } catch (error) {
+                reviewHistoryStatus = 'partial';
+                core.warning(`Unable to paginate older Qoder review history: ${error.message}`);
+              }
+            }
+
+            if (!discussionContextAvailable) {
+              try {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
+                reviewNodes = reviews.map((review) => ({
+                  author: { login: review.user?.login },
+                  authorAssociation: review.author_association,
+                  body: review.body,
+                  state: review.state,
+                  submittedAt: review.submitted_at,
+                  commit: { oid: review.commit_id },
+                }));
+                reviewHistoryStatus = 'complete';
+              } catch (error) {
+                core.warning(`Unable to load fallback review history: ${error.message}`);
+              }
+            }
+
+            const referencedIssueNumbers = [];
+            const addReferencedIssue = (rawNumber) => {
+              const issueNumber = Number(rawNumber);
+              if (issueNumber !== prNumber && !referencedIssueNumbers.includes(issueNumber)) {
+                referencedIssueNumbers.push(issueNumber);
+              }
+            };
+            const prReferenceText = `${pr.title || ''}\n${pr.body || ''}`;
+            const issueReferencePattern = /(?:^|[^\w/.-])(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/g;
+            for (const match of prReferenceText.matchAll(issueReferencePattern)) {
+              const [, refOwner, refRepo, rawNumber] = match;
+              if (refOwner && (
+                refOwner.toLowerCase() !== owner.toLowerCase() ||
+                refRepo.toLowerCase() !== repo.toLowerCase()
+              )) {
+                continue;
+              }
+              addReferencedIssue(rawNumber);
+            }
+            const issueUrlPattern = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/issues\/(\d+)\b/g;
+            for (const match of prReferenceText.matchAll(issueUrlPattern)) {
+              const [, refOwner, refRepo, rawNumber] = match;
+              if (
+                refOwner.toLowerCase() === owner.toLowerCase() &&
+                refRepo.toLowerCase() === repo.toLowerCase()
+              ) {
+                addReferencedIssue(rawNumber);
+              }
+            }
+
+            const linkedIssueKeys = new Set(linkedIssues.map((issue) =>
+              `${issue.repository?.nameWithOwner || `${owner}/${repo}`}#${issue.number}`.toLowerCase()));
+            const missingIssueNumbers = referencedIssueNumbers
+              .filter((issueNumber) => !linkedIssueKeys.has(`${owner}/${repo}#${issueNumber}`.toLowerCase()))
+              .slice(0, Math.max(0, 5 - linkedIssues.length));
+
+            if (missingIssueNumbers.length > 0) {
+              try {
+                const issueAliases = missingIssueNumbers.map((issueNumber, index) => `
+                  issue${index}: issue(number: ${issueNumber}) {
+                    number
+                    title
+                    body
+                    state
+                    url
+                    repository { nameWithOwner }
+                    comments(last: 5) {
+                      nodes { author { login } authorAssociation body createdAt }
+                    }
+                  }`).join('\n');
+                const referencedIssueData = await github.graphql(
+                  `query($owner: String!, $repo: String!) {
+                    repository(owner: $owner, name: $repo) {
+                      ${issueAliases}
+                    }
+                  }`,
+                  { owner, repo },
+                );
+                linkedIssues.push(...Object.values(referencedIssueData?.repository || {}).filter(Boolean));
+                if (linkedIssueContextStatus === 'unavailable') {
+                  linkedIssueContextStatus = 'partial';
+                }
+              } catch (error) {
+                linkedIssueContextStatus = 'partial';
+                core.warning(`Unable to load explicitly referenced issues: ${error.message}`);
+              }
+            }
+            linkedIssues = linkedIssues.slice(0, 5);
+
+            const normalizedReviews = reviewNodes.map((review) => ({
+              login: review.author?.login,
+              association: review.authorAssociation,
+              body: review.body,
+              state: review.state,
+              submittedAt: review.submittedAt,
+              commitId: review.commit?.oid,
+            }));
+            const qoderReviews = normalizedReviews
+              .filter((review) => isQoder(review.login) && review.commitId && review.state !== 'PENDING')
+              .sort((left, right) => new Date(left.submittedAt || 0) - new Date(right.submittedAt || 0));
+            const latestQoderReview = qoderReviews.at(-1);
+
+            const fullFiles = async () => github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            let reviewMode = 'full';
+            let rangeBase = pr.base.sha;
+            let rangeHead = pr.head.sha;
+            let files = [];
+            let skip = false;
+
+            if (requestedScope !== 'full' && latestQoderReview) {
+              try {
+                const { data: comparison } = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: latestQoderReview.commitId,
+                  head: pr.head.sha,
+                });
+
+                if (comparison.status === 'identical') {
+                  skip = true;
+                  reviewMode = 'already-reviewed';
+                } else if (comparison.status === 'ahead') {
+                  const comparisonFiles = comparison.files || [];
+                  const comparisonCommits = comparison.commits || [];
+                  const hasMergeCommit = comparisonCommits.some((commit) => commit.parents.length > 1);
+                  const hasTruncatedCommits = comparison.ahead_by > comparisonCommits.length;
+                  const hasTruncatedFiles = comparisonFiles.length >= 300;
+
+                  if (hasMergeCommit || hasTruncatedCommits || hasTruncatedFiles) {
+                    if (requestedScope === 'incremental') {
+                      skip = true;
+                      reviewMode = 'incremental-unavailable';
+                    } else {
+                      reviewMode = 'full-unreliable-increment';
+                    }
+                  } else {
+                    reviewMode = 'incremental';
+                    rangeBase = latestQoderReview.commitId;
+                    files = comparisonFiles;
+                    if (files.length === 0) {
+                      skip = true;
+                      reviewMode = 'no-diff';
+                    }
+                  }
+                } else {
+                  if (requestedScope === 'incremental') {
+                    skip = true;
+                    reviewMode = 'incremental-unavailable';
+                  } else {
+                    reviewMode = 'rewritten-history';
+                  }
+                }
+              } catch (error) {
+                core.warning(`Unable to compare the last Qoder review commit: ${error.message}`);
+                if (requestedScope === 'incremental') {
+                  skip = true;
+                  reviewMode = 'incremental-unavailable';
+                } else {
+                  reviewMode = 'rewritten-history';
+                }
+              }
+            }
+
+            if (requestedScope === 'incremental' && !latestQoderReview) {
+              skip = true;
+              reviewMode = 'incremental-unavailable';
+            }
+
+            if (!skip && reviewMode !== 'incremental' && files.length === 0) {
+              files = await fullFiles();
+            }
+
+            const initialThreadComment = (thread) => thread.initialComments?.nodes?.[0];
+            const formatThread = (thread) => {
+              const initial = initialThreadComment(thread);
+              if (!initial) {
+                return null;
+              }
+              const replies = (thread.recentComments?.nodes || [])
+                .filter((comment) => comment.id !== initial.id)
+                .slice(-4);
+              const comments = [initial, ...replies]
+                .map((comment) =>
+                  `${comment.createdAt || 'unknown-time'} [${comment.authorAssociation || 'NONE'}] ${comment.author?.login || 'unknown'}: ${compact(comment.body, 700)}`)
+                .join('\n');
+              return bounded(
+                `[${thread.isResolved ? 'resolved' : 'open'}] ${thread.path || 'general'}\n${comments}`,
+                3200,
+              );
+            };
+            const isReviewCommand = (body) =>
+              /^(@qoder|\/qoder)\s+review(?:\s+full)?\s*$/i.test(String(body || '').split(/\r?\n/, 1)[0]);
+
+            const qoderThreadNodes = threadNodes
+              .filter((thread) => isQoder(initialThreadComment(thread)?.author?.login));
+            const humanThreadNodes = threadNodes
+              .filter((thread) => {
+                const login = initialThreadComment(thread)?.author?.login;
+                return login && !isQoder(login) && !isBot(login);
+              });
+            const hasTruncatedThreadReplies = threadNodes.some((thread) => {
+              const initial = initialThreadComment(thread);
+              return (thread.recentComments?.nodes || [])
+                .filter((comment) => comment.id !== initial?.id).length > 4;
+            });
+            if (
+              qoderThreadNodes.length > 20 ||
+              humanThreadNodes.length > 12 ||
+              hasTruncatedThreadReplies
+            ) {
+              threadContextStatus = 'partial';
+            }
+
+            const qoderThreads = qoderThreadNodes
+              .slice(-20)
+              .map(formatThread)
+              .filter(Boolean);
+            const humanThreads = humanThreadNodes
+              .slice(-12)
+              .map(formatThread)
+              .filter(Boolean);
+
+            const humanComments = prComments
+              .filter((comment) => {
+                const login = comment.author?.login;
+                return login && !isQoder(login) && !isBot(login) && !isReviewCommand(comment.body);
+              })
+              .slice(-20)
+              .map((comment) =>
+                `${comment.createdAt || 'unknown-time'} [${comment.authorAssociation || 'NONE'}] ${comment.author.login}: ${compact(comment.body, 700)}`);
+            const humanReviews = normalizedReviews
+              .filter((review) =>
+                review.login &&
+                !isQoder(review.login) &&
+                !isBot(review.login) &&
+                review.state !== 'PENDING' &&
+                compact(review.body, 1))
+              .slice(-10)
+              .map((review) =>
+                `${review.submittedAt || 'unknown-time'} [${review.state}/${review.association || 'NONE'}] ${review.login}: ${compact(review.body, 1200)}`);
+
+            const prContext = [
+              `TITLE: ${compact(pr.title, 500) || '(none)'}`,
+              `AUTHOR: ${pr.user?.login || 'unknown'}`,
+              `STATE: ${pr.state}; DRAFT: ${pr.draft}`,
+              `BASE: ${pr.base.ref}@${pr.base.sha}`,
+              `HEAD: ${pr.head.label || pr.head.ref}@${pr.head.sha}`,
+              `LABELS: ${(pr.labels || []).map((label) => label.name).filter(Boolean).join(', ') || '(none)'}`,
+              'DESCRIPTION:',
+              bounded(pr.body, 6000) || '(none)',
+            ].join('\n');
+
+            const formatIssue = (issue) => {
+              const issueRepository = issue.repository?.nameWithOwner || `${owner}/${repo}`;
+              const isLocalIssue = issueRepository.toLowerCase() ===
+                `${owner}/${repo}`.toLowerCase();
+              const issueComments = (issue.comments?.nodes || [])
+                .filter((comment) => {
+                  const login = comment.author?.login;
+                  return login && !isQoder(login) && !isBot(login);
+                })
+                .slice(-5)
+                .map((comment) => {
+                  const association = isLocalIssue
+                    ? (comment.authorAssociation || 'NONE')
+                    : 'EXTERNAL_REPOSITORY';
+                  return `${comment.createdAt || 'unknown-time'} [${association}] ${comment.author.login}: ${compact(comment.body, 700)}`;
+                });
+              return bounded([
+                `ISSUE: ${issueRepository}#${issue.number}`,
+                `ASSOCIATION_SCOPE: ${isLocalIssue ? 'local-repository' : 'external-repository'}`,
+                `STATE: ${issue.state}; URL: ${issue.url}`,
+                `TITLE: ${compact(issue.title, 500)}`,
+                'DESCRIPTION:',
+                bounded(issue.body, 3000) || '(none)',
+                'RECENT_ISSUE_COMMENTS:',
+                issueComments.length > 0 ? issueComments.join('\n') : '(none)',
+              ].join('\n'), 7000);
+            };
+            const linkedIssueContext = [
+              `LINKED_ISSUE_CONTEXT_STATUS: ${linkedIssueContextStatus}`,
+              linkedIssues.length > 0 ? linkedIssues.map(formatIssue).join('\n\n') : '(none found)',
+            ].join('\n');
+
+            const conversation = [
+              `DISCUSSION_CONTEXT_STATUS: ${discussionContextAvailable ? 'complete' : 'unavailable'}`,
+              'RECENT_PR_COMMENTS:',
+              humanComments.length > 0 ? humanComments.join('\n') : '(none)',
+              'HUMAN_REVIEW_SUMMARIES:',
+              humanReviews.length > 0 ? humanReviews.join('\n') : '(none)',
+              'HUMAN_REVIEW_THREADS:',
+              humanThreads.length > 0 ? humanThreads.join('\n\n') : '(none)',
+            ].join('\n');
+            const qoderReviewSummaries = qoderReviews
+              .filter((review) => compact(review.body, 1))
+              .slice(-10)
+              .map((review) =>
+                `${review.submittedAt || 'unknown-time'} [${review.state}] commit=${review.commitId}: ${compact(review.body, 1600)}`);
+
+            const history = [
+              `THREAD_CONTEXT_STATUS: ${threadContextStatus}`,
+              `REVIEW_HISTORY_STATUS: ${reviewHistoryStatus}`,
+              `LATEST_QODER_REVIEW_COMMIT: ${latestQoderReview?.commitId || '(none)'}`,
+              'RECENT_QODER_REVIEW_SUMMARIES:',
+              qoderReviewSummaries.length > 0 ? qoderReviewSummaries.join('\n\n') : '(none)',
+              'QODER_REVIEW_THREADS:',
+              qoderThreads.length > 0 ? qoderThreads.join('\n\n') : '(none)',
+            ].join('\n');
+
+            core.setOutput('skip', String(skip));
+            core.setOutput('mode', reviewMode);
+            core.setOutput('range_base', rangeBase);
+            core.setOutput('range_head', rangeHead);
+            core.setOutput('files', files.map((file) => file.filename).join('\n'));
+            core.setOutput('pr_context', prContext);
+            core.setOutput('linked_issues', linkedIssueContext);
+            core.setOutput('conversation', conversation);
+            core.setOutput('history', history);
+
+      - name: Build Qoder prompt
+        id: prompt
+        if: steps.review-context.outputs.skip != 'true'
+        env:
+          REPO: ${{ github.repository }}
+          REVIEW_MODE: ${{ steps.review-context.outputs.mode }}
+          REVIEW_RANGE_BASE: ${{ steps.review-context.outputs.range_base }}
+          REVIEW_RANGE_HEAD: ${{ steps.review-context.outputs.range_head }}
+          REVIEW_FILES: ${{ steps.review-context.outputs.files }}
+          PR_CONTEXT: ${{ steps.review-context.outputs.pr_context }}
+          LINKED_ISSUES_CONTEXT: ${{ steps.review-context.outputs.linked_issues }}
+          CONVERSATION_CONTEXT: ${{ steps.review-context.outputs.conversation }}
+          REVIEW_HISTORY: ${{ steps.review-context.outputs.history }}
+        run: |
+          set -euo pipefail
+
+          prompt_file=""
+          files_file="$(mktemp)"
+          trap 'rm -f "${prompt_file:-}" "${files_file:-}"' EXIT
+          printf '%s\n' "$REVIEW_FILES" > "$files_file"
+
+          add_component_context() {
+            case "$1" in
+              anolisa) add_context_file "distribution/anolisa/AGENTS.md" ;;
+              agent-sec-core) add_context_file "src/agent-sec-core/AGENTS.md" ;;
+              agentsight) add_context_file "src/agentsight/AGENTS.md" ;;
+              skillfs) add_context_file "src/skillfs/AGENTS.md" ;;
+              cosh-ng) add_context_file "src/cosh-ng/AGENTS.md" ;;
+              blaze) add_context_file "src/blaze/AGENTS.md" ;;
+            esac
+          }
+
+          add_component_review_guidance() {
+            local component_name="$1"
+            [[ "$component_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 0
+            local component_root="src/${component_name}"
+            case "$component_name" in
+              anolisa) component_root="distribution/anolisa" ;;
+              copilot-shell) component_root="deprecated/copilot-shell" ;;
+            esac
+            add_review_guidance_file \
+              "${component_root}/develop-skills/${component_name}-code-review/SKILL.md"
+          }
+
+          add_context_file() {
+            local name="$1"
+            [[ -f "$name" ]] || return 0
+            case " ${context_files[*]-} " in
+              *" ${name} "*) ;;
+              *) context_files+=("$name") ;;
+            esac
+          }
+
+          add_review_guidance_file() {
+            local name="$1"
+            [[ -f "$name" ]] || return 0
+            case " ${review_guidance_files[*]-} " in
+              *" ${name} "*) ;;
+              *) review_guidance_files+=("$name") ;;
+            esac
+          }
+
+          add_nearest_agents() {
+            local file="$1"
+            local dir
+            dir="$(dirname "$file")"
+            while [[ "$dir" != "." && "$dir" != "/" ]]; do
+              add_context_file "${dir}/AGENTS.md"
+              dir="$(dirname "$dir")"
+            done
+          }
+
+          context_files=()
+          review_guidance_files=()
+          add_context_file "AGENTS.md"
+          component="$REQUESTED_COMPONENT"
+
+          if [[ "$component" == "auto" ]]; then
+            component="general"
+            if grep -qE '^(\.github/|scripts/.*ci|AGENTS\.md$)' "$files_file"; then
+              component="ci"
+            fi
+            if grep -qE '^(docs/|.*README.*|.*CHANGELOG.*|.*CONTRIBUTING.*|specs/)' "$files_file"; then
+              [[ "$component" == "general" ]] && component="docs"
+            fi
+            if grep -qE '^distribution/anolisa/' "$files_file"; then [[ "$component" == "general" ]] && component="anolisa"; fi
+            if grep -qE '^src/tokenless/' "$files_file"; then [[ "$component" == "general" ]] && component="tokenless"; fi
+            if grep -qE '^src/agent-sec-core/' "$files_file"; then [[ "$component" == "general" ]] && component="agent-sec-core"; fi
+            if grep -qE '^src/agentsight/' "$files_file"; then [[ "$component" == "general" ]] && component="agentsight"; fi
+            if grep -qE '^src/agent-memory/' "$files_file"; then [[ "$component" == "general" ]] && component="agent-memory"; fi
+            if grep -qE '^src/skillfs/' "$files_file"; then [[ "$component" == "general" ]] && component="skillfs"; fi
+            if grep -qE '^src/ws-ckpt/' "$files_file"; then [[ "$component" == "general" ]] && component="ws-ckpt"; fi
+            if grep -qE '^src/os-skills/' "$files_file"; then [[ "$component" == "general" ]] && component="os-skills"; fi
+            if grep -qE '^deprecated/copilot-shell/' "$files_file"; then [[ "$component" == "general" ]] && component="copilot-shell"; fi
+            if grep -qE '^src/cosh-ng/' "$files_file"; then [[ "$component" == "general" ]] && component="cosh-ng"; fi
+            if grep -qE '^src/blaze/' "$files_file"; then [[ "$component" == "general" ]] && component="blaze"; fi
+            if grep -qE '^src/ktuner/' "$files_file"; then [[ "$component" == "general" ]] && component="ktuner"; fi
+          else
+            add_component_context "$component"
+          fi
+
+          while IFS= read -r changed_file; do
+            [[ -n "$changed_file" ]] || continue
+            add_nearest_agents "$changed_file"
+            case "$changed_file" in
+              src/*/*|distribution/anolisa/*|deprecated/copilot-shell/*)
+                changed_component="${changed_file#*/}"
+                changed_component="${changed_component%%/*}"
+                add_component_review_guidance "$changed_component"
+                ;;
+            esac
+          done < "$files_file"
+          add_component_context "$component"
+          add_component_review_guidance "$component"
+
+          context_manifest="$(printf '%s\n' "${context_files[@]}")"
+          review_guidance_manifest="(none)"
+          if [[ "${#review_guidance_files[@]}" -gt 0 ]]; then
+            review_guidance_manifest="$(printf '%s\n' "${review_guidance_files[@]}")"
+          fi
+          changed_files="$(sed -n '1,120p' "$files_file")"
+          review_policy=".github/review/review.md"
+
+          if [[ ! -f "$review_policy" ]]; then
+            echo "Missing Qoder review policy: $review_policy" >&2
+            exit 1
+          fi
+
+          prompt_file="$(mktemp)"
+          cp "$review_policy" "$prompt_file"
+          cat >> "$prompt_file" <<EOF
+
+          RUNTIME_CONTEXT:
+          REPO:${REPO} PR_NUMBER:${PR_NUMBER}
+          OUTPUT_LANGUAGE: Chinese
+          PRIMARY_COMPONENT: ${component}
+          REVIEW_MODE: ${REVIEW_MODE}
+          REVIEW_RANGE: ${REVIEW_RANGE_BASE}..${REVIEW_RANGE_HEAD}
+
+          CONTEXT_MANIFEST:
+          ${context_manifest}
+
+          REVIEW_GUIDANCE_MANIFEST:
+          ${review_guidance_manifest}
+
+          PR_CONTEXT_UNTRUSTED:
+          ${PR_CONTEXT}
+
+          LINKED_ISSUES_CONTEXT_UNTRUSTED:
+          ${LINKED_ISSUES_CONTEXT}
+
+          PR_CONVERSATION_CONTEXT_UNTRUSTED:
+          ${CONVERSATION_CONTEXT}
+
+          QODER_HISTORY_CONTEXT_UNTRUSTED:
+          ${REVIEW_HISTORY}
+
+          REVIEW_SCOPE_FILES_FIRST_120:
+          ${changed_files}
+          EOF
+
+          delimiter="QODER_PROMPT_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          while grep -Fxq "$delimiter" "$prompt_file"; do
+            delimiter="QODER_PROMPT_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          done
+
+          {
+            echo "prompt<<$delimiter"
+            cat "$prompt_file"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Qoder runtime state
+        env:
+          HOME: ${{ runner.temp }}/qoder-home-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME"
+          rm -f "$HOME/.local/bin/qoder-github-mcp-server"
+
+      - name: Run Qoder PR review
+        id: qoder
+        if: steps.review-context.outputs.skip != 'true'
+        uses: QoderAI/qoder-action@0881d27d15a7a93778ebc5c942d11da313ee8b7e
+        env:
+          HOME: ${{ runner.temp }}/qoder-home-${{ github.run_id }}-${{ github.run_attempt }}
+        with:
+          qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          flags: |
+            --model performance
+
+      - name: Clean Qoder runtime state
+        if: always()
+        env:
+          HOME: ${{ runner.temp }}/qoder-home-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || true
+
+          qoder_output_file="${{ steps.qoder.outputs.output_file || '' }}"
+          if [[ "$qoder_output_file" == /tmp/qoder-output-*.log ]]; then
+            rm -f "$qoder_output_file"
+            rm -f "${qoder_output_file/qoder-output-/qoder-error-}"
+          fi
+
+          if [[ -f "$HOME/.qoder.json" ]]; then
+            tmp_config="$(mktemp)"
+            if jq 'del(.mcpServers.qoder_github) | if (.mcpServers == {}) then del(.mcpServers) else . end' \
+              "$HOME/.qoder.json" > "$tmp_config"; then
+              mv "$tmp_config" "$HOME/.qoder.json"
+            else
+              rm -f "$tmp_config"
+            fi
+          fi
+
+          if [[ "$HOME" == "$RUNNER_TEMP"/qoder-home-* ]]; then
+            rm -rf "$HOME"
+          fi

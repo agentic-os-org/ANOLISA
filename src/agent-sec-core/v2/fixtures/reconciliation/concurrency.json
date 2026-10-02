@@ -1,0 +1,163 @@
+[
+  {
+    "caseId": "REC-CORE-006",
+    "variant": "blocked-result-two-instances",
+    "blockAt": "finish",
+    "initial": {
+      "$ref": "record.create.pending"
+    },
+    "calls": [
+      {
+        "operation": "adapter",
+        "input": {
+          "$ref": "binding.rev-7"
+        },
+        "output": {
+          "$ref": "adapter.translated"
+        }
+      },
+      {
+        "operation": "prepare",
+        "input": {
+          "$ref": "plan.opaque"
+        },
+        "output": {
+          "$ref": "prepare.new-b.ok"
+        }
+      },
+      {
+        "operation": "create",
+        "input": {
+          "$ref": "request.new-b.no-previous"
+        },
+        "output": {
+          "$ref": "report.new-b.present"
+        }
+      }
+    ],
+    "admission": null,
+    "intermediate": {
+      "$ref": "record.create.registered"
+    },
+    "expected": {
+      "$ref": "record.create.ready"
+    },
+    "trace": [
+      "read",
+      "claim",
+      "claim:matched",
+      "adapter",
+      "adapter:return",
+      "prepare",
+      "prepare:return",
+      "read",
+      "register",
+      "register:matched",
+      "create",
+      "create:return",
+      "read",
+      "finish",
+      "finish:matched",
+      "read"
+    ],
+    "first": {
+      "kind": "completed"
+    },
+    "second": {
+      "kind": "skipped"
+    }
+  },
+  {
+    "caseId": "REC-CORE-022",
+    "variant": "timeout-join-before-delete",
+    "blockAt": "create",
+    "initial": {
+      "$ref": "record.create.pending"
+    },
+    "calls": [
+      {
+        "operation": "adapter",
+        "input": {
+          "$ref": "binding.rev-7"
+        },
+        "output": {
+          "$ref": "adapter.translated"
+        }
+      },
+      {
+        "operation": "prepare",
+        "input": {
+          "$ref": "plan.opaque"
+        },
+        "output": {
+          "$ref": "prepare.new-b.ok"
+        }
+      },
+      {
+        "operation": "create",
+        "input": {
+          "$ref": "request.new-b.no-previous"
+        },
+        "output": {
+          "$ref": "report.new-b.present"
+        }
+      },
+      {
+        "operation": "delete",
+        "input": {
+          "$ref": "targets.new-b"
+        },
+        "output": {
+          "$ref": "report.new-b.absent"
+        }
+      }
+    ],
+    "admission": {
+      "spec": {
+        "$ref": "binding.rev-7"
+      },
+      "status": {
+        "phase": "PENDING_DELETE"
+      }
+    },
+    "intermediate": {
+      "$ref": "record.create.registered"
+    },
+    "expected": null,
+    "trace": [
+      "read",
+      "claim",
+      "claim:matched",
+      "adapter",
+      "adapter:return",
+      "prepare",
+      "prepare:return",
+      "read",
+      "register",
+      "register:matched",
+      "create",
+      "create:return",
+      "admit",
+      "read",
+      "finish",
+      "finish:matched",
+      "read",
+      "claim",
+      "claim:matched",
+      "read",
+      "register",
+      "register:matched",
+      "delete",
+      "delete:return",
+      "read",
+      "finish",
+      "finish:matched"
+    ],
+    "first": {
+      "kind": "superseded"
+    },
+    "second": {
+      "kind": "completed"
+    }
+  }
+]

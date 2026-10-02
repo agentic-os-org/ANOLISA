@@ -1,0 +1,858 @@
+[
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": null,
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": [],
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": "invalid",
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {},
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "session_id": "s",
+      "run_id": "r",
+      "tool_call_id": "t"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "s",
+        "run_id": "r"
+      },
+      "model": {
+        "session_id": "s",
+        "run_id": "r"
+      },
+      "tool": {
+        "session_id": "s",
+        "run_id": "r",
+        "tool_call_id": "t"
+      }
+    }
+  },
+  {
+    "input": {
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": null,
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": 42,
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": false,
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": [],
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": {},
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": " \t ",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": " \t ",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": " \t ",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": " \t ",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": null,
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": 42,
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": false,
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": [],
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": {},
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": ""
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": " \t ",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": " \t "
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": " \t ",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": " \t ",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀",
+      "callId": "call",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": null,
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": 42,
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": false,
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": [],
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": {},
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": ""
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": ""
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": " \t ",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": " \t "
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": " \t "
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀",
+      "toolCallId": "tool"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": null
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": 42
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": false
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": []
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": {}
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": ""
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": " \t "
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": " \t ",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀...[truncated]",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool",
+      "session_id": "snake",
+      "run_id": "snake",
+      "tool_call_id": "snake"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": null,
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool",
+      "session_id": "must-not-fallback"
+    },
+    "expected": {
+      "agent": null,
+      "model": null,
+      "tool": null
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": null,
+      "toolCallId": "tool",
+      "call_id": "must-not-fallback"
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool"
+      }
+    }
+  },
+  {
+    "input": {
+      "sessionId": "session",
+      "runId": "run",
+      "callId": "call",
+      "toolCallId": "tool",
+      "agentName": 123,
+      "unknown": {
+        "secret": "ignored"
+      }
+    },
+    "expected": {
+      "agent": {
+        "session_id": "session",
+        "run_id": "run"
+      },
+      "model": {
+        "session_id": "session",
+        "run_id": "run",
+        "call_id": "call"
+      },
+      "tool": {
+        "session_id": "session",
+        "run_id": "run",
+        "tool_call_id": "tool",
+        "call_id": "call"
+      }
+    }
+  }
+]

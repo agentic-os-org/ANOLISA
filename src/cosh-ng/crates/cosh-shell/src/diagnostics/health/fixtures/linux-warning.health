@@ -1,0 +1,21 @@
+# cosh-shell startup health fixture
+host=fixture-linux-warning
+score=68
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.available_mib u64 1800 MiB
+fact memory memory.available_ratio f64 0.055 -
+fact memory memory.used_ratio f64 0.945 -
+fact memory memory.swap_total_mib u64 8192 MiB
+fact memory memory.swap_used_mib u64 4506 MiB
+fact memory memory.swap_used_ratio f64 0.55 -
+fact cpu cpu.load_1m f64 3.2 -
+fact cpu cpu.load_5m f64 2.8 -
+fact cpu cpu.cores u64 4 -
+fact cpu cpu.load_per_core_1m f64 0.80 -
+fact cpu cpu.load_per_core_5m f64 0.70 -
+fact disk filesystem.max_used_ratio f64 0.86 -
+fact disk filesystem.available_gib f64 8.0 GiB
+fact disk filesystem.riskiest_mount str / -
+fact disk filesystem.root_used_ratio f64 0.86 -
+fact disk filesystem.root_available_gib f64 8.0 GiB

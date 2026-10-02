@@ -1,0 +1,83 @@
+{
+  "input": {
+    "policyId": "prevent-file-deletion",
+    "revision": 1,
+    "template": {
+      "kind": "prevent_file_deletion",
+      "files": [
+        "/workspace/important/**",
+        "/etc/agent/config.yaml"
+      ]
+    }
+  },
+  "output": {
+    "irSchemaVersion": 1,
+    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+    "policyId": "prevent-file-deletion",
+    "revision": 1,
+    "payload": {
+      "resources": [
+        {
+          "id": "protected-file-entries",
+          "kind": "file",
+          "matchers": [
+            {
+              "path": {
+                "type": "glob",
+                "pattern": "/workspace/important/**"
+              },
+              "resolution": {
+                "type": "path_entry"
+              }
+            },
+            {
+              "path": {
+                "type": "exact",
+                "path": "/etc/agent/config.yaml"
+              },
+              "resolution": {
+                "type": "path_entry"
+              }
+            }
+          ]
+        }
+      ],
+      "rules": [
+        {
+          "id": "deny-protected-file-deletion",
+          "when": {
+            "type": "atom",
+            "atom": {
+              "type": "resource_operation",
+              "operation": "delete",
+              "target": {
+                "type": "in",
+                "resourceSet": "protected-file-entries"
+              }
+            }
+          },
+          "outcome": {
+            "decision": "deny",
+            "obligations": [
+              "audit",
+              "emit_receipt"
+            ],
+            "remediation": "none"
+          },
+          "enforcement": {
+            "decisionTiming": "pre_effect",
+            "requiredEvidence": [
+              "binding_ready",
+              "operation_denied"
+            ]
+          }
+        }
+      ],
+      "activation": "post_attach_allowed",
+      "failurePolicy": {
+        "runtime": "fail_closed",
+        "update": "keep_last_known_good"
+      }
+    }
+  }
+}

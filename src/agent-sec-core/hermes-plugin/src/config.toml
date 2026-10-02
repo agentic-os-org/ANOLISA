@@ -1,0 +1,23 @@
+[capabilities.code-scan]
+enabled = true
+timeout = 10
+enable_block = false
+
+[capabilities.observability]
+enabled = true
+timeout = 5
+
+[capabilities.pii-scan-user-input]
+enabled = true
+timeout = 10
+policy = "observe"
+include_low_confidence = false
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 15
+
+[capabilities.skill-ledger]
+enabled = true
+timeout = 5
+policy = "observe"

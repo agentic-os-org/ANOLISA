@@ -1,0 +1,499 @@
+name: CI / sec-core RPM Build
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - 'src/agent-sec-core/**'
+      - '.github/actions/package-source/**'
+      - '.github/actions/package-vendor/**'
+      - '.github/workflows/sec-core-rpmbuild.yaml'
+  workflow_dispatch:       # 手动触发不受 paths 限制
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  build-rpm:
+    name: Build agent-sec-core RPM
+    # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Configure mirrors and install dependencies
+        run: |
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          dnf install -y tar git rpm-build systemd-rpm-macros gcc make clang llvm \
+                         openssl-devel libseccomp-devel bubblewrap \
+                         python3-pip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Build RPM
+        run: ./scripts/rpm-build.sh agent-sec-core
+
+      - name: List RPM contents
+        run: |
+          echo "=== RPM files built ==="
+          find scripts/rpmbuild/RPMS -name '*.rpm' | sort
+          echo ""
+          for rpm in scripts/rpmbuild/RPMS/**/*.rpm; do
+            echo "========================================"
+            echo ">>> $rpm"
+            echo "========================================"
+            if [[ "$rpm" == *agent-sec-cli* ]]; then
+              rpm -qip "$rpm"
+              echo "--- Files (site-packages grouped by top-level) ---"
+              rpm -qlp "$rpm" | awk -F'site-packages/' '
+                /site-packages\//{seen[$2]=1; split($2,a,"/"); top[a[1]]=1; next}
+                {print}
+              END{for(t in top) print "/opt/agent-sec/lib/python3.11/site-packages/" t "/..."}
+              ' | sort
+            else
+              rpm -qlvp "$rpm"
+            fi
+            echo ""
+          done
+
+      - name: Test RPM installation
+        run: |
+          dnf makecache
+          dnf install -y scripts/rpmbuild/RPMS/**/*.rpm
+          echo "=== Verify CLI ==="
+          agent-sec-cli --help
+          echo "=== Verify daemon ==="
+          agent-sec-daemon --help
+          echo "=== Verify sandbox ==="
+          linux-sandbox --help
+          echo "=== Verify site-packages ==="
+          ls /opt/agent-sec/lib/python3.11/site-packages/agent_sec_cli/
+          echo "=== Verify cosh extension ==="
+          ls /usr/share/anolisa/extensions/agent-sec-core/
+          ls /usr/share/anolisa/extensions/agent-sec-core/hooks/
+          echo "=== Verify openclaw plugin ==="
+          ls /opt/agent-sec/openclaw-plugin/
+          ls /opt/agent-sec/openclaw-plugin/dist/
+          ls /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+          echo "=== Verify hermes plugin ==="
+          ls /opt/agent-sec/hermes-plugin/src/
+          ls /opt/agent-sec/hermes-plugin/src/plugin.yaml
+          ls /opt/agent-sec/hermes-plugin/scripts/deploy.sh
+          echo "=== Verify daemon systemd unit ==="
+          ls /usr/lib/systemd/user/agent-sec-core.service
+          echo "=== Verify daemon binary ==="
+          ls /usr/bin/agent-sec-daemon
+          echo "=== Verify codex plugin ==="
+          ls /opt/agent-sec/codex-plugin/
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
+          ls /opt/agent-sec/codex-plugin/install.sh
+          ls /opt/agent-sec/codex-plugin/.agents/plugins/marketplace.json
+          echo "=== Verify skills ==="
+          ls /usr/share/anolisa/skills/
+          echo "=== Verify component manifest ==="
+          test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
+
+      - name: Verify Python dependencies match requirements.txt
+        run: |
+          # `packaging` is a CI-only parser, not a runtime dep, so it never ships
+          # in the RPM site-packages. Install it explicitly to avoid relying on
+          # transitive deps that may disappear (broke when ML deps were dropped).
+          uv pip install --system --break-system-packages --python python3.11 packaging
+          echo "Checking installed Python packages against requirements.txt ..."
+          export PYTHONPATH=/opt/agent-sec/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}
+          python3.11 << 'PYEOF'
+          import importlib.metadata, sys
+          from packaging.requirements import Requirement
+          from packaging.version import Version
+
+          with open('src/agent-sec-core/agent-sec-cli/requirements.txt') as f:
+              reqs = []
+              for line in f:
+                  s = line.strip().rstrip('\\').strip()
+                  if not s or s.startswith('#') or s.startswith('--hash='):
+                      continue
+                  reqs.append(s)
+          failed = []
+          skipped = 0
+          for raw in reqs:
+              req = Requirement(raw)
+              if req.marker and not req.marker.evaluate():
+                  skipped += 1
+                  continue
+              try:
+                  installed_ver = Version(importlib.metadata.version(req.name))
+              except importlib.metadata.PackageNotFoundError:
+                  failed.append(f'{req.name}: not installed')
+                  continue
+              if req.specifier and not req.specifier.contains(installed_ver):
+                  failed.append(f'{req.name}: {installed_ver} does not match {req.specifier}')
+          if failed:
+              print(f'ERROR: {len(failed)} dependency check(s) failed:', file=sys.stderr)
+              for item in failed:
+                  print(f'  - {item}', file=sys.stderr)
+              sys.exit(1)
+          print(f'All {len(reqs) - skipped} dependencies verified ({skipped} skipped due to platform markers).')
+          PYEOF
+
+      - name: Verify cli Python imports
+        run: |
+          export PYTHONPATH=/opt/agent-sec/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}
+          python3 << 'PYEOF'
+          import importlib, pathlib, sys, os
+
+          import agent_sec_cli
+          site_pkg = pathlib.Path(agent_sec_cli.__file__).parent
+          print(f'Package location: {site_pkg}')
+
+          # Collect all .py files and convert to module names
+          modules = []
+          for pyfile in sorted(site_pkg.rglob('*.py')):
+              if '__pycache__' in pyfile.parts:
+                  continue
+              rel = pyfile.relative_to(site_pkg.parent)
+              parts = list(rel.with_suffix('').parts)
+              if parts[-1] == '__init__':
+                  parts = parts[:-1]
+              modules.append('.'.join(parts))
+
+          failed = []
+          for mod in modules:
+              try:
+                  importlib.import_module(mod)
+                  print(f'  {mod} ... OK')
+              except Exception as e:
+                  print(f'  {mod} ... FAILED: {e}')
+                  failed.append((mod, str(e)))
+
+          print(f'\nTotal: {len(modules)} modules, {len(failed)} failed')
+          if failed:
+              print('\nFailed modules:', file=sys.stderr)
+              for mod, err in failed:
+                  print(f'  - {mod}: {err}', file=sys.stderr)
+              sys.exit(1)
+          print('All modules imported successfully')
+          PYEOF
+
+      - name: Verify cosh hook Python imports
+        run: |
+          python3 << 'PYEOF'
+          import importlib.util, pathlib, sys
+
+          hooks_dir = pathlib.Path('/usr/share/anolisa/extensions/agent-sec-core/hooks')
+          print(f'Hooks directory: {hooks_dir.resolve()}')
+          sys.path.insert(0, str(hooks_dir))
+
+          py_files = sorted(hooks_dir.glob('*.py'))
+          if not py_files:
+              print('ERROR: no hook .py files found', file=sys.stderr)
+              sys.exit(1)
+
+          failed = []
+          for pyfile in py_files:
+              mod_name = pyfile.stem.replace('-', '_')
+              spec = importlib.util.spec_from_file_location(mod_name, pyfile)
+              if spec is None:
+                  print(f'  {pyfile.name} ... FAILED: cannot create module spec')
+                  failed.append((pyfile.name, 'cannot create module spec'))
+                  continue
+              try:
+                  mod = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(mod)
+                  print(f'  {pyfile.name} ... OK')
+              except Exception as e:
+                  print(f'  {pyfile.name} ... FAILED: {e}')
+                  failed.append((pyfile.name, str(e)))
+
+          print(f'\nTotal: {len(py_files)} hooks, {len(failed)} failed')
+          if failed:
+              print('\nFailed hooks:', file=sys.stderr)
+              for name, err in failed:
+                  print(f'  - {name}: {err}', file=sys.stderr)
+              sys.exit(1)
+          print('All hook scripts imported successfully')
+          PYEOF
+
+      - name: Uninstall skills package before E2E tests
+        run: rpm -e agent-sec-skills --nodeps
+
+      - name: Run E2E tests on installed RPM
+        run: make -C src/agent-sec-core test-e2e-rpm
+
+      - name: Upload RPM artifacts
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-rpms-${{ github.run_number }}-${{ github.sha }}
+          path: scripts/rpmbuild/RPMS/**/*.rpm
+          retention-days: 7
+
+  # Build and test V2 from the same local Source0/Source1 archives. The source
+  # checkout supplies the packaging inputs and test harness, never the RPM build.
+  build-rpm-v2:
+    name: Test agent-sec-core V2 RPM from packaged sources
+    # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      # Alinux4 does not include tar, which actions/checkout needs to extract
+      # the repository when Git is unavailable in the base image.
+      - name: Configure mirrors and install build and test prerequisites
+        run: |
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          # The spec guards %systemd_* at parse time, so dnf builddep cannot read
+          # it until systemd-rpm-macros is installed.
+          dnf install -y rpm-build rpmdevtools dnf-plugins-core systemd-rpm-macros \
+                         tar gzip findutils sed git make bubblewrap python3 python3-pip
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve V2 version
+        id: version
+        run: |
+          value=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$value"
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Package Source0
+        uses: ./.github/actions/package-source
+        with:
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          upload-artifact: 'false'
+
+      - name: Package Source1
+        uses: ./.github/actions/package-vendor
+        with:
+          component: agent-sec-core
+          version: ${{ steps.version.outputs.value }}
+          upload-artifact: 'false'
+
+      - name: Build RPM from packaged sources
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          # package-source exports BUILD_DIR for package-vendor. Do not let that
+          # staging path override the Makefile's RPM build output directory.
+          unset BUILD_DIR
+          rpmdev-setuptree
+          source0="/tmp/archives/agent-sec-core-${VERSION}.tar.gz"
+          source1="/tmp/archives/agent-sec-core-${VERSION}-vendor.tar.gz"
+          test -f "$source0"
+          test -f "$source1"
+          cp "$source0" "$source1" "$HOME/rpmbuild/SOURCES/"
+          # Read the spec from Source0 so rpmbuild uses only packaged inputs.
+          tar -xzOf "$source0" "agent-sec-core-${VERSION}/agent-sec-core.spec.v2.in" \
+            | sed "s/@VERSION@/${VERSION}/g" > "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          dnf builddep -y --spec "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
+            "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          mkdir -p /tmp/rpms
+          find "$HOME/rpmbuild/RPMS" -name '*.rpm' -exec cp {} /tmp/rpms/ \;
+          test -n "$(find /tmp/rpms -name '*.rpm' -print -quit)"
+
+      - name: List RPM contents
+        run: |
+          echo "=== Offline-built RPM files ==="
+          find /tmp/rpms -name '*.rpm' -print | sort
+          for rpm in /tmp/rpms/*.rpm; do
+            rpm -qlvp "$rpm"
+          done
+
+      - name: Test RPM installation
+        run: |
+          dnf install -y /tmp/rpms/*.rpm
+          echo "=== Verify CLI (Rust) ==="
+          agent-sec-cli --help
+          echo "=== Verify daemon (Rust) ==="
+          agent-sec-daemon --help
+          echo "=== Verify sandbox ==="
+          linux-sandbox --help
+          echo "=== Verify cosh extension ==="
+          test -f /usr/share/anolisa/extensions/agent-sec-core/cosh-extension.json
+          ls /usr/share/anolisa/extensions/agent-sec-core/hooks/
+          echo "=== Verify openclaw plugin ==="
+          ls /opt/agent-sec/openclaw-plugin/dist/
+          echo "=== Verify hermes plugin ==="
+          ls /opt/agent-sec/hermes-plugin/src/plugin.yaml
+          echo "=== Verify codex plugin ==="
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          echo "=== Verify daemon systemd unit ==="
+          test -f /usr/lib/systemd/system/agent-sec-core.service
+          test ! -e /usr/lib/systemd/user/agent-sec-core.service
+          test ! -e /usr/lib/sysusers.d/agent-sec-core.conf
+          grep -qx 'User=root' /usr/lib/systemd/system/agent-sec-core.service
+          grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
+          systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
+          test "$(stat -c %a /etc/agent-sec/skillsec.json)" = 600
+          echo "=== Verify component manifest ==="
+          test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
+          echo "=== Assert no V1 Python site-packages ==="
+          if [ -e /opt/agent-sec/lib/python3.11/site-packages ]; then
+            echo "ERROR: V1 site-packages present in V2 RPM"; exit 1;
+          fi
+
+      - name: Verify V2 source installation layout
+        run: V2_BIN_BUILD_DIR=/usr/bin bash src/agent-sec-core/tests/packaging/test-skillsec-install.sh
+
+      - name: Verify cosh hook Python imports
+        run: |
+          python3 << 'PYEOF'
+          import importlib.util, pathlib, sys
+
+          hooks_dir = pathlib.Path('/usr/share/anolisa/extensions/agent-sec-core/hooks')
+          print(f'Hooks directory: {hooks_dir.resolve()}')
+          sys.path.insert(0, str(hooks_dir))
+
+          py_files = sorted(hooks_dir.glob('*.py'))
+          if not py_files:
+              print('ERROR: no hook .py files found', file=sys.stderr)
+              sys.exit(1)
+
+          failed = []
+          for pyfile in py_files:
+              mod_name = pyfile.stem.replace('-', '_')
+              spec = importlib.util.spec_from_file_location(mod_name, pyfile)
+              if spec is None:
+                  print(f'  {pyfile.name} ... FAILED: cannot create module spec')
+                  failed.append((pyfile.name, 'cannot create module spec'))
+                  continue
+              try:
+                  mod = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(mod)
+                  print(f'  {pyfile.name} ... OK')
+              except Exception as e:
+                  print(f'  {pyfile.name} ... FAILED: {e}')
+                  failed.append((pyfile.name, str(e)))
+
+          print(f'\nTotal: {len(py_files)} hooks, {len(failed)} failed')
+          if failed:
+              print('\nFailed hooks:', file=sys.stderr)
+              for name, err in failed:
+                  print(f'  - {name}: {err}', file=sys.stderr)
+              sys.exit(1)
+          print('All hook scripts imported successfully')
+          PYEOF
+
+      - name: Uninstall skills package before E2E tests
+        run: rpm -e agent-sec-skills --nodeps
+
+      - name: Start V2 daemon for CLI compatibility E2E
+        run: |
+          # Avoid runner-mounted ancestors with unrelated owners or writable modes.
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
+          daemon_log="$RUNNER_TEMP/agent-sec-daemon.log"
+          daemon_pid="$RUNNER_TEMP/agent-sec-daemon.pid"
+          socket="$runtime_dir/daemon.sock"
+          chmod 0700 "$runtime_dir"
+          printf '{"stateDir":"%s","managedSkillDirs":["%s/**"]}\n' \
+            "$runtime_dir/skillsec-state" "$runtime_dir/pytest" > "$runtime_dir/skillsec.json"
+          chmod 0600 "$runtime_dir/skillsec.json"
+          AGENT_SEC_DATA_DIR="$runtime_dir/audit" agent-sec-daemon --socket "$socket" \
+            --skillsec-config "$runtime_dir/skillsec.json" >"$daemon_log" 2>&1 &
+          echo $! >"$daemon_pid"
+          echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_E2E_ROOT=$runtime_dir/pytest" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
+              echo "agent-sec-daemon exited before accepting connections" >&2
+              cat "$daemon_log" >&2
+              exit 1
+            fi
+            if python3 - "$socket" <<'PY'
+          import socket
+          import sys
+          try:
+              connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              connection.settimeout(0.1)
+              connection.connect(sys.argv[1])
+              connection.close()
+          except OSError:
+              raise SystemExit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.05
+          done
+          echo "agent-sec-daemon did not accept connections" >&2
+          cat "$daemon_log" >&2
+          exit 1
+
+      - name: Run V2 E2E tests on installed RPM
+        run: |
+          source_dir=src/agent-sec-core/agent-sec-cli
+          hidden_root="$(mktemp -d)"
+          mv "$source_dir" "$hidden_root/agent-sec-cli"
+          restore_source() {
+            mv "$hidden_root/agent-sec-cli" "$source_dir"
+            rmdir "$hidden_root"
+          }
+          trap restore_source EXIT
+
+          unset PYTHONPATH
+          if python3 -c 'import agent_sec_cli' 2>/dev/null; then
+            echo "ERROR: agent_sec_cli remains importable after hiding V1 source"
+            exit 1
+          fi
+          PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} --basetemp=$AGENT_SEC_E2E_ROOT" \
+            make -C src/agent-sec-core test-e2e-rpm-v2
+
+      - name: Upload V2 RPM artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-v2-rpms-${{ github.run_number }}-${{ github.sha }}
+          path: /tmp/rpms/*.rpm
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Show V2 daemon log after E2E failure
+        if: failure()
+        run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
+
+      - name: Stop V2 daemon after E2E tests
+        if: always()
+        run: |
+          if test -f "$AGENT_SEC_DAEMON_PID"; then
+            pid="$(cat "$AGENT_SEC_DAEMON_PID")"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          fi
+          # Cleanup is best-effort so an earlier test failure remains visible.
+          :
+# End of workflow

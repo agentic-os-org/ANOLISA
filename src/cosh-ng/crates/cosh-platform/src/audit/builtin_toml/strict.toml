@@ -1,0 +1,144 @@
+# Built-in audit policy: strict.
+#
+# default = Deny. Only an explicit allow-list of read-only operations passes.
+# Suitable for production servers and untrusted Agents.
+
+version = "v1-strict"
+default = "Deny"
+
+# Sensitive-path guard — deny direct access to sensitive system and credential
+# files. Must appear BEFORE shell-allow-readonly-singletons.
+[[rules]]
+name = "shell-sensitive-system-files"
+outcome = "Deny"
+reason = "Command references sensitive system file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { one_of = [
+  "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers"
+] } }]
+
+[[rules]]
+name = "shell-sensitive-sudoersd"
+outcome = "Deny"
+reason = "Command references sensitive sudoers configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/etc/sudoers.d/*" } }]
+
+[[rules]]
+name = "shell-sensitive-proc-self"
+outcome = "Deny"
+reason = "Command references process self-info"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/proc/self/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-home"
+outcome = "Deny"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-root"
+outcome = "Deny"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-tilde"
+outcome = "Deny"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.ssh/*" } }]
+
+# Shell history files: ~/.bash_history, /home/*/.bash_history, /root/.bash_history
+[[rules]]
+name = "shell-sensitive-shell-history-home"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-root"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-tilde"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.bash_history" } }]
+
+# Read-only single-token shell commands.
+[[rules]]
+name = "shell-allow-readonly-singletons"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = { one_of = [
+  "uptime", "uname", "hostname", "whoami", "id", "pwd",
+  "ls", "cat", "head", "tail", "wc",
+  "ps", "df", "du", "free",
+  "date", "env", "printenv", "which", "whereis",
+  "echo", "file", "stat", "readlink",
+  "find", "grep", "rg", "awk", "sed",
+  "sort", "uniq", "cut", "tr",
+  "netstat", "ss", "ip", "lsof", "dig",
+  "journalctl"
+] }
+
+# Read-only git subcommands.
+[[rules]]
+name = "shell-allow-git-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = { one_of = ["status", "log", "diff", "show", "blame", "describe", "rev-parse", "ls-files", "ls-tree", "shortlog", "grep"] }
+
+# Read-only systemctl.
+[[rules]]
+name = "shell-allow-systemctl-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "systemctl"
+target = { one_of = ["status", "is-active", "is-enabled", "list-units", "list-unit-files", "show", "cat"] }
+
+# Pkg subsystem: read-only only.
+[[rules]]
+name = "pkg-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "pkg"
+operation = { one_of = ["search", "list"] }
+
+# Svc subsystem: read-only only.
+[[rules]]
+name = "svc-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "svc"
+operation = { one_of = ["status", "list"] }
+
+# Checkpoint: read-only queries.
+[[rules]]
+name = "checkpoint-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "checkpoint"
+operation = { one_of = ["list", "status", "diff"] }

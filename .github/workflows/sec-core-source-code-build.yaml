@@ -1,0 +1,251 @@
+name: CI / sec-core Source Build
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - 'src/agent-sec-core/**'
+      - 'scripts/build-all.sh'
+      - '.github/workflows/sec-core-source-code-build.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            container: ''
+          - name: Alinux4
+            container: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    name: Source Build (${{ matrix.name }})
+    runs-on: anolisa-k8s-general-ci-x64
+    container: ${{ matrix.container || '' }}
+    steps:
+      - name: Configure mirrors and install base tools (Alinux4)
+        if: matrix.container != ''
+        run: |
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          dnf install -y tar git sudo bubblewrap gnupg2 jq
+          # Fix sudo PAM in container: replace with permissive config
+          cat > /etc/pam.d/sudo <<'EOF'
+          #%PAM-1.0
+          auth       sufficient   pam_rootok.so
+          account    sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+          EOF
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Expose Node.js in the system PATH
+        run: |
+          node_backup="${RUNNER_TEMP}/anolisa-system-node-backup"
+          if sudo test -e /usr/local/bin/node || sudo test -L /usr/local/bin/node; then
+            sudo mv /usr/local/bin/node "$node_backup"
+          fi
+          restore_node() {
+            sudo rm -f /usr/local/bin/node
+            if sudo test -e "$node_backup" || sudo test -L "$node_backup"; then
+              sudo mv "$node_backup" /usr/local/bin/node
+            fi
+          }
+          trap restore_node ERR
+          sudo ln -s "$(command -v node)" /usr/local/bin/node
+          PATH=/usr/local/bin:/usr/bin:/bin node --version
+          echo "ANOLISA_NODE_BACKUP=${node_backup}" >> "$GITHUB_ENV"
+          trap - ERR
+      - name: Install runtime dependencies (Ubuntu 22.04)
+        if: matrix.container == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap gnupg jq
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Build and install
+        run: |
+          build_status=0
+          ./scripts/build-all.sh --component sec-core || build_status=$?
+          if (( build_status != 0 )); then
+            echo "::group::sec-core build failure log"
+            tail -n 200 target/build.log 2>/dev/null || echo "target/build.log is unavailable"
+            echo "::endgroup::"
+            exit "$build_status"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify CLI
+        run: |
+          agent-sec-cli --version
+          agent-sec-cli --help
+      - name: Verify daemon
+        run: agent-sec-daemon --help
+      - name: Verify sandbox
+        run: linux-sandbox --help
+      - name: Verify runtime dependencies
+        run: |
+          sec_runtime_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          PATH="$sec_runtime_path" bwrap --version
+          if PATH="$sec_runtime_path" command -v gpg >/dev/null; then
+            PATH="$sec_runtime_path" gpg --version
+          else
+            PATH="$sec_runtime_path" gpg2 --version
+          fi
+          PATH="$sec_runtime_path" node --version
+          PATH="$sec_runtime_path" jq --version
+      - name: Verify deployment
+        run: |
+          echo "=== Skills ==="
+          ls ~/.copilot-shell/skills/
+          echo "=== Cosh Extension ==="
+          ls ~/.copilot-shell/extensions/agent-sec-core/
+          ls ~/.copilot-shell/extensions/agent-sec-core/hooks/
+          echo "=== OpenClaw Plugin ==="
+          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/
+          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/dist/
+          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/
+          test -x ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+          echo "=== Hermes Plugin ==="
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          test -x ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          echo "=== Codex Plugin ==="
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+          test -x ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+          ls ~/.local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
+          echo "=== CLI venv ==="
+          ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
+      - name: Run E2E tests
+        run: make -C src/agent-sec-core test-e2e-source-build
+      - name: Restore system Node.js
+        if: always()
+        run: |
+          [[ -n "${ANOLISA_NODE_BACKUP:-}" ]] || exit 0
+          sudo rm -f /usr/local/bin/node
+          if sudo test -e "$ANOLISA_NODE_BACKUP" || sudo test -L "$ANOLISA_NODE_BACKUP"; then
+            sudo mv "$ANOLISA_NODE_BACKUP" /usr/local/bin/node
+          fi
+
+  system-build:
+    name: Source Build System Install (Ubuntu 22.04)
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Expose Node.js in the system PATH
+        run: |
+          node_backup="${RUNNER_TEMP}/anolisa-system-node-backup"
+          if sudo test -e /usr/local/bin/node || sudo test -L /usr/local/bin/node; then
+            sudo mv /usr/local/bin/node "$node_backup"
+          fi
+          restore_node() {
+            sudo rm -f /usr/local/bin/node
+            if sudo test -e "$node_backup" || sudo test -L "$node_backup"; then
+              sudo mv "$node_backup" /usr/local/bin/node
+            fi
+          }
+          trap restore_node ERR
+          sudo ln -s "$(command -v node)" /usr/local/bin/node
+          PATH=/usr/local/bin:/usr/bin:/bin node --version
+          echo "ANOLISA_NODE_BACKUP=${node_backup}" >> "$GITHUB_ENV"
+          trap - ERR
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y passwd util-linux
+      - name: Build and install in system mode
+        run: |
+          build_status=0
+          ./scripts/build-all.sh --component sec-core --system || build_status=$?
+          if (( build_status != 0 )); then
+            echo "::group::sec-core build failure log"
+            tail -n 200 target/build.log 2>/dev/null || echo "target/build.log is unavailable"
+            echo "::endgroup::"
+            exit "$build_status"
+          fi
+      - name: Verify system commands
+        run: |
+          agent-sec-cli --version
+          agent-sec-cli --help
+          agent-sec-cli scan-pii --help >/dev/null
+          agent-sec-daemon --help
+          linux-sandbox --help
+      - name: Verify runtime dependencies
+        run: |
+          sec_runtime_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          PATH="$sec_runtime_path" bwrap --version
+          if PATH="$sec_runtime_path" command -v gpg >/dev/null; then
+            PATH="$sec_runtime_path" gpg --version
+          else
+            PATH="$sec_runtime_path" gpg2 --version
+          fi
+          PATH="$sec_runtime_path" node --version
+          PATH="$sec_runtime_path" jq --version
+      - name: Verify system deployment
+        run: |
+          echo "=== System binaries ==="
+          test -x /usr/local/bin/agent-sec-cli
+          test -x /usr/local/bin/agent-sec-daemon
+          test -x /usr/local/bin/linux-sandbox
+          echo "=== Cosh Extension ==="
+          test -d /usr/share/anolisa/extensions/agent-sec-core/hooks
+          echo "=== OpenClaw Plugin ==="
+          test -d /usr/local/lib/anolisa/sec-core/openclaw-plugin/dist
+          test -x /usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+          echo "=== Hermes Plugin ==="
+          test -f /usr/local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
+          test -x /usr/local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          echo "=== Codex Plugin ==="
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
+          test -x /usr/local/lib/anolisa/sec-core/codex-plugin/install.sh
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
+          echo "=== Skills ==="
+          test -d /usr/share/anolisa/skills
+          echo "=== CLI venv ==="
+          test -x /usr/local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
+      - name: Verify system install as regular user
+        run: |
+          python_path="$(readlink -f /usr/local/lib/anolisa/sec-core/venv/bin/python)"
+          echo "venv python: ${python_path}"
+          case "${python_path}" in
+            /root/*)
+              echo "ERROR: venv Python points to root-private path: ${python_path}" >&2
+              exit 1
+              ;;
+          esac
+          namei -l /usr/local/lib/anolisa/sec-core/venv/bin/python
+          sudo useradd -m -s /bin/bash secprobe || true
+          sudo -u secprobe env PATH=/usr/local/bin:/usr/bin:/bin node --version
+          sudo -u secprobe /usr/local/bin/agent-sec-cli --version
+          sudo -u secprobe /usr/local/bin/agent-sec-cli scan-pii --help >/dev/null
+      - name: Restore system Node.js
+        if: always()
+        run: |
+          [[ -n "${ANOLISA_NODE_BACKUP:-}" ]] || exit 0
+          sudo rm -f /usr/local/bin/node
+          if sudo test -e "$ANOLISA_NODE_BACKUP" || sudo test -L "$ANOLISA_NODE_BACKUP"; then
+            sudo mv "$ANOLISA_NODE_BACKUP" /usr/local/bin/node
+          fi

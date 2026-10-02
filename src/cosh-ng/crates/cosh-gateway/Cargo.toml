@@ -1,0 +1,25 @@
+[package]
+name = "cosh-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent-client-protocol = { workspace = true }
+clap = { workspace = true }
+cosh-gateway-contracts = { path = "../cosh-gateway-contracts" }
+nix = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+signal-hook = { workspace = true }
+thiserror = { workspace = true }
+wait-timeout = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+tempfile = { workspace = true }

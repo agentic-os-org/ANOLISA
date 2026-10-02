@@ -1,0 +1,368 @@
+From 4e752f42e3303b1cfa9814319fe3ca0e779fc854 Mon Sep 17 00:00:00 2001
+From: AgentSight Patch Maintainer <agentsight@localhost>
+Date: Mon, 3 Aug 2026 10:44:38 +0800
+Subject: [PATCH 1/3] add AgentSight file enforcement profile
+
+---
+ bpf/src/lib.rs | 325 +++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 299 insertions(+), 26 deletions(-)
+
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index 9bcefcdc..f4c05985 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -71,0 +72,4 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
++const PINNED_FILE_PROFILE_MARKER: &str =
++    "agentsight_profile_file_v1_a62e5d9d96f91101cda019519053e950d532380a";
++const PINNED_FULL_PROFILE_MARKER: &str =
++    "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
+@@ -448,0 +453,15 @@ fn pin_loaded_maps(
++fn pin_profile_marker(
++    bpf: &Ebpf,
++    paths: &PinnedEnginePaths,
++    reserve: HookReserve,
++    created: &mut Vec<PathBuf>,
++) -> io::Result<()> {
++    let marker = paths.map(reserve.profile_marker());
++    bpf.map("cap_state")
++        .ok_or_else(|| err("map cap_state missing for profile marker"))?
++        .pin(&marker)
++        .map_err(|e| err(format!("pin profile marker at {}: {e}", marker.display())))?;
++    created.push(marker);
++    Ok(())
++}
++
+@@ -503 +522 @@ fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
+-fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
++fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io::Result<bool> {
+@@ -520,7 +539,12 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
+-    for name in [
+-        "handle_fork",
+-        "handle_exec_args",
+-        "handle_exit",
+-        "cap_drain_tick",
+-    ] {
+-        if !paths.link(name).try_exists()? {
++    let marker = reserve.profile_marker();
++    if !paths.map(marker).try_exists()? {
++        return Err(err(format!(
++            "ActPlane pinned metadata mismatch at {}: expected {marker}; remove the pin root before changing ActPlane revision, profile, or schema",
++            paths.root.display()
++        )));
++    }
++    let budget = HookBudget::for_pinned_reserve(reserve);
++    for spec in TRACEPOINTS {
++        let exists = paths.link(spec.name).try_exists()?;
++        let expected = tracepoint_needed(spec, budget);
++        if expected && !exists {
+@@ -528,0 +553,3 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
++        if exists && !expected {
++            return Err(pinned_profile_mismatch(paths, spec.name));
++        }
+@@ -530,2 +557,11 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
+-    if bpf_lsm_active() && !paths.link("enforce_bpf_syscall").try_exists()? {
+-        return Ok(false);
++
++    let lsm_active = bpf_lsm_active();
++    for (name, _) in LSM_PROGS {
++        let exists = paths.link(name).try_exists()?;
++        let expected = lsm_link_expected(name, budget, lsm_active);
++        if expected && !exists {
++            return Ok(false);
++        }
++        if exists && !expected {
++            return Err(pinned_profile_mismatch(paths, name));
++        }
+@@ -535,0 +572,7 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
++fn pinned_profile_mismatch(paths: &PinnedEnginePaths, link: &str) -> io::Error {
++    err(format!(
++        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}; remove the pin root before changing profiles",
++        paths.root.display()
++    ))
++}
++
+@@ -579 +622,6 @@ fn ignore_missing_remove(result: Result<(), MapError>, what: &str) -> io::Result
+-        Ok(()) | Err(MapError::KeyNotFound) => Ok(()),
++        Ok(()) | Err(MapError::KeyNotFound | MapError::ElementNotFound) => Ok(()),
++        Err(MapError::SyscallError(error))
++            if error.io_error.raw_os_error() == Some(libc::ENOENT) =>
++        {
++            Ok(())
++        }
+@@ -1159,0 +1208,2 @@ struct HookBudget {
++    suppress_dataflow_tracepoints: bool,
++    file_open_only: bool,
+@@ -1162,0 +1213,26 @@ impl HookBudget {
++    fn for_pinned_reserve(reserve: HookReserve) -> Self {
++        let mut budget = HookBudget {
++            features: reserve.policy_features,
++            file_write: reserve.file_write_paths,
++            advanced_tracepoints: reserve.advanced_tracepoints,
++            suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
++            file_open_only: reserve.file_open_only,
++        };
++        if reserve.file_flow {
++            budget.features |= FEAT_FILE_FLOW;
++        }
++        if reserve.network {
++            budget.features |= FEAT_CONNECT | FEAT_RECV;
++        }
++        if reserve.block_exec {
++            budget.features |= FEAT_BLOCK_EXEC;
++        }
++        if reserve.block_file {
++            budget.features |= FEAT_BLOCK_FILE;
++        }
++        if reserve.block_connect {
++            budget.features |= FEAT_BLOCK_CONNECT;
++        }
++        budget
++    }
++
+@@ -1170,0 +1247,2 @@ impl HookBudget {
++                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
++                file_open_only: reserve.file_open_only,
+@@ -1176,0 +1255,2 @@ impl HookBudget {
++                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
++                file_open_only: reserve.file_open_only,
+@@ -1225,0 +1306,6 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
++    if budget.suppress_dataflow_tracepoints {
++        return matches!(
++            spec.need,
++            TracepointNeed::Core | TracepointNeed::CoreExec | TracepointNeed::ExecArgs
++        );
++    }
+@@ -1275,0 +1362,33 @@ fn lsm_needed(
++fn lsm_needed_for_budget(
++    name: &str,
++    block_exec: bool,
++    block_file: bool,
++    block_connect: bool,
++    recv_flow: bool,
++    budget: HookBudget,
++) -> bool {
++    if budget.file_open_only {
++        return block_file && name == "enforce_file_open";
++    }
++    lsm_needed(
++        name,
++        block_exec,
++        block_file,
++        block_connect,
++        recv_flow,
++        budget.advanced_tracepoints,
++    )
++}
++
++fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
++    lsm_active
++        && lsm_needed_for_budget(
++            name,
++            budget.features & FEAT_BLOCK_EXEC != 0,
++            budget.features & FEAT_BLOCK_FILE != 0,
++            budget.features & FEAT_BLOCK_CONNECT != 0,
++            budget.has_recv(),
++            budget,
++        )
++}
++
+@@ -1511,0 +1631 @@ pub struct PinnedEngine {
++    policy_features: u32,
+@@ -1522,0 +1643,2 @@ struct HookReserve {
++    suppress_dataflow_tracepoints: bool,
++    file_open_only: bool,
+@@ -1543,0 +1666,2 @@ impl HookReserve {
++            suppress_dataflow_tracepoints: false,
++            file_open_only: false,
+@@ -1546,0 +1671,48 @@ impl HookReserve {
++
++    fn file_enforcement() -> Self {
++        HookReserve {
++            block_file: true,
++            suppress_dataflow_tracepoints: true,
++            file_open_only: true,
++            policy_features: FEAT_PATH_CONTAINS
++                | FEAT_PATH_SUFFIX
++                | FEAT_OPEN_RULES
++                | FEAT_BLOCK_FILE,
++            ..HookReserve::default()
++        }
++    }
++
++    fn profile_marker(self) -> &'static str {
++        if self.file_open_only {
++            PINNED_FILE_PROFILE_MARKER
++        } else {
++            PINNED_FULL_PROFILE_MARKER
++        }
++    }
++
++    fn pinned_profile_value(value: Option<&str>) -> io::Result<Self> {
++        match value {
++            None => Ok(HookReserve::full_profile()),
++            Some(value) if value.eq_ignore_ascii_case("full") => Ok(HookReserve::full_profile()),
++            Some(value) if value.eq_ignore_ascii_case("file-enforcement") => {
++                Ok(HookReserve::file_enforcement())
++            }
++            Some(value) => Err(err(format!(
++                "unsupported ACTPLANE_PINNED_PROFILE value {value:?}"
++            ))),
++        }
++    }
++
++    fn pinned_profile() -> io::Result<Self> {
++        let value = std::env::var("ACTPLANE_PINNED_PROFILE").ok();
++        HookReserve::pinned_profile_value(value.as_deref())
++    }
++}
++
++fn validate_pinned_runtime(reserve: HookReserve, lsm_active: bool) -> io::Result<()> {
++    if reserve.file_open_only && !lsm_active {
++        return Err(err(
++            "ACTPLANE_PINNED_PROFILE=file-enforcement requires an active BPF LSM",
++        ));
++    }
++    Ok(())
+@@ -1563,2 +1735,8 @@ impl PinnedEngine {
+-        if pinned_engine_present(&paths)? {
+-            return Ok(Self { paths });
++        let reserve = HookReserve::pinned_profile()?;
++        validate_pinned_runtime(reserve, bpf_lsm_active())?;
++        let policy_features = reserve.policy_features;
++        if pinned_engine_present(&paths, reserve)? {
++            return Ok(Self {
++                paths,
++                policy_features,
++            });
+@@ -1567,5 +1745 @@ impl PinnedEngine {
+-        match Loader::load_with_pinned_layout(
+-            &empty_config_blob(),
+-            HookReserve::full_profile(),
+-            paths.clone(),
+-        ) {
++        match Loader::load_with_pinned_layout(&empty_config_blob(), reserve, paths.clone()) {
+@@ -1574,2 +1748,5 @@ impl PinnedEngine {
+-                if pinned_engine_present(&paths)? {
+-                    Ok(Self { paths })
++                if pinned_engine_present(&paths, reserve)? {
++                    Ok(Self {
++                        paths,
++                        policy_features,
++                    })
+@@ -1584,2 +1761,5 @@ impl PinnedEngine {
+-                if pinned_engine_present(&paths)? {
+-                    Ok(Self { paths })
++                if pinned_engine_present(&paths, reserve)? {
++                    Ok(Self {
++                        paths,
++                        policy_features,
++                    })
+@@ -1628 +1808 @@ impl PinnedEngine {
+-            policy_features: PINNED_POLICY_FEATURES,
++            policy_features: self.policy_features,
+@@ -1813 +1993 @@ impl Loader {
+-            if pinned_engine_present(paths)? {
++            if pinned_engine_present(paths, hook_reserve)? {
+@@ -1891 +2071 @@ impl Loader {
+-                if !lsm_needed(
++                if !lsm_needed_for_budget(
+@@ -1897 +2077 @@ impl Loader {
+-                    hook_budget.advanced_tracepoints,
++                    hook_budget,
+@@ -1922,0 +2103 @@ impl Loader {
++                pin_profile_marker(&bpf, paths, hook_reserve, &mut created)?;
+@@ -2888,0 +3070,2 @@ mod tests {
++            suppress_dataflow_tracepoints: false,
++            file_open_only: false,
+@@ -2902,0 +3086,2 @@ mod tests {
++            suppress_dataflow_tracepoints: false,
++            file_open_only: false,
+@@ -2918,0 +3104,88 @@ mod tests {
++    #[test]
++    fn pinned_file_enforcement_avoids_flow_tracepoints() {
++        fn spec(name: &str) -> &'static TracepointSpec {
++            TRACEPOINTS
++                .iter()
++                .find(|spec| spec.name == name)
++                .expect("tracepoint spec")
++        }
++
++        let budget = HookBudget::from_config(
++            &unsafe { std::mem::zeroed() },
++            HookReserve::file_enforcement(),
++        );
++
++        assert!(budget.features & FEAT_BLOCK_FILE != 0);
++        assert!(budget.features & FEAT_OPEN_RULES != 0);
++        assert!(!tracepoint_needed(spec("trace_openat"), budget));
++        assert!(!tracepoint_needed(spec("trace_rename"), budget));
++        assert!(lsm_needed(
++            "enforce_file_open",
++            false,
++            true,
++            false,
++            false,
++            false,
++        ));
++        assert!(lsm_needed_for_budget(
++            "enforce_file_open",
++            false,
++            true,
++            false,
++            false,
++            budget,
++        ));
++        assert!(!lsm_needed_for_budget(
++            "enforce_path_truncate",
++            false,
++            true,
++            false,
++            false,
++            budget,
++        ));
++    }
++
++    #[test]
++    fn pinned_file_enforcement_requires_bpf_lsm() {
++        let error = validate_pinned_runtime(HookReserve::file_enforcement(), false)
++            .expect_err("file enforcement must reject tracepoint-only mode");
++        assert!(error.to_string().contains("requires an active BPF LSM"));
++    }
++
++    #[test]
++    fn pinned_file_enforcement_rejects_full_profile_links() {
++        let budget = HookBudget::for_pinned_reserve(HookReserve::file_enforcement());
++        assert!(lsm_link_expected("enforce_file_open", budget, true));
++        assert!(!lsm_link_expected("enforce_bpf_syscall", budget, true));
++    }
++
++    #[test]
++    fn pinned_profile_marker_captures_revision_profile_and_schema() {
++        let marker = HookReserve::file_enforcement().profile_marker();
++        assert!(marker.contains("file_v1"));
++        assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
++        assert_ne!(marker, HookReserve::full_profile().profile_marker());
++    }
++
++    #[test]
++    fn unknown_pinned_profile_is_rejected() {
++        let error = HookReserve::pinned_profile_value(Some("file-enforcment"))
++            .expect_err("unknown profile must not fall back to full hooks");
++        assert!(error
++            .to_string()
++            .contains("unsupported ACTPLANE_PINNED_PROFILE"));
++    }
++
++    #[test]
++    fn missing_map_delete_is_idempotent() {
++        assert!(ignore_missing_remove(Err(MapError::ElementNotFound), "fixture").is_ok());
++        assert!(ignore_missing_remove(
++            Err(MapError::SyscallError(aya::sys::SyscallError {
++                call: "bpf_map_delete_elem",
++                io_error: io::Error::from_raw_os_error(libc::ENOENT),
++            })),
++            "fixture",
++        )
++        .is_ok());
++    }
++

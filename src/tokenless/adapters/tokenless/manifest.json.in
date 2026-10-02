@@ -1,0 +1,162 @@
+{
+  "component": "tokenless",
+  "version": "@VERSION@",
+  "targets": {
+    "cosh": {
+      "compatibleVersions": "*",
+      "method": "extension",
+      "extensionFile": "common/cosh-extension.json",
+      "extensionDir": "extensions/tokenless",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "compress-schema"
+        ],
+        "commands": ["tokenless-stats"]
+      }
+    },
+    "openclaw": {
+      "compatibleVersions": ">=5.0.0",
+      "capabilities": {
+        "plugins": ["tokenless"]
+      },
+      "actions": {
+        "detect":    "openclaw/scripts/detect.sh",
+        "install":   "openclaw/scripts/install.sh",
+        "uninstall": "openclaw/scripts/uninstall.sh"
+      }
+    },
+    "dsh": {
+      "compatibleVersions": ">=0.1.0-rc.2 <0.2.0",
+      "method": "plugin",
+      "pluginId": "@anolisa/dsh-tokenless",
+      "capabilities": {
+        "seams": ["tools/post-execute"],
+        "features": ["compress-response", "error-attribution", "stats"]
+      },
+      "bundle": {
+        "entry": "package.json",
+        "patch": "cordis.patch.yml",
+        "pluginEntry": "dist/index.js"
+      }
+    },
+    "hermes": {
+      "compatibleVersions": ">=1.0.0",
+      "capabilities": {
+        "hooks": [
+          "compress-response",
+          "compress-toon",
+          "rewrite",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "hermes/scripts/detect.sh",
+        "install":   "hermes/scripts/install.sh",
+        "uninstall": "hermes/scripts/uninstall.sh"
+      }
+    },
+    "qoder": {
+      "compatibleVersions": ">=0.2.0",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response"
+        ]
+      },
+      "actions": {
+        "detect":    "qoder/scripts/detect.sh",
+        "install":   "qoder/scripts/install.sh",
+        "uninstall": "qoder/scripts/uninstall.sh"
+      }
+    },
+    "claude-code": {
+      "compatibleVersions": ">=2.0.0",
+      "method": "plugin",
+      "marketplace": "anolisa-tokenless",
+      "pluginId": "tokenless@anolisa-tokenless",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "claude-code/scripts/detect.sh",
+        "install":   "claude-code/scripts/install.sh",
+        "uninstall": "claude-code/scripts/uninstall.sh"
+      }
+    },
+    "codex": {
+      "compatibleVersions": "*",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "response-diagnostics"
+        ]
+      },
+      "actions": {
+        "detect":    "codex/scripts/detect.sh",
+        "install":   "codex/scripts/install.sh",
+        "uninstall": "codex/scripts/uninstall.sh"
+      }
+    },
+    "opencode": {
+      "compatibleVersions": ">=1.0.0",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "compress-schema"
+        ]
+      },
+      "actions": {
+        "detect":    "opencode/scripts/detect.sh",
+        "install":   "opencode/scripts/install.sh",
+        "uninstall": "opencode/scripts/uninstall.sh"
+      }
+    },
+    "qwencode": {
+      "compatibleVersions": ">=0.17.0",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "compress-schema",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "qwencode/scripts/detect.sh",
+        "install":   "qwencode/scripts/install.sh",
+        "uninstall": "qwencode/scripts/uninstall.sh"
+      }
+    },
+    "qwenpaw": {
+      "compatibleVersions": ">=2.0.0 <3.0.0",
+      "capabilities": {
+        "hooks": [
+          "compress-schema",
+          "rewrite",
+          "compress-response",
+          "compress-toon"
+        ]
+      },
+      "actions": {
+        "detect":    "qwenpaw/scripts/detect.sh",
+        "install":   "qwenpaw/scripts/install.sh",
+        "uninstall": "qwenpaw/scripts/uninstall.sh"
+      }
+    }
+  }
+}

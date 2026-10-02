@@ -1,0 +1,187 @@
+name: Infra / AgentSight Kernel Validation
+
+on:
+  push:
+    branches:
+      - chore/test_sight
+    paths:
+      - 'src/agentsight/**'
+      - '.github/workflows/agentsight-runner-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+concurrency:
+  group: agentsight-runner-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standard:
+    name: Standard CI
+    runs-on: anolisa-agentsight-ci-x64
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy, llvm-tools-preview'
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agentsight
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev \
+            zlib1g-dev pkg-config perl
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
+
+      - name: Check formatting
+        working-directory: src/agentsight
+        run: cargo fmt --all --check
+
+      - name: Check architecture boundaries
+        working-directory: src/agentsight
+        run: python3 scripts/check-arch-boundaries.py
+
+      - name: Check SQLite entry points
+        working-directory: src/agentsight
+        run: |
+          python3 scripts/check-sqlite-entrypoints.py --self-test
+          python3 scripts/check-sqlite-entrypoints.py
+
+      - name: Lint
+        working-directory: src/agentsight
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
+      - name: Run tests with coverage
+        working-directory: src/agentsight
+        run: |
+          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/)'
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsight-runner-test-coverage
+          path: src/agentsight/coverage.xml
+          retention-days: 7
+
+  ebpf:
+    name: eBPF load (${{ matrix.kernel }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: '5.10'
+            runner: anolisa-agentsight-kernel510-x64
+          - kernel: '5.15'
+            runner: anolisa-agentsight-kernel515-x64
+          - kernel: '6.6'
+            runner: anolisa-agentsight-kernel66-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify kernel runner
+        shell: bash
+        env:
+          EXPECTED_KERNEL: ${{ matrix.kernel }}
+        run: |
+          set -euo pipefail
+          actual_kernel=$(uname -r)
+          case "$actual_kernel" in
+            "$EXPECTED_KERNEL".*) ;;
+            *)
+              echo "Expected kernel ${EXPECTED_KERNEL}.x, got ${actual_kernel}" >&2
+              exit 1
+              ;;
+          esac
+
+          sudo -n true
+          sudo test -r /sys/kernel/btf/vmlinux
+          test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token
+          echo "Kernel: ${actual_kernel}"
+          echo "Runner capabilities:"
+          sudo grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' \
+            /proc/self/status
+          echo "BPF sysctls:"
+          cat /proc/sys/kernel/unprivileged_bpf_disabled
+          cat /proc/sys/kernel/perf_event_paranoid
+          echo "LSM modules:"
+          # securityfs may not be mounted in container runners; try to mount it.
+          # Skip if already mounted (reused self-hosted runner).
+          mountpoint -q /sys/kernel/security 2>/dev/null || \
+            sudo mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+          if [ -r /sys/kernel/security/lsm ]; then
+            cat /sys/kernel/security/lsm
+            grep -q bpf /sys/kernel/security/lsm || \
+              echo "::warning::BPF-LSM is not active on this runner; enforcement e2e tests will be skipped"
+          else
+            echo "::warning::securityfs not available; cannot determine LSM status"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agentsight
+          shared-key: agentsight-bpf-${{ matrix.kernel }}
+
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev \
+            zlib1g-dev pkg-config perl
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
+
+      - name: Load all eBPF probes
+        shell: bash
+        env:
+          RUST_BACKTRACE: '1'
+          RUST_LOG: debug
+        run: |
+          set -euo pipefail
+          cd src/agentsight
+          cargo_bin=$(command -v cargo)
+          sudo env \
+            HOME="$HOME" \
+            CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            PATH="$PATH" \
+            RUST_BACKTRACE="$RUST_BACKTRACE" \
+            RUST_LOG="$RUST_LOG" \
+            CARGO_BIN="$cargo_bin" \
+            bash -c '
+              ulimit -l unlimited
+              exec "$CARGO_BIN" test --test bpf_load -- \
+                --ignored --nocapture --test-threads=1
+            '

@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source TASK_A = exec "**/task-a"
+  source TASK_B = exec "**/task-b"
+
+  rule no-cross-task-commit:
+    block exec "git" "commit" if TASK_A and TASK_B
+    because "do not mix task A and task B state"

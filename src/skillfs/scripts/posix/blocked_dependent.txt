@@ -1,0 +1,214 @@
+# SkillFS T0.1 external POSIX harness — blocked-dependent manifest.
+#
+# Each non-comment line is a glob pattern (matched against the test file
+# path relative to <pjdfstest>/tests). A failing pjdfstest file whose
+# path matches at least one pattern is bucketed as a "blocked fail" in
+# the harness report — it is known to fail because pjdfstest's own
+# setup uses a surface SkillFS deliberately does not implement
+# (symlink/mkfifo/mknod/socket via `create_file` or direct `symlink`
+# helper, or hardlinks via "multiply linked").
+#
+# Format: a `# citation` comment line MUST immediately precede each
+# glob, naming the upstream pjdfstest file and the line range that
+# justifies the entry. Entries without an upstream citation are not
+# allowed; "it failed in the baseline" is not a citation.
+#
+# When a Phase 2 package implements symlink creation, hardlink,
+# mkfifo, or mknod, remove every entry whose citation cites that
+# surface and re-run the harness.
+#
+# See docs/testing/posix-external-harness.md for the install/run guide.
+
+# ---------------------------------------------------------------------------
+# chmod
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/chmod/00.t:23,29,57,88 — loops `for type in regular
+# dir fifo block char socket symlink` and calls `symlink ${n0} ${n1}`
+# inside the body. Requires mkfifo/mknod/symlink helpers we reject.
+chmod/00.t
+
+# pjdfstest tests/chmod/01.t:15 — loops
+# `for type in regular fifo block char socket; do create_file`,
+# which fans out to mkfifo/mknod helpers we reject.
+chmod/01.t
+
+# pjdfstest tests/chmod/04.t:26 — calls
+# `expect 0 symlink ${n2} ${n0}/${n1}` as a setup step.
+chmod/04.t
+
+# pjdfstest tests/chmod/06.t:18,19 — `expect 0 symlink` pair sets up
+# the loop topology; without symlink the test cannot proceed.
+chmod/06.t
+
+# pjdfstest tests/chmod/07.t:37 — calls `symlink ${n2} ${n1}/${n3}`.
+chmod/07.t
+
+# pjdfstest tests/chmod/11.t:28 — calls `expect 0 symlink ${n1} ${n2}`
+# in the type loop before exercising sticky-bit semantics.
+chmod/11.t
+
+# ---------------------------------------------------------------------------
+# chown
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/chown/00.t:24,33,60,71,110 — loops through every
+# file type including fifo/block/char/socket/symlink and creates
+# symlinks inside each iteration.
+chown/00.t
+
+# pjdfstest tests/chown/01.t:15 — loops
+# `for type in regular fifo block char socket; do create_file`,
+# which fans out to mkfifo/mknod helpers we reject.
+chown/01.t
+
+# pjdfstest tests/chown/06.t:14,15 — `expect 0 symlink` pair sets up
+# the ELOOP topology.
+chown/06.t
+
+# pjdfstest tests/chown/07.t:21,28 — loops `for type in regular dir
+# fifo block char socket symlink` and calls `symlink` inside.
+chown/07.t
+
+# ---------------------------------------------------------------------------
+# ftruncate
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/ftruncate/07.t:14,15 — `expect 0 symlink` pair
+# sets up the ELOOP topology.
+ftruncate/07.t
+
+# ---------------------------------------------------------------------------
+# mkdir
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/mkdir/01.t:15 — loops
+# `for type in regular fifo block char socket; do create_file`,
+# which fans out to mkfifo/mknod helpers we reject.
+mkdir/01.t
+
+# pjdfstest tests/mkdir/07.t:14,15 — `expect 0 symlink` pair sets up
+# the ELOOP topology.
+mkdir/07.t
+
+# pjdfstest tests/mkdir/10.t:13 — loops
+# `for type in regular dir fifo block char socket symlink`, requiring
+# every unsupported helper.
+mkdir/10.t
+
+# ---------------------------------------------------------------------------
+# open
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/open/01.t:14 — loops `for type in regular fifo
+# block char socket; do create_file ${type} ${n0}/${n1}`. The
+# non-`regular` iterations require mkfifo/mknod/bind helpers we
+# reject; only the `regular` case (subtests 2–5) can run end to
+# end on SkillFS today.
+open/01.t
+
+# pjdfstest tests/open/12.t:14,15 — `expect 0 symlink` pair sets up
+# the ELOOP topology.
+open/12.t
+
+# pjdfstest tests/open/16.t:19 — calls `expect 0 symlink ${n0} ${n1}`.
+open/16.t
+
+# pjdfstest tests/open/17.t:13 — calls `expect 0 mkfifo ${n0} 0644`
+# as a test setup step.
+open/17.t
+
+# pjdfstest tests/open/22.t:13 — loops
+# `for type in regular dir fifo block char socket symlink`.
+open/22.t
+
+# pjdfstest tests/open/24.t:31 — calls `expect 0 bind ${n0}` to
+# create a UNIX domain socket on disk; the FUSE bind() path uses a
+# mknod-style operation we reject.
+open/24.t
+
+# ---------------------------------------------------------------------------
+# rename
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/rename/00.t:49 — calls `expect 0 symlink ${n0} ${n1}`
+# during EACCES coverage setup.
+rename/00.t
+
+# pjdfstest tests/rename/11.t:15,16 — `expect 0 symlink` pair sets up
+# the ELOOP topology.
+rename/11.t
+
+# pjdfstest tests/rename/12.t:16,19 — loops `for type in regular fifo
+# block char socket; do create_file` twice; mkfifo/mknod required.
+rename/12.t
+
+# pjdfstest tests/rename/13.t:16 — loops `for type in regular fifo
+# block char socket symlink; do create_file`.
+rename/13.t
+
+# pjdfstest tests/rename/14.t:16 — loops `for type in regular fifo
+# block char socket symlink; do create_file`.
+rename/14.t
+
+# pjdfstest tests/rename/20.t:18 — loops `for type in regular dir
+# fifo block char socket symlink; do create_file`.
+rename/20.t
+
+# pjdfstest tests/rename/23.t:21 — loops `for type in regular fifo
+# block char socket; do create_file` and exercises multiply-linked
+# (hardlink) destinations.
+rename/23.t
+
+# ---------------------------------------------------------------------------
+# rmdir
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/rmdir/01.t:24,28 — `expect 0 symlink` then
+# `expect 0 mkfifo` as test setup; neither helper is implemented.
+rmdir/01.t
+
+# pjdfstest tests/rmdir/05.t:14,15 — calls `symlink ${n0} ${n1}` and
+# `symlink ${n1} ${n0}` as test setup.
+rmdir/05.t
+
+# pjdfstest tests/rmdir/06.t:15 — loops `for type in regular dir
+# fifo block char socket symlink`.
+rmdir/06.t
+
+# ---------------------------------------------------------------------------
+# truncate
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/truncate/07.t:14,15 — symlink setup pair.
+truncate/07.t
+
+# ---------------------------------------------------------------------------
+# unlink
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/unlink/00.t:24,29,34,39 — `expect 0 symlink` then
+# `expect 0 mkfifo` then `expect 0 mknod ${n0} b` then
+# `expect 0 mknod ${n0} c`; cycles through every special-file type
+# the test must create.
+unlink/00.t
+
+# pjdfstest tests/unlink/07.t:14,15 — symlink setup pair.
+unlink/07.t
+
+# pjdfstest tests/unlink/11.t:23 — loops `for type in regular fifo
+# block char socket symlink`.
+unlink/11.t
+
+# ---------------------------------------------------------------------------
+# utimensat
+# ---------------------------------------------------------------------------
+
+# pjdfstest tests/utimensat/00.t:23 — loops `for type in regular dir
+# fifo block char socket; do create_file`.
+utimensat/00.t
+
+# pjdfstest tests/utimensat/05.t:30 — `ln -s ${n0} ${n2}` shell
+# symlink as test setup; the rest of the test cannot run if symlink
+# creation is rejected.
+utimensat/05.t

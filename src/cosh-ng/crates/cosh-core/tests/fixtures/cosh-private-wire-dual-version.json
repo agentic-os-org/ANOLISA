@@ -1,0 +1,436 @@
+{
+  "legacy_v1": {
+    "initialize_request": {
+      "type": "control_request",
+      "request_id": "gateway-init-1",
+      "request": {
+        "subtype": "initialize",
+        "fire_session_start": false,
+        "protocol_version": 1
+      }
+    },
+    "initialize_ack": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "gateway-init-1",
+        "response": {
+          "subtype": "initialize",
+          "protocol_version": 1,
+          "capabilities": {
+            "can_handle_can_use_tool": true,
+            "can_handle_host_executed_shell_tool_result": true,
+            "can_handle_shell_evidence_tool": false,
+            "can_handle_approval_receipt": true
+          }
+        }
+      }
+    }
+  },
+  "gateway_brokered_v3": {
+    "initialize_request": {
+      "type": "control_request",
+      "request_id": "gateway-init-v3",
+      "request": {
+        "subtype": "initialize",
+        "fire_session_start": false,
+        "protocol_version": 3,
+        "execution_profile": "gateway_brokered_v1",
+        "capability_profile": {
+          "profile_id": "task-only-v1",
+          "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+        }
+      }
+    },
+    "initialize_ack": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "gateway-init-v3",
+        "response": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          },
+          "runtime_tools": [
+            "ask_user_question"
+          ],
+          "capabilities": {
+            "can_handle_can_use_tool": true,
+            "can_handle_host_executed_shell_tool_result": false,
+            "can_handle_shell_evidence_tool": false,
+            "can_handle_approval_receipt": true,
+            "can_handle_brokered_ask_user": true
+          }
+        }
+      }
+    },
+    "ask_user_request": {
+      "type": "control_request",
+      "request_id": "question-1",
+      "request": {
+        "subtype": "ask_user",
+        "tool_use_id": "question-call",
+        "question": "Choose a branch",
+        "options": [
+          {
+            "label": "main",
+            "description": "Use the default branch"
+          }
+        ],
+        "allow_free_text": true,
+        "multi_select": false
+      }
+    },
+    "ask_user_answer": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "question-1",
+        "response": {
+          "behavior": "answer",
+          "answer": "main"
+        }
+      }
+    },
+    "invalid_initialize_requests": {
+      "missing_version": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
+        }
+      },
+      "wrong_version": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 2,
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
+        }
+      },
+      "missing_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
+        }
+      },
+      "wrong_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "legacy",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
+        }
+      },
+      "missing_capability_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "gateway_brokered_v1"
+        }
+      },
+      "drifted_capability_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      }
+    },
+    "invalid_initialize_acks": {
+      "missing_version": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "wrong_version": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 2,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "missing_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "wrong_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "legacy",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "missing_capability_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capabilities": {}
+          }
+        }
+      },
+      "drifted_capability_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "missing_capabilities": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "runtime_tools": [
+              "ask_user_question"
+            ]
+          }
+        }
+      },
+      "wrong_capabilities": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "runtime_tools": [
+              "ask_user_question"
+            ],
+            "capabilities": {
+              "can_handle_can_use_tool": true,
+              "can_handle_host_executed_shell_tool_result": true,
+              "can_handle_shell_evidence_tool": false,
+              "can_handle_approval_receipt": true,
+              "can_handle_brokered_ask_user": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "gateway_brokered_checkpoint_v4": {
+    "initialize_request": {
+      "type": "control_request",
+      "request_id": "gateway-init-v4",
+      "request": {
+        "subtype": "initialize",
+        "fire_session_start": false,
+        "protocol_version": 4,
+        "execution_profile": "gateway_brokered_checkpoint_v1",
+        "capability_profile": {
+          "profile_id": "workspace-checkpoint-v1",
+          "manifest_digest": "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1"
+        }
+      }
+    },
+    "initialize_ack": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "gateway-init-v4",
+        "response": {
+          "subtype": "initialize",
+          "protocol_version": 4,
+          "execution_profile": "gateway_brokered_checkpoint_v1",
+          "capability_profile": {
+            "profile_id": "workspace-checkpoint-v1",
+            "manifest_digest": "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1"
+          },
+          "runtime_tools": [
+            "ask_user_question",
+            "workspace_checkpoint_create"
+          ],
+          "capabilities": {
+            "can_handle_can_use_tool": true,
+            "can_handle_host_executed_shell_tool_result": false,
+            "can_handle_shell_evidence_tool": false,
+            "can_handle_approval_receipt": true,
+            "can_handle_hosted_checkpoint_create": true,
+            "can_handle_brokered_ask_user": true
+          }
+        }
+      }
+    },
+    "checkpoint_created": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "checkpoint-request-1",
+        "response": {
+          "behavior": "host_executed_checkpoint_create",
+          "checkpointResult": {
+            "checkpoint_id": "ckp_123e4567-e89b-12d3-a456-426614174000",
+            "outcome": {
+              "status": "created",
+              "snapshot_id": "snap-1"
+            }
+          }
+        }
+      }
+    },
+    "checkpoint_uncertain": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "checkpoint-request-2",
+        "response": {
+          "behavior": "host_executed_checkpoint_error",
+          "checkpointError": {
+            "outcome": "uncertain",
+            "code": "checkpoint_unknown",
+            "message": "Exact evidence was not available"
+          }
+        }
+      }
+    }
+  },
+  "gateway_brokered_workspace_write_v5": {
+    "initialize_request": {
+      "type": "control_request",
+      "request_id": "gateway-init-v5",
+      "request": {
+        "subtype": "initialize",
+        "fire_session_start": false,
+        "protocol_version": 5,
+        "execution_profile": "gateway_brokered_workspace_write_v1",
+        "capability_profile": {
+          "profile_id": "workspace-write-v1",
+          "manifest_digest": "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a"
+        }
+      }
+    },
+    "initialize_ack": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "gateway-init-v5",
+        "response": {
+          "subtype": "initialize",
+          "protocol_version": 5,
+          "execution_profile": "gateway_brokered_workspace_write_v1",
+          "capability_profile": {
+            "profile_id": "workspace-write-v1",
+            "manifest_digest": "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a"
+          },
+          "runtime_tools": [
+            "ask_user_question",
+            "write_file"
+          ],
+          "capabilities": {
+            "can_handle_can_use_tool": true,
+            "can_handle_host_executed_shell_tool_result": false,
+            "can_handle_shell_evidence_tool": false,
+            "can_handle_approval_receipt": true,
+            "can_handle_brokered_ask_user": true
+          }
+        }
+      }
+    }
+  }
+}

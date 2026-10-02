@@ -1,0 +1,80 @@
+[component]
+name = "agent-memory"
+version = "0.2.8"
+layer = "runtime"
+domain = "state"
+display_name = "Agent Memory"
+description = "Agent persistent memory and context"
+owner = "agent-memory-team"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[backends.rpm]
+package = "agent-memory"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/agent-memory/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/agent-memory"
+target = "{bindir}/agent-memory"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/agent-memory/default.toml"
+target = "{datadir}/agent-memory/default.toml"
+mode = "0644"
+type = "config"
+
+[[component.layout.files]]
+source = "share/anolisa/mcp-servers/agent-memory.json"
+target = "{datadir}/mcp-servers/agent-memory.json"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/agent-memory/anolisa-memory@.service"
+target = "{userunitdir}/anolisa-memory@.service"
+mode = "0644"
+
+[[component.layout.files]]
+source = "adapters/agent-memory/manifest.json"
+target = "{datadir}/adapters/agent-memory/manifest.json"
+mode = "0644"
+
+[[component.services]]
+unit = "anolisa-memory@.service"
+scope = "user"
+instance = "%u"
+enable = false
+start = false
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/agent-memory"
+timeout_secs = 5
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party"
+adapter_type = "plugin"
+plugin_id = "memory-anolisa"
+source = "adapters/agent-memory/openclaw"
+dest = "{datadir}/adapters/agent-memory/openclaw/"
+detect = { binary = "openclaw" }
+
+[adapters.bundle]
+entry = "openclaw.plugin.json"

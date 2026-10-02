@@ -1,0 +1,19 @@
+[package]
+name = "ebpf-ifc-engine"
+version = "0.1.9"
+edition = "2021"
+description = "eBPF information-flow control engine for Linux: kernel-level label propagation and policy rule matching across process, file, network, and stdio boundaries."
+license = "MIT"
+repository = "https://github.com/eunomia-bpf/ActPlane"
+keywords = ["ebpf", "ifc", "policy-engine", "bpf-lsm", "linux"]
+categories = ["os::linux-apis"]
+
+[lib]
+name = "ebpf_ifc_engine"
+path = "src/lib.rs"
+
+[dependencies]
+aya = "0.13"
+libc = "0.2"
+libbpf-sys = "1.7"
+log = { workspace = true }

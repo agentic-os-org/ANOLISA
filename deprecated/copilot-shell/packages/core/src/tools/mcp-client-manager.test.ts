@@ -1,0 +1,87 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { McpClientManager } from './mcp-client-manager.js';
+import { McpClient } from './mcp-client.js';
+import type { ToolRegistry } from './tool-registry.js';
+import type { Config } from '../config/config.js';
+
+vi.mock('./mcp-client.js', async () => {
+  const originalModule = await vi.importActual('./mcp-client.js');
+  return {
+    ...originalModule,
+    McpClient: vi.fn(),
+    populateMcpServerCommand: vi.fn(() => ({
+      'test-server': {},
+    })),
+  };
+});
+
+describe('McpClientManager', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should discover tools from all servers', async () => {
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getChildProcessEnv: () => ({ COSH_SESSION_ID: 'test-session-id' }),
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(McpClient).toHaveBeenCalledWith(
+      'test-server',
+      {},
+      {},
+      {},
+      {},
+      false,
+      undefined,
+      { COSH_SESSION_ID: 'test-session-id' },
+    );
+    expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
+    expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
+  });
+
+  it('should not discover tools if folder is not trusted', async () => {
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => false,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(mockedMcpClient.connect).not.toHaveBeenCalled();
+    expect(mockedMcpClient.discover).not.toHaveBeenCalled();
+  });
+});

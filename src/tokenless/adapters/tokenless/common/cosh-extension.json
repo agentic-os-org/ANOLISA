@@ -1,0 +1,65 @@
+{
+  "name": "tokenless",
+  "version": "0.8.4",
+  "contextFileName": "COPILOT.md",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-tool-ready",
+            "description": "Registered hard-disabled Tool Ready pass-through; performs no check, repair, or block",
+            "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
+            "timeout": 10000,
+            "fail_open": true,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|shell|exec|process)$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-rewrite",
+            "description": "Rewrites shell commands via rtk for token savings",
+            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py --agent-id copilot-shell",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-response",
+            "description": "Compresses tool responses and encodes to TOON format",
+            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py --agent-id copilot-shell",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-schema",
+            "description": "Compresses tool schema definitions for token savings",
+            "command": "python3 ${extensionPath}/hooks/compress_schema_hook.py",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ]
+  }
+}

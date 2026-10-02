@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Codex PreToolUse Tool Ready adapter, currently a silent pass-through.
+
+Release builds of ``tokenless env-check`` return ``UNKNOWN`` with
+``enabled:false``, which this adapter silently passes through. The retained
+legacy pipeline below remains dormant until the readiness model is redesigned
+and intentionally re-enabled in source.
+
+Legacy pipeline: Check → Fix → Re-check
+  1. CHECK:   ``tokenless env-check --json --tool <name>``
+  2. FIX:     ``tokenless env-check --fix --json --tool <name>``
+  3. RE-CHECK: parse result after fix attempt
+
+Protocol:
+    stdin  ← codex PreToolUse JSON (tool_name, ...)
+    stdout → {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                      "permissionDecision": "allow"|"deny",
+                                      "additionalContext": "..."}}
+
+Status mapping (from tokenless env-check --json):
+    READY       → passthrough (empty stdout)
+    PARTIAL     → allow + additionalContext warning
+    NOT_READY   → auto-fix → re-check → deny if still failing
+    UNKNOWN     → passthrough (fail-open)
+
+Fail-open: every error path silently passes through (exit 0 with empty
+stdout) so the agent session is never blocked by a hook failure.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from typing import Optional
+
+# Resolve shared hook utilities (common/hooks/) with FHS fallback paths.
+# Primary: relative path (works for source-tree and FHS/RPM install).
+# Fallbacks: system and user FHS paths (works when Codex caches only the
+# plugin subdirectory and the relative path resolves outside the cache).
+#
+# Trust model (aligned with bash is_trusted_file / Rust is_trusted_path):
+#   - System FHS paths (/usr/share, /usr/local/share) are unconditional.
+#   - User-relative paths use passwd DB home (NOT $HOME — env-controllable),
+#     with ownership and parent-dir permission checks.
+#   - Relative ../../common/hooks is trusted only if the resolved target
+#     exists and is under a system prefix or a passwd-validated home path.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_trusted_dir(path: str) -> bool:
+    """Check whether a directory is trusted for Python module imports.
+
+    Mirrors the trust criteria in bash tool_ready_hook.sh (is_trusted_file)
+    and Rust env_check.rs (is_trusted_path): system paths unconditional,
+    user paths validated via passwd + ownership + parent permission checks.
+
+    NOTE: Callers should pass realpath-resolved paths (not just abspath)
+    so that symlink targets are validated before the trust check — a
+    symlinked /usr/share/anolisa → /tmp/ would bypass the prefix check
+    if only abspath is used.
+    """
+    # System FHS prefixes are always trusted
+    for prefix in ("/usr/share/", "/usr/local/share/", "/usr/libexec/", "/usr/lib/anolisa/"):
+        if path.startswith(prefix):
+            return True
+    # For paths outside system prefixes (e.g. source-tree cloned to
+    # /opt/anolisa/), trust them if owned by current uid or root AND
+    # parent directory is not world-writable. This covers developer
+    # worktrees without requiring the path to be under passwd home.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid != os.getuid() and st.st_uid != 0:
+        # Not owned by us or root — refuse. Home paths must be owned by
+        # us or root; source-tree paths outside system prefixes are
+        # already covered by the ownership check above (current uid/root).
+        return False
+    # Ownership OK — check parent directory is not world-writable
+    parent = os.path.dirname(path)
+    try:
+        pst = os.stat(parent)
+    except OSError:
+        return False
+    if pst.st_uid != os.getuid() and pst.st_uid != 0:
+        return False
+    if pst.st_mode & 0o002:  # world-writable
+        return False
+    return True
+
+# Resolve real home from passwd DB for user-install fallback path.
+# Falls back to "" (empty) when unavailable — candidate is then skipped.
+try:
+    import pwd as _pwd
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_REAL_HOME, *parts) if _REAL_HOME else ""
+
+
+_HOOK_UTILS_CANDIDATES = [
+    os.path.join(_HERE, "..", "..", "common", "hooks"),                   # source-tree / FHS
+    "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
+    os.path.join(_REAL_HOME, ".local", "share",
+                 "anolisa", "adapters", "tokenless", "common", "hooks") if _REAL_HOME else "",
+]
+_HOOK_UTILS_RESOLVED = ""
+for _C in _HOOK_UTILS_CANDIDATES:
+    if _C and _is_trusted_dir(os.path.realpath(_C)) and os.path.isdir(_C):
+        _HOOK_UTILS_RESOLVED = os.path.realpath(_C)
+        sys.path.insert(0, _C)
+        break
+
+if _HOOK_UTILS_RESOLVED:
+    from hook_utils import skip_silent as _skip  # noqa: E402
+else:
+    # Fail-open: no trusted hook_utils found → provide inline fallbacks
+    # so the hook script exits 0 (passthrough) rather than ImportError → exit 1.
+    def _skip() -> None:  # type: ignore[assignment,misc]
+        sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
+FIX_TIMEOUT = 60  # auto-fix may involve package installs (dnf/pip)
+
+# -- tokenless binary search paths (ANOLISA FHS spec) ------------------------
+# Codex can cache this script without common/hooks. Keep this standalone list
+# aligned with hook_utils.py::_known_binary_paths.
+
+_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
+_TOKENLESS_SYSTEM_FALLBACK = "/usr/local/bin/tokenless"
+_TOKENLESS_LOCAL_BIN = _user_path(".local", "bin", "tokenless")
+_TOKENLESS_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "tokenless"
+)
+_TOKENLESS_LOCAL_LIB = _user_path(
+    ".local", "lib", "anolisa", "tokenless", "tokenless"
+)
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _warn(msg: str) -> None:
+    print(f"[tokenless:ready] {msg}", file=sys.stderr)
+
+
+def _find_tokenless() -> Optional[str]:
+    explicit = os.environ.get("TOKENLESS_BIN", "")
+    if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+    path = shutil.which("tokenless")
+    if path:
+        return path
+    for fp in (
+        _TOKENLESS_LOCAL_BIN,
+        _TOKENLESS_SYSTEM_FALLBACK,
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
+    ):
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            return fp
+    return None
+
+
+def _run_env_check(
+    tokenless_bin: str, tool_name: str, fix: bool = False
+) -> Optional[dict]:
+    """Run tokenless env-check and return parsed JSON result, or None."""
+    cmd = [tokenless_bin, "env-check", "--json", "--tool", tool_name]
+    if fix:
+        cmd.append("--fix")
+    timeout = FIX_TIMEOUT if fix else 10
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        _warn(f"env-check{' --fix' if fix else ''} exit {proc.returncode}")
+        return None
+    try:
+        return json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def _build_response(
+    tool_name: str,
+    status: str,
+    missing: list[str],
+    permission: str,
+) -> str:
+    """Build a codex PreToolUse JSON response and return it as a string."""
+    missing_str = ", ".join(missing) if missing else "unknown"
+    if status == "PARTIAL":
+        ctx = (
+            f"[tokenless:ready] {tool_name}: PARTIAL — "
+            f"recommended deps not installed: {missing_str}. "
+            f"Core tool is functional, extended features may be unavailable."
+        )
+    else:
+        ctx = (
+            f"[tokenless:ready] {tool_name}: NOT_READY — "
+            f"auto-fix attempted but dependencies still missing: {missing_str}. "
+            f"Do NOT retry the same tool — fix the environment first."
+        )
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": permission,
+            "additionalContext": ctx,
+        }
+    }
+    return json.dumps(response, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    # 1. Locate tokenless binary
+    tokenless_bin = _find_tokenless()
+    if not tokenless_bin:
+        _skip()
+
+    # 2. Read stdin JSON
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    # 3. Extract tool_name
+    tool_name = input_data.get("tool_name", "")
+    if not tool_name:
+        _skip()
+
+    # === Phase 1: CHECK ===
+    result = _run_env_check(tokenless_bin, tool_name, fix=False)
+    if result is None:
+        _skip()
+
+    status = result.get("status", "UNKNOWN")
+    missing = result.get("missing", [])
+
+    if status == "READY":
+        _skip()
+
+    if status == "UNKNOWN":
+        _skip()
+
+    if status == "PARTIAL":
+        print(_build_response(tool_name, status, missing, "allow"))
+        return
+
+    # === Phase 2: FIX (auto-install missing required dependencies) ===
+    _warn(f"{tool_name}: {status}, attempting auto-fix"
+          + (f" (missing: {', '.join(missing)})" if missing else ""))
+
+    fix_result = _run_env_check(tokenless_bin, tool_name, fix=True)
+    if fix_result is None:
+        # Fix command itself failed — report what we know from check
+        if status == "PARTIAL":
+            print(_build_response(tool_name, status, missing, "allow"))
+            return
+        print(_build_response(tool_name, status, missing, "deny"))
+        return
+
+    fix_status = fix_result.get("status", "UNKNOWN")
+
+    # === Phase 3: RE-CHECK ===
+    if fix_status == "READY":
+        _warn(f"{tool_name}: auto-fix succeeded, tool is now READY")
+        _skip()
+
+    # Fix didn't fully resolve — report remaining issues
+    fix_missing = fix_result.get("missing", [])
+    if fix_status == "PARTIAL":
+        print(_build_response(tool_name, fix_status, fix_missing, "allow"))
+        return
+
+    # Still NOT_READY after fix
+    print(_build_response(tool_name, fix_status, fix_missing, "deny"))
+
+
+if __name__ == "__main__":
+    main()

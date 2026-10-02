@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/provider-response/v1alpha1",
+  "title": "External AW Provider response v1alpha1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "status",
+        "operations"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "status": {
+          "const": "ok"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "events",
+              "effects"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[!-~]+$",
+                "not": {
+                  "pattern": "[^!-~]"
+                }
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "session.start",
+                    "input.submit",
+                    "tool.before",
+                    "tool.after",
+                    "permission.request",
+                    "compact.before",
+                    "compact.after",
+                    "subagent.start",
+                    "subagent.stop",
+                    "turn.stop",
+                    "session.end",
+                    "model.before_request",
+                    "runtime.observed",
+                    "runtime.exited",
+                    "security.violation",
+                    "coverage.changed"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 16,
+                "uniqueItems": true
+              },
+              "effects": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "observe",
+                    "block",
+                    "ask",
+                    "replace_input",
+                    "replace_result"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": true
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "status"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "status": {
+          "const": "ok"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "status",
+        "input_digest",
+        "effects"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "status": {
+          "const": "ok"
+        },
+        "input_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "minLength": 71,
+          "maxLength": 71
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "observe",
+                  "block",
+                  "ask",
+                  "replace_input",
+                  "replace_result"
+                ]
+              },
+              "reason_code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_.-]+$",
+                "not": {
+                  "pattern": "[^A-Za-z0-9_.-]"
+                }
+              }
+            }
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "status",
+        "error_code"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "status": {
+          "const": "error"
+        },
+        "error_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "not": {
+            "pattern": "[^A-Za-z0-9_.-]"
+          }
+        }
+      }
+    }
+  ]
+}

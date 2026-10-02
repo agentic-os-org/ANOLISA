@@ -1,0 +1,39 @@
+# cosh-ng-managed-task-dev-v1
+# Transient source-tree development unit installed below /run by managed-task-dev.sh.
+[Unit]
+Description=COSH Gateway source development daemon (%i)
+Conflicts=cosh-gateway@%i.service cosh-gateway-acp@%i.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=%i
+Environment=COSH_GATEWAY_ACP_ARG=
+Environment=COSH_GATEWAY_CHECKPOINT_ARG=
+EnvironmentFile=/run/cosh-gateway-dev-%i.env
+Environment=HOME=/var/lib/cosh-gateway-dev-%i/core-home
+ExecStart=/usr/local/libexec/cosh-ng-dev/%i/cosh-gateway serve --systemd-unit=cosh-gateway-dev@%i.service --socket=/run/cosh-gateway-dev-%i/gateway.sock --database=/var/lib/cosh-gateway-dev-%i/gateway.sqlite --core-executable=/usr/local/libexec/cosh-ng-dev/%i/cosh-core --workspace=${COSH_GATEWAY_WORKSPACE} $COSH_GATEWAY_ACP_ARG $COSH_GATEWAY_CHECKPOINT_ARG
+RuntimeDirectory=cosh-gateway-dev-%i
+RuntimeDirectoryMode=0700
+StateDirectory=cosh-gateway-dev-%i
+StateDirectoryMode=0700
+UMask=0077
+
+KillMode=control-group
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+Delegate=no
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+InaccessiblePaths=/run/user
+RestrictSUIDSGID=false
+LockPersonality=true

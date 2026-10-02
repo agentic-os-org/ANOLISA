@@ -1,0 +1,27 @@
+[package]
+name = "asc-pcp"
+description = "Binding reconciliation core with opaque target deployment ports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-policy-repository = { workspace = true }
+asc-foundation-types = { workspace = true }
+asc-policy-types = { workspace = true }
+asc-policy-target-contracts = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+asc-agentsight-client = { workspace = true }
+asc-pap = { workspace = true }
+asc-pap-repository-memory = { workspace = true }
+asc-policy-adapter-agentsight = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
