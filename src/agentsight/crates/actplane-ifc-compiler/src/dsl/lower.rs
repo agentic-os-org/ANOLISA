@@ -373,6 +373,126 @@ mod tests {
             "error should mention byte ABI limit: {err}"
         );
     }
+
+    #[test]
+    fn exec_arg_at_abi_limit_compiles() {
+        // 23 bytes: exactly ARG - 1, fits with NUL terminator in [u8; 24]
+        let arg = "a".repeat(23);
+        let dsl = format!("rule r:\n  block exec \"git\" \"{arg}\" if A\n  because \"test\"\n");
+        assert!(
+            crate::dsl::compile_str(&dsl).is_ok(),
+            "23-byte exec arg should compile successfully"
+        );
+    }
+
+    #[test]
+    fn exec_arg_exceeding_abi_limit_rejected() {
+        // 24 bytes: exactly ARG; set_pat would truncate to a 23-byte prefix
+        // that the engine's full-slot compare silently matches as a prefix.
+        let arg = "a".repeat(24);
+        let dsl = format!("rule r:\n  block exec \"git\" \"{arg}\" if A\n  because \"test\"\n");
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("24-byte exec arg must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn since_arg_exceeding_abi_limit_rejected() {
+        let arg = "a".repeat(24);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/confirm\" since exec \"git\" \"{arg}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("24-byte since arg must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_target_at_abi_limit_compiles() {
+        // 63-byte basename: exactly PAT - 1, fits with NUL terminator
+        let name = "b".repeat(63);
+        let dsl = format!("rule r:\n  block exec \"{name}\" if A\n  because \"test\"\n");
+        assert!(
+            crate::dsl::compile_str(&dsl).is_ok(),
+            "63-byte exec target should compile successfully"
+        );
+    }
+
+    #[test]
+    fn exec_target_exceeding_abi_limit_rejected() {
+        // 64-byte basename: set_pat would truncate to 63 bytes + NUL, an
+        // exact-match literal no runtime comm can ever equal.
+        let name = "b".repeat(64);
+        let dsl = format!("rule r:\n  block exec \"{name}\" if A\n  because \"test\"\n");
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte exec target must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_condition_target_exceeding_abi_limit_rejected() {
+        let name = "b".repeat(64);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless target \"{name}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte condition target must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_pattern_exceeding_abi_limit_rejected() {
+        // An `after` gate literal longer than the ABI would be truncated and
+        // could then never match, voiding the clause's carve-out silently.
+        let name = "c".repeat(64);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/{name}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte gate pattern must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_source_exceeding_abi_limit_rejected() {
+        let name = "d".repeat(64);
+        let dsl = format!(
+            "source AGENT = exec \"{name}\"\nrule r:\n  block exec \"git\" if AGENT\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte exec source must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
 }
 
 fn ipv4_to_kernel(addr: Ipv4Addr) -> u32 {
@@ -526,6 +646,29 @@ impl Ctx {
     }
 
     fn add_update(&mut self, spec: UpdateSpec<'_>) -> Result<(), String> {
+        // Every literal stored by this path (exec/file sources, declassify and
+        // endorse gates, `after` gate patterns, `since` invalidator patterns
+        // and their args) is matched byte-exact by the engine, so a silently
+        // truncated literal either never matches or matches a prefix. Reject
+        // at the ABI limit like the file-path checks in compile_with_labels.
+        if spec.target.len() >= PAT {
+            return Err(format!(
+                "pattern '{}' is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                spec.target,
+                spec.target.len(),
+                PAT - 1,
+                PAT
+            ));
+        }
+        if spec.arg.len() >= ARG {
+            return Err(format!(
+                "argument '{}' is {} bytes, exceeds the {} byte ABI limit (ARG={})",
+                spec.arg,
+                spec.arg.len(),
+                ARG - 1,
+                ARG
+            ));
+        }
         for u in &mut self.updates {
             if u.op == spec.op
                 && u.m == spec.m
@@ -984,6 +1127,17 @@ pub fn compile_with_labels(
     }
     for rule in &pol.rules {
         for cl in &rule.clauses {
+            if let Some(arg) = &cl.target.arg {
+                if arg.len() >= ARG {
+                    return Err(format!(
+                        "rule '{}': exec argument is {} bytes, exceeds the {} byte ABI limit (ARG={})",
+                        rule.name,
+                        arg.len(),
+                        ARG - 1,
+                        ARG
+                    ));
+                }
+            }
             for op in op_lowers(cl.op)? {
                 let op = *op;
                 let target_matches = if op == OP_CONNECT || op == OP_RECV {
@@ -996,6 +1150,15 @@ pub fn compile_with_labels(
                     if (op == OP_OPEN || op == OP_WRITE) && tlit.len() >= PAT {
                         return Err(format!(
                             "rule '{}': target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                            rule.name,
+                            tlit.len(),
+                            PAT - 1,
+                            PAT
+                        ));
+                    }
+                    if op == OP_EXEC && tlit.len() >= PAT {
+                        return Err(format!(
+                            "rule '{}': exec target pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
                             rule.name,
                             tlit.len(),
                             PAT - 1,
@@ -1025,6 +1188,15 @@ pub fn compile_with_labels(
                                 if (op == OP_OPEN || op == OP_WRITE) && l.len() >= PAT {
                                     return Err(format!(
                                         "rule '{}': condition target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                                        rule.name,
+                                        l.len(),
+                                        PAT - 1,
+                                        PAT
+                                    ));
+                                }
+                                if op == OP_EXEC && l.len() >= PAT {
+                                    return Err(format!(
+                                        "rule '{}': condition target pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
                                         rule.name,
                                         l.len(),
                                         PAT - 1,
