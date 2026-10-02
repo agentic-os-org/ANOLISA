@@ -71,6 +71,11 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer：风险拦截
 
+对不含 argv 条件的 exec、文件 open/write 和 connect 操作进行执行前 `block`，要求内核启用 BPF LSM，
+并加载对应的 hook。缺少这些能力时，初始策略和运行时策略更新都会被拒绝，并报告缺失的 hook。
+仅选择 full hook profile 无法让未启用 BPF LSM 的内核具备阻断能力；受支持的 `notify` 和 `kill`
+规则仍可通过 tracepoint 执行。
+
 `agentsight-enforcer` 是可以拦截高风险 Agent 动作的特权守护进程，随安装包发布，由
 `agentsight-enforcer.service` 启动。当它的 socket（`/run/agentsight/enforcer.sock`）不存在时，`serve`
 会打印：
