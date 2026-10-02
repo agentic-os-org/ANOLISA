@@ -8,6 +8,10 @@
   detected and replaced automatically, so file-delete guard and enforcement
   health no longer stay down until someone removes the old layout by hand.
   (#3445)
+- Keep an application's process tree under policy when its binding is deleted
+  and recreated: the rebind now migrates the live session tree into the fresh
+  runtime domain, so changing the policy of an already-running application no
+  longer silently drops its processes from every policy. (#3370)
 
 ## 0.13.0
 
