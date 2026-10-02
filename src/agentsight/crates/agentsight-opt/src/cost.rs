@@ -1121,7 +1121,8 @@ pub(crate) fn extract_waste_candidates_from(
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
     let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-    let mut user_inputs: Vec<(usize, usize, String)> = Vec::new(); // step, tokens, snippet
+                                                                            // (first replay turn, replays, tokens, snippet)
+    let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;
     for step in &trajectory.steps {
@@ -1152,8 +1153,19 @@ pub(crate) fn extract_waste_candidates_from(
                 let text = step.message.as_deref().unwrap_or("");
                 let toks = estimate_tokens(text);
                 if toks >= USER_LARGE_MIN {
-                    let step_no = turn_idx.max(0) as usize;
-                    user_inputs.push((step_no, toks, trunc(text, SNIPPET_CHARS)));
+                    // The message arrives after turn_idx + 1 agent turns have
+                    // finished, so it enters the context of the turns that
+                    // follow - never the turn that completed before it was
+                    // sent. turn_idx is -1 before the first agent step, hence
+                    // the +1: a leading message is replayed by every turn.
+                    let first_replay_turn = (turn_idx + 1) as usize;
+                    let replays = total_steps.saturating_sub(first_replay_turn);
+                    user_inputs.push((
+                        first_replay_turn,
+                        replays,
+                        toks,
+                        trunc(text, SNIPPET_CHARS),
+                    ));
                 }
             }
             _ => {}
@@ -1316,15 +1328,14 @@ pub(crate) fn extract_waste_candidates_from(
     if !user_inputs.is_empty() {
         let up_potential: usize = user_inputs
             .iter()
-            .map(|(s, t, _)| {
-                ((*t as f64) * PROMPT_COMPRESS_FRAC * total_steps.saturating_sub(*s) as f64).round()
-                    as usize
+            .map(|(_, replays, t, _)| {
+                ((*t as f64) * PROMPT_COMPRESS_FRAC * *replays as f64).round() as usize
             })
             .sum();
         let steps: Vec<usize> = user_inputs.iter().map(|u| u.0).collect();
         let top_m13 = user_inputs
             .iter()
-            .map(|(s, t, _)| bill_share(t * total_steps.saturating_sub(*s)))
+            .map(|(_, replays, t, _)| bill_share(t * *replays))
             .fold(0.0, f64::max);
         candidates.push(WasteCandidate {
             id: "user_prompt".into(),
@@ -1339,10 +1350,10 @@ pub(crate) fn extract_waste_candidates_from(
             facts: format!(
                 "{} 段超长用户输入（最大 {} tok），最大单条 M13 重放占比 {:.0}%",
                 user_inputs.len(),
-                fmt_k(user_inputs.iter().map(|u| u.1).max().unwrap_or(0)),
+                fmt_k(user_inputs.iter().map(|u| u.2).max().unwrap_or(0)),
                 top_m13 * 100.0
             ),
-            snippet: user_inputs.first().map(|u| u.2.clone()).unwrap_or_default(),
+            snippet: user_inputs.first().map(|u| u.3.clone()).unwrap_or_default(),
         });
     }
 
@@ -1995,5 +2006,37 @@ mod tests {
             c.potential_save_tokens
         );
         assert!(c.potential_save_tokens > 0);
+    }
+
+    /// A user message that arrives mid-conversation is replayed only by the
+    /// agent turns that FOLLOW it: the turn that completed before the message
+    /// was sent never saw it, so it contributes no replay cost. The
+    /// prompt-compression candidate must count replays that way.
+    #[test]
+    fn user_prompt_candidate_counts_only_following_turn_replays() {
+        let big = "x ".repeat(4000); // ~2k tokens, over the 1.5k USER_LARGE_MIN
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"{big}"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z","message":"a1"}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z","message":"a2"}},
+            {{"step_id":4,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"a3"}},
+            {{"step_id":5,"source":"user","timestamp":"2026-07-02T06:30:04.000Z","message":"{big}"}},
+            {{"step_id":6,"source":"agent","timestamp":"2026-07-02T06:30:05.000Z","message":"a4"}},
+            {{"step_id":7,"source":"agent","timestamp":"2026-07-02T06:30:06.000Z","message":"a5"}},
+            {{"step_id":8,"source":"agent","timestamp":"2026-07-02T06:30:07.000Z","message":"a6"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let up = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "user_prompt")
+            .expect("user_prompt candidate fires on 2k-token inputs");
+        // Leading input: replayed by all 6 turns. Mid-conversation input
+        // (after 3 finished turns): replayed by turns 3..5, i.e. 3 turns.
+        // 2k tok x 0.6 x (6 + 3) = 10800; counting the finished turn too
+        // would report 12000.
+        assert_eq!(up.potential_save_tokens, 10_800);
     }
 }
