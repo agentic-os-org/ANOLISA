@@ -328,16 +328,24 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
                                     ("content-type", "text/event-stream"),
                                 ],
                             )
+                            # python-h2 buffers frames until data_to_send() is
+                            # called; flush after headers and after every chunk
+                            # so --chunk-delay-ms paces delivery instead of
+                            # delaying one final burst (the HTTP/1.1 path
+                            # already flushes per chunk via chunked_write).
+                            sock.sendall(connection.data_to_send())
                             for item in events:
                                 frame = f"data: {json.dumps(item, separators=(',', ':'))}\n\n".encode()
                                 connection.send_data(
                                     event.stream_id, frame, end_stream=False
                                 )
+                                sock.sendall(connection.data_to_send())
                                 if settings.chunk_delay:
                                     time.sleep(settings.chunk_delay)
                             connection.send_data(
                                 event.stream_id, b"data: [DONE]\n\n", end_stream=True
                             )
+                            sock.sendall(connection.data_to_send())
                         else:
                             payload = json.dumps(
                                 {
