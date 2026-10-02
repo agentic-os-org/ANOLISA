@@ -142,15 +142,25 @@ fn one_policy_admits_four_explicit_adapter_boundaries_without_running_programs()
             .unwrap();
         assert_eq!(before.step_id, "check");
         assert_eq!(before.provider, "policy");
-        assert_eq!(before.operation, "check");
-        assert_eq!(before.effects, ["observe", "block"]);
+        assert_eq!(
+            before.execution,
+            aw_provider::admission::StepExecution::Provider {
+                operation: "check".into(),
+                effects: vec!["observe".into(), "block".into()],
+            }
+        );
         assert_eq!(before.on_error, "block");
         let after = steps
             .iter()
             .find(|step| step.event == "tool.after")
             .unwrap();
-        assert_eq!(after.operation, "record");
-        assert_eq!(after.effects, ["observe"]);
+        assert_eq!(
+            after.execution,
+            aw_provider::admission::StepExecution::Provider {
+                operation: "record".into(),
+                effects: vec!["observe".into()],
+            }
+        );
         assert_eq!(after.on_error, "report");
     }
 }
@@ -425,4 +435,38 @@ fn enabled_step_order_is_preserved_within_each_event() {
             .collect::<Vec<_>>(),
         ["check", "check-second"]
     );
+}
+
+#[test]
+fn native_hooks_require_no_fabricated_provider_evidence() {
+    let mut document = document();
+    document["spec"]["providers"]["policy"]["protocol"] = json!("native-hook/v1alpha1");
+    document["spec"]["providers"]["policy"]["config"] = json!({});
+    for name in ["tool.before", "tool.after"] {
+        document["spec"]["events"][name]["steps"] = json!([
+            {"id": "raw", "provider": "policy", "native": {}, "on_error": "report"}
+        ]);
+    }
+    for adapter in ["qoder", "openclaw", "hermes", "qwenpaw"] {
+        let steps = admit(
+            &configuration(&document),
+            adapter,
+            &capabilities(adapter),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert!(steps
+            .iter()
+            .all(|step| step.execution == aw_provider::admission::StepExecution::Native));
+    }
+    let mut unsupported = capabilities("qoder");
+    unsupported.events.remove("tool.after");
+    assert!(admit(
+        &configuration(&document),
+        "qoder",
+        &unsupported,
+        &BTreeMap::new()
+    )
+    .is_err());
 }

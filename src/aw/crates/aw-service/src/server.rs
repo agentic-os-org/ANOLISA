@@ -5,11 +5,11 @@ use crate::{
     endpoint::{self, Endpoint},
     ipc, rejected,
     runtime::Runtime,
-    Request, Response, Result, VERSION,
+    Operation, Request, Response, Result, VERSION,
 };
 use std::{
     io,
-    os::unix::net::UnixStream,
+    os::{fd::AsRawFd, unix::net::UnixStream},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -150,6 +150,7 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
     };
     let deadline = deadline::decode(request.deadline_ns);
     let expires = deadline.as_ref().copied().unwrap_or(initial);
+    let binding = matches!(&request.operation, Operation::Bind { .. });
     let result = (|| {
         if request.api_version != VERSION {
             return Err(rejected("protocol_version"));
@@ -160,7 +161,12 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
         {
             return Err(rejected("stale_service"));
         }
-        runtime.handle(request.operation, deadline?)
+        let deadline = deadline?;
+        if binding {
+            prepare_connected(&stream, &runtime, request.operation, deadline)
+        } else {
+            runtime.handle(request.operation, deadline, &runtime.stopped)
+        }
     })();
     let (result, error, audit_key) = match result {
         Ok(value) => (Some(value), None, None),
@@ -175,5 +181,54 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
         error,
         audit_key,
     };
-    let _ = ipc::write(&mut stream, &response, expires);
+    if ipc::write(&mut stream, &response, expires).is_err() && binding {
+        if let Some(instance_id) = response
+            .result
+            .as_ref()
+            .and_then(|value| value["instance_id"].as_str())
+        {
+            let _ = runtime.handle(
+                Operation::Unbind {
+                    instance_id: instance_id.into(),
+                },
+                Instant::now() + Duration::from_secs(1),
+                &runtime.stopped,
+            );
+        }
+    }
+}
+
+fn prepare_connected(
+    stream: &UnixStream,
+    runtime: &Arc<Runtime>,
+    operation: Operation,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    let cancelled = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .name("aw-prepare".into())
+            .spawn_scoped(scope, || runtime.handle(operation, deadline, &cancelled))?;
+        while !worker.is_finished() {
+            let mut peer = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLRDHUP,
+                revents: 0,
+            };
+            // SAFETY: poll borrows one live socket descriptor and never consumes its data.
+            let result = unsafe { libc::poll(&mut peer, 1, 20) };
+            if runtime.stopped.load(Ordering::Acquire)
+                || Instant::now() >= deadline
+                || peer.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                    != 0
+                || (result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
+            {
+                cancelled.store(true, Ordering::Release);
+                break;
+            }
+        }
+        worker
+            .join()
+            .map_err(|_| rejected("binding_worker_failed"))?
+    })
 }

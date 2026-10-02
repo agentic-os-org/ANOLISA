@@ -1,4 +1,4 @@
-//! Prepared local Provider execution over bounded command transport.
+//! Prepared structured Provider and native hook execution over bounded transport.
 //! Adapters retain native scheduling, permissions and effect adoption.
 
 #![forbid(unsafe_code)]
@@ -9,8 +9,8 @@ mod transport;
 
 pub use event::Event;
 pub use report::{
-    CallFailure, CallRecord, Failure, FailureAction, Invocation, Method, PreparationFailure,
-    ProcessOutput,
+    CallFailure, CallRecord, Failure, FailureAction, Invocation, Method, NativeOutput,
+    PreparationFailure, ProcessOutput, StepOutput,
 };
 
 use aw_config::{Configuration, Validator};
@@ -70,6 +70,7 @@ pub enum Error {
 }
 
 struct Provider {
+    native: bool,
     command: CommandSpec,
     config: Value,
     timeout: Duration,
@@ -96,7 +97,8 @@ impl Host {
     /// Validate desired configuration, execute discovery/private validation, then admit.
     ///
     /// All enabled requirements are preflighted before starting any command. Each
-    /// referenced Provider is prepared once; disabled-only references are skipped.
+    /// structured Provider is prepared once; native commands skip discovery and
+    /// private validation. Disabled-only references are skipped.
     /// Preparation shares the caller's absolute deadline, with each exchange also
     /// capped by the configured Provider timeout. Parsing, encoding and response
     /// validation count against it. Transport cleanup retains its separate budget.
@@ -157,6 +159,9 @@ impl Host {
     ) -> Result<(), Error> {
         let mut evidence = BTreeMap::new();
         for (name, provider) in &self.providers {
+            if provider.native {
+                continue;
+            }
             let mut replies = Vec::new();
             for method in [Method::Describe, Method::ValidateConfig] {
                 let record = self.record(name, method, None, None)?;
@@ -282,6 +287,7 @@ fn provider(value: &Value, context: &ProcessContext) -> Result<Provider, Error> 
         .ok_or(Error::Invalid("empty Provider argv"))?;
     let output_bytes = positive(&value["max_output_bytes"])?;
     Ok(Provider {
+        native: value["protocol"] == "native-hook/v1alpha1",
         command: CommandSpec {
             program: PathBuf::from(program),
             args: args.iter().map(OsString::from).collect(),

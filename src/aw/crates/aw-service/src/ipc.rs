@@ -13,11 +13,14 @@ use std::{
         unix::{ffi::OsStrExt, net::UnixStream},
     },
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-pub(crate) const MAX_FRAME: usize = 2 * 1024 * 1024;
+// A one-MiB native byte array expands to at most four MiB in JSON; one MiB
+// normalized event plus framing fits here. Per-stream limits remain independent.
+pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 40;
 
 fn invalid(message: &'static str) -> io::Error {
@@ -36,10 +39,22 @@ fn transfer(
     buffer: &mut [u8],
     deadline: Instant,
     writing: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> io::Result<()> {
     let mut offset = 0;
     while offset < buffer.len() {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "socket request cancelled",
+            ));
+        }
         let budget = remaining(deadline)?;
+        let budget = if cancelled.is_some() {
+            budget.min(Duration::from_millis(20))
+        } else {
+            budget
+        };
         let result = if writing {
             stream.set_write_timeout(Some(budget))?;
             stream.write(&buffer[offset..])
@@ -64,6 +79,9 @@ fn transfer(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                if cancelled.is_some() {
+                    continue;
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "socket deadline exceeded",
@@ -80,14 +98,22 @@ pub(crate) fn read<T: DeserializeOwned>(
     stream: &mut UnixStream,
     deadline: Instant,
 ) -> io::Result<T> {
+    read_cancellable(stream, deadline, None)
+}
+
+pub(crate) fn read_cancellable<T: DeserializeOwned>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    cancelled: Option<&AtomicBool>,
+) -> io::Result<T> {
     let mut prefix = [0; 4];
-    transfer(stream, &mut prefix, deadline, false)?;
+    transfer(stream, &mut prefix, deadline, false, cancelled)?;
     let length = u32::from_be_bytes(prefix) as usize;
     if length > MAX_FRAME {
         return Err(invalid("socket frame exceeds size limit"));
     }
     let mut bytes = vec![0; length];
-    transfer(stream, &mut bytes, deadline, false)?;
+    transfer(stream, &mut bytes, deadline, false, cancelled)?;
     let result = decode(&bytes)?;
     remaining(deadline)?;
     Ok(result)
@@ -122,8 +148,9 @@ pub(crate) fn write<T: Serialize>(
         &mut (bytes.0.len() as u32).to_be_bytes(),
         deadline,
         true,
+        None,
     )?;
-    transfer(stream, &mut bytes.0, deadline, true)
+    transfer(stream, &mut bytes.0, deadline, true, None)
 }
 
 struct BoundedBuffer(Vec<u8>);

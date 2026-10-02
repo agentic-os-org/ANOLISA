@@ -60,18 +60,25 @@ and does not extend the signal to arbitrary descendants.
 
 Normal completion also terminates remaining members of the command group. This
 transport is for commands whose children share the invocation's bounded lifetime;
-it is not a service launcher. It does not change global signal handlers, create
-helper threads or reap unrelated children.
+it is not a service launcher. The bounded pipe API does not change global signal
+handlers, create helper threads or reap unrelated children.
+
+`run_foreground` separately runs an interactive Agent with inherited standard
+streams and the same owned process-group cleanup. It transfers a terminal only
+when the caller owns its foreground, restores that ownership on return, and
+forwards signals supplied by the caller. An interactive session has no command
+time limit; cancellation starts bounded shutdown. This API does not replace the
+separate daemon lifecycle owner.
 
 ## Native semantics and future enforcement
 
 The current delivery serves `tool.before` and `tool.after`. Scheduling remains
 with the native adapter: concurrent calls remain independent, sequential hooks
 remain sequential, and the library does not manufacture after events or approvals.
-`aw-host` composes this transport with the Provider protocol; daemon/CLI wiring
-and four-framework adoption tests remain separate increments. Native command
-callers continue to use `aw-exec` directly. No new `aw.yaml` fields or Core profiles are needed
-for this library.
+`aw-host` composes this transport with structured Provider and native command
+execution. The service and Qoder launcher use it without moving native scheduling
+into the executor. The other three framework adapters remain subsequent work.
+This library does not parse `aw.yaml` or select Core profiles.
 
 The extension boundary separates transport, policy evaluation and effect
 application. Adapters report the actual native capabilities; a later OS backend

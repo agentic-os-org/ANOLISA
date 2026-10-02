@@ -19,6 +19,8 @@ use std::{
     time::Instant,
 };
 
+mod hooks;
+
 const MAX_BINDINGS: usize = 16;
 const MAX_EVENTS: usize = 32;
 const MAX_STEPS: usize = 64;
@@ -26,6 +28,8 @@ const MAX_CALLS: usize = 64;
 
 struct Instance {
     host: Arc<Host>,
+    closing: bool,
+    hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
 }
 
 struct EventEntry {
@@ -97,6 +101,7 @@ impl Runtime {
         self: &Arc<Self>,
         operation: Operation,
         deadline: Instant,
+        cancelled: &AtomicBool,
     ) -> Result<Value> {
         if Instant::now() >= deadline {
             return Err(rejected("deadline_exceeded"));
@@ -115,8 +120,25 @@ impl Runtime {
                 capabilities,
                 cwd,
                 environment,
-            } => self.bind(target, capabilities, cwd, environment, deadline),
-            Operation::OpenEvent { instance_id, event } => self.open(instance_id, event, deadline),
+            } => self.bind(
+                target,
+                capabilities,
+                ProcessContext {
+                    cwd: cwd.into(),
+                    environment,
+                    stderr_bytes: 64 * 1024,
+                },
+                deadline,
+                cancelled,
+            ),
+            Operation::OpenEvent { instance_id, event } => {
+                self.open(instance_id, event, None, deadline)
+            }
+            Operation::OpenHookEvent {
+                instance_id,
+                event,
+                native_input,
+            } => self.open_hook(instance_id, event, native_input, deadline),
             Operation::InvokeStep {
                 event_id,
                 instance_id,
@@ -169,6 +191,9 @@ impl Runtime {
                     .ok_or_else(|| rejected("unknown_instance"))?;
                 Ok(json!({"released": true}))
             }
+            Operation::ReleaseInstance { instance_id } => {
+                self.release_instance(&instance_id, deadline)
+            }
             Operation::Audit { key } => self.audit.read(&key),
             Operation::Stop => {
                 self.stopped.store(true, Ordering::Release);
@@ -181,9 +206,9 @@ impl Runtime {
         &self,
         target: String,
         capabilities: Capabilities,
-        cwd: String,
-        environment: BTreeMap<String, String>,
+        context: ProcessContext,
         deadline: Instant,
+        cancelled: &AtomicBool,
     ) -> Result<Value> {
         let instance_id = self.identifier()?;
         {
@@ -200,10 +225,20 @@ impl Runtime {
             &instance_id,
             &target,
             capabilities,
-            cwd,
-            environment,
+            context,
             deadline,
+            cancelled,
         );
+        let result = result.and_then(|host| {
+            if cancelled.load(Ordering::Acquire)
+                || self.stopped.load(Ordering::Acquire)
+                || Instant::now() >= deadline
+            {
+                Err(rejected("binding_cancelled"))
+            } else {
+                Ok(host)
+            }
+        });
         let mut instances = self
             .instances
             .lock()
@@ -214,6 +249,8 @@ impl Runtime {
                     instance_id.clone(),
                     Some(Instance {
                         host: Arc::new(host),
+                        closing: false,
+                        hooks: Arc::new(Mutex::new(BTreeMap::new())),
                     }),
                 );
                 Ok(json!(Binding {
@@ -235,9 +272,9 @@ impl Runtime {
         key: &str,
         target: &str,
         capabilities: Capabilities,
-        cwd: String,
-        environment: BTreeMap<String, String>,
+        context: ProcessContext,
         deadline: Instant,
+        cancelled: &AtomicBool,
     ) -> Result<Host> {
         // Reject excessive metadata and step counts before journaling or Provider discovery.
         if target.len() > 128
@@ -259,16 +296,9 @@ impl Runtime {
                 &self.bytes,
                 target,
                 capabilities,
-                ProcessContext {
-                    cwd: cwd.into(),
-                    environment: environment
-                        .into_iter()
-                        .map(|(k, v)| (k.into(), v.into()))
-                        .collect(),
-                    stderr_bytes: 64 * 1024,
-                },
+                context,
                 deadline,
-                &self.stopped,
+                cancelled,
             );
             match host {
                 Ok(host) => {
@@ -292,6 +322,7 @@ impl Runtime {
         self: &Arc<Self>,
         instance_id: String,
         value: Value,
+        native_input: Option<Vec<u8>>,
         deadline: Instant,
     ) -> Result<Value> {
         let instances = self
@@ -302,7 +333,8 @@ impl Runtime {
             &instances
                 .get(&instance_id)
                 .and_then(Option::as_ref)
-                .ok_or_else(|| rejected("unknown_instance"))?
+                .filter(|instance| !instance.closing)
+                .ok_or_else(|| rejected("unknown_or_draining_instance"))?
                 .host,
         );
         if value["agent"]["instance_id"] != instance_id {
@@ -331,7 +363,11 @@ impl Runtime {
         let runtime = Arc::clone(self);
         let thread_key = key.clone();
         let worker = thread::Builder::new().name("aw-event".into()).spawn(move || {
-            let event = host.event(value, deadline, &cancelled).map_err(|_| rejected("event_invalid"));
+            let automatic = native_input.is_some();
+            let event = match native_input {
+                Some(input) => host.hook_event(value, input, deadline, &cancelled),
+                None => host.event(value, deadline, &cancelled),
+            }.map_err(|_| rejected("event_invalid"));
             match event {
                 Ok(event) => {
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect() };
@@ -340,7 +376,7 @@ impl Runtime {
                     match claimed {
                         Ok(_) => {
                             let _ = ready.send(Ok(json!(handle)));
-                            runtime.event_loop(&thread_key, &event, &cancelled, receiver);
+                            runtime.event_loop(&thread_key, &event, &cancelled, receiver, automatic);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -388,16 +424,22 @@ impl Runtime {
         event: &aw_host::Event<'_>,
         cancelled: &AtomicBool,
         receiver: Receiver<Job>,
+        automatic: bool,
     ) {
         let mut close = None;
         let mut claimed = BTreeSet::new();
         let mut panicked = false;
+        let completed_steps = AtomicU64::new(0);
+        let step_count = event.steps().count() as u64;
         thread::scope(|scope| {
             let mut children = Vec::new();
             while Instant::now() < event.deadline()
                 && !self.stopped.load(Ordering::Acquire)
                 && !cancelled.load(Ordering::Acquire)
             {
+                if automatic && completed_steps.load(Ordering::Acquire) == step_count {
+                    break;
+                }
                 let job = match receiver.recv_timeout(
                     event
                         .deadline()
@@ -432,9 +474,11 @@ impl Runtime {
                             })
                             .is_err()
                         {
+                            completed_steps.fetch_add(1, Ordering::Release);
                             let _ = reply.send(Err(rejected("call_limit")));
                             continue;
                         }
+                        let completed_steps = &completed_steps;
                         children.push(scope.spawn(move || {
                             let _guard = CallGuard(&self.calls);
                             let result = (|| {
@@ -446,6 +490,7 @@ impl Runtime {
                                 self.audit.append(key, record)?;
                                 Ok(result)
                             })();
+                            completed_steps.fetch_add(1, Ordering::Release);
                             let _ = reply.send(result);
                         }));
                     }
@@ -456,7 +501,7 @@ impl Runtime {
                 panicked |= child.join().is_err();
             }
         });
-        let completed = self.audit.append(key, json!({"phase": "closed", "status": if panicked { "worker_failed" } else if close.is_some() { "closed" } else if self.stopped.load(Ordering::Acquire) { "stopped" } else if Instant::now() >= event.deadline() { "expired" } else { "cancelled" }, "attempted_steps": claimed.len()}));
+        let completed = self.audit.append(key, json!({"phase": "closed", "status": if panicked { "worker_failed" } else if close.is_some() { "closed" } else if automatic && completed_steps.load(Ordering::Acquire) == step_count { "completed" } else if self.stopped.load(Ordering::Acquire) { "stopped" } else if Instant::now() >= event.deadline() { "expired" } else { "cancelled" }, "attempted_steps": claimed.len()}));
         // Release registry membership before acknowledging close so immediate unbind works.
         if let Ok(mut events) = self.events.lock() {
             events.remove(key);

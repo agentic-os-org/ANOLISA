@@ -1,4 +1,4 @@
-//! Pure capability admission for tool events; no discovery or runtime binding.
+//! Pure capability admission for structured Providers and explicit native hook steps.
 
 use crate::{Description, Error, ValidatedConfig};
 use serde_json::Value;
@@ -35,8 +35,9 @@ pub struct AdapterCapabilities {
 
 /// One configured step checked against the implementation and Adapter.
 ///
-/// Only steps returned by [`admit`] have also passed Provider admission. Steps
-/// returned by [`preflight`] remain candidates, and public fields carry no proof
+/// Structured steps returned by [`admit`] have also passed Provider admission;
+/// native steps require no Provider handshake. Steps returned by [`preflight`]
+/// remain candidates, and public fields carry no proof
 /// of admission. This is not an executable Core plan or a Ready status. Runtime
 /// binding, budgets, process ownership and adoption remain Host concerns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,17 +48,29 @@ pub struct AdmittedStep {
     pub step_id: String,
     /// The named Provider in the desired configuration.
     pub provider: String,
-    /// The requested Provider operation for this event.
-    pub operation: String,
-    /// Requested effects, checked against Provider support only by [`admit`].
-    pub effects: Vec<String>,
+    /// Structured Provider evaluation or uninterpreted native hook execution.
+    pub execution: StepExecution,
     /// The Host action required when Provider execution fails.
     pub on_error: String,
 }
 
+/// Execution contract selected explicitly by the configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StepExecution {
+    /// Validate requests and candidate effects with aw-provider/v1alpha1.
+    Provider {
+        /// Operation declared by the Provider.
+        operation: String,
+        /// Requested effects checked against Provider and Adapter evidence.
+        effects: Vec<String>,
+    },
+    /// Preserve raw callback input, output and process status for the Adapter.
+    Native,
+}
+
 /// Admits enabled tool steps using explicit Provider and trusted Adapter evidence.
 ///
-/// Disabled events and steps do not require Provider discovery. Enabled events
+/// Native commands and disabled steps require no Provider discovery. Enabled events
 /// must be supported even when `required` is false or their step list is empty.
 /// Step order within each event is preserved; the result does not order distinct
 /// events or choose serial versus parallel execution.
@@ -88,7 +101,7 @@ pub fn admit(
 /// order within each event is preserved without choosing execution scheduling.
 ///
 /// Returned steps are candidates, not Provider-admitted steps. Hosts must still
-/// call [`admit`] with discovered Provider evidence before executing them.
+/// call [`admit`] with discovered evidence for structured Providers before execution.
 ///
 /// # Errors
 /// Rejects unsupported events, effects, transports, guards, selectors or failure
@@ -177,25 +190,33 @@ fn preflight_step(
         .get(provider_name)
         .ok_or(Error::Invalid("unknown configured Provider"))?;
     require(
-        provider["protocol"] == "aw-provider/v1alpha1"
-            && provider["transport"]["type"] == "stdio"
+        matches!(
+            provider["protocol"].as_str(),
+            Some("aw-provider/v1alpha1" | "native-hook/v1alpha1")
+        ) && provider["transport"]["type"] == "stdio"
             && provider["transport"]["location"] == "agent",
         "Provider transport or protocol is not supported",
     )?;
-    let operation_name = string(&step["operation"])?;
-    let mut effects = Vec::new();
-    for effect in step["effects"]
-        .as_array()
-        .ok_or(Error::Invalid("step effects must be an array"))?
-    {
-        let effect = string(effect)?;
-        require(
-            supported_effect(event, effect)
-                && adapter_effects.iter().any(|supported| supported == effect),
-            "requested effect is not supported by the implementation and Adapter",
-        )?;
-        effects.push(effect.to_owned());
-    }
+    let execution = if provider["protocol"] == "native-hook/v1alpha1" {
+        require(step.get("native").is_some(), "native hook step is required")?;
+        StepExecution::Native
+    } else {
+        let operation = string(&step["operation"])?.to_owned();
+        let mut effects = Vec::new();
+        for effect in step["effects"]
+            .as_array()
+            .ok_or(Error::Invalid("step effects must be an array"))?
+        {
+            let effect = string(effect)?;
+            require(
+                supported_effect(event, effect)
+                    && adapter_effects.iter().any(|supported| supported == effect),
+                "requested effect is not supported by the implementation and Adapter",
+            )?;
+            effects.push(effect.to_owned());
+        }
+        StepExecution::Provider { operation, effects }
+    };
     let on_error = string(&step["on_error"])?;
     require(
         on_error == "report"
@@ -208,8 +229,7 @@ fn preflight_step(
         event: event.to_owned(),
         step_id: string(&step["id"])?.to_owned(),
         provider: provider_name.to_owned(),
-        operation: operation_name.to_owned(),
-        effects,
+        execution,
         on_error: on_error.to_owned(),
     })
 }
@@ -219,6 +239,13 @@ fn check_provider(
     step: &AdmittedStep,
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<(), Error> {
+    let StepExecution::Provider {
+        operation: requested,
+        effects,
+    } = &step.execution
+    else {
+        return Ok(());
+    };
     let evidence = providers
         .get(&step.provider)
         .ok_or(Error::Invalid("enabled step lacks Provider evidence"))?;
@@ -230,7 +257,7 @@ fn check_provider(
         .as_array()
         .ok_or(Error::Invalid("Provider description lacks operations"))?
         .iter()
-        .find(|operation| operation["name"] == step.operation)
+        .find(|operation| operation["name"] == *requested)
         .ok_or(Error::Invalid(
             "Provider does not declare the requested operation",
         ))?;
@@ -238,7 +265,7 @@ fn check_provider(
         contains(&operation["events"], &step.event),
         "Provider operation does not support the requested event",
     )?;
-    for effect in &step.effects {
+    for effect in effects {
         require(
             contains(&operation["effects"], effect),
             "requested effect is not supported by the Provider",

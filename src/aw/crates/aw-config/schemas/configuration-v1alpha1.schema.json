@@ -248,6 +248,15 @@
         },
         "argv": {
           "$ref": "#/$defs/argv"
+        },
+        "qoder": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sequential": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -263,7 +272,10 @@
       ],
       "properties": {
         "protocol": {
-          "const": "aw-provider/v1alpha1"
+          "enum": [
+            "aw-provider/v1alpha1",
+            "native-hook/v1alpha1"
+          ]
         },
         "transport": {
           "$ref": "#/$defs/transport"
@@ -432,8 +444,6 @@
       "required": [
         "id",
         "provider",
-        "operation",
-        "effects",
         "on_error"
       ],
       "properties": {
@@ -471,8 +481,44 @@
             "block",
             "withhold_result"
           ]
+        },
+        "native": {
+          "type": "object",
+          "additionalProperties": false
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "operation",
+            "effects"
+          ],
+          "not": {
+            "required": [
+              "native"
+            ]
+          }
+        },
+        {
+          "required": [
+            "native"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "operation"
+                ]
+              },
+              {
+                "required": [
+                  "effects"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }
   }
 }

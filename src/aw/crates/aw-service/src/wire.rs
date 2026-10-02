@@ -3,7 +3,9 @@
 use aw_provider::admission::AdapterCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ffi::OsString};
+
+mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
 pub const VERSION: &str = "aw-service/v1alpha1";
@@ -98,10 +100,19 @@ pub enum Operation {
         /// Absolute working directory for Provider processes.
         cwd: String,
         /// Complete explicit environment; no implicit daemon inheritance.
-        environment: BTreeMap<String, String>,
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
     },
     /// Release a binding; active events must be closed first.
     Unbind {
+        /// Service-issued identifier.
+        instance_id: String,
+    },
+    /// Cancel this instance's events, wait for cleanup, then release its binding.
+    ///
+    /// A timed-out release keeps the instance draining and forbids new events;
+    /// another release may finish cleanup without reopening the instance.
+    ReleaseInstance {
         /// Service-issued identifier.
         instance_id: String,
     },
@@ -111,6 +122,20 @@ pub enum Operation {
         instance_id: String,
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
+    },
+    /// Lease one native callback shared by all step processes for the same tool call.
+    ///
+    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Repeated opens require identical input and reuse the first deadline. Closed
+    /// correlations remain claimed until unbind; they cannot start a new budget.
+    /// At most 1024 correlations are retained per instance; exhaustion is explicit.
+    OpenHookEvent {
+        /// Prepared service instance.
+        instance_id: String,
+        /// Normalized event, with matching instance and native correlation IDs.
+        event: Value,
+        /// Exact callback stdin, limited independently to one MiB.
+        native_input: Vec<u8>,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {
@@ -141,7 +166,7 @@ impl Operation {
     /// Parse untrusted operation JSON before normalization can discard invalid data.
     ///
     /// # Errors
-    /// Rejects messages over 2 MiB, overflowing integer tokens, duplicate fields,
+    /// Rejects messages over 8 MiB, overflowing integer tokens, duplicate fields,
     /// excessive nesting, trailing data and invalid operation fields. Native
     /// floating-point values and Unicode remain supported.
     pub fn from_json(bytes: &[u8]) -> crate::Result<Self> {
@@ -149,7 +174,7 @@ impl Operation {
     }
 }
 
-/// Exactly one result or error code, never raw Provider diagnostics.
+/// Exactly one result or error code; native results explicitly carry callback bytes.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {

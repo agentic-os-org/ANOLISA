@@ -4,6 +4,7 @@ use crate::{deadline, ipc, rejected, Identity, Operation, Request, Response, Res
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
 
@@ -21,7 +22,7 @@ impl Client {
     /// # Errors
     /// Rejects transport, framing, version and response errors.
     pub fn connect(socket: impl AsRef<Path>, expires: Instant) -> Result<Self> {
-        let response = exchange(socket.as_ref(), None, Operation::Status, expires)?;
+        let response = exchange(socket.as_ref(), None, Operation::Status, expires, None)?;
         response_result(&response)?;
         Ok(Self {
             socket: socket.as_ref().to_owned(),
@@ -44,11 +45,37 @@ impl Client {
     /// Returns transport errors or the service's stable rejection code; rejects
     /// stale generations, malformed replies and replies received after deadline.
     pub fn call(&self, operation: Operation, expires: Instant) -> Result<Value> {
+        self.call_with_cancellation(operation, expires, None)
+    }
+
+    /// Execute one operation, abandoning the reply when cancellation is requested.
+    ///
+    /// Dropping the connection cancels unfinished server-side binding preparation.
+    /// Other operations may already have taken effect; never retry them implicitly.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::call`], or an interrupted I/O error.
+    pub fn call_cancellable(
+        &self,
+        operation: Operation,
+        expires: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        self.call_with_cancellation(operation, expires, Some(cancelled))
+    }
+
+    fn call_with_cancellation(
+        &self,
+        operation: Operation,
+        expires: Instant,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Value> {
         let response = exchange(
             &self.socket,
             Some(self.identity.clone()),
             operation,
             expires,
+            cancelled,
         )?;
         if response.identity != self.identity {
             return Err(rejected("stale_service"));
@@ -62,8 +89,17 @@ fn exchange(
     identity: Option<Identity>,
     operation: Operation,
     expires: Instant,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Response> {
-    if let Operation::OpenEvent { event, .. } = &operation {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "socket request cancelled",
+        )
+        .into());
+    }
+    if let Operation::OpenEvent { event, .. } | Operation::OpenHookEvent { event, .. } = &operation
+    {
         let mut pending = vec![(event, 0)];
         while let Some((value, depth)) = pending.pop() {
             if depth > aw_provider::MAX_DEPTH {
@@ -85,7 +121,7 @@ fn exchange(
     let mut stream = ipc::connect(socket, expires)?;
     crate::endpoint::same_user(&stream)?;
     ipc::write(&mut stream, &request, expires)?;
-    let response: Response = ipc::read(&mut stream, expires)?;
+    let response: Response = ipc::read_cancellable(&mut stream, expires, cancelled)?;
     if Instant::now() >= expires {
         return Err(rejected("deadline_exceeded"));
     }
@@ -120,17 +156,27 @@ mod tests {
         for _ in 0..256 {
             value = Value::Array(vec![value]);
         }
-        let result = exchange(
-            Path::new("/no-service-connection-needed"),
-            None,
+        for operation in [
             Operation::OpenEvent {
                 instance_id: "fixture".into(),
-                event: value,
+                event: value.clone(),
             },
-            Instant::now() + Duration::from_secs(1),
-        );
-        assert!(
-            matches!(result, Err(crate::Error::Rejected(code)) if code == "event_nesting_limit")
-        );
+            Operation::OpenHookEvent {
+                instance_id: "fixture".into(),
+                event: value.clone(),
+                native_input: vec![],
+            },
+        ] {
+            let result = exchange(
+                Path::new("/no-service-connection-needed"),
+                None,
+                operation,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            );
+            assert!(
+                matches!(result, Err(crate::Error::Rejected(code)) if code == "event_nesting_limit")
+            );
+        }
     }
 }

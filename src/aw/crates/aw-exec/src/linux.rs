@@ -1,6 +1,7 @@
 //! Nonblocking three-pipe exchange with one absolute execution deadline.
 
 mod child;
+pub(super) mod foreground;
 
 use self::child::OwnedChild;
 use crate::{CommandSpec, Error, Limits, Output, Stream};

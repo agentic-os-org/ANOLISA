@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aw-config = { workspace = true }
 aw-core = { workspace = true }
+aw-exec = { workspace = true }
 aw-host = { workspace = true }
 aw-provider = { workspace = true }
 libc = { workspace = true }

@@ -118,6 +118,7 @@ version = "0.1.0"
 dependencies = [
  "aw-config",
  "aw-core",
+ "aw-exec",
  "aw-host",
  "aw-provider",
  "libc",

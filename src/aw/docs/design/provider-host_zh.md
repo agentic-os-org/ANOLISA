@@ -17,7 +17,8 @@ Agent 启动、原生 Hook 安装、效果采用和审计持久化仍由接入�
 | 接入 Adapter | 提供可信能力、归一化事件、调度步骤并应用原生效果 |
 
 Host 复用这些库，离线准入仍不执行命令，原始传输层仍不解释 Provider JSON。
-原生 Hook 命令调用方继续直接使用 `aw-exec`，保留原始字节和原生退出状态。
+原生步骤显式选择 `native-hook/v1alpha1`；Host 使用同一执行器保留原始字节和
+原生退出状态，不执行 Provider 握手。
 `aw-host` 不实现独立的 `aw-core::Host` 合同，不生成 Core receipt，也不改变
 Core 的最终执行约束。
 
@@ -35,8 +36,9 @@ Core 的最终执行约束。
 它们的可信性与稳定性。
 
 准备阶段先解析配置，并对全部启用需求调用 `admission::preflight`，之后才启动
-Provider。每个被引用的 Provider 分别启动进程执行 `describe` 和
-`validate_config`；仅被禁用项引用的 Provider 会跳过。已检查的响应成为
+Provider。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
+`validate_config`；原生命令按显式原生步骤合同准入，不执行这两项调用。仅被禁用项
+引用的 Provider 会跳过。已检查的响应成为
 `admission::admit` 的证据，最终只保留全部通过准入的步骤。失败时不会返回部分
 准备好的 Host，也不会回滚此前完成的调用，因此准备方法应避免副作用。
 
@@ -71,14 +73,19 @@ Agent 已采用策略。准入范围仍为：
 自动重试。创建另一个 Event 不会对原生回调去重。执行工具前，Adapter 必须收集
 其合同要求的结果。
 
-每次交互都采用一个方法一个进程、字面 argv、单条 JSON 请求和单条 JSON 响应。
+结构化交互采用一个方法一个进程、字面 argv、单条 JSON 请求和单条 JSON 响应。
+原生步骤使用 `Host::hook_event`，同时提供原始回调字节和归一化事件。原始输入在
+该 Event 内不可变，原生命令直接接收它，不包裹 AW 协议。
 传输层保留独立的一秒清理预算，因此返回时间可能晚于事件截止时间。无法验证清理
 完成仍属于执行失败。进程组清理不提供 sandbox 或 OS 执行约束；详见
 [有界命令执行](bounded-execution_zh.md)。
 
 ## 解释报告
 
-`Invocation.result` 保留 `Outcome` 或原始 `Failure`。成功的 `block` 效果属于
+`Invocation.result` 保留 `StepOutput` 或原始 `Failure`。`StepOutput::Provider`
+包含已校验的结构化结果，`StepOutput::Native` 包含 stdout、stderr 和原生进程状态。
+原生非零退出是交给 Adapter 解释的结果，不是结构化 Provider 错误。以下效果与
+响应校验规则适用于结构化 Provider 结果。成功的 `block` 效果属于
 策略结果；非零退出、stdin 未完整写入、传输失败、Provider 错误或无效协议响应
 属于执行失败。`failure_action` 另行给出配置要求的 `Report` 或 `Block` 失败
 动作，不会把失败结果替换成成功的策略阻断。空效果列表不增加限制，也不授予原生
