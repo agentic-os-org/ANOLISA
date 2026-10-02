@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source SUBAGENT = exec "**/subagent"
+
+  rule subagent-scope:
+    block write file "/repo/**" if SUBAGENT unless target "/repo/tasks/subagent/**"
+    block unlink file "/repo/**" if SUBAGENT unless target "/repo/tasks/subagent/**"
+    because "sub-agent writes stay in its delegated workspace"

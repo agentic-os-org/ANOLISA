@@ -1,0 +1,5 @@
+version: 1
+policy: |
+  rule mediate-proddb:
+    block open file "**/prod.db" unless lineage-includes exec "**/migrate"
+    because "prod.db only via the migration tool"

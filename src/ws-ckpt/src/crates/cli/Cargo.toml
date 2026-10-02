@@ -1,0 +1,21 @@
+[package]
+name = "ws-ckpt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ws-ckpt"
+path = "src/main.rs"
+
+[dependencies]
+ws-ckpt-common = { path = "../common" }
+ws-ckpt-daemon = { path = "../daemon" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros"] }
+anyhow = "1"
+serde_json = "1"
+toml = "0.8"
+chrono = { version = "0.4", features = ["clock"] }

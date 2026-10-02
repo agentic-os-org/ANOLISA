@@ -1,0 +1,171 @@
+{
+  "schema_version": 4,
+  "storage": {
+    "base_path": "/var/log/sysak/.agentsight",
+    "primary": {
+      "retention_days": 30,
+      "max_db_size_mb": 500,
+      "check_interval_secs": 60
+    },
+    "genai": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 60
+    },
+    "interruptions": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    },
+    "trajectories": {
+      "retention_days": 30,
+      "max_db_size_mb": 500,
+      "check_interval_secs": 300
+    },
+    "optimization": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "security_audit": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 3600
+    },
+    "reuse": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "causal": {
+      "retention_days": 30,
+      "max_db_size_mb": 200,
+      "check_interval_secs": 300
+    },
+    "enforcement": {
+      "retention_days": 30,
+      "max_db_size_mb": 100,
+      "check_interval_secs": 60
+    }
+  },
+  "runtime": {
+    "sls_logtail_path": ""
+  },
+  "server": {
+    "auth": {
+      "enabled": true
+    }
+  },
+  "deadloop": {
+    "enabled": false,
+    "kill_after_count": 3
+  },
+  "features": {
+    "token_stats": true,
+    "tokenizer": {
+      "enabled": false,
+      "cache_size": 4
+    },
+    "session_mapping": {
+      "enabled": true,
+      "max_entries": 10000
+    },
+    "sqlite_storage": {
+      "enabled": true,
+      "batch": {
+        "max_size": 100,
+        "flush_ms": 100
+      }
+    },
+    "resource_sampling": false,
+    "interruption_detection": {
+      "enabled": true
+    },
+    "audit": true,
+    "token_consumption": false,
+    "sls_logtail": false,
+    "trajectory_collection": {
+      "enabled": false,
+      "scan_interval_secs": 30
+    },
+    "reuse_llm_judge": false
+  },
+  "runtime_limits": {
+    "event_channel_capacity": 10000,
+    "event_channel_policy": "backpressure",
+    "event_channel_max_bytes_mb": 64,
+    "pending_genai_max_count": 1000,
+    "pending_genai_max_bytes_mb": 64,
+    "pid_cache_size": 1024,
+    "max_connection_body_mb": 8,
+    "connection_idle_timeout_secs": 60,
+    "ring_buffer_mb": 32
+  },
+  "https": [
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]},
+    {"rule": ["api.openai.com"]}
+  ],
+  "http": [],
+  "encryption": {
+    "public_key": ""
+  },
+  "cmdline": {
+    "allow": [
+      {"rule": ["hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*python*", "*hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*python*", "-m", "*hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*codex*"], "agent_name": "Codex"},
+      {"rule": ["*node*", "*codex*"], "agent_name": "Codex"},
+      {"rule": ["*/node*", "*", "*", "*", "*", "*server/index.ts*"], "agent_name": "Runloop"},
+      {"rule": ["node*", "*/bin/cosh*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*/bin/copilot*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*copilot-shell*"], "agent_name": "Cosh"},
+      {"rule": ["*node*", "*copilot-shell*"], "agent_name": "Cosh"},
+      {"rule": ["*node*", "*cosh*"], "agent_name": "Cosh"},
+      {"rule": ["*node*", "*os-copilot*"], "agent_name": "Cosh"},
+      {"rule": ["*cosh-shell*"], "agent_name": "CoshNG"},
+      {"rule": ["*cosh-core*"], "agent_name": "CoshNG"},
+      {"rule": ["*cosh-cli*"], "agent_name": "CoshNG"},
+      {"rule": ["*openclaw-gatewa*"], "agent_name": "OpenClaw"},
+      {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
+      {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
+      {"rule": ["*node*", "*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
+      {"rule": ["openclaw"], "agent_name": "OpenClaw"},
+      {"rule": ["claude*"], "agent_name": "Claude"},
+      {"rule": ["*/claude*"], "agent_name": "Claude"},
+      {"rule": ["*node*", "*claude*"], "agent_name": "Claude"},
+      {"rule": ["qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["*/qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["*node*", "*qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "-m", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agent_scope*"], "agent_name": "AgentScope"}
+    ],
+    "deny": [
+      {"rule": ["*", "*", "-c", "*sftp-server*"]}
+    ]
+  },
+  "codex_offsets": {
+    "schema_version": 1,
+    "entries": [
+      {
+        "codex_version": "0.141.0",
+        "fingerprint": { "file_size": 276579568, "head_64k_sha256": "f015ddd2a687c1fc0b3ce70d898c0a68eeab88ad0040e79b0fe49a8545ff52a9" },
+        "offsets": { "ssl_write": 210691872, "ssl_read": 210691280, "ssl_do_handshake": 210689600, "write_is_ex": true, "read_is_ex": true }
+      },
+      {
+        "codex_version": "0.137.0",
+        "fingerprint": { "file_size": 227758400, "head_64k_sha256": "49b0a1c3a831071e9766cd0db83537a5270a374f8ac11783264a5a354c3b544a" },
+        "offsets": { "ssl_write": 172964768, "ssl_read": 172964176, "ssl_do_handshake": 172962496, "write_is_ex": true, "read_is_ex": true }
+      },
+      {
+        "codex_version": "0.50.0",
+        "fingerprint": { "build_id": "bb5d7e7c56d11f3877c23081359ad9b94faa85fe", "file_size": 46101568, "head_64k_sha256": "8a223d7f6dfcbc6f8a21a15cb349ae81ec4b82fc3aeb37383cf3331f4b95dbac" },
+        "offsets": null
+      }
+    ]
+  }
+}

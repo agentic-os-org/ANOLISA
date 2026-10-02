@@ -1,0 +1,21 @@
+[Unit]
+Description=ANOLISA Blaze - Per-Host Sandbox Daemon
+Documentation=https://github.com/alibaba/anolisa
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/anolisa/blazed daemon start --config /etc/anolisa/blaze/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+- insert:
+  - id: agentsight
+    name: '@agentsight/dsh-plugin'

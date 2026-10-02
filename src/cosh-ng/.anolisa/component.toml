@@ -1,0 +1,103 @@
+[component]
+name = "cosh-ng"
+version = "0.26.0"
+layer = "runtime"
+domain = "tools"
+display_name = "cosh-ng"
+description = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+conflicts = ["cosh"]
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.2.17"
+
+[backends.rpm]
+package = "cosh-ng"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64", "aarch64"]
+
+[[component.dependencies]]
+name = "bash"
+kind = "system-package"
+probe = "bash --version"
+packages = { rpm = "bash", deb = "bash" }
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/cosh-ng/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/cosh-cli"
+target = "{bindir}/cosh-cli"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/cosh"
+target = "{bindir}/cosh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/cosh-switch"
+target = "{bindir}/cosh-switch"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-core"
+target = "{libexecdir}/cosh-ng/cosh-core"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-gateway"
+target = "{libexecdir}/cosh-ng/cosh-gateway"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-shell"
+target = "{libexecdir}/cosh-ng/cosh-shell"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/cosh-ng/cosh-gateway@.service.in"
+target = "{unitdir}/cosh-gateway@.service"
+mode = "0644"
+render = "anolisa-paths-v1"
+
+[[component.layout.files]]
+source = "share/anolisa/skills/manage-task-checkpoints/SKILL.md"
+target = "{datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/doc/cosh-ng/LICENSE"
+target = "{datadir}/doc/cosh-ng/LICENSE"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/doc/cosh-ng/README.md"
+target = "{datadir}/doc/cosh-ng/README.md"
+mode = "0644"
+
+[[component.services]]
+unit = "cosh-gateway@.service"
+scope = "system"
+enable = false
+start = false
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/cosh-cli"
+timeout_secs = 5

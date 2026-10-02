@@ -1,0 +1,19 @@
+{
+  "name": "@anolisa/tokenless-linux-x64",
+  "version": "0.8.4",
+  "private": true,
+  "description": "Token-Less native binaries for Linux x86_64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "src/tokenless"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "files": [
+    "bin/"
+  ],
+  "preferUnplugged": true
+}

@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/plan-execution/v1",
+  "title": "plan execution v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "revision",
+    "plan_digest",
+    "event_id",
+    "scope",
+    "boundary_id",
+    "boundary_revision",
+    "steps",
+    "decision",
+    "evidence"
+  ],
+  "properties": {
+    "plan_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "revision": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "plan_digest": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+    },
+    "event_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "scope": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/scope"
+    },
+    "boundary_id": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+    },
+    "boundary_revision": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_id",
+          "outcome",
+          "invocations"
+        ],
+        "properties": {
+          "step_id": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "gap",
+              "skipped",
+              "cancelled"
+            ]
+          },
+          "invocations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "invocation_id",
+                "receipt_digest"
+              ],
+              "properties": {
+                "invocation_id": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+                },
+                "receipt_digest": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+                }
+              }
+            },
+            "minItems": 0,
+            "maxItems": 16
+          },
+          "started_sequence": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+          },
+          "settled_sequence": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+          },
+          "reason": {
+            "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/name"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "skipped"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "invocations": {
+                  "maxItems": 0
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "started_sequence"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "settled_sequence"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "started_sequence",
+                "settled_sequence"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "invocations": {
+                  "minItems": 1
+                }
+              },
+              "not": {
+                "required": [
+                  "reason"
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "reason"
+              ]
+            }
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 32
+    },
+    "decision": {
+      "enum": [
+        "proceed",
+        "deny",
+        "preserve",
+        "cancelled"
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/evidence"
+      },
+      "minItems": 1,
+      "maxItems": 16
+    }
+  }
+}

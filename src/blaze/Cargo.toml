@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+[workspace]
+resolver = "2"
+members = [
+    "crates/blaze-core",
+    "crates/blazed",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env", "color"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["net", "rt"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+async-trait = "0.1"
+libc = "0.2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Data
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+semver = "1.0"
+base64 = "0.22"
+rustix = { version = "1.1", features = ["fs"] }
+sha2 = "0.10"
+
+# Internal crates
+blaze-core = { path = "crates/blaze-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

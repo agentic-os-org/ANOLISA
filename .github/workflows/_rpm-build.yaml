@@ -1,0 +1,283 @@
+name: Build / RPM (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: "Component to build (copilot-shell, cosh-ng, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory, skillfs, anolisa)"
+        required: true
+        type: string
+      version:
+        description: "Version string (e.g. 1.0.0 or 1.0.0~nightly.15.abc1234)"
+        required: true
+        type: string
+      arch:
+        description: "Target architecture (amd64 or arm64)"
+        required: true
+        type: string
+      source-artifact:
+        description: "Name of the source archive artifact to download"
+        required: true
+        type: string
+      vendor-artifact:
+        description: "Name of the vendor archive artifact to download (leave empty if not needed)"
+        required: false
+        type: string
+        default: ""
+      artifact-suffix:
+        description: "Suffix for the output RPM artifact name"
+        required: false
+        type: string
+        default: ""
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  build-rpm:
+    name: "Build"
+    runs-on: ${{ inputs.arch == 'arm64' && 'anolisa-k8s-arm2204-nightly' || 'anolisa-k8s-amd-nightly' }}
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Fix repo mirror
+        run: sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+
+      - name: Install build dependencies
+        run: |
+          dnf_install() {
+            dnf --setopt=timeout=120 --setopt=retries=5 --setopt=minrate=1 install -y "$@"
+          }
+
+          dnf_install rpm-build rpmdevtools dnf-plugins-core tar gzip \
+            make gcc gcc-c++ findutils sed coreutils
+
+          # Component-specific dependencies
+          case "${{ inputs.component }}" in
+            copilot-shell)
+              dnf_install nodejs npm
+              ;;
+            cosh-ng)
+              dnf install -y rust cargo pkgconfig systemd-rpm-macros
+              rustc --version | awk '{
+                split($2, v, ".")
+                if (v[1] < 1 || (v[1] == 1 && v[2] < 88)) exit 1
+              }'
+              ;;
+            agent-sec-core)
+              dnf_install clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
+              ;;
+            agentsight)
+              dnf_install rust cargo make gcc nodejs npm perl perl-IPC-Cmd perl-core perl-FindBin \
+                clang clang-devel llvm libbpf-devel elfutils-libelf-devel \
+                zlib-devel openssl-devel pkgconf-pkg-config systemd-rpm-macros
+              ;;
+            tokenless)
+              dnf_install rust cargo jq nodejs npm
+              ;;
+            ws-ckpt)
+              dnf_install rust cargo nodejs npm btrfs-progs rsync systemd-rpm-macros
+              ;;
+            agent-memory)
+              # rusqlite (bundled) + git2 (vendored libgit2) need a C toolchain
+              # and cmake; systemd-devel provides libsystemd headers for the
+              # journald fan-out feature.
+              dnf_install rust cargo cmake systemd-devel
+              ;;
+            skillfs)
+              dnf_install rust cargo gcc make pkgconfig fuse3-devel
+              ;;
+            os-skills)
+              # noarch, no extra build deps
+              ;;
+          esac
+
+      # agent-sec-core requires Rust 1.93+, Python 3.11 + uv, Node.js 22.23.2
+      # These are installed via GitHub Actions (aligned with sec-core-rpmbuild.yaml)
+      - name: "Setup Rust toolchain (agent-sec-core)"
+        if: inputs.component == 'agent-sec-core'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+
+      - name: "Setup Rust toolchain (skillfs)"
+        if: inputs.component == 'skillfs'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.86.0'
+
+      - name: "Setup Rust toolchain (tokenless)"
+        if: inputs.component == 'tokenless'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.91.0'
+
+      - name: "Setup Rust toolchain (anolisa)"
+        if: inputs.component == 'anolisa'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+
+      - name: "Setup Python + uv (agent-sec-core)"
+        if: inputs.component == 'agent-sec-core'
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+          enable-cache: false
+
+      - name: "Setup Node.js (agent-sec-core)"
+        if: inputs.component == 'agent-sec-core'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Setup rpmbuild tree
+        run: rpmdev-setuptree
+
+      - name: Download source archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.source-artifact }}
+          path: /tmp/sources/
+
+      - name: Download vendor archive
+        if: inputs.vendor-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.vendor-artifact }}
+          path: /tmp/vendor/
+
+      - name: Prepare source and spec
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ inputs.version }}"
+          COMPONENT="${{ inputs.component }}"
+
+          # Find the source tarball
+          SOURCE_TAR=$(find /tmp/sources/ -name "*.tar.gz" | head -1)
+          if [ -z "$SOURCE_TAR" ]; then
+            echo "ERROR: No source tarball found"
+            exit 1
+          fi
+
+          # Rename tarball to match RPM spec Source0: %{name}-%{version}.tar.gz
+          # (strip artifact suffix like .nightly from the filename)
+          EXPECTED_TAR="${COMPONENT}-${VERSION}.tar.gz"
+          cp "$SOURCE_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_TAR}"
+
+          # Copy vendor tarball if present, renaming to match spec Source1:
+          # %{name}-%{version}-vendor.tar.gz (strip any artifact suffix).
+          if [ -d "/tmp/vendor/" ]; then
+            VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1)
+            if [ -n "$VENDOR_TAR" ]; then
+              EXPECTED_VENDOR_TAR="${COMPONENT}-${VERSION}-vendor.tar.gz"
+              cp "$VENDOR_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_VENDOR_TAR}"
+            fi
+          fi
+
+          # Extract source to get .spec.in
+          EXTRACT_DIR=$(mktemp -d)
+          tar -xzf "$SOURCE_TAR" -C "$EXTRACT_DIR"
+
+          # agentsight's spec packages a prebuilt binary, service file and docs.
+          # Build it from the full source archive, then replace Source0 with the
+          # compact payload expected by agentsight.spec.
+          if [ "$COMPONENT" = "agentsight" ]; then
+            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+            if [ -z "$SOURCE_ROOT" ]; then
+              echo "ERROR: agentsight source root not found"
+              exit 1
+            fi
+
+            if [ -d "/tmp/vendor/" ]; then
+              VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1)
+              if [ -n "$VENDOR_TAR" ]; then
+                tar -xzf "$VENDOR_TAR" -C "$SOURCE_ROOT"
+              fi
+            fi
+
+            (
+              cd "$SOURCE_ROOT"
+              make build-frontend NPM_REGISTRY=https://registry.npmmirror.com
+              make build
+              ./scripts/build-enforcer.sh
+            )
+
+            PACKAGE_DIR=$(mktemp -d)
+            "$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
+            tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
+            echo "AGENTSIGHT_VERIFY_RPM=$SOURCE_ROOT/scripts/verify-rpm-package.sh" >> "$GITHUB_ENV"
+          fi
+
+          # The anolisa spec intentionally unpacks Source0 into `anolisa/`
+          # instead of the versioned directory emitted by package-source.
+          if [ "$COMPONENT" = "anolisa" ]; then
+            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+            if [ -z "$SOURCE_ROOT" ]; then
+              echo "ERROR: anolisa source root not found"
+              exit 1
+            fi
+
+            PACKAGE_DIR=$(mktemp -d)
+            mkdir -p "$PACKAGE_DIR/anolisa"
+            cp -a "$SOURCE_ROOT/." "$PACKAGE_DIR/anolisa/"
+            tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" anolisa
+          fi
+
+          # Find and process spec template
+          SPEC_IN=$(find "$EXTRACT_DIR" -name "${COMPONENT}.spec.in" | head -1)
+          if [ -z "$SPEC_IN" ]; then
+            SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
+          fi
+          if [ -n "$SPEC_IN" ]; then
+            SPEC_OUT="${SPEC_IN%.in}"
+            sed "s/@VERSION@/${VERSION}/g" "$SPEC_IN" > "$SPEC_OUT"
+            SPEC_FILE="$SPEC_OUT"
+          else
+            # Fallback: look for plain .spec
+            SPEC_FILE=$(find "$EXTRACT_DIR" -name "*.spec" | head -1)
+          fi
+
+          if [ -z "$SPEC_FILE" ]; then
+            echo "ERROR: No spec file found"
+            exit 1
+          fi
+
+          cp "$SPEC_FILE" ~/rpmbuild/SPECS/
+          echo "SPEC_BASENAME=$(basename "$SPEC_FILE")" >> $GITHUB_ENV
+          echo "EXTRACT_DIR=${EXTRACT_DIR}" >> $GITHUB_ENV
+
+      - name: Build RPM
+        run: |
+          rpmbuild -bb --nodeps \
+            --define "_topdir $HOME/rpmbuild" \
+            ~/rpmbuild/SPECS/${SPEC_BASENAME}
+
+      - name: Collect RPM artifacts
+        run: |
+          ARCH="${{ inputs.arch }}"
+          RPM_ARCH="$([[ "$ARCH" == "amd64" ]] && echo "x86_64" || echo "aarch64")"
+
+          mkdir -p /tmp/rpm-output/
+
+          # Collect built RPMs (both arch-specific and noarch)
+          find ~/rpmbuild/RPMS/ -name "*.rpm" -exec cp {} /tmp/rpm-output/ \;
+
+          echo "Built RPMs:"
+          ls -la /tmp/rpm-output/
+
+          if [ "${{ inputs.component }}" = "agentsight" ]; then
+            while IFS= read -r rpm_path; do
+              "$AGENTSIGHT_VERIFY_RPM" "$rpm_path"
+            done < <(find /tmp/rpm-output/ -maxdepth 1 -type f -name "*.rpm" -print)
+          fi
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ inputs.component }}-${{ inputs.arch }}${{ inputs.artifact-suffix }}
+          path: /tmp/rpm-output/*.rpm
+          retention-days: 7
+          if-no-files-found: error

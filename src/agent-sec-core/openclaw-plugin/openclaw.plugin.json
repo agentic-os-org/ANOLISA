@@ -1,0 +1,120 @@
+{
+  "id": "agent-sec",
+  "name": "Agent Security",
+  "version": "0.13.2",
+  "description": "Security hooks powered by agent-sec-cli",
+  "activation": {
+    "onCapabilities": ["hook"]
+  },
+  "extensions": ["./dist/index.js"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "promptScanBlock": {
+        "type": "boolean",
+        "default": false,
+        "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+      },
+      "piiScanUserInput": {
+        "type": "boolean",
+        "default": true,
+        "description": "Scan model-entry text on stable OpenClaw >=2026.5.12, inbound text on older hosts, and tool/model boundaries"
+      },
+      "piiIncludeLowConfidence": {
+        "type": "boolean",
+        "default": false,
+        "description": "是否包含低置信度 PII findings"
+      },
+      "codeScanRequireApproval": {
+        "type": "boolean",
+        "default": false,
+        "description": "代码扫描检测到安全问题时是否要求用户审批（默认仅记录日志并放行）"
+      },
+      "capabilities": {
+        "type": "object",
+        "description": "按能力配置启用状态和阻断策略",
+        "properties": {
+          "scan-code": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          },
+          "prompt-scan": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          },
+          "pii-scan-user-input": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "policy": {
+                "type": "string",
+                "enum": ["observe", "warn", "ask", "block", "debug", "deny"],
+                "default": "observe",
+                "description": "PII hook policy；ask 在支持确认的前置事件请求确认，其他不支持的边界降级为 warn"
+              },
+              "enableBlock": {
+                "type": "boolean",
+                "default": false,
+                "description": "检测到 deny 级别 PII/凭据时是否直接阻断本轮请求"
+              }
+            }
+          },
+          "skill-ledger": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "policy": {
+                "type": "string",
+                "enum": ["observe", "warn", "ask", "block", "debug", "deny"],
+                "default": "ask",
+                "description": "控制已挂载 Skill Ledger hook 的用户可见行为：observe 仅审计，warn 告警放行，ask 优先要求确认，block 直接拒绝执行"
+              },
+              "enableBlock": {
+                "type": "boolean",
+                "description": "Deprecated: 未配置 policy 时兼容旧配置；true 映射为 block，false 映射为 warn"
+              },
+              "blockStatuses": {
+                "type": "array",
+                "default": ["none", "drifted", "deny", "tampered"],
+                "items": { "type": "string" },
+                "description": "Deprecated: policy=block 现在对所有非空 Skill Ledger message 直接拒绝执行"
+              }
+            }
+          },
+          "observability": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "promptScanBlock": {
+      "label": "Prompt 扫描拦截模式",
+      "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+    },
+    "piiScanUserInput": {
+      "label": "PII checks",
+      "description": "Scan model-entry text on stable OpenClaw >=2026.5.12, inbound text on older hosts, and tool/model boundaries"
+    },
+    "piiIncludeLowConfidence": {
+      "label": "PII 低置信度 findings",
+      "description": "展示低置信度 PII findings"
+    },
+    "codeScanRequireApproval": {
+      "label": "代码扫描审批模式",
+      "description": "启用后，代码扫描检测到安全问题时在 Dashboard 上弹出审批卡片；关闭则仅记录日志并放行"
+    },
+    "capabilities": {
+      "label": "能力配置",
+      "description": "配置各安全能力的启用状态和阻断策略"
+    }
+  }
+}

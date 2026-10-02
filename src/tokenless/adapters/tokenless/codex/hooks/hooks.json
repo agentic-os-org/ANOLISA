@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/scripts/tool-ready",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|run_shell_command|terminal|Shell|exec|process",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/scripts/rewrite-hook",
+            "timeout": 10,
+            "statusMessage": "Rewriting command via RTK..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/scripts/response-diagnostics",
+            "timeout": 10,
+            "statusMessage": "Checking tool response..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": null,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/scripts/check-tokenless",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

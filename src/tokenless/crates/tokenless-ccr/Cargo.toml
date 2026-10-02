@@ -1,0 +1,26 @@
+[package]
+name = "tokenless-ccr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reversible compression stash (Compress-Cache-Retrieve) for tokenless"
+
+[features]
+# Default production backend. rusqlite is already a workspace dependency
+# (bundled), so enabling it by default adds no new heavy dependency to the
+# tokenless binary. Disable with `--no-default-features` for a lean,
+# in-memory-only build (e.g. embedded tests).
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+blake3.workspace = true
+thiserror.workspace = true
+tokenless-protocol = { path = "../tokenless-protocol" }
+
+[dependencies.rusqlite]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tempfile.workspace = true

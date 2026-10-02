@@ -1,0 +1,29 @@
+[package]
+name = "skillfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "SkillFS — AI agent skill management via virtual filesystem and MCP"
+
+[[bin]]
+name = "skillfs"
+path = "src/main.rs"
+
+[dependencies]
+skillfs-core = { workspace = true }
+skillfs-fuse = { path = "../skillfs-fuse" }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,8 @@
+version: 1
+policy: |
+  source TOOL = exec "**/mcp-server"
+  source UNTRUST = endpoint "*"
+
+  rule tool-egress:
+    block connect endpoint "*" if TOOL and UNTRUST unless target "127."
+    because "tool output derived from network input cannot leave the host"

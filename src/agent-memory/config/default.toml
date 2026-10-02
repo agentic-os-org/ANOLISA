@@ -1,0 +1,72 @@
+[global]
+# Identity used as the default namespace (`user-<user_id>`).
+# Override via env: USER_ID=alice
+user_id = "default"
+
+[memory]
+# Intelligence profile biasing tool-selection strategy.
+# - basic    : weak models, prefer Tier B structured API (P4+)
+# - advanced : strong models (default), prefer file tools
+# - expert   : frontier models, file tools only
+# Profile gates BOTH tools/list (Tier B is hidden) AND tools/call
+# (Tier B invocations are rejected with METHOD_NOT_FOUND on `expert`),
+# so a client cannot bypass the filter by hard-coding a tool name.
+# It is still a UX hint, not a security boundary against a co-tenant
+# with kernel-level access — the filesystem sandbox is.
+profile = "advanced"
+
+[memory.paths]
+# Base directory under which each namespace gets its own mount:
+#   <base_dir>/<ns_kind>-<ns_id>/{README.md, .anolisa/, ...}
+# Override via env: MEMORY_BASE_DIR=/custom/path
+base_dir = "~/.anolisa/memory"
+
+# ── Embedding ─────────────────────────────────────────────────
+# Backend for semantic (vector) search via `memory_search mode=vector|hybrid`.
+# Override via env: MEMORY_EMBEDDING_BACKEND=openai|ollama|none
+#
+# OpenAI: set `api_key` or MEMORY_OPENAI_API_KEY (falls back to OPENAI_API_KEY).
+#   backend = "openai"
+#   api_key  = ""
+#   model    = "text-embedding-3-small"               # or "text-embedding-3-large"
+#
+# Ollama (no auth, needs a running ollama server):
+#   backend = "ollama"
+#   model   = "nomic-embed-text"             # or "bge-m3", "mxbai-embed-large"
+#   base_url = "http://localhost:11434"
+
+[memory.embedding]
+backend = "none"
+# api_key  = ""        # only for openai
+# model    = ""
+# base_url = ""
+
+# ── Size limits ─────────────────────────────────────────────────
+# Maximum bytes for a single mem_read / mem_write / mem_append call.
+# Override via env: MEMORY_MAX_READ_BYTES, MEMORY_MAX_WRITE_BYTES,
+# MEMORY_MAX_APPEND_BYTES.
+max_read_bytes   = 1_048_576   #  1 MiB
+max_write_bytes  = 16_777_216  # 16 MiB
+max_append_bytes = 4_194_304   #  4 MiB
+
+[memory.index]
+enabled = true
+# Time decay: exp(-lambda * age_days). 0 = disabled.
+time_decay_lambda = 0.01   # half-life ~69 days
+time_decay_alpha  = 0.3    # time contributes 30% of score boost
+# Cold archival: files with 0 access_count older than this many days
+# are excluded from normal search.
+cold_after_days       = 30
+exclude_cold_on_search = true
+
+# ── Consolidation ───────────────────────────────────────────────
+# Auto-extract L1 atomic facts from session audit logs on shutdown.
+[memory.consolidation]
+enabled                  = true
+max_facts                = 20
+min_tool_calls           = 3
+episodic_enabled         = true
+min_episode_steps        = 3
+max_episodes_per_session = 10
+conflict_detection       = true
+conflict_bm25_threshold  = -2.0

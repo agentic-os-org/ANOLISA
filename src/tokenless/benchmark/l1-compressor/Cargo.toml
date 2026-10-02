@@ -1,0 +1,81 @@
+# Copyright 2026 Alibaba Cloud
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tokenless Benchmark Suite — L1 compressor layer (standalone Cargo workspace).
+#
+# Kept OUT of the main tokenless workspace on purpose:
+#   * the main `[profile.release]` sets `panic = "abort"`, which breaks
+#     criterion's measurement harness (it relies on unwinding);
+#   * `cargo test --workspace` in the main tree should not pull in these
+#     heavy benchmark-only dependencies (criterion) nor run the adversarial
+#     load tests as part of the normal unit-test cycle.
+#
+# Depends on the tokenless crates by path so it always benchmarks the exact
+# working-tree sources next to it.
+[workspace]
+
+[package]
+name = "tokenless-bench"
+version = "0.7.4"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "L1 component-layer benchmark and quality/adversarial test suite for tokenless compression"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1.0"
+toon-format = { version = "0.5", default-features = false }
+tokenless-schema = { path = "../../crates/tokenless-schema" }
+tokenless-compressors = { path = "../../crates/tokenless-compressors" }
+tokenless-ccr = { path = "../../crates/tokenless-ccr" }
+# SIGKILL fallback for rtk children that outlive the 5s timeout — used in
+# `src/metrics.rs` behind `#[cfg(unix)]`, so a plain grep misses it.
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# criterion needs unwinding; keep the default (no panic=abort) here.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# --- L1 performance benchmarks (criterion, custom harness) ---
+# The `l1_` prefix marks every target as the component layer (single
+# compressor in isolation) of the four-layer benchmark plan; higher layers
+# (L2 module comparison, ...) will claim `l2_`+ prefixes in follow-up PRs.
+[[bench]]
+name = "l1_schema_latency"
+harness = false
+
+[[bench]]
+name = "l1_response_latency"
+harness = false
+
+[[bench]]
+name = "l1_toon_latency"
+harness = false
+
+[[bench]]
+name = "l1_pipeline_latency"
+harness = false
+
+# Cross-process rtk rewrite latency (ms-range; see file-top methodology note).
+[[bench]]
+name = "l1_rtk_latency"
+harness = false

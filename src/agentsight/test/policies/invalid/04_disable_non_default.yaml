@@ -1,0 +1,16 @@
+version: 1
+rules:
+  local:
+    ifc: |
+      rule local:
+        kill exec "git"
+        because "local"
+domains:
+  session:
+    bind:
+      - rule: local
+        mode: locked
+  child:
+    parent: session
+    disable:
+      - not-inherited-default

@@ -1,0 +1,106 @@
+macro_rules! activity_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            RuntimeDetailsUnavailableTitle,
+            RuntimeDetailsUnavailableBody,
+            ActivityTitle,
+            ActivityDetailsTitle,
+            ActivityRunLabel,
+            ActivityDetailLabel,
+            ActivitySkillLabel,
+            ActivitySkillUpdatedStatus,
+            ActivityToolLabel,
+            ActivityToolOutputLabel,
+            ActivityShellLabel,
+            ActivityStatusLoading,
+            ActivityStatusLoaded,
+            ActivityStatusFailed,
+            ActivityStatusCalled,
+            ActivityStatusRequested,
+            ActivityStatusCaptured,
+            ActivityStatusCompleted,
+            ActivityStatusError,
+            ActivityStatusInterrupted,
+            ActivityToolCalledSummary,
+            ActivityToolRequestedSummary,
+            ActivityToolOutputCapturedSummary,
+            ActivityProviderNativeShellBypassSummary,
+            ActivityToolNeedsForegroundShellSummary,
+            ActivityShellHandoffSentSummary,
+            ToolCardReadFileLabel,
+            ToolCardWriteFileLabel,
+            ToolCardEditFileLabel,
+            ToolCardSearchFilesLabel,
+            ToolCardFindFilesLabel,
+            ToolCardListDirectoryLabel,
+            ToolCardShellLabel,
+            ToolCardWebFetchLabel,
+            ToolCardWebSearchLabel,
+            ToolCardSkillLabel,
+            ToolCardAgentLabel,
+            ToolCardMemoryLabel,
+            ToolCardEvidenceLabel,
+            ToolCardCustomToolLabel,
+            ToolCardCalledStatus,
+            ToolCardRequestedStatus,
+            ToolCardAutoApprovedStatus,
+            ToolCardCapturedStatus,
+            ToolCardCompletedStatus,
+            ToolCardFailedStatus,
+            ToolCardDuplicateStatus,
+            ToolCardInterruptedStatus,
+            ToolCardReadOnlyIntent,
+            ToolCardWriteIntent,
+            ToolCardExecuteIntent,
+            ToolCardNetworkIntent,
+            ToolCardContextIntent,
+            ToolCardCustomIntent,
+            ToolCardApprovalRequiredAction,
+            ToolCardWriteCompletedResult,
+            ToolCardEditCompletedResult,
+            ToolCardSkillAvailableResult,
+            ToolCardShellEvidenceDeliveredResult,
+            ToolCardShellEvidenceListResult,
+            ToolCardShellEvidenceReadResult,
+            ToolCardShellEvidenceAlreadyDeliveredResult,
+            ToolCardShellEvidenceFailedResult,
+            ToolCardShellEvidenceDuplicateResult,
+            ToolCardShellEvidenceMetadataMetric,
+            ToolCardOutputCapturedResult,
+            ToolCardLinesReturnedResult,
+            ToolCardStdoutMetric,
+            ToolCardStderrMetric,
+            ToolCardTruncatedMetric,
+            MarkdownCodeLabel,
+            MarkdownCodeWithLanguageLabel,
+            MarkdownTableLabel,
+        );
+    };
+}
+
+macro_rules! tool_summary_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ToolOutputStdoutCapturedSummary,
+            ToolOutputStderrCapturedSummary,
+            ToolSummaryExit,
+            ToolSummaryBlocked,
+            ToolSummaryTimedOut,
+            ToolSummaryFailed,
+        );
+    };
+}
+
+macro_rules! activity_untracked_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ActivityStatusCompletedUntracked,
+        );
+    };
+}

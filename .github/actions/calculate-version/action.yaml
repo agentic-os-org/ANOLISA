@@ -1,0 +1,103 @@
+name: "Calculate Version"
+description: "Calculate version from git describe using configurable tag patterns (e.g. cosh/v*, sec-core/v*, os-release/v*)"
+
+inputs:
+  tag-match:
+    description: "Tag glob pattern for git describe --match (e.g. cosh/v*, sec-core/v*, os-release/v*)"
+    required: true
+  ref:
+    description: "Git ref to calculate version from (e.g. release/sec-core/v0.3). Defaults to current HEAD."
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: "Calculated version (e.g. 2.1.0 or 2.1.0~nightly.5.abc1234)"
+    value: ${{ steps.calc.outputs.version }}
+  version_tag:
+    description: "Docker-safe tag (~ replaced with -)"
+    value: ${{ steps.calc.outputs.version_tag }}
+  is_release:
+    description: "Whether this is a clean release version (true/false)"
+    value: ${{ steps.calc.outputs.is_release }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Calculate version from git describe
+      id: calc
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TAG_MATCH="${{ inputs.tag-match }}"
+        REF="${{ inputs.ref }}"
+
+        # Ensure ALL commits and tags are available.
+        # actions/checkout with fetch-depth:0 only fetches the current branch's
+        # history. Tags created on main AFTER the branch diverged point to commits
+        # not in the local graph, making git-describe unable to reach them.
+        # Fetching the full main branch first ensures those commits exist locally.
+        git fetch origin main --no-tags --quiet 2>&1 || echo "::warning::Failed to fetch main"
+        git fetch origin --tags --force 2>&1 || echo "::warning::Failed to fetch tags"
+
+        # Determine target commit: use specified ref or default to HEAD
+        if [ -n "$REF" ]; then
+          git fetch origin "$REF" --quiet 2>&1 || { echo "::error::Failed to fetch ref: $REF"; exit 1; }
+          TARGET=$(git rev-parse FETCH_HEAD)
+          echo "  Using ref: ${REF} (commit: ${TARGET:0:7})"
+        else
+          TARGET=HEAD
+        fi
+
+        # Debug: show available matching tags
+        echo "::group::Debug: matching tags for ${TAG_MATCH}"
+        git tag -l "$TAG_MATCH" | sort -V | tail -10
+        echo "::endgroup::"
+
+        GIT_DESC=$(git describe --tags --match "$TAG_MATCH" --long --always "$TARGET" 2>&1 || echo "")
+        echo "  git describe output: ${GIT_DESC}"
+
+        # Extract the tag prefix (everything before /v) for stripping
+        # e.g. "cosh/v*" → prefix pattern is "*/v"
+        # We strip by removing everything up to and including "/v" from the tag
+        strip_tag_prefix() {
+          local tag="$1"
+          # Remove prefix up to and including /v (e.g. "cosh/v2.1.0" → "2.1.0")
+          echo "${tag#*/v}"
+        }
+
+        if [ -z "$GIT_DESC" ] || ! echo "$GIT_DESC" | grep -qE '/v[0-9]'; then
+          # No matching tag found — pure nightly from commit count + hash
+          SHORT_HASH=$(git rev-parse --short "$TARGET")
+          COMMIT_COUNT=$(git rev-list --count "$TARGET")
+          VERSION="0.0.0~nightly.${COMMIT_COUNT}.${SHORT_HASH}"
+          IS_RELEASE=false
+        else
+          if [[ "$GIT_DESC" == *-0-g* ]]; then
+            # Exact tag match (0 commits ahead, not dirty) → release
+            RAW_TAG=${GIT_DESC%-0-g*}
+            VERSION=$(strip_tag_prefix "$RAW_TAG")
+            IS_RELEASE=true
+          else
+            # Commits ahead of tag → nightly
+            BASE_TAG=$(echo "$GIT_DESC" | sed 's/-[0-9]*-g.*//')
+            BASE_VERSION=$(strip_tag_prefix "$BASE_TAG")
+            COMMITS=$(echo "$GIT_DESC" | sed 's/.*-\([0-9]*\)-g.*/\1/')
+            HASH_PART=$(echo "$GIT_DESC" | sed 's/.*-g\([^ ]*\).*/\1/')
+            SHORT_HASH=$(echo "$HASH_PART" | sed 's/-dirty$//')
+            SUFFIX=""
+            if [[ "$GIT_DESC" == *-dirty ]]; then SUFFIX=".dirty"; fi
+            VERSION="${BASE_VERSION}~nightly.${COMMITS}.${SHORT_HASH}${SUFFIX}"
+            IS_RELEASE=false
+          fi
+        fi
+
+        # Docker tag: replace ~ with - (Docker tags don't support ~)
+        VERSION_TAG=$(echo "$VERSION" | tr '~' '-')
+
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+        echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+
+        echo "::notice title=Version (${TAG_MATCH})::${VERSION} (tag: ${VERSION_TAG}, release: ${IS_RELEASE})"

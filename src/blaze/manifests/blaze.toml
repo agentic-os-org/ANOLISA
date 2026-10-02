@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Component manifest for the blaze per-host sandbox orchestrator.
+
+[component]
+name = "blaze"
+version = "0.3.0"
+layer = "runtime"
+domain = "blaze"
+description = "Per-host sandbox orchestrator — multi-backend lifecycle management, kernel coordination"
+
+[build]
+system = "cargo"
+targets = ["release"]
+
+[build.toolchain]
+rust = ">=1.88.0"
+
+# Binary installation handled by dist/blaze.spec (RPM). Not in main build system while in Labs.
+
+[packaging]
+rpm_name = "blaze"
+service_name = "blazed.service"
+config_dir = "/etc/anolisa/blaze"
+state_dir = "/var/lib/blaze"
+runtime_dir = "/run/blaze"
+tcp_port = 14159
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+build = ["rust>=1.88"]
+runtime = ["firecracker", "bubblewrap"]
+
+[[features]]
+name = "function_tier"
+label = "Linux-sandbox function tier backend"
+default = true

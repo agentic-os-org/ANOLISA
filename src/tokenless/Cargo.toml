@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tokenless-ccr",
+    "crates/tokenless-protocol",
+    "crates/tokenless-compressors",
+    "crates/tokenless-schema",
+    "crates/tokenless-runtime",
+    "crates/tokenless-cli",
+    "crates/tokenless-stats",
+    "python/tokenless",
+]
+default-members = [
+    "crates/tokenless-ccr",
+    "crates/tokenless-protocol",
+    "crates/tokenless-compressors",
+    "crates/tokenless-schema",
+    "crates/tokenless-runtime",
+    "crates/tokenless-cli",
+    "crates/tokenless-stats",
+]
+exclude = [
+    "third_party/rtk",
+]
+
+[workspace.package]
+version = "0.8.4"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+csv = "1.4"
+html5ever = "0.39"
+regex = "1.10"
+thiserror = "2.0"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+toon-format = { version = "0.5", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
+blake3 = "1.5"
+dirs = "5.0"
+libc = "0.2"
+similar = "2"
+pyo3 = "0.24.2"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Python extensions must unwind at the FFI boundary instead of aborting the
+# embedding interpreter. CLI releases continue to use the profile above.
+[profile.python-release]
+inherits = "release"
+panic = "unwind"

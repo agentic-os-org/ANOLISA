@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "local": {"duration_seconds": 0, "minimum_cycles": 1},
+    "g2": {"duration_seconds": 0, "minimum_cycles": 1},
+    "g3": {"duration_seconds": 7200, "minimum_cycles": 120},
+    "g4": {"duration_seconds": 21600, "minimum_cycles": 360},
+    "g5": {"duration_seconds": 86400, "minimum_cycles": 1440}
+  },
+  "cases": [
+    {"id":"E2E-01","name":"installed non-interactive entry","profiles":["local","g2","g3","g4","g5"],"kind":"non_interactive","requires":[],"timeout_seconds":30,"purpose":"Prove that the installed cosh launcher preserves -c output and exit status."},
+    {"id":"E2E-02","name":"default shell through a real PTY","profiles":["local","g2","g3","g4","g5"],"kind":"pty","requires":[],"timeout_seconds":60,"purpose":"Prove that the default installed shell accepts commands and exits cleanly in a real PTY."},
+    {"id":"E2E-03","name":"explicit bash PTY","profiles":["g2","g3","g4","g5"],"kind":"pty_bash","requires":["bash"],"timeout_seconds":60,"purpose":"Prove explicit bash selection, command boundaries, and post-command usability."},
+    {"id":"E2E-04","name":"explicit zsh PTY","profiles":["g2","g3","g4","g5"],"kind":"pty_zsh","requires":["zsh"],"timeout_seconds":60,"purpose":"Prove explicit zsh selection, command boundaries, and post-command usability."},
+    {"id":"E2E-05","name":"OpenSSH login shell","profiles":["g2","g3","g4","g5"],"kind":"ssh","requires":["ssh","COSH_E2E_SSH_TARGET","COSH_E2E_SSH_KEY","COSH_E2E_KNOWN_HOSTS"],"timeout_seconds":90,"purpose":"Prove an OpenSSH login reaches the installed cosh shell through a real PTY."},
+    {"id":"E2E-06","name":"sudo execution and credential cleanup","profiles":["g2","g3","g4","g5"],"kind":"sudo","requires":["sudo","COSH_E2E_SUDO_USER"],"timeout_seconds":60,"purpose":"Prove the allowlisted sudo path and invalidate cached credentials during cleanup."},
+    {"id":"E2E-07","name":"deterministic core provider workflow","profiles":["g2","g3","g4","g5"],"kind":"provider","requires":["COSH_E2E_PROVIDER_READY"],"timeout_seconds":120,"purpose":"Prove the installed cosh to cosh-core provider path with a deterministic loopback provider."},
+    {"id":"E2E-08","name":"mixed workload soak","profiles":["g3","g4","g5"],"kind":"soak","requires":[],"timeout_seconds":90000,"purpose":"Detect PTY, child-process, descriptor, latency, and memory degradation over long runs."}
+  ]
+}

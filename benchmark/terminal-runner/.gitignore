@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Sensitive / runtime artifacts — never commit
+# ---------------------------------------------------------------------------
+
+# Harbor upstream is cloned by scripts/setup.sh — do not vendor it.
+/harbor/
+
+# Dataset is cloned by scripts/setup.sh — do not vendor it.
+/dataset/
+
+# Job outputs (contain logs, possibly API keys, container output).
+/jobs/
+
+# Local temp / cache.
+*.tmp
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Node / npm
+node_modules/
+package-lock.json
+bun.lock
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+logs/

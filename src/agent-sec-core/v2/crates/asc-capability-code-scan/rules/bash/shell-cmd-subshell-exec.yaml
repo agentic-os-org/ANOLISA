@@ -1,0 +1,13 @@
+rule_id: shell-cmd-subshell-exec
+cwe_id: CWE-78
+desc_en: >-
+  Command substitution containing dangerous combinations for data exfiltration
+  (curl/wget with sensitive content reading) or code execution (eval with shell commands).
+desc_zh: >-
+  命令替换包含危险的数据外泄组合（curl/wget 读取敏感内容）或代码执行（eval 执行 shell 命令）。
+regex: |-
+  \b(?:curl|wget)\b[^;\n]*\$\([^)]*\b(?:cat|head|tail|base64)\b[^)]*\)
+  |\beval\s+[^\n]*\$\([^)]*\b(?:cat|grep|base64|curl|wget)\b[^)]*\)
+  |\$\(\s*(?:cat|head|tail|grep)\s+[^)]*(?:/etc/(?:passwd|shadow|gshadow)|\.ssh/|/root/)[^)]*\)
+  |\$\([^)]*\bbase64\b[^)]*\)\.[a-z0-9]+\.[a-z]+
+severity: warn

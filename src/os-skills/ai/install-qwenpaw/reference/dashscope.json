@@ -1,0 +1,29 @@
+{
+  "id": "dashscope",
+  "name": "DashScope",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "api_key": "{DASHSCOPE_API_KEY}",
+  "chat_model": "OpenAIChatModel",
+  "models": [
+    {
+      "id": "qwen3-max",
+      "name": "Qwen3 Max"
+    },
+    {
+      "id": "qwen3-235b-a22b-thinking-2507",
+      "name": "Qwen3 235B A22B Thinking"
+    },
+    {
+      "id": "deepseek-v3.2",
+      "name": "DeepSeek-V3.2"
+    }
+  ],
+  "extra_models": [],
+  "api_key_prefix": "sk",
+  "is_local": false,
+  "freeze_url": true,
+  "require_api_key": true,
+  "is_custom": false,
+  "support_model_discovery": false,
+  "generate_kwargs": {}
+}

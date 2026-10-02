@@ -1,0 +1,11 @@
+[package]
+name = "tokenless-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned lifecycle transport shared by Tokenless frontends"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

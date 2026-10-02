@@ -1,0 +1,12 @@
+[package]
+name = "aw-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pinned AW capability execution using versioned contracts"
+publish = false
+
+[dependencies]
+aw-contracts = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

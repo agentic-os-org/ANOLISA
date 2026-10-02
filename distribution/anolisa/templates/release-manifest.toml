@@ -1,0 +1,52 @@
+# Template: release-manifest.toml (schema v1)
+#
+# Lightweight version-check endpoint for `anolisa update self`. The CLI
+# fetches this file to discover whether a newer version is available, then
+# downloads the matching platform tar.gz archive, extracts the `anolisa`
+# binary, and atomically replaces itself.
+#
+# Consumed by `anolisa_core::self_update::ReleaseManifest`.
+#
+# IMPORTANT: This file is a TEMPLATE. Every value wrapped in
+# `<REPLACE_WITH_...>` is a placeholder meant to be substituted before
+# the file is published. The `example.invalid` URLs (RFC 2606) will never
+# resolve.
+#
+# Artifact requirements:
+#   - URL must point to a gzipped tar archive (.tar.gz)
+#   - Archive must contain a regular file named `anolisa` (at any depth)
+#   - sha256 is the digest of the .tar.gz file itself (not the binary)
+#   - size is the byte length of the .tar.gz file
+
+schema_version = 1
+version = "<REPLACE_WITH_LATEST_VERSION>"
+
+# -----------------------------------------------------------------------------
+# Linux x86_64
+# -----------------------------------------------------------------------------
+[[artifacts]]
+os = "linux"
+arch = "x86_64"
+url = "https://example.invalid/<REPLACE_WITH_PATH>/anolisa-cli-<VERSION>-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "<REPLACE_WITH_SHA256>"
+size = 12345678
+
+# -----------------------------------------------------------------------------
+# Linux aarch64
+# -----------------------------------------------------------------------------
+[[artifacts]]
+os = "linux"
+arch = "aarch64"
+url = "https://example.invalid/<REPLACE_WITH_PATH>/anolisa-cli-<VERSION>-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "<REPLACE_WITH_SHA256>"
+size = 12345678
+
+# -----------------------------------------------------------------------------
+# macOS aarch64 (Apple Silicon)
+# -----------------------------------------------------------------------------
+[[artifacts]]
+os = "macos"
+arch = "aarch64"
+url = "https://example.invalid/<REPLACE_WITH_PATH>/anolisa-cli-<VERSION>-aarch64-apple-darwin.tar.gz"
+sha256 = "<REPLACE_WITH_SHA256>"
+size = 12345678

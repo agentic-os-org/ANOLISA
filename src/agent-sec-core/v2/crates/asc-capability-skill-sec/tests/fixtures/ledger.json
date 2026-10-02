@@ -1,0 +1,765 @@
+{
+  "source_revision": "e7c1c3fdc01bb9ffd01dac9e9b8c83f5df3bd60e",
+  "source_hashes": {
+    "__init__.py": "5dd5a1d71b3d08571d7bdaa2d685f580b581237e3e50d6486b9f39b928fefb4f",
+    "activation_policy.py": "f846de87b1cee44b0fc2f90d5cb262c702d4f0e33a90a536f864b90feb15f47f",
+    "analyze.py": "831352d17b37748708f3419fed6dff9e06f6499c0f8274bce54fc8cf2dc739df",
+    "cli.py": "156baf64717b25ee02f526902e961d89423f51d18fc75f2d19fac6a479e06ada",
+    "config.py": "201ce48997a584e81862da54be6c9aa9c21ff2f76957417533bcabcced73defe",
+    "core/__init__.py": "b218dee7af4e2e005e0765537ee6ca5b05dec4873d87e7d6ae44be111be2acdb",
+    "core/auditor.py": "7e2ecd1814cf09dddeece3f25dd699d0b4813e06f9e021b154bcfd3a92189147",
+    "core/certifier.py": "a4cf00746b29f9a94fa95ee56f866803d961c55d20f5f30d011fe966a5739faa",
+    "core/checker.py": "d2f54ebd80681c359586ac767dfbfbbe40dbf1cedf54921c83655a2aa923aea6",
+    "core/decision.py": "eefb18edc5d6a422624a41cb025b648b6d780dc2147925bbb013db0879d5c584",
+    "core/exposure.py": "ffcdafa9e8015db7fab553da7e30b5fc1e4191efa0f374412635f45d4764cf7b",
+    "core/file_hasher.py": "96c4aa2d8679a2af929d21ac55a4362e24ffd1abb123678b3201b8af01479852",
+    "core/live_root.py": "3cc93b56de90f9d478e373b3bffeb989ea596acbfd13de871dbb3fb9649a9ab1",
+    "core/manifest_helpers.py": "103a47bda3f1473b074d12a4519519e4132729b76084b567405d0a08000e11f5",
+    "core/manifest_integrity.py": "7bb9330f1ba1539151583844ae1a467c36b047af9f6ca915a928900558ee7ba3",
+    "core/resolver.py": "9b645322ed77d97d447c2608b61a334760bf4fd9a250f48cbdd04494ea58e435",
+    "core/status.py": "f37faacdb6e707d3f290f0db61716a42b624d80b274641693d0dff16ff256a9e",
+    "core/version_chain.py": "23ceca610e306cd67e92eacffd2b9ec7dc88632fec3148356d79eda8dad7c1b7",
+    "errors.py": "4a1356a7dfdcfb129a194013d600931aafa29f1011502e46523b23a7f0127e86",
+    "models/__init__.py": "9865a5ff2753146f74132b3645849e4b92fea330fffc0867476c0e15e37e038f",
+    "models/finding.py": "f637e763c804b91ddaf428ba5089407dd9aaea23483f62b4566e4648988d4147",
+    "models/manifest.py": "7583edbd9a6c4b17aa5b869be89e0447f93a3211930ee6c3ef7e6f0d6f417327",
+    "models/scan.py": "720bd4b9bab5b6a934aefe36633ce6b6c0972a2c40839a805a7df775a1cca530",
+    "path_identity.py": "8c05e20513e10d6a15e4725a19fb5e87f3ce4b8061ca14db7892fdf497235db7",
+    "paths.py": "7de6711caae6c7f087e051cf71c8430c81acf851879189770df6d1c4125ea95f",
+    "scanner/__init__.py": "313a551c597d01d29377233f12859a16d3e0ffcf423296ad507d8e212c3549ba",
+    "scanner/builtins/__init__.py": "7bc54c44221c0b9933c9016b57822ffd2c5a8a6b0075b8ea6fb7188cfd16721b",
+    "scanner/builtins/cisco_static/__init__.py": "eaa1155a2bfde4da78885ad8d6fb67380b0b9c540cb0319f80e5323b7b50f2c4",
+    "scanner/builtins/cisco_static/scanner.py": "389436ed638fc0de7fcdd8b04a945ff9c7a23c7e71b4b92cb3390555ac2b53cc",
+    "scanner/builtins/dispatcher.py": "1cf0f52e4e3c20b0a967b6255658e1a20deb2134e44c0c64669e0ecd1a9787cd",
+    "scanner/names.py": "f1b7615545e9a4610b37d76bb9b7cda24d0393c73dde0bba31a394257043e44a",
+    "scanner/parsers.py": "5e7228c8776207b83f11202d763e7a8e24494b364001e9ffb491f8ae27fb25ea",
+    "scanner/registry.py": "8a127f92f987789efc767e574f868e624929c5281855f75c6d8221468a07f51a",
+    "scanner/skill_code_scanner.py": "a942e51097e2eb9ecdbe7ca2adc57d4307cf6bebea254dd58c03e215d8f503c0",
+    "signing/__init__.py": "4726b5f1e098686020bcc0b23cc97d43fa4cc54da9ea954dab7a22f74ee785a8",
+    "signing/base.py": "a0db2555730476a8e46732bdad3400e2c380f5afc5f9dcbbee33b7fc4a2d25a9",
+    "signing/ed25519.py": "6689a77fee7e6bbe6d6956eea874a80a9e105189ccece9b3ac0c912fcc565c56",
+    "signing/key_manager.py": "08a1c0b56592e294f293ab15f4c176f2d620d4d1cbf31829dde88bbfa54e6a54",
+    "skillfs_peer_auth.py": "f5157304fd780bae2616ba011a908303ad1c88240bc65a601c42b58b309f8b9d",
+    "utils.py": "31499cacc71235233bfb395128a82fccc6a095d21ad21676bd2be1d0db155170"
+  },
+  "cases": [
+    {
+      "name": "certify-merge-replace",
+      "steps": [
+        {
+          "op": "check",
+          "expected": {
+            "versionId": null,
+            "fileCount": null,
+            "status": "none"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "one",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "one"
+            ]
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "two",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "deny",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "deny",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [
+              "two"
+            ]
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "deny",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "deny",
+                "message": "review required"
+              }
+            ]
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "two",
+          "findings": [
+            {
+              "rule": "review",
+              "level": "warn",
+              "message": "review required"
+            }
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "warn",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [
+              "two"
+            ]
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "warn",
+            "findings": [
+              {
+                "rule": "review",
+                "level": "warn",
+                "message": "review required"
+              }
+            ]
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "two",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [
+              "two"
+            ]
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": true,
+            "versions_checked": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "content-versions",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": "main.sh",
+          "content": "echo new\n"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "drifted",
+            "added": [],
+            "removed": [],
+            "modified": [
+              "main.sh"
+            ]
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "remove",
+          "path": "main.sh"
+        },
+        {
+          "op": "write",
+          "path": "new.txt",
+          "content": "new"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000002",
+            "fileCount": 2,
+            "status": "drifted",
+            "added": [
+              "new.txt"
+            ],
+            "removed": [
+              "main.sh"
+            ],
+            "modified": []
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000003",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": true,
+            "versions_checked": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "scan-fill-force",
+      "steps": [
+        {
+          "op": "scan",
+          "scanners": [
+            "code-scanner"
+          ],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "code-scanner"
+            ],
+            "skippedScanners": []
+          }
+        },
+        {
+          "op": "scan",
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [
+              "static-scanner"
+            ],
+            "skippedScanners": [
+              "code-scanner"
+            ]
+          }
+        },
+        {
+          "op": "scan",
+          "expected": {
+            "status": "noop",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [],
+            "skippedScanners": [
+              "code-scanner",
+              "static-scanner"
+            ]
+          }
+        },
+        {
+          "op": "scan",
+          "force": true,
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [
+              "code-scanner",
+              "static-scanner"
+            ],
+            "skippedScanners": []
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": true,
+            "versions_checked": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "import-only-scan",
+      "steps": [
+        {
+          "op": "scan",
+          "scanners": [
+            "skill-vetter"
+          ],
+          "expected": {
+            "executionError": "SkillLedgerError"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "scan",
+          "scanners": [
+            "skill-vetter"
+          ],
+          "expected": {
+            "status": "noop",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": false,
+            "fileCount": 2,
+            "scannersRun": [],
+            "skippedScanners": [
+              "skill-vetter"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing-latest",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "remove",
+          "path": ".skill-meta/latest.json"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": null,
+            "fileCount": null,
+            "status": "tampered"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": true,
+            "versions_checked": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "corrupt-latest",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/latest.json",
+          "content": "{}"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": null,
+            "fileCount": null,
+            "status": "tampered"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": true,
+            "versions_checked": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "corrupt-snapshot",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/versions/v000001.snapshot/main.sh",
+          "content": "tampered"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "audit",
+          "expected": {
+            "valid": true,
+            "versions_checked": 1
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": false,
+            "versions_checked": 1
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000002",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing-snapshot",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "remove",
+          "path": ".skill-meta/versions/v000001.snapshot"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": false,
+            "versions_checked": 1
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "orphan-and-high-slot",
+      "steps": [
+        {
+          "op": "mkdir",
+          "path": ".skill-meta/versions/v000001.snapshot"
+        },
+        {
+          "op": "write",
+          "path": ".skill-meta/versions/v999999.json",
+          "content": "{}"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": null,
+            "fileCount": null,
+            "status": "tampered"
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "audit",
+          "snapshots": true,
+          "expected": {
+            "valid": false,
+            "versions_checked": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "excluded-content",
+      "steps": [
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000001",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 2,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        },
+        {
+          "op": "write",
+          "path": ".git/config",
+          "content": "ignored"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "pass"
+          }
+        },
+        {
+          "op": "write",
+          "path": "build/data",
+          "content": "hashed although scanner excludes this directory"
+        },
+        {
+          "op": "check",
+          "expected": {
+            "versionId": "v000001",
+            "fileCount": 2,
+            "status": "drifted",
+            "added": [
+              "build/data"
+            ],
+            "removed": [],
+            "modified": []
+          }
+        },
+        {
+          "op": "certify",
+          "scanner": "fixture",
+          "findings": [],
+          "expected": {
+            "status": "scanned",
+            "versionId": "v000002",
+            "scanStatus": "pass",
+            "newVersion": true,
+            "fileCount": 3,
+            "scannersRun": [
+              "fixture"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+# Starter configuration for offline validation.
+# No policy program is configured; runtime integration is still being built.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: local-agent
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+  providers: {}
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps: []
+    tool.after:
+      enabled: true
+      required: true
+      steps: []

@@ -1,0 +1,211 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SettingsDialog > Snapshot Tests > should render default state correctly 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render focused on scope selector 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with accessibility settings enabled 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 true* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with all boolean settings disabled 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                false* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                     false* │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with different scope selected (System) 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode (Modified in System)                                                            false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with different scope selected (Workspace) 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode (Modified in Workspace)                                                         false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with file filtering settings configured 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and number settings 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                false* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with tools and security settings 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Snapshot Tests > should render with various boolean settings enabled 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Settings                                                                                       │
+│                                                                                                  │
+│ ▲                                                                                                │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                       Copilot Shell Dark │
+│   Vim Mode                                                                                 true* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      true* │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;

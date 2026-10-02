@@ -1,0 +1,9 @@
+version: 1
+policy: |
+  source SUBAGENT = exec "**/subagent"
+
+  rule protect-parent-policy:
+    block write file "**/actplane.yaml" if SUBAGENT
+    block write file "**/.mcp.json" if SUBAGENT
+    block write file "**/.actplane/**" if SUBAGENT
+    because "sub-agent cannot modify parent policy or integration state"

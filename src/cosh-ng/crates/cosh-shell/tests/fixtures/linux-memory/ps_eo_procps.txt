@@ -1,0 +1,10 @@
+    PID    PPID COMMAND         %MEM %CPU   RSS    VSZ COMMAND
+    543       1 lima-guestagent  2.3  0.0 42116 1281176 /usr/local/bin/lima-guestagent daemon --vsock-port 2222 --runtime-dir=/run/lima-guestagent
+    620       1 tuned            1.4  0.3 25684 478568 /usr/libexec/platform-python -Es /usr/sbin/tuned -l -P
+    770       1 polkitd          1.1  0.0 19732 1522764 /usr/lib/polkit-1/polkitd --no-debug
+    615       1 NetworkManager   1.0  0.0 18524 475224 /usr/sbin/NetworkManager --no-daemon
+    455       1 systemd-journal  0.7  0.0 13348  37112 /usr/lib/systemd/systemd-journald
+    838       1 rsyslogd         0.6  0.0 11284 347272 /usr/sbin/rsyslogd -n
+      1       0 systemd          0.5  0.0  9888 104052 /usr/lib/systemd/systemd --switched-root --system --deserialize 17
+   1359     835 sshd             0.5  0.0  9380  20720 sshd: quejianming [priv]
+    860       1 systemd          0.4  0.0  8520  20812 /usr/lib/systemd/systemd --user

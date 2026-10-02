@@ -1,0 +1,100 @@
+name: CI / Repository Governance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/components.json"
+      - ".github/labels.json"
+      - ".github/CODEOWNERS"
+      - ".github/maintainers.json"
+      - ".github/commitlint.config.json"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/scripts/validate-repository-metadata.py"
+      - ".github/scripts/test_validate_repository_metadata.py"
+      - ".github/scripts/test_package_source_paths.py"
+      - ".github/actions/package-source/action.yaml"
+      - ".github/scripts/issue-claim.js"
+      - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/issue-triage.js"
+      - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/dingtalk_notification.py"
+      - ".github/scripts/test_dingtalk_notification.py"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/prelint.yml"
+      - ".github/workflows/release.yaml"
+      - ".github/workflows/repository-metadata.yml"
+      - ".github/workflows/issue-automation.yml"
+      - ".github/workflows/issue-claim.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/components.json"
+      - ".github/labels.json"
+      - ".github/CODEOWNERS"
+      - ".github/maintainers.json"
+      - ".github/commitlint.config.json"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/scripts/validate-repository-metadata.py"
+      - ".github/scripts/test_validate_repository_metadata.py"
+      - ".github/scripts/test_package_source_paths.py"
+      - ".github/actions/package-source/action.yaml"
+      - ".github/scripts/issue-claim.js"
+      - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/issue-triage.js"
+      - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/dingtalk_notification.py"
+      - ".github/scripts/test_dingtalk_notification.py"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/prelint.yml"
+      - ".github/workflows/release.yaml"
+      - ".github/workflows/repository-metadata.yml"
+      - ".github/workflows/issue-automation.yml"
+      - ".github/workflows/issue-claim.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-governance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate governance metadata
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate component, label, and routing metadata
+        run: |
+          python3 -m unittest discover \
+            -s .github/scripts \
+            -p 'test_validate_repository_metadata.py'
+          python3 .github/scripts/validate-repository-metadata.py
+
+      - name: Test source archive paths and identity
+        run: python3 .github/scripts/test_package_source_paths.py
+
+  community-automation:
+    name: Test community automation
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check .github/scripts/issue-triage.js
+          node --check .github/scripts/issue-claim.js
+
+      - name: Run state-machine regression tests
+        run: |
+          node --test \
+            .github/scripts/issue-triage.test.js \
+            .github/scripts/issue-claim.test.js
+          python3 .github/scripts/test_dingtalk_notification.py

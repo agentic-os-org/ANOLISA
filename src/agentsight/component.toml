@@ -1,0 +1,33 @@
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[component]
+name = "agentsight"
+version = "0.13.0"
+layer = "runtime"
+domain = "observability"
+description = "eBPF-based AI agent observability tool"
+stability = "experimental"
+
+[install]
+modes = ["system"]
+
+[backends.rpm]
+package = "agentsight"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64"]
+requires_kernel = ">=5.8"
+
+[environment.requires_env]
+btf_available = "true"
+capability = "CAP_BPF"
+
+[dependencies]
+runtime = ["elfutils-libelf"]
+
+[[health_checks]]
+name = "binary"
+kind = "command"
+command = "{bindir}/agentsight --version"

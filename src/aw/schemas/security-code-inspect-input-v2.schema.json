@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/security-code-inspect-input/v2",
+  "title": "security-code-inspect input v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "boundary",
+    "constraints"
+  ],
+  "properties": {
+    "artifact": {
+      "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/artifact"
+    },
+    "boundary": {
+      "enum": [
+        "pre_tool",
+        "post_tool"
+      ]
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language"
+      ],
+      "properties": {
+        "language": {
+          "enum": [
+            "auto",
+            "bash",
+            "python"
+          ]
+        }
+      }
+    }
+  }
+}

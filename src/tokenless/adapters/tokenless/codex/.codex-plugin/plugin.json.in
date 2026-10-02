@@ -1,0 +1,21 @@
+{
+  "name": "tokenless",
+  "version": "@VERSION@",
+  "description": "Shell command output reduction and environment error diagnostics for Codex. Rewrites supported commands through RTK before execution and classifies environment failures with actionable fix hints.",
+  "keywords": [
+    "rtk",
+    "shell",
+    "token",
+    "context",
+    "optimization",
+    "environment",
+    "diagnostics"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Tokenless",
+    "shortDescription": "Reduce shell output with RTK and diagnose environment errors",
+    "category": "developer-tools",
+    "capabilities": ["hook"]
+  }
+}

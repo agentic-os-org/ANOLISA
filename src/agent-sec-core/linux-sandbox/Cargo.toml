@@ -1,0 +1,42 @@
+[package]
+name = "linux-sandbox"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "linux-sandbox"
+path = "src/main.rs"
+
+[lib]
+name = "linux_sandbox"
+path = "src/lib.rs"
+
+[lints.clippy]
+uninlined_format_args = "deny"
+redundant_closure_for_method_calls = "deny"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+libc = "0.2.182"
+path-absolutize = "3.1.1"
+schemars = "0.8.22"
+seccompiler = "0.5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1.44"
+url = "2"
+thiserror = "2.0.17"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.23.0"
+tokio = { version = "1", features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "time",
+]}

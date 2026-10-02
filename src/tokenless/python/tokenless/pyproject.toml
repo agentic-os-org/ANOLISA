@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "anolisa-tokenless"
+dynamic = ["version"]
+description = "In-process Python SDK for Tokenless lifecycle optimization"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ANOLISA Authors" }]
+keywords = ["anolisa", "tokenless", "llm", "compression"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+]
+
+[project.urls]
+Homepage = "https://github.com/alibaba/anolisa/tree/main/src/tokenless"
+Repository = "https://github.com/alibaba/anolisa.git"
+Issues = "https://github.com/alibaba/anolisa/issues"
+
+[tool.maturin]
+bindings = "pyo3"
+python-source = "python"
+module-name = "anolisa_tokenless._native"
+features = ["pyo3/extension-module"]
+strip = true
+exclude = ["python/anolisa_tokenless/**/__pycache__/**"]
