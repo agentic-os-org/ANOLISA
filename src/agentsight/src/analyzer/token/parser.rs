@@ -112,14 +112,27 @@ impl TokenParser {
             return None;
         }
 
+        let cache_creation_input_tokens = find_u64(data, "cache_creation_input_tokens");
+        let anthropic_cache_read = find_u64(data, "cache_read_input_tokens");
+        let cache_read_input_tokens =
+            anthropic_cache_read.or_else(|| find_u64(data, "cached_tokens"));
+        // `cache_creation_input_tokens` / `cache_read_input_tokens` field names
+        // only occur in Anthropic's schema, where cache tokens are billed on
+        // top of input_tokens; OpenAI-compatible providers keep cache inside
+        // the input count (`cached_tokens`).
+        let provider = if cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some() {
+            LLMProvider::Anthropic
+        } else {
+            LLMProvider::OpenAI
+        };
+
         Some(TokenUsage {
             input_tokens: input.unwrap_or(0),
             output_tokens: output.unwrap_or(0),
-            cache_creation_input_tokens: find_u64(data, "cache_creation_input_tokens"),
-            cache_read_input_tokens: find_u64(data, "cache_read_input_tokens")
-                .or_else(|| find_u64(data, "cached_tokens")),
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             model: None,
-            provider: LLMProvider::OpenAI,
+            provider,
         })
     }
 
@@ -609,6 +622,25 @@ data:{"sequence_number":10,"type":"response.completed","response":{"usage":{"tot
         assert_eq!(usage.input_tokens, 57);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_read_input_tokens, Some(2));
+        // OpenAI-style cache (cached_tokens) stays inside input: provider
+        // must not be mislabeled as Anthropic.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_anthropic_cache_fields_report_anthropic() {
+        // Truncated Anthropic message_delta: Anthropic bills cache tokens on
+        // top of input_tokens, so the scan must label the provider Anthropic —
+        // otherwise billed_input_tokens silently drops the cache counters.
+        let data = r#"{"type":"message_delta","usage":{"input_tokens":100,"cache_creation_input_tokens":10,"cache_read_input_tokens":20"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage should still parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_creation_input_tokens, Some(10));
+        assert_eq!(usage.cache_read_input_tokens, Some(20));
+        assert_eq!(usage.provider, LLMProvider::Anthropic);
     }
 
     #[test]
