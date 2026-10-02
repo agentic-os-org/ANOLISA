@@ -331,3 +331,24 @@ class TestMainDecision:
         assert "linux-sandbox" in sandboxed_cmd
         # 沙箱内不应包含 sudo
         assert "sudo" not in sandboxed_cmd.split("bash -c")[1]
+
+    def test_build_sandbox_command_quotes_cwd_with_metacharacters(self):
+        """cwd 中的 shell 元字符必须按字面传递给 --sandbox-policy-cwd。
+
+        双引号包裹时 $ 与反引号会被外层 shell 展开（命令注入/策略 cwd 失真）；
+        单引号包裹且 ' 转义为 '\\'' 后，任意 Linux 目录名都按字面传递。
+        """
+        cwd = "/home/u/x$(id)y/it's/proj"
+        cmd = sandbox_guard.build_sandbox_command("rm -rf ./build", cwd)
+        expected = "--sandbox-policy-cwd '/home/u/x$(id)y/it'\\''s/proj'"
+        assert expected in cmd
+
+    def test_sandboxed_command_escapes_cwd_metacharacters(self, monkeypatch):
+        """端到端：含元字符的 cwd 进入沙箱改写时不得被外层 shell 解释。"""
+        result = self._run_main(
+            "rm -rf ./build", monkeypatch, cwd="/home/u/x$(id)y/proj"
+        )
+        assert result["decision"] == "allow"
+        assert "hookSpecificOutput" in result
+        sandboxed_cmd = result["hookSpecificOutput"]["tool_input"]["command"]
+        assert "--sandbox-policy-cwd '/home/u/x$(id)y/proj'" in sandboxed_cmd
