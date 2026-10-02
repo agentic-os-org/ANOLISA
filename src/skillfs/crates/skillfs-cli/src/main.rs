@@ -3144,9 +3144,15 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
                     entry.metadata.tags.join(", ")
                 }
             );
+            let status = entry.parse_status.status_str();
+            let message = entry.parse_status.message();
+            let status_detail = if message.is_empty() {
+                status.to_string()
+            } else {
+                format!("{status} ({message})")
+            };
             println!(
-                "  Status: {} | {}",
-                format!("{:?}", entry.parse_status).to_lowercase(),
+                "  Status: {status_detail} | {}",
                 if entry.metadata.enabled {
                     "enabled"
                 } else {
