@@ -583,7 +583,13 @@ fn is_derived(value: f64, pool: &[EvidenceEntry]) -> bool {
         .take(DERIVED_SEARCH_CAP)
         .collect();
     for (i, a) in numbers.iter().enumerate() {
-        for b in &numbers[i..] {
+        // Pair with distinct pool entries only: the doc contract says
+        // "follows arithmetically from two values already in evidence",
+        // and a self-pair (a, a) trivially yields a/a == 1, marking
+        // every value-1 claim Derived instead of Unresolved — value-1
+        // Number claims can anchor findings, so this would let fabricated
+        // ones escape detection whenever any nonzero number is pooled.
+        for b in &numbers[i + 1..] {
             if numbers_agree(value, a + b)
                 || numbers_agree(value, (a - b).abs())
                 || numbers_agree(value, a * b)
