@@ -24,6 +24,7 @@ pub enum HookEventName {
 }
 
 impl HookEventName {
+    /// Returns the wire name of this hook kind.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PreToolUse => "PreToolUse",
@@ -306,6 +307,13 @@ struct HookExecution {
 }
 
 impl HookSystem {
+    /// Builds a hook registry from configuration.
+    ///
+    /// Hooks without a name are skipped with a `tracing::warn!` rather than
+    /// failing construction, so a partially-configured registry still starts
+    /// with the valid hooks. When hooks are globally disabled while config
+    /// entries exist, a stderr warning is printed and the entries are
+    /// dropped.
     pub fn from_config(config: &HooksConfig) -> Self {
         let enabled = config.enabled;
 
@@ -378,6 +386,11 @@ impl HookSystem {
         }
     }
 
+    /// Builds a registry that never fires.
+    ///
+    /// Unlike [`Self::from_config`], no configuration is read or parsed, so
+    /// no misconfiguration can surface here: the registry starts empty and
+    /// disabled, and no hook process is ever spawned.
     pub fn new_disabled() -> Self {
         Self {
             enabled: false,
@@ -553,6 +566,21 @@ impl HookSystem {
 
     // ─── Fire methods ────────────────────────────────────────────────
 
+    /// Fires `PreToolUse` hooks registered for this tool.
+    ///
+    /// Returns a passthrough result with no failures when the hook system is
+    /// disabled, so callers need no separate enabled check. Each hook runs
+    /// under a per-hook deadline; a timed-out hook's process group is killed
+    /// and reported in `hook_failures` instead of aborting the tool call.
+    /// Every matching hook runs (sequentially when any definition opts in,
+    /// concurrently otherwise); no decision short-circuits the rest. The
+    /// outputs are folded afterwards: a block-class decision
+    /// ("block"/"deny"/"reject") is sticky and wins over later allow, ask,
+    /// or passthrough outputs. A failed hook (non-zero exit other than the
+    /// block code 2, malformed JSON, timeout, and so on) always surfaces in
+    /// `hook_failures`, and its failure folds into a
+    /// `HookDecision::HookFailure` decision unless the hook is configured
+    /// `fail_open`.
     pub async fn fire_pre_tool_use(
         &self,
         session_id: &str,
@@ -600,6 +628,13 @@ impl HookSystem {
         self.aggregate_pre_tool_use(outputs, &defs)
     }
 
+    /// Fires `PostToolUse` hooks registered for this tool.
+    ///
+    /// Same disabled-passthrough, deadline, and decision-fold semantics as
+    /// [`Self::fire_pre_tool_use`], except that failed hooks (including
+    /// timeouts) are only logged via `tracing` at execution time: the
+    /// returned result has no `hook_failures` field, so failures never
+    /// surface in it.
     pub async fn fire_post_tool_use(
         &self,
         session_id: &str,
@@ -649,6 +684,7 @@ impl HookSystem {
         self.aggregate_post_tool_use(outputs, &defs)
     }
 
+    /// Fires `UserPromptSubmit` hooks for an incoming prompt.
     pub async fn fire_user_prompt_submit(
         &self,
         session_id: &str,
@@ -679,6 +715,7 @@ impl HookSystem {
         self.aggregate_user_prompt(outputs, &defs)
     }
 
+    /// Fires `SessionStart` hooks with the session and working directory.
     pub async fn fire_session_start(&self, session_id: &str, cwd: &str) -> SessionStartResult {
         if !self.enabled {
             return SessionStartResult {
@@ -702,6 +739,7 @@ impl HookSystem {
         self.aggregate_session_start(outputs, &defs)
     }
 
+    /// Fires `Stop` hooks with the session's last assistant message.
     pub async fn fire_stop(&self, session_id: &str, cwd: &str, last_message: &str) -> StopResult {
         if !self.enabled {
             return StopResult {
@@ -725,6 +763,7 @@ impl HookSystem {
         self.aggregate_stop(outputs, &defs)
     }
 
+    /// Fires `PostToolUse` hooks for a tool invocation that failed.
     pub async fn fire_post_tool_use_failure(
         &self,
         session_id: &str,
@@ -804,6 +843,7 @@ impl HookSystem {
         }
     }
 
+    /// Fires `BeforeModel` hooks before a model request is sent.
     pub async fn fire_before_model(
         &self,
         session_id: &str,
@@ -878,6 +918,7 @@ impl HookSystem {
         }
     }
 
+    /// Fires `AfterModel` hooks after a model response arrives.
     pub async fn fire_after_model(
         &self,
         session_id: &str,
