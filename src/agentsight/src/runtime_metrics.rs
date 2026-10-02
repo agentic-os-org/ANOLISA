@@ -342,6 +342,18 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         file_name.to_string_lossy(),
         std::process::id()
     ));
+    // A crashed earlier export may have left the fixed-name temporary behind:
+    // the process died between create and rename, or this PID was recycled by
+    // a restarted deployment. The name embeds this process's PID, so no live
+    // writer can own it; reclaim a plain leftover file instead of failing
+    // every export for the rest of this process's lifetime. Anything that is
+    // not a regular file stays put and the create_new below still refuses it.
+    match fs::symlink_metadata(&temporary) {
+        Ok(meta) if meta.file_type().is_file() => {
+            let _ = fs::remove_file(&temporary);
+        }
+        _ => {}
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -678,26 +690,49 @@ mod tests {
     }
 
     #[test]
-    fn atomic_writer_does_not_overwrite_an_existing_temporary_path() {
+    fn stale_own_pid_temporary_is_reclaimed_and_published() {
+        // A crashed export leaves a plain temporary behind; because the name
+        // embeds this process's PID, no live writer can own it, so the next
+        // export must reclaim it instead of failing forever.
         let directory = test_directory();
         fs::create_dir_all(&directory).expect("create test directory");
         let path = directory.join("metrics.prom");
         let temporary = directory.join(format!(".metrics.prom.{}.tmp", std::process::id()));
-        fs::write(&temporary, b"owned by another writer").expect("seed temporary path");
+        fs::write(&temporary, b"leftover from a crashed export").expect("seed stale temporary");
 
-        let error = write_atomic(&path, b"new metrics").expect_err("existing path must fail");
+        write_atomic(&path, b"fresh snapshot").expect("reclaim stale temporary and publish");
 
-        assert!(
-            error
-                .to_string()
-                .contains("failed to create metrics snapshot")
-        );
         assert_eq!(
-            fs::read(&temporary).expect("read seeded path"),
-            b"owned by another writer"
+            fs::read_to_string(&path).expect("read published snapshot"),
+            "fresh snapshot"
         );
-        assert!(!path.exists());
-        fs::remove_file(temporary).expect("remove seeded path");
+        assert!(
+            !temporary.exists(),
+            "stale temporary must be replaced by the published snapshot"
+        );
+        fs::remove_file(path).expect("remove published snapshot");
+        fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn foreign_pid_temporary_is_never_touched() {
+        // A temporary carrying another PID belongs to a live writer; it must
+        // not be removed, and publishing our own snapshot must not disturb it.
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join("metrics.prom");
+        let foreign = directory.join(".metrics.prom.999999.tmp");
+        fs::write(&foreign, b"owned by another process").expect("seed foreign temporary");
+
+        write_atomic(&path, b"snapshot").expect("publish snapshot");
+
+        assert_eq!(
+            fs::read(&foreign).expect("read foreign temporary"),
+            b"owned by another process",
+            "a temporary carrying another PID belongs to a live writer and must not be removed"
+        );
+        fs::remove_file(path).expect("remove published snapshot");
+        fs::remove_file(foreign).expect("remove seeded foreign temporary");
         fs::remove_dir(directory).expect("remove test directory");
     }
 }
