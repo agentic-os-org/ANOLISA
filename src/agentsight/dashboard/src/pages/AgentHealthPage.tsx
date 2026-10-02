@@ -887,6 +887,12 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const [latencyLoading, setLatencyLoading] = useState(true);
   const [latencyError, setLatencyError] = useState<string | null>(null);
   const latencyRequestIdRef = useRef(0);
+  // refresh() runs on a 10 s poll and after protection toggles; its follow-up
+  // fetches (bindings / pending cases) resolve even later. Without a version,
+  // a slow older round can land after a newer one and resurrect a just
+  // detached binding (the toggle flips back to "protected") or restore stale
+  // case counts. Same pattern as latencyRequestIdRef above.
+  const refreshVersionRef = useRef(0);
 
   const loadLatency = useCallback(async () => {
     const requestId = ++latencyRequestIdRef.current;
@@ -912,14 +918,17 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   }, [rangeMs]);
 
   const refresh = useCallback(async () => {
+    const version = ++refreshVersionRef.current;
     try {
       // Fetch all at once (including client/worker), then group by parent_pid under each main card
       const data = await fetchAgentProcessHealth({ includeClients: true });
+      if (version !== refreshVersionRef.current) return;
       const agentRows = Array.isArray(data?.agents) ? data.agents : [];
       setAgents(agentRows.filter(a => a.role === 'gateway'));
       setClientAgents(agentRows.filter(a => a.role !== 'gateway'));
       setLastScan(data.last_scan_time ?? 0);
       void fetchEnforcementBindings().then(({ bindings }) => {
+        if (version !== refreshVersionRef.current) return;
         // 活跃 binding = pending/enforced/degraded；建立 root_pid → binding_id 映射用于停用保护
         const nextBindings = new Map<number, string>();
         for (const binding of bindings) {
@@ -936,6 +945,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
       }).catch(() => undefined);
       // 同一加载流程内附带拉取风险案件，按 agent_id 分组统计待研判（open）数量
       void fetchSecurityCases({ limit: 500 }).then((response) => {
+        if (version !== refreshVersionRef.current) return;
         const counts = new Map<string, number>();
         for (const riskCase of response.data.items) {
           if (riskCase.status !== 'open') continue;
@@ -946,11 +956,13 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
       setError(null);
       hasDataRef.current = true;
     } catch (e: any) {
-      if (!hasDataRef.current) {
+      if (version === refreshVersionRef.current && !hasDataRef.current) {
         setError(e.message || t('ah.requestFailed'));
       }
     } finally {
-      setLoading(false);
+      if (version === refreshVersionRef.current) {
+        setLoading(false);
+      }
     }
   }, [t]);
 
@@ -980,6 +992,14 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
       });
     }
   };
+
+  // Optimistically flip the toggle, then re-sync from the server: the new
+  // round's version also discards any in-flight older snapshot that predates
+  // the binding and would otherwise revert the toggle.
+  const handleProtected = useCallback((pid: number, bindingId: string) => {
+    setProtectionBindings(previous => new Map(previous).set(pid, bindingId));
+    void refresh();
+  }, [refresh]);
 
   const handleDetachProtection = useCallback(async (pid: number, bindingId: string) => {
     try {
@@ -1131,7 +1151,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
                 protectedByPolicy={protectionBindings.has(group.agents[0].pid)}
                 bindingId={protectionBindings.get(group.agents[0].pid)}
                 pendingCaseCount={pendingCasesByAgent.get(group.agents[0].agent_name) ?? 0}
-                onProtected={(pid, bindingId) => setProtectionBindings(previous => new Map(previous).set(pid, bindingId))}
+                onProtected={handleProtected}
                 onDetachProtection={handleDetachProtection}
                 addToast={addToast}
                 latency={latencyForAgent(group.agentName)}
@@ -1145,7 +1165,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
                 onRestart={handleRestart}
                 restartingPids={restartingPids}
                 protectionBindings={protectionBindings}
-                onProtected={(pid, bindingId) => setProtectionBindings(previous => new Map(previous).set(pid, bindingId))}
+                onProtected={handleProtected}
                 onDetachProtection={handleDetachProtection}
                 addToast={addToast}
                 pendingCaseCounts={pendingCasesByAgent}
