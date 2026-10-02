@@ -1,6 +1,16 @@
 use anyhow::Result;
 use std::time::Instant;
 
+/// Removes the wrapped path when dropped, so a mid-run write/sync failure
+/// cannot leak the bench temp file. Unlink-while-open is fine on Linux: the
+/// kernel keeps the inode alive until the file handle closes.
+struct RemoveOnDrop<'a>(&'a str);
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        std::fs::remove_file(self.0).ok();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BenchResult {
     pub name: String,
@@ -231,6 +241,8 @@ fn bench_io_latency() -> Result<BenchResult> {
 
     let data = [0u8; 4096];
 
+    let _cleanup = RemoveOnDrop(path);
+
     // Warm up
     file.write_all(&data)?;
 
@@ -240,7 +252,7 @@ fn bench_io_latency() -> Result<BenchResult> {
     }
     let elapsed = start.elapsed();
 
-    std::fs::remove_file(path).ok();
+    drop(_cleanup);
 
     let us_per_write = elapsed.as_micros() as f64 / iterations as f64;
 
@@ -269,6 +281,8 @@ fn bench_io_throughput() -> Result<BenchResult> {
         .truncate(true)
         .open(path)?;
 
+    let _cleanup = RemoveOnDrop(path);
+
     let start = Instant::now();
     for _ in 0..blocks {
         file.write_all(&data)?;
@@ -276,7 +290,7 @@ fn bench_io_throughput() -> Result<BenchResult> {
     file.sync_all()?;
     let elapsed = start.elapsed();
 
-    std::fs::remove_file(path).ok();
+    drop(_cleanup);
 
     let mb_per_sec = total_size as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
 
@@ -332,4 +346,21 @@ fn bench_net_latency() -> Result<BenchResult> {
         value: us_per_rtt,
         unit: "μs/RTT".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_on_drop_guard_removes_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("ktuner-bench-guard-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"x").expect("write guard test file");
+        {
+            let _guard = RemoveOnDrop(path.to_str().expect("utf-8 temp path"));
+            assert!(path.exists(), "file must exist while the guard is live");
+        }
+        assert!(!path.exists(), "guard must remove the file on drop");
+    }
 }
