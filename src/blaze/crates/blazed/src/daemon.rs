@@ -31,6 +31,15 @@ use crate::spawner::{
 use crate::state::ServerState;
 use crate::state_store::StateStore;
 
+/// Time one accepted connection may take to deliver complete request headers.
+///
+/// hyper documents the same 30-second default for its header read timeout,
+/// but that default only takes effect when the builder carries a timer.
+/// Without one, a client that opens a connection and never finishes its
+/// headers pins the connection task and its buffers indefinitely on both
+/// listeners.
+const REQUEST_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Boot the daemon: load config + policies, prepare state directories,
 /// bind the API socket, and run the accept loop until SIGTERM/SIGINT.
 pub async fn run(config_path: &Path) -> Result<()> {
@@ -434,7 +443,12 @@ where
             let state = state.clone();
             async move { api::handle(req, state).await }
         });
-        if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
+        if let Err(err) = http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(REQUEST_HEADER_READ_TIMEOUT)
+            .serve_connection(io, svc)
+            .await
+        {
             tracing::debug!(?err, "connection closed with error");
         }
         let _: Option<Full<Bytes>> = None;
@@ -1196,5 +1210,86 @@ backend_priority = ["bubblewrap"]
         );
         assert!(!config.storage.images_dir.exists());
         assert!(!config.daemon.state_dir.exists());
+    }
+
+    fn connection_test_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
+        let mut config = DaemonConfig::default();
+        config.daemon.state_dir = temp.path().join("state");
+        config.storage.images_dir = temp.path().join("images");
+        config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
+        std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
+        std::fs::create_dir_all(&config.storage.images_dir).expect("images");
+        std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
+        let storage: Arc<dyn blaze_core::storage::StorageProvider> =
+            Arc::new(crate::file_provider::FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ));
+        let mut spawners = SpawnerRegistry::new();
+        spawners.insert(BackendKind::Mock, Arc::new(MockSpawner));
+        Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::new(),
+                HookRegistry::new(),
+                spawners,
+                BackendKind::Mock,
+                storage,
+            )
+            .expect("server state"),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_request_headers_close_the_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = connection_test_state(&temp);
+
+        let (mut client, server) = tokio::io::duplex(64);
+        spawn_conn(TokioIo::new(server), state);
+        client
+            .write_all(b"GET /v1/health HTTP/1.1\r\n")
+            .await
+            .expect("write partial request headers");
+        client.flush().await.expect("flush partial headers");
+
+        let mut drained = Vec::new();
+        let closed =
+            tokio::time::timeout(Duration::from_secs(120), client.read_to_end(&mut drained)).await;
+        assert!(
+            closed.is_ok_and(|result| result.is_ok()),
+            "a request that never finishes its headers must not pin the connection"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn complete_request_headers_still_serve_their_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = connection_test_state(&temp);
+
+        let (mut client, server) = tokio::io::duplex(4096);
+        spawn_conn(TokioIo::new(server), state);
+        client
+            .write_all(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write complete request");
+
+        let mut response = Vec::new();
+        let served =
+            tokio::time::timeout(Duration::from_secs(120), client.read_to_end(&mut response))
+                .await
+                .expect("complete requests must still be served");
+        served.expect("read response");
+        let response = String::from_utf8(response).expect("UTF-8 response");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "unexpected response: {response}"
+        );
+        assert!(response.contains("\"status\": \"ok\""));
     }
 }
