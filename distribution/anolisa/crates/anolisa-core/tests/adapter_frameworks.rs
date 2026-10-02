@@ -66,6 +66,11 @@ const MANAGED_ENV: &[&str] = &[
     "QWENPAW_HOME",
     "FAKE_QWENPAW_LOG",
     "FAKE_QWENPAW_FAIL",
+    "HERMES_BIN",
+    "HERMES_HOME",
+    "FAKE_HERMES_LOG",
+    "FAKE_HERMES_STATE",
+    "FAKE_HERMES_FAIL",
 ];
 
 struct EnvGuard {
@@ -761,6 +766,64 @@ fn stage_codex_hook_bundle(root: &Path) {
         br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
     )
     .expect("hooks.json");
+}
+
+fn stage_hermes_bundle(root: &Path) {
+    std::fs::write(root.join("README.md"), b"hermes plugin\n").expect("readme");
+    std::fs::write(root.join("plugin.js"), b"// stub plugin\n").expect("plugin.js");
+}
+
+/// Fake `hermes` CLI: appends each argv line to `$FAKE_HERMES_LOG` and keeps
+/// enabled/disabled sets under `$FAKE_HERMES_STATE`, modelling the real
+/// contract: `plugins disable` moves the name into the disabled set (the
+/// plugin stays installed and listed, marked `disabled`), and disabling a
+/// plugin that is not enabled exits non-zero without changing state.
+/// `FAKE_HERMES_FAIL=disable` instead simulates a hard failure: non-zero
+/// exit with the plugin left enabled.
+fn write_fake_hermes(dir: &Path) -> PathBuf {
+    let path = dir.join("hermes");
+    write_exec(
+        &path,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_HERMES_LOG"
+st="$FAKE_HERMES_STATE"; mkdir -p "$st" 2>/dev/null
+in_enabled() { [ -f "$st/plugins" ] && grep -qx "$1" "$st/plugins"; }
+remove_from() { [ -f "$1" ] && { grep -vx "$2" "$1" > "$1.tmp" 2>/dev/null || true; mv "$1.tmp" "$1" 2>/dev/null || true; }; }
+if [ "$1" = "plugins" ]; then
+  case "$2" in
+    enable)
+      remove_from "$st/disabled" "$3"
+      in_enabled "$3" || echo "$3" >> "$st/plugins" ;;
+    disable)
+      [ "$FAKE_HERMES_FAIL" = "disable" ] && { echo "disable boom" >&2; exit 1; }
+      in_enabled "$3" || { echo "plugin not enabled: $3" >&2; exit 1; }
+      remove_from "$st/plugins" "$3"
+      echo "$3" >> "$st/disabled" ;;
+    remove)
+      remove_from "$st/plugins" "$3"
+      remove_from "$st/disabled" "$3" ;;
+    list)
+      cat "$st/plugins" 2>/dev/null || true
+      if [ -f "$st/disabled" ]; then sed 's/^/disabled /' "$st/disabled"; fi ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+    path
+}
+
+fn apply_hermes_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> PathBuf {
+    let hermes_home = world.prefix.join("hermes-home");
+    std::fs::create_dir_all(&hermes_home).expect("hermes home");
+    let log = world.prefix.join("hermes.log");
+    let state = world.prefix.join("hermes-state");
+    guard.set("HERMES_BIN", fake_bin);
+    guard.set("HERMES_HOME", &hermes_home);
+    guard.set("FAKE_HERMES_LOG", &log);
+    guard.set("FAKE_HERMES_STATE", &state);
+    hermes_home
 }
 
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
@@ -1470,6 +1533,119 @@ fn codex_disable_keeps_receipt_when_cli_removal_fails() {
         .cloned()
         .expect("receipt kept");
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn hermes_disable_keeps_receipt_when_deregistration_fails() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    // Force `plugins disable` to hard-fail: the plugin stays in the enabled
+    // set, so the driver must keep both the plugin directory and the receipt
+    // instead of reporting a completed cleanup.
+    guard.set("FAKE_HERMES_FAIL", Path::new("disable"));
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        !disabled.claim_removed,
+        "receipt must be kept when deregistration fails"
+    );
+    assert!(!disabled.report.cleanup_complete);
+    assert!(
+        hermes_home.join("plugins").join(COMPONENT).is_dir(),
+        "plugin directory must survive for the retry"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "hermes")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn hermes_disable_completes_when_cli_succeeds() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        disabled.claim_removed,
+        "successful disable drops the receipt"
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !hermes_home.join("plugins").join(COMPONENT).exists(),
+        "plugin directory must be removed after a successful disable"
+    );
+}
+
+#[test]
+fn hermes_disable_treats_already_disabled_as_deregistered() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+    let state = world.prefix.join("hermes-state");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    // Simulate an out-of-band disable: the real CLI moves the name from the
+    // enabled set into plugins.disabled and refuses a repeated disable with
+    // a non-zero exit, while `plugins list` keeps showing the plugin with a
+    // `disabled` marker. Presence alone must not read as "still registered"
+    // — that made a successful deregistration retry forever.
+    std::fs::write(state.join("plugins"), b"").expect("clear enabled set");
+    std::fs::write(state.join("disabled"), format!("{COMPONENT}\n").as_bytes())
+        .expect("mark disabled");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        disabled.claim_removed,
+        "a listed-but-disabled plugin is deregistered; the receipt must go"
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !hermes_home.join("plugins").join(COMPONENT).exists(),
+        "plugin directory must be removed once the disabled state is verified"
+    );
 }
 
 /// Regression: when the resource bundle is resolved from a packaged datadir
