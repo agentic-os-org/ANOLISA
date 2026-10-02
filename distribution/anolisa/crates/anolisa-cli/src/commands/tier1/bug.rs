@@ -549,7 +549,6 @@ fn render_cosh_ng_section(out: &mut String, diagnostics: &cosh_ng::CoshNgDiagnos
             out.push_str("typeset -p _COSH_AI_ENABLED _COSH_HAS_USER_COMMAND_NOT_FOUND\n");
             out.push_str("whence -v command_not_found_handler\n");
             out.push_str("whence -v _cosh_user_command_not_found_handler\n");
-            out.push_str("?? 测试\n");
             out.push_str("```\n\n");
             out.push_str("Then, from a separate terminal:\n\n");
             out.push_str("```sh\n");
@@ -1045,6 +1044,20 @@ mod tests {
         assert!(
             markdown.contains("~/.local/lib/anolisa/libexec/cosh-ng/cosh-shell doctor"),
             "reproduction checklist must use the resolved binary path: {markdown}"
+        );
+        // The SOP checklist is pasted verbatim into users' Zsh sessions and
+        // into public issue reports — it must carry only runnable commands.
+        let checklist = markdown
+            .split("```zsh\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("zsh checklist block");
+        assert_eq!(
+            checklist,
+            "typeset -p _COSH_AI_ENABLED _COSH_HAS_USER_COMMAND_NOT_FOUND\n\
+             whence -v command_not_found_handler\n\
+             whence -v _cosh_user_command_not_found_handler",
+            "checklist must not carry debug text: {markdown}"
         );
     }
 
