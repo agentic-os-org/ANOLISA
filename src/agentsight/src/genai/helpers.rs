@@ -601,8 +601,11 @@ impl GenAIBuilder {
         let mut result = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = rest.find("<system-reminder>") {
-            result.push_str(&rest[..start]);
+            // Only a complete block is stripped. Without a closing tag the
+            // text merely mentions the tag (no block to remove), so the
+            // remainder is kept verbatim and appended once after the loop.
             if let Some(end_offset) = rest[start..].find("</system-reminder>") {
+                result.push_str(&rest[..start]);
                 rest = &rest[start + end_offset + "</system-reminder>".len()..];
             } else {
                 break;
@@ -1035,6 +1038,29 @@ mod tests {
         assert_eq!(
             GenAIBuilder::strip_user_query_prefix(text),
             "<system-reminder>some context without end tag and user input"
+        );
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_text_before_unclosed_tag_not_duplicated() {
+        // A prefix before an unterminated tag used to be emitted twice: the
+        // prefix was accumulated, then the whole remainder (prefix included)
+        // was appended again.
+        let text = "how do I use <system-reminder> tags in prompts?";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "how do I use <system-reminder> tags in prompts?"
+        );
+    }
+
+    #[test]
+    fn test_strip_system_reminder_tags_keeps_unterminated_tail_once() {
+        // Complete blocks are stripped; the tail after the last unterminated
+        // open tag is kept exactly once.
+        let text = "A <system-reminder>drop</system-reminder> B <system-reminder>mention C";
+        assert_eq!(
+            GenAIBuilder::strip_system_reminder_tags(text),
+            "A  B <system-reminder>mention C"
         );
     }
 
