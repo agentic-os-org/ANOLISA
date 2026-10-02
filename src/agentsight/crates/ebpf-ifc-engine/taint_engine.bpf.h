@@ -1189,32 +1189,31 @@ static int te_update_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != c->op)
+	if (up->op != c->op)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (u.op == TOP_CONNECT)
-		match = ((c->ip & u.ipv4_mask) == u.ipv4);
-	else if (u.op == TOP_EXEC)
-		match = taint_exec_match(u.match, c->target, u.target);
+	if (up->op == TOP_CONNECT)
+		match = ((c->ip & up->ipv4_mask) == up->ipv4);
+	else if (up->op == TOP_EXEC)
+		match = taint_exec_match(up->match, c->target, up->target);
 	else
-		match = te_path_match(u.match, c->target, u.target);
+		match = te_path_match(up->match, c->target, up->target);
 	if (!match)
 		return 0;
 	/* For exec updates with an arg constraint, also check argv tokens. */
-	if (u.op == TOP_EXEC && u.arg[0] != '\0') {
+	if (up->op == TOP_EXEC && up->arg[0] != '\0') {
 		struct te_argslots *a = te_argslots_buf();
-		if (!a || !taint_arg_match(a->slots, u.arg))
+		if (!a || !taint_arg_match(a->slots, up->arg))
 			return 0;
 	}
-	c->add |= u.add;
-	c->del |= u.del;
-	if (u.gate_exit_code == TAINT_GATE_IMMEDIATE)
-		c->gates |= u.gates;
+	c->add |= up->add;
+	c->del |= up->del;
+	if (up->gate_exit_code == TAINT_GATE_IMMEDIATE)
+		c->gates |= up->gates;
 	else
-		c->exit_gates |= u.gates;
-	c->invals |= u.invals;
+		c->exit_gates |= up->gates;
+	c->invals |= up->invals;
 	return 0;
 }
 
@@ -1227,25 +1226,24 @@ static int te_exec_update_simple_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != TOP_EXEC)
+	if (up->op != TOP_EXEC)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (!te_exec_simple_match(u.match, c->target, u.target))
+	if (!te_exec_simple_match(up->match, c->target, up->target))
 		return 0;
-	if (u.arg[0] != '\0') {
+	if (up->arg[0] != '\0') {
 		struct te_argslots *a = te_argslots_buf();
-		if (!a || !taint_arg_match(a->slots, u.arg))
+		if (!a || !taint_arg_match(a->slots, up->arg))
 			return 0;
 	}
-	c->add |= u.add;
-	c->del |= u.del;
-	if (u.gate_exit_code == TAINT_GATE_IMMEDIATE)
-		c->gates |= u.gates;
+	c->add |= up->add;
+	c->del |= up->del;
+	if (up->gate_exit_code == TAINT_GATE_IMMEDIATE)
+		c->gates |= up->gates;
 	else
-		c->exit_gates |= u.gates;
-	c->invals |= u.invals;
+		c->exit_gates |= up->gates;
+	c->invals |= up->invals;
 	return 0;
 }
 
@@ -1258,27 +1256,26 @@ static int te_exec_update_prefix_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != TOP_EXEC)
+	if (up->op != TOP_EXEC)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (u.match == TAINT_MATCH_EXACT || u.match == TAINT_MATCH_ANY)
+	if (up->match == TAINT_MATCH_EXACT || up->match == TAINT_MATCH_ANY)
 		return 0;
-	if (!taint_exec_match(u.match, c->target, u.target))
+	if (!taint_exec_match(up->match, c->target, up->target))
 		return 0;
-	if (u.arg[0] != '\0') {
+	if (up->arg[0] != '\0') {
 		struct te_argslots *a = te_argslots_buf();
-		if (!a || !taint_arg_match(a->slots, u.arg))
+		if (!a || !taint_arg_match(a->slots, up->arg))
 			return 0;
 	}
-	c->add |= u.add;
-	c->del |= u.del;
-	if (u.gate_exit_code == TAINT_GATE_IMMEDIATE)
-		c->gates |= u.gates;
+	c->add |= up->add;
+	c->del |= up->del;
+	if (up->gate_exit_code == TAINT_GATE_IMMEDIATE)
+		c->gates |= up->gates;
 	else
-		c->exit_gates |= u.gates;
-	c->invals |= u.invals;
+		c->exit_gates |= up->gates;
+	c->invals |= up->invals;
 	return 0;
 }
 
@@ -1296,22 +1293,21 @@ static int te_exec_update_no_args_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != TOP_EXEC)
+	if (up->op != TOP_EXEC)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (u.arg[0] != '\0')
+	if (up->arg[0] != '\0')
 		return 0;
-	if (!taint_exec_match(u.match, c->target, u.target))
+	if (!taint_exec_match(up->match, c->target, up->target))
 		return 0;
-	c->add |= u.add;
-	c->del |= u.del;
-	if (u.gate_exit_code == TAINT_GATE_IMMEDIATE)
-		c->gates |= u.gates;
+	c->add |= up->add;
+	c->del |= up->del;
+	if (up->gate_exit_code == TAINT_GATE_IMMEDIATE)
+		c->gates |= up->gates;
 	else
-		c->exit_gates |= u.gates;
-	c->invals |= u.invals;
+		c->exit_gates |= up->gates;
+	c->invals |= up->invals;
 	return 0;
 }
 
@@ -1341,14 +1337,13 @@ static int te_file_update_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != c->op)
+	if (up->op != c->op)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (!te_path_match(u.match, c->target, u.target))
+	if (!te_path_match(up->match, c->target, up->target))
 		return 0;
-	te_update_accum(c, &u);
+	te_update_accum(c, up);
 	return 0;
 }
 
@@ -1366,14 +1361,13 @@ static int te_endpoint_update_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != c->op)
+	if (up->op != c->op)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if ((c->ip & u.ipv4_mask) != u.ipv4)
+	if ((c->ip & up->ipv4_mask) != up->ipv4)
 		return 0;
-	te_update_accum(c, &u);
+	te_update_accum(c, up);
 	return 0;
 }
 
@@ -2323,13 +2317,12 @@ static int te_exit_gate_cb(__u32 i, void *vc)
 	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
 	if (!up)
 		return 1;
-	struct taint_update u = *up;
-	__u64 matched = c->pending & u.gates;
-	if (!matched || u.gate_exit_code == TAINT_GATE_IMMEDIATE)
+	__u64 matched = c->pending & up->gates;
+	if (!matched || up->gate_exit_code == TAINT_GATE_IMMEDIATE)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (up->domain_id != c->domain_id)
 		return 0;
-	if (te_exit_status_matches(c->raw_status, u.gate_exit_code))
+	if (te_exit_status_matches(c->raw_status, up->gate_exit_code))
 		c->gates |= matched;
 	return 0;
 }
