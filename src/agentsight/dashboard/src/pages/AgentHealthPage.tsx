@@ -1390,8 +1390,15 @@ const InterruptionSection: React.FC<{ addToast: (msg: string) => void }> = ({ ad
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(15);
   const hasDataRef = useRef(false);
+  // The 30 s poll and filter changes both re-issue `load`; only the newest
+  // request may touch the state, or a slow older response lands last and the
+  // table shows rows that violate the active filters (resolved events under
+  // "unresolved only", the previous time range, ...). Same pattern as
+  // `latencyRequestIdRef` in AgentStatusSection below.
+  const loadRequestIdRef = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     try {
       const endNs = Date.now() * 1_000_000;
       const startNs = endNs - hours * 3600 * 1_000_000_000;
@@ -1403,15 +1410,18 @@ const InterruptionSection: React.FC<{ addToast: (msg: string) => void }> = ({ ad
         resolved: unresolvedOnly ? false : undefined,
         limit: 200,
       });
+      if (requestId !== loadRequestIdRef.current) return;
       setEvents(data);
       setError(null);
       hasDataRef.current = true;
     } catch (e: any) {
-      if (!hasDataRef.current) {
+      if (requestId === loadRequestIdRef.current && !hasDataRef.current) {
         setError(e.message ?? t('ah.failedToLoad'));
       }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [hours, typeFilter, severityFilter, unresolvedOnly, t]);
 
