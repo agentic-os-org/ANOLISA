@@ -194,12 +194,10 @@ fn mount_inner(
 
     #[cfg(target_os = "linux")]
     {
-        let mountinfo = std::fs::read_to_string("/proc/mounts").ok();
-        if let Some(info) = mountinfo {
-            let mount_str = mountpoint.to_string_lossy();
-            if info
-                .lines()
-                .any(|line| line.split_whitespace().nth(1) == Some(&*mount_str))
+        let mountinfo = std::fs::read("/proc/mounts").ok();
+        if let Some(bytes) = mountinfo {
+            use std::os::unix::ffi::OsStrExt;
+            if crate::proc_mounts::mounts_contain_target(&bytes, mountpoint.as_os_str().as_bytes())
             {
                 warn!(mountpoint = %mountpoint.display(), "mount point already mounted, attempting cleanup");
                 let _ = std::process::Command::new("fusermount3")

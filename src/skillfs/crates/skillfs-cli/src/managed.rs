@@ -309,15 +309,14 @@ pub enum MountState {
 /// How long to keep retrying unmount of a stale endpoint before giving up.
 const UNMOUNT_TIMEOUT_MS: u64 = 3_000;
 
-/// Whether the mountpoint currently appears in `/proc/mounts`.
+/// Whether the mountpoint currently appears in `/proc/mounts`. Matching is
+/// byte-exact against the escape-decoded mount field (see
+/// [`skillfs_fuse::proc_mounts`]): a lossy UTF-8 view would conflate a
+/// mounted invalid-byte path with a different queried U+FFFD path.
 pub fn is_mounted(mountpoint: &Path) -> bool {
-    let target = mountpoint.to_string_lossy();
-    match std::fs::read_to_string("/proc/mounts") {
-        Ok(info) => info
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target)),
-        Err(_) => false,
-    }
+    use std::os::unix::ffi::OsStrExt;
+    let mounts = std::fs::read("/proc/mounts").unwrap_or_default();
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, mountpoint.as_os_str().as_bytes())
 }
 
 /// Classify the mountpoint: distinguish a healthy mount from a dead FUSE
@@ -950,6 +949,26 @@ mod tests {
         let a = instance_id_for(Path::new("/tmp/mount-a"));
         let b = instance_id_for(Path::new("/tmp/mount-b"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn is_mounted_matches_escaped_and_invalid_byte_paths() {
+        // The matcher lives in skillfs_fuse::proc_mounts (unit-tested there);
+        // this pins the wiring: escaped mountpoints match their real path and
+        // an invalid-byte mount never collides with a U+FFFD query.
+        let mounts = b"fuse.skillfs /mnt/my\\040skills fuse.skillfs rw 0 0\nfuse.skillfs /mnt/\xff fuse.skillfs rw 0 0\n";
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/my skills"
+        ));
+        assert!(!skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            "/mnt/\u{FFFD}".as_bytes()
+        ));
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/\xff"
+        ));
     }
 
     #[test]

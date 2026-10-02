@@ -389,14 +389,14 @@ impl MountFixture {
     }
 }
 
+/// Live-mountpoint check per `/proc/mounts`; delegates to the production
+/// byte-exact, escape-decoding matcher.
 fn is_mounted(path: &Path) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(mounts) = std::fs::read("/proc/mounts") else {
         return false;
     };
-    let target = path.to_string_lossy();
-    mounts
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
 }
 
 fn force_unmount(path: &Path) {

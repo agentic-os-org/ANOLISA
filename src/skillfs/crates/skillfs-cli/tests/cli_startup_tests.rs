@@ -23,14 +23,13 @@ fn bin_path() -> &'static str {
 
 /// True when `path` is a live mountpoint per `/proc/mounts`. Authoritative
 /// even for a dead FUSE endpoint (where `metadata()` would misbehave).
+/// Delegates to the production byte-exact, escape-decoding matcher.
 fn is_mounted(path: &Path) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(mounts) = std::fs::read("/proc/mounts") else {
         return false;
     };
-    let target = path.to_string_lossy();
-    mounts
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
 }
 
 /// Bounded, best-effort force unmount: `fusermount3 -u`, then lazy `-z`, then

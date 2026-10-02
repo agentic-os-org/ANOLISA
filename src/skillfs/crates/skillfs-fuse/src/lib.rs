@@ -22,6 +22,7 @@ mod handles;
 mod inode;
 mod mount;
 pub mod path;
+pub mod proc_mounts;
 mod sync;
 mod sys;
 mod xattr;
@@ -167,13 +168,14 @@ impl MountHandle {
     /// `std::fs::metadata`, which can succeed on a dead FUSE endpoint).
     #[cfg(target_os = "linux")]
     fn path_is_mounted(path: &std::path::Path) -> bool {
-        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        // Raw bytes on both sides: a lossy UTF-8 view would conflate a
+        // mounted invalid-byte path with a queried U+FFFD path, and
+        // read_to_string fails wholesale on any non-UTF-8 mount line.
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(mounts) = std::fs::read("/proc/mounts") else {
             return false;
         };
-        let target = path.to_string_lossy();
-        mounts
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+        crate::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
     }
 
     /// One best-effort unmount pass: plain `fusermount3 -u`, then lazy
