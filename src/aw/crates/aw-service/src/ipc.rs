@@ -17,7 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const MAX_FRAME: usize = 2 * 1024 * 1024;
+// A one-MiB native byte array expands to at most four MiB in JSON; one MiB
+// normalized event plus framing fits here. Per-stream limits remain independent.
+pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 40;
 
 fn invalid(message: &'static str) -> io::Error {

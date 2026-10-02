@@ -23,10 +23,9 @@ spec:
       config:
         version: 1
         mode: observe
-        # Match normalized tool names supplied by the Agent adapter exactly.
+        # Qoder preserves the native tool name; match Bash exactly.
         tools:
-          shell: {language: bash, input_pointer: /command}
-          python: {language: python, input_pointer: /code}
+          Bash: {language: bash, input_pointer: /command}
   events:
     tool.before:
       enabled: true

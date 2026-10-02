@@ -1,8 +1,9 @@
-//! Developer CLI for the standalone service and its explicit local protocol.
+//! Standalone AW service, native Agent launcher and explicit local protocol.
+
+mod cli;
 
 use aw_service::{Client, Operation, Server};
 use std::{
-    collections::BTreeMap,
     io::Read,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -15,42 +16,38 @@ extern "C" fn stop(_: libc::c_int) {
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("aw: {error}");
-        std::process::exit(1);
+    match run() {
+        Ok(exit) => exit.finish(),
+        Err(error) => {
+            eprintln!("aw: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected validate, serve, status, request or stop")?;
+        .ok_or("expected run, validate, serve, status, request or stop")?;
     if command == "--help" {
-        println!("aw validate --config FILE\naw serve --config FILE --state-dir ABSOLUTE_DIR\naw status|stop --socket ABSOLUTE_PATH\naw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json");
-        return Ok(());
+        println!("aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- [AGENT_ARGS]\naw validate --config FILE\naw serve --config FILE --state-dir ABSOLUTE_DIR\naw status|stop (--config FILE | --socket ABSOLUTE_PATH)\naw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json");
+        return Ok(cli::Exit::Code(0));
     }
-    let mut flags = BTreeMap::new();
-    while let Some(flag) = args.next() {
-        if !flag.starts_with("--") {
-            return Err("expected a named option".into());
-        }
-        let value = args.next().ok_or("option requires a value")?;
-        if flags.insert(flag, value).is_some() {
-            return Err("duplicate option".into());
-        }
+    let args = cli::Arguments::parse(args)?;
+    if matches!(command.as_str(), "run" | "hook") {
+        return cli::dispatch(&command, &args);
     }
+    let flags = &args.flags;
     let allowed: &[&str] = match command.as_str() {
         "validate" => &["--config"],
         "serve" => &["--config", "--state-dir"],
-        "status" | "stop" => &["--socket"],
+        "status" | "stop" => &["--socket", "--config"],
         "request" => &["--socket", "--timeout-ms"],
         _ => return Err("unknown command".into()),
     };
-    if flags.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err("unknown option".into());
-    }
-    let required = |name: &str| flags.get(name).ok_or_else(|| format!("missing {name}"));
+    args.check(allowed, false)?;
+    let required = |name: &str| args.required(name);
     match command.as_str() {
         "validate" | "serve" => {
             let mut bytes = Vec::new();
@@ -92,16 +89,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     let mut input = Vec::new();
                     std::io::stdin()
-                        .take(2 * 1024 * 1024 + 1)
+                        .take(8 * 1024 * 1024 + 1)
                         .read_to_end(&mut input)?;
-                    if input.len() > 2 * 1024 * 1024 {
-                        return Err("operation exceeds 2 MiB".into());
+                    if input.len() > 8 * 1024 * 1024 {
+                        return Err("operation exceeds 8 MiB".into());
                     }
                     serde_json::from_slice(&input)?
                 }
             };
             let expires = Instant::now() + Duration::from_millis(budget);
-            let client = Client::connect(required("--socket")?, expires)?;
+            let paths = if let Some(config) = flags.get("--config") {
+                if flags.contains_key("--socket") {
+                    return Err("choose --config or --socket".into());
+                }
+                let bytes = cli::read_file(config, 4 * 1024 * 1024)?;
+                let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty());
+                Some(aw_service::launch_service::resolve(
+                    &bytes,
+                    runtime.as_deref().map(std::path::Path::new),
+                )?)
+            } else {
+                None
+            };
+            let socket = match &paths {
+                Some(paths) => paths.socket.clone(),
+                None => PathBuf::from(required("--socket")?),
+            };
+            let client = Client::connect(socket, expires)?;
+            if paths
+                .as_ref()
+                .is_some_and(|paths| paths.config_revision != client.identity().config_revision)
+            {
+                return Err("service configuration does not match the supplied file".into());
+            }
             let result = client.call(operation, expires)?;
             println!(
                 "{}",
@@ -111,5 +131,5 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    Ok(())
+    Ok(cli::Exit::Code(0))
 }

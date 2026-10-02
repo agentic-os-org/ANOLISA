@@ -3,7 +3,7 @@
 use aw_provider::Outcome;
 use std::{process::ExitStatus, time::Duration};
 
-/// External Provider method executed in its own process.
+/// Bounded command call, with structured and native protocols kept distinct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     /// Discover operations and effects.
@@ -12,6 +12,8 @@ pub enum Method {
     ValidateConfig,
     /// Evaluate one admitted event step.
     Invoke,
+    /// Execute an uninterpreted native callback without a Provider handshake.
+    NativeHook,
 }
 
 impl Method {
@@ -20,6 +22,7 @@ impl Method {
             Self::Describe => "describe",
             Self::ValidateConfig => "validate_config",
             Self::Invoke => "invoke",
+            Self::NativeHook => "native_hook",
         }
     }
 }
@@ -99,12 +102,30 @@ pub enum FailureAction {
     Block,
 }
 
+/// Native callback bytes and status; the Adapter applies its framework's semantics.
+pub struct NativeOutput {
+    /// Unmodified stdout, including non-UTF-8 bytes.
+    pub stdout: Vec<u8>,
+    /// Unmodified stderr, independent of stdout and never automatically audited.
+    pub stderr: Vec<u8>,
+    /// Real exit or signal status, including native policy and diagnostic outcomes.
+    pub status: ExitStatus,
+}
+
+/// Successful transport result with explicit protocol ownership.
+pub enum StepOutput {
+    /// Protocol-validated candidate effects; the Adapter owns adoption.
+    Provider(Outcome),
+    /// Native output is not interpreted as AW policy or a Provider response.
+    Native(NativeOutput),
+}
+
 /// Result of one claimed event step; the embedding Adapter owns effect adoption.
 pub struct Invocation {
     /// Correlated execution metadata, including the native process status when available.
     pub record: CallRecord,
-    /// Checked candidate effects or the original execution failure.
-    pub result: Result<Outcome, Failure>,
+    /// Explicitly typed Provider/native output or the original execution failure.
+    pub result: Result<StepOutput, Failure>,
     /// Present only on failure; does not replace or hide `result`.
     pub failure_action: Option<FailureAction>,
 }

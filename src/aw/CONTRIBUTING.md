@@ -48,7 +48,7 @@ the pinned Rust toolchain. Local validation also uses Linux ARM64.
 | `aw-core` | Plan execution through trusted runtime ports; depends on `aw-contracts` |
 | `aw-exec` | Bounded Linux command transport and owned process-group cleanup; independent of Provider protocols |
 | `aw-host` | Compose configuration, Provider admission and bounded transport into local preparation and invocation; depends on `aw-config`, `aw-provider` and `aw-exec` |
-| `aw-service` | Standalone local service, reusable client and developer CLI; executes through `aw-host` and reuses the `aw-core` Journal for metadata |
+| `aw-service` | Standalone service, reusable client and native launcher; uses `aw-host` for Hook execution, `aw-exec` for foreground ownership and `aw-core` Journal for metadata |
 
 Keep native framework integration outside these libraries and service; process execution belongs in `aw-exec`.
 Keep Provider message parsing and offline admission in `aw-provider`; `aw-host`

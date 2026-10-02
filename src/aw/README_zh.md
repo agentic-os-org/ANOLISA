@@ -2,63 +2,58 @@
 
 [English](README.md)
 
-AW 为 Agent 策略提供统一配置和本地服务。Linux 服务独立于 Agent 或 shell，负责
-准备外部 Provider、执行工具事件步骤，并持久保存审计元数据。Adapter 提供原生
-能力信息、调度回调并采用返回效果。当前接口仍处于实验阶段，QwenPaw、Qoder CLI、
-OpenClaw 和 Hermes 接入仍在开发中。
+AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以启动 Qoder CLI，
+接通配置的工具 Hook，运行外部 Provider，并独立于 Agent 会话保存执行元数据。
+用户继续使用 Qoder 的终端界面和原生 Hook 调度。QwenPaw、OpenClaw 和 Hermes
+Adapter 仍待交付，当前接口处于实验阶段。
 
 ## 当前可用范围
 
 | 能力 | 可用状态 |
 | --- | --- |
 | 校验一份包含命名 Provider 和全部 16 个事件名的 `aw.yaml` | ✅ |
-| 运行独立 Linux 服务并查询本地执行记录 | ✅ 源码构建 |
-| 执行 `tool.before`（`observe`/`block`）和 `tool.after`（`observe`）Provider 步骤 | ✅ 本地客户端 API 与合成事件示例 |
-| 启动 Agent、安装其 Hook 或验证原生效果采用 | ❌ |
-| 安装已发布的 AW 包或按需启动服务 | ❌ |
-| 请求审批、替换工具结果或在原生 Hook 之外强制执行策略 | ❌ |
+| 启动 Qoder CLI 1.1.64 并接通工具前后 Hook | ✅ Linux 源码构建 |
+| 工具前执行结构化 Provider 的 `observe`/`block`，工具成功后执行 `observe` | ✅ |
+| 执行回调输入保持不变的原生 Hook 命令 | ✅ 字节输出和退出状态交回 Qoder；不含重写链与审批流程 |
+| 启动或复用独立服务，查询执行元数据 | ✅ |
+| 通过 AW 启动 QwenPaw、OpenClaw 或 Hermes | ❌ |
+| 安装已发布的 AW 包、跨框架请求审批或在原生 Hook 之外强制执行策略 | ❌ |
 
-服务状态和 Provider 准入不能证明 Agent 已受到保护。服务返回候选效果，后续
-Adapter 需要验证 Agent 确实采用这些效果。
+## 启动 Qoder
 
-## 从源码运行
-
-AW 尚未通过 `anolisa install` 或 RPM 发布。在 Linux 上安装 rustup 后，从仓库
-根目录构建：
+AW 尚未通过 `anolisa install` 或 RPM 发布。在 Linux 上安装 rustup 和 Qoder CLI
+1.1.64 后，从仓库根目录构建。如果该版本不在 `PATH` 中，先修改示例的
+`spec.agents.qoder.argv`。
 
 ```bash
 cd src/aw
 cargo build --locked -p aw-service --bin aw
-target/debug/aw validate --config crates/aw-config/examples/aw.minimal.yaml
-AW_DEMO_ROOT="$(mktemp -d "$PWD/target/aw-demo.XXXXXX")"
-printf 'Socket: %s\n' "$AW_DEMO_ROOT/state/aw.sock"
-target/debug/aw serve --config crates/aw-config/examples/aw.minimal.yaml \
-  --state-dir "$AW_DEMO_ROOT/state"
+target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-`serve` 在前台运行，起步配置没有 Provider。在另一个终端进入 `src/aw`，将
-`AW_DEMO_SOCKET` 替换为上面打印的绝对路径，再查看或停止服务：
+示例在工具执行前和成功后运行一条中性命令，用于演示 Hook 接线，没有安装安全
+规则。AW 启动或复用配置指定的服务，再打开 Qoder 的原有界面。退出 Qoder 后
+回到原终端并释放本次会话，共享服务和审计历史继续保留。
 
 ```bash
-AW_DEMO_SOCKET=/absolute/socket/path/printed/above
-target/debug/aw status --socket "$AW_DEMO_SOCKET"
-target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
-前台命令会在清理完成后退出，审计记录保留在状态目录中。退出后在原终端执行
-`rm -r -- "$AW_DEMO_ROOT"`，仅删除本次演示目录及其审计历史。
-[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)提供可运行的 Provider
-演示、命令参考和重启说明。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明原生配置共存、Hook
+串并行、Provider 配置、显式服务启动和记录查询。原生 Hook 仍受框架自身能力约束，
+仅凭服务状态不能证明 Qoder 已采用策略。
 
 ## 接入与开发
 
-可复用的 `aw-service::Client` 绑定一次服务启动及其配置版本。Adapter 打开一个
-事件，按原生语义串行或并行调用步骤，再关闭事件。所有步骤共享事件截止时间，
-每个步骤只能尝试一次。服务先持久记录执行元数据，再返回结果；结果不确定的调用
-不会自动重试。
+可复用的 `aw-service::Client` 绑定一次服务启动及其配置版本。Adapter 归一化
+回调并保留原生调度。相关回调共享同一个事件截止时间，每个步骤只能尝试一次。
+服务先记录执行元数据，再返回结果；结果不确定的调用不会自动重试。
 
-`aw-host` 仍可直接嵌入应用。`aw-core` 提供独立的固定计划执行 API，以及被服务
-复用的持久 `FileJournal` 存储。两者都不授予原生权限，也不认证效果采用。
+`aw-host` 同时支持结构化 Provider 消息和显式选择的原生 Hook 字节传输。
+`aw-core` 提供独立的固定计划执行 API，以及被服务复用的持久 `FileJournal`
+存储。这些边界让 cosh、桌面客户端和 Herdr 保持独立于服务实现。
 
 - [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)与
   [配置参考](../../docs/developer-guide/zh/aw/configuration.md)

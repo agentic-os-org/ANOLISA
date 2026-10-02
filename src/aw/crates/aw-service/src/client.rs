@@ -63,7 +63,8 @@ fn exchange(
     operation: Operation,
     expires: Instant,
 ) -> Result<Response> {
-    if let Operation::OpenEvent { event, .. } = &operation {
+    if let Operation::OpenEvent { event, .. } | Operation::OpenHookEvent { event, .. } = &operation
+    {
         let mut pending = vec![(event, 0)];
         while let Some((value, depth)) = pending.pop() {
             if depth > aw_provider::MAX_DEPTH {
@@ -120,17 +121,26 @@ mod tests {
         for _ in 0..256 {
             value = Value::Array(vec![value]);
         }
-        let result = exchange(
-            Path::new("/no-service-connection-needed"),
-            None,
+        for operation in [
             Operation::OpenEvent {
                 instance_id: "fixture".into(),
-                event: value,
+                event: value.clone(),
             },
-            Instant::now() + Duration::from_secs(1),
-        );
-        assert!(
-            matches!(result, Err(crate::Error::Rejected(code)) if code == "event_nesting_limit")
-        );
+            Operation::OpenHookEvent {
+                instance_id: "fixture".into(),
+                event: value.clone(),
+                native_input: vec![],
+            },
+        ] {
+            let result = exchange(
+                Path::new("/no-service-connection-needed"),
+                None,
+                operation,
+                Instant::now() + Duration::from_secs(1),
+            );
+            assert!(
+                matches!(result, Err(crate::Error::Rejected(code)) if code == "event_nesting_limit")
+            );
+        }
     }
 }

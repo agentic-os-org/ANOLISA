@@ -5,8 +5,9 @@
 `aw-service` exposes prepared Provider execution through a standalone Linux
 process and a reusable synchronous Rust client. One service owns one immutable
 AW configuration snapshot, its live bindings and events, and durable execution
-metadata. It does not launch an Agent, install native Hooks or certify that an
-Agent adopted a Provider response.
+metadata. The `aw run` client starts Qoder CLI 1.1.64 with session-owned native
+Hook entries; the daemon is independent of that foreground Agent. Service
+execution records do not certify that an Agent adopted a response.
 
 ## Component ownership
 
@@ -17,7 +18,8 @@ Agent adopted a Provider response.
 | `aw-host` | Provider discovery, configuration validation, admission and once-only step invocation |
 | `aw-exec` | Child-process deadlines, output limits, cancellation and process-group cleanup |
 | `aw-core::journal::FileJournal` | Durable reservations and verified metadata record chains |
-| Future Adapter | Verify native capabilities, normalize callbacks, retain native scheduling and apply effects |
+| Qoder Adapter | Verify the supported native version, normalize callbacks, retain native scheduling and apply supported effects |
+| `launch_service` | Resolve private paths, verify an existing configuration revision or start an on-demand service |
 
 The service reuses `FileJournal` as storage. It does not run Core plans or produce
 Core execution/adoption receipts. Provider-private settings remain in
@@ -29,7 +31,8 @@ service.
 [wire.rs](../../crates/aw-service/src/wire.rs) defines the experimental
 `aw-service/v1alpha1` protocol. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
-and one response; a frame is limited to 2 MiB.
+and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
+a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
 
 A request contains `api_version`, `identity`, `deadline_ns` and `operation`.
 The initial `status` request may omit identity. Every subsequent request must
@@ -43,21 +46,29 @@ running service.
 | `status` | None | PID, resource counts, audit health and unverified adoption status |
 | `bind` | `target`, trusted `capabilities`, absolute `cwd`, complete `environment` | Service-issued `instance_id`, identity and preparation `audit_key` |
 | `unbind` | `instance_id` | Release a binding after all its events have closed |
+| `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
-| `invoke_step` | `event_id`, `instance_id`, `step_id` | Candidate effects or execution failure with call metadata |
+| `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
+| `invoke_step` | `event_id`, `instance_id`, `step_id` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
 | `close_event` | `event_id`, `instance_id` | Cancel unfinished work, join children and acknowledge closure |
 | `audit` | Preparation or event `key` | Verified durable envelopes and a `terminal` flag |
 | `stop` | None | Acknowledge requested shutdown; process exit completes cleanup |
 
-`bind` invokes real `describe` and `validate_config` exchanges. Capability evidence
+`bind` invokes real `describe` and `validate_config` exchanges for structured
+Providers; explicit native commands have no such handshake. Capability evidence
 comes from the trusted same-user caller, never from Provider claims. Preparation
 pins the working directory, explicit environment and configured commands for the
-binding. Later requests cannot change them. A preparation failure may return an
+binding. The Qoder launcher also pins `QODER_PROJECT_DIR` and
+`CLAUDE_PROJECT_DIR` to that verified directory for command compatibility; it
+also reproduces Qoder's source/version/site metadata from the launch snapshot. It
+does not copy arbitrary callback environment or per-Hook `env` into Provider
+context. Later requests cannot change that context. A preparation failure may return an
 `audit_key` without a successful binding; the Rust client exposes it through
 `Error::Attempt`.
 
-The current service admits `tool.before` with `observe`/`block` and `tool.after`
-with `observe`. It rejects enabled unsupported events, `ask`, result replacement,
+The current service admits structured `tool.before` with `observe`/`block`,
+`tool.after` with `observe`, and explicit native steps at those tool points. It
+rejects enabled unsupported events, structured `ask`, result replacement,
 final guards and stronger execution guarantees. A successful empty effect list
 adds no restriction and grants no native permission. A successful policy block
 is distinct from a failed invocation whose `failure_action` is `block`.
@@ -71,9 +82,23 @@ and does not rerun failed steps. Each step may be attempted once in that event.
 
 The Adapter must share the returned handle across callbacks belonging to the
 same native event. A native session or tool-call ID is correlation data, not
-proof that two callbacks belong to one service event. Opening a new event per
-step would reset the budget and is not a valid implementation of the shared
-event contract.
+proof that two callbacks belong to one service event. `open_hook_event` correlates
+nonempty session/tool-call IDs and event name inside a prepared instance, then
+requires the same normalized event and exact native bytes for subsequent opens.
+It retains closed and failed-open claims until instance release; they cannot
+create a new budget. Opening an independent event per step is not valid shared
+event scheduling. The current per-instance correlation limit is 1,024 events.
+
+The Qoder Adapter registers one callback per AW step in a shared matcher group.
+Qoder retains default parallel execution and its matching-group sequential
+behavior. Each callback opens or joins its event, then claims only its own step.
+Incomplete events expire even if Qoder never invokes the remaining callbacks.
+Current native input is immutable: a sequential command that returns
+`updatedInput` can change the next callback stdin, which is rejected as a
+correlation mismatch and handled by that step's `on_error`. Supporting rewrite
+chains requires a separate contract for per-step input snapshots under the same
+deadline; raw output forwarding does not establish that support or portable
+approval.
 
 The Linux `CLOCK_MONOTONIC` deadline includes connection setup and framing.
 A call may have at most 60 seconds remaining. `open_event` fixes the event deadline
@@ -135,8 +160,26 @@ sandbox or isolation from other processes of that user.
 
 Explicit `spec.daemon.state_dir` and `spec.daemon.endpoint` values must match the
 selected directory and socket. `auto` leaves path selection to the launcher;
-this CLI still requires `--state-dir`. The configuration's startup preference
-does not install a supervisor or implement on-demand startup.
+`aw serve` still requires `--state-dir`. `aw run` implements on-demand startup;
+`external` requires an existing service. With both paths set to `auto`, the
+launcher chooses `$XDG_RUNTIME_DIR/aw/<revision-prefix>` or
+`/tmp/aw-UID/<revision-prefix>` when the runtime variable is unset. An explicitly
+supplied runtime directory must already be private and owned by the current user.
+The path uses a shortened revision to fit a Unix socket; reuse still verifies
+the entire configuration revision.
+
+Startup holds a private per-state lock and writes an immutable configuration
+snapshot. A new service runs in a separate session with null stdin/stdout and a
+private stderr log. Existing services are reused only after identity and audit
+health checks. Unknown or stale endpoints are not silently replaced, and failed
+startup cleans up only its own child. No supervisor is installed. `status` and
+`stop` accept either `--config FILE` for the same resolver or an explicit socket.
+
+The foreground launcher owns its generated settings and binding files. On Agent
+exit it calls `release_instance`, cancels and drains that instance, and removes
+its own generated files. Other instances and the daemon remain available. A
+timed-out release leaves the instance draining and rejects new events; a later
+release can finish cleanup without repeating event execution.
 
 `Server` installs no signal handlers; its owner supplies a cancellation flag.
 The `aw serve` CLI handles SIGINT/SIGTERM, cancels active work and joins connection

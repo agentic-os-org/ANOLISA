@@ -1,7 +1,7 @@
 //! Bounded metadata chains using the existing durable journal storage contract.
 
 use aw_core::{journal::FileJournal, ports::Journal};
-use aw_host::{CallRecord, Failure, FailureAction, Invocation, Method};
+use aw_host::{CallRecord, Failure, FailureAction, Invocation, Method, StepOutput};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -107,7 +107,7 @@ pub(crate) fn call(record: &CallRecord) -> Value {
     json!({
         "request_id": record.request_id,
         "provider": record.provider,
-        "method": match record.method { Method::Describe => "describe", Method::ValidateConfig => "validate_config", Method::Invoke => "invoke" },
+        "method": match record.method { Method::Describe => "describe", Method::ValidateConfig => "validate_config", Method::Invoke => "invoke", Method::NativeHook => "native_hook" },
         "host_event_id": record.event_id,
         "step_id": record.step_id,
         "elapsed_ms": record.elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
@@ -121,8 +121,16 @@ pub(crate) fn call(record: &CallRecord) -> Value {
 
 pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let metadata = call(&value.record);
+    let native = value.record.method == Method::NativeHook;
+    let mut native_output = Value::Null;
     let (status, effects, failure) = match value.result {
-        Ok(outcome) => ("ok", outcome.as_value()["effects"].clone(), None),
+        Ok(StepOutput::Provider(outcome)) => ("ok", outcome.as_value()["effects"].clone(), None),
+        Ok(StepOutput::Native(output)) => {
+            use std::os::unix::process::ExitStatusExt;
+            native_output = json!({"stdout": output.stdout, "stderr": output.stderr,
+                "exit_code": output.status.code(), "signal": output.status.signal()});
+            ("ok", Value::Null, None)
+        }
         Err(error) => (
             "error",
             json!([]),
@@ -142,10 +150,16 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let blocked = effects
         .as_array()
         .is_some_and(|effects| effects.iter().any(|effect| effect["type"] == "block"));
-    let record = json!({"phase": "completed", "call": metadata, "status": status, "failure": failure,
-        "failure_action": action, "policy_block": blocked});
-    let result = json!({"status": status, "effects": effects, "failure": failure,
+    let kind = if native { "native" } else { "provider" };
+    let record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
+        "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
+    let mut result = json!({"kind": kind, "status": status, "failure": failure,
         "failure_action": action, "call": metadata});
+    if native {
+        result["native"] = native_output;
+    } else {
+        result["effects"] = effects;
+    }
     (record, result)
 }
 
