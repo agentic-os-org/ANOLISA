@@ -90,6 +90,18 @@ impl TimePeriod {
         let start_ns = start.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
         let end_ns = end.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
 
+        // The fixed-day/week/month ends above are second-granularity
+        // (23:59:59); records are stamped in nanoseconds, so the last second
+        // of the period would be invisible to the inclusive <= query bound.
+        // Extend the end to the final nanosecond of that second — one
+        // nanosecond short of the next day, which belongs to the next period.
+        let end_ns = match self {
+            TimePeriod::Yesterday | TimePeriod::LastWeek | TimePeriod::LastMonth => {
+                end_ns.saturating_add(999_999_999)
+            }
+            _ => end_ns,
+        };
+
         (start_ns, end_ns)
     }
 
@@ -1111,6 +1123,43 @@ mod tests {
         let result = query.by_period_with_breakdown(TimePeriod::Today);
         assert_eq!(result.breakdown.len(), 1);
         assert_eq!(result.breakdown[0].name, "python");
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_period_end_covers_the_final_second() {
+        // The fixed ends were second-granularity (23:59:59) while records are
+        // stamped in nanoseconds, so 23:59:59.5 fell outside the inclusive
+        // query bound and silently vanished from the period totals.
+        let ns: u64 = 1_000_000_000;
+        let (start, end) = TimePeriod::Yesterday.time_range();
+        assert_eq!(end - start, 86_400 * ns - 1);
+
+        let (start, end) = TimePeriod::LastWeek.time_range();
+        assert_eq!(end - start, 7 * 86_400 * ns - 1);
+
+        let (start, end) = TimePeriod::LastMonth.time_range();
+        let now = Utc::now().naive_utc();
+        let first_this_month = now.date().with_day(1).unwrap();
+        let last_last_month = first_this_month - chrono::Duration::days(1);
+        let first_last_month = last_last_month.with_day(1).unwrap();
+        let days = (last_last_month - first_last_month).num_days() + 1;
+        assert_eq!(end - start, days as u64 * 86_400 * ns - 1);
+    }
+
+    #[test]
+    fn test_yesterday_includes_record_in_final_second() {
+        let path = unique_db_path("yesterday_final_second");
+        let store = TokenStore::new(&path).unwrap();
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+        // 23:59:59.5 yesterday — inside the calendar day, sub-second.
+        let late = yesterday_start + 86_399 * 1_000_000_000 + 500_000_000;
+        store
+            .insert(&make_record(late, Some("Agent-Late"), 40, 20))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period(TimePeriod::Yesterday);
+        assert_eq!(result.total_tokens, 60);
         cleanup_db(&path);
     }
 }
