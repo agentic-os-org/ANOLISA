@@ -158,9 +158,17 @@ impl Registry {
             .validators
             .get(name)
             .ok_or_else(|| Error::UnsupportedSchema(name.into()))?;
-        validator
-            .validate(value)
-            .map_err(|_| Error::SchemaMismatch(name.into()))
+        validator.validate(value).map_err(|error| {
+            // Same diagnostics as aw-config's shape errors: where the value
+            // failed, the masked reason, and which constraint rejected it.
+            // masked() keeps payload values out of the message.
+            Error::SchemaMismatch(format!(
+                "{name} at `{}`: {} (schema `{}`)",
+                error.instance_path(),
+                error.masked(),
+                error.schema_path()
+            ))
+        })
     }
 
     /// Checks an acknowledgement against the existing common/v1 evidence shape.
@@ -171,9 +179,14 @@ impl Registry {
     /// Rejects invalid encoding, missing fields or a malformed evidence reference.
     pub fn validate_evidence(&self, value: &Value) -> Result<(), Error> {
         canonical::bytes(value)?;
-        self.evidence
-            .validate(value)
-            .map_err(|_| Error::SchemaMismatch("common-v1 evidence".into()))
+        self.evidence.validate(value).map_err(|error| {
+            Error::SchemaMismatch(format!(
+                "common-v1 evidence at `{}`: {} (schema `{}`)",
+                error.instance_path(),
+                error.masked(),
+                error.schema_path()
+            ))
+        })
     }
 
     /// Returns a schema URI and exact resource digest for negotiation.
