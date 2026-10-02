@@ -195,16 +195,24 @@ pub fn param_to_path(param: &str) -> String {
 
 /// Whether a parameter name is structurally legitimate to apply. Used to reject
 /// hostile entries from imported config files before they ever reach the
-/// filesystem. Rejects traversal, absolute paths and NUL bytes.
+/// filesystem. Rejects traversal, absolute paths, NUL bytes, and degenerate
+/// spellings with empty segments (`vm//swappiness`, `vm..swappiness`).
 pub fn is_safe_param(param: &str) -> bool {
     if param.is_empty() || param.starts_with('/') || param.contains('\0') {
         return false;
     }
-    // `..` is only a traversal between path separators. The sysctl branch turns
-    // dots into slashes (so any ".." there collapses to "//" and cannot
-    // escape), leaving the block// and transparent_hugepage/ branches — both
-    // '/'-separated — as the real risk.
-    if param.split('/').any(|seg| seg == "..") {
+    // Dots are separators for sysctl names (param_to_path turns them into
+    // slashes), so inspect the slash-resolved spelling: `..` segments are the
+    // traversal risk on the '/'-separated block/ and transparent_hugepage/
+    // branches, and empty segments are degenerate repeated or trailing
+    // separators. The kernel collapses those on write, but the rollback
+    // ledger keeps the spelling verbatim and persistence would emit a name
+    // sysctl.d rejects (e.g. `vm..swappiness = 60`).
+    if param
+        .replace('.', "/")
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "..")
+    {
         return false;
     }
     true
@@ -391,6 +399,12 @@ fn validate_import_value(param: &str, value: &str) -> Result<()> {
 /// with no way back. `current` is the pre-write value: rollback is only
 /// recorded when it is known, so we never record a bogus "" original to restore.
 pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<()> {
+    // Structural name guard before anything else: the rollback ledger records
+    // the key verbatim and persistence re-emits it, so a degenerate spelling
+    // must never be applied — rejecting here keeps it out of the ledger.
+    if !is_safe_param(param) {
+        anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
+    }
     validate_import_value(param, value)?;
     write_and_verify(param, value)?;
     if let Some(prev) = current {
@@ -825,6 +839,22 @@ mod tests {
         assert!(!is_safe_param("/etc/passwd"));
         assert!(!is_safe_param(""));
         assert!(!is_safe_param(".."));
+    }
+
+    #[test]
+    fn test_is_safe_param_rejects_degenerate_separators() {
+        // The kernel collapses repeated separators on write, so
+        // `vm//swappiness` and `vm..swappiness` (dots are sysctl separators)
+        // both reach the same file — but the ledger keeps the spelling
+        // verbatim and persistence would emit a name sysctl.d rejects.
+        assert!(!is_safe_param("vm//swappiness"));
+        assert!(!is_safe_param("vm..swappiness"));
+        assert!(!is_safe_param("vm.swappiness."));
+        assert!(!is_safe_param("block//sda/scheduler"));
+        // VLAN interfaces (`eth0.100` under procfs) keep both spellings
+        // legitimate: the dot form and the canonical slashed form.
+        assert!(is_safe_param("net.ipv4.conf.eth0/100.forwarding"));
+        assert!(is_safe_param("net.ipv4.conf.eth0.100.forwarding"));
     }
 
     #[test]
@@ -1293,6 +1323,21 @@ mod tests {
             err.to_string().contains("invalid value"),
             "apply_import skipped validation: {err}"
         );
+    }
+
+    #[test]
+    fn test_apply_import_rejects_degenerate_names() {
+        // The name guard fires before validate_import_value and before any
+        // filesystem access, so this needs no root and touches no /proc/sys
+        // entry. The value itself is valid — only the name can be the
+        // rejection reason.
+        for param in ["vm//swappiness", "vm..swappiness"] {
+            let err = apply_import(param, "10", None).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid parameter name"),
+                "degenerate name {param:?} must be rejected up front: {err}"
+            );
+        }
     }
 
     #[test]
