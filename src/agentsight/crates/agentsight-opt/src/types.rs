@@ -1028,6 +1028,11 @@ pub struct WasteReport {
     pub items: Vec<WasteItem>, // worth-optimizing rows only
     pub considered: usize,     // candidates evaluated
     pub dismissed: usize,      // judged not worth optimizing
+    /// Judgments that errored (transport/parse) - neither kept nor dismissed.
+    /// A report whose judgments all failed is returned as an error instead,
+    /// so this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
     pub model: String,
 }
 
