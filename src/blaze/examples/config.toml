@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+# Example blaze daemon configuration.
+#
+# Production deployments install this file at /etc/anolisa/blaze/config.toml.
+# All fields shown below include their default values; you only need to
+# specify values that differ from the defaults.
+
+# ---------------------------------------------------------------------------
+# Daemon global settings.
+# ---------------------------------------------------------------------------
+[daemon]
+# Log verbosity level. The daemon uses the `tracing` crate internally.
+# Options: trace, debug, info, warn, error.  Default: "info".
+log_level = "info"
+
+# Root directory for persistent daemon state (instance metadata, templates,
+# images). The daemon creates subdirectories automatically on first startup.
+# Default: "/var/lib/blaze".
+state_dir = "/var/lib/blaze"
+
+# Path to the Unix domain socket for local API access.
+# Clients connect via: curl --unix-socket <path> http://localhost/v1/...
+# Default: "/run/blaze/api.sock".
+socket = "/run/blaze/api.sock"
+
+# ---------------------------------------------------------------------------
+# Optional TCP listener for remote API access.
+# ---------------------------------------------------------------------------
+[listen]
+# TCP bind address for remote HTTP API.
+# Leave empty or omit to disable TCP (UDS-only mode).
+# When set, platforms (Substrate, E2B orchestrators) can reach the daemon
+# over the network.  Example: "0.0.0.0:14159".
+# Default: "" (disabled).
+http_addr = ""
+
+# ---------------------------------------------------------------------------
+# Backend binary paths.
+# Maps backend name → absolute path to the executable.
+# The daemon probes each configured backend at startup; backends whose
+# binaries are missing or non-executable are logged and skipped.
+# ---------------------------------------------------------------------------
+[backends]
+# Supported backend names (kebab-case):
+#   firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
+#   kata-qemu, runc, bubblewrap.
+firecracker = "/usr/bin/firecracker"
+bubblewrap = "/usr/bin/bwrap"
+# Phase 2+ backends (uncomment when spawner implementations land):
+# gvisor = "/usr/bin/runsc"
+# rund = "/usr/bin/rund"
+# kata-fc = "/usr/bin/containerd-shim-kata-v2"
+# kata-clh = "/usr/bin/containerd-shim-kata-v2"
+# kata-qemu = "/usr/bin/containerd-shim-kata-v2"
+# runc = "/usr/bin/runc"
+
+# ---------------------------------------------------------------------------
+# Policy engine settings.
+# ---------------------------------------------------------------------------
+[policy]
+# Directory containing policy TOML files. The daemon loads all *.toml files
+# in this directory at startup.  Default: "/etc/anolisa/blaze/policies".
+dir = "/etc/anolisa/blaze/policies"
+
+# Behavior when a policy file fails to parse or validate.
+# Options: "fail" (abort daemon startup), "warn" (log and skip the file).
+# Default: "fail".
+on_load_error = "fail"
+
+# ---------------------------------------------------------------------------
+# Image storage settings.
+# ---------------------------------------------------------------------------
+[storage]
+# Primary directory for vmlinux kernels, rootfs base images, and memfile
+# bases. All runtime image files are resolved relative to this path.
+# Default: "/var/lib/blaze/images".
+images_dir = "/var/lib/blaze/images"
+
+# Provider-owned mutable runtime slots. This path must be disjoint from
+# images_dir. Default: "/var/lib/blaze/instances".
+instances_dir = "/var/lib/blaze/instances"
+
+# Storage provider backend. Currently supported: "file".
+# Additional providers may be registered at runtime.
+provider = "file"
+
+# Sparse fallback sizes used when base artifacts are unavailable.
+rootfs_size = 8589934592
+mem_size = 4294967296
+
+# Periodic artifact synchronization is opt-in. Set a positive duration to
+# persist already-written sandbox slot files and directory metadata.
+sync_interval = "disabled"
+
+# Maximum time the scheduler waits for one artifact synchronization attempt.
+sync_timeout = "30s"
+
+# ---------------------------------------------------------------------------
+# Published template catalog.
+# ---------------------------------------------------------------------------
+[template]
+# Destination for atomically published template artifact sets.
+# Default: "/var/lib/blaze/templates".
+dir = "/var/lib/blaze/templates"
+
+# Optional operator-controlled source root. Imports are disabled when omitted.
+# API requests name a relative directory below this root.
+# import_root = "/srv/blaze/template-imports"
+
+# Per-import resource bounds and aggregate catalog capacity.
+max_files = 32
+max_bytes = 274877906944
+max_metadata_bytes = 1048576
+max_total_bytes = 1099511627776
+max_entries = 128
+
+# ---------------------------------------------------------------------------
+# Metrics / observability.
+# ---------------------------------------------------------------------------
+[metrics]
+# Path to the Unix domain socket serving Prometheus metrics.
+# A Prometheus scraper can connect here to pull /metrics.
+# Default: "/run/blaze/metrics.sock".
+prometheus_socket = "/run/blaze/metrics.sock"

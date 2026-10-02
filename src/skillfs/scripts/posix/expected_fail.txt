@@ -1,0 +1,65 @@
+# SkillFS T0 external POSIX harness — expected-fail manifest.
+#
+# Each non-comment line is a glob pattern matched against the test file
+# path relative to <pjdfstest>/tests (for example: "link/00.t", "symlink/*").
+# A failing pjdfstest file whose path matches at least one pattern is
+# reported as an expected fail and does not fail the harness. All other
+# failures are reported as unexpected and the harness exits non-zero.
+#
+# Keep this manifest narrow: every entry must be a SkillFS surface that
+# we already know returns EROFS/ENOSYS/ENOTSUP today. Anything else is
+# a real signal and must be investigated.
+#
+# See docs/testing/posix-external-harness.md for the install/run guide.
+
+# ---------------------------------------------------------------------------
+# Hard links: Package T2 allows same-skill regular-file hardlinks only.
+# Remaining link files cover unsupported cross-skill, directory, non-regular,
+# permission / ownership, or sticky-bit style behavior. T2.1 full + targeted
+# pjdfstest runs kept these failing and pruned the now-passing link files.
+# ---------------------------------------------------------------------------
+link/00.t
+link/01.t
+link/03.t
+link/06.t
+link/07.t
+link/10.t
+link/11.t
+
+# ---------------------------------------------------------------------------
+# Symlink creation: Package T2 allows only relative same-skill symlink targets.
+# Absolute targets, cross-skill / outside-source targets, and protected
+# namespace targets remain denied. T2.1 pruned the now-passing same-skill
+# relative cases from the old broad symlink bucket.
+# ---------------------------------------------------------------------------
+symlink/03.t
+symlink/05.t
+symlink/06.t
+symlink/08.t
+
+# ---------------------------------------------------------------------------
+# FIFO / device-node creation: Package T2 allows ordinary FIFO creation, but
+# remaining mkfifo files still fail due permission / ownership / edge-case
+# behavior outside T2's scope. Device-node mknod remains intentionally denied.
+# ---------------------------------------------------------------------------
+mkfifo/00.t
+mkfifo/01.t
+mkfifo/03.t
+mkfifo/05.t
+mkfifo/06.t
+mkfifo/09.t
+mknod/*
+
+# ---------------------------------------------------------------------------
+# posix_fallocate: not implemented; FUSE returns the default ENOSYS.
+# Tracked as a Phase 2 advanced op.
+# ---------------------------------------------------------------------------
+posix_fallocate/*
+
+# ---------------------------------------------------------------------------
+# chflags: BSD-specific file flags. Linux + Linux FUSE pass through to the
+# underlying filesystem, which rejects with EOPNOTSUPP for ext4/xfs. These
+# files exist in pjdfstest for FreeBSD coverage and are expected to fail
+# on Linux regardless of SkillFS.
+# ---------------------------------------------------------------------------
+chflags/*

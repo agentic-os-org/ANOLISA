@@ -1,0 +1,12 @@
+rule_id: shell-obfuscation
+cwe_id: CWE-506
+desc_en: >-
+  Command decodes obfuscated content (base64, hex) and executes it,
+  a common technique used in malicious scripts to evade detection.
+desc_zh: >-
+  命令解码混淆内容（base64、hex）并执行，这是恶意脚本中用于规避检测的常见技术。
+regex: |-
+  \bbase64\s+(-d|--decode)\b[^;\n]*\|\s*(?:sudo\s+)?\b(sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node)\b
+  |\b(xxd\s+-[a-zA-Z]*r|printf\s+['"]\\x)[^;\n]*\|\s*(?:sudo\s+)?\b(sh|bash|zsh|dash|ksh)\b
+  |\becho\s+['"]?[A-Za-z0-9+/=]{20,}['"]?\s*\|\s*base64\s+(-d|--decode)
+severity: warn

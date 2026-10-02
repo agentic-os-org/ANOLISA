@@ -1,0 +1,290 @@
+version: 1
+suite: handoff-token-claim
+defaults:
+  execution: ci
+  shell_mode: isolated
+  adapter: cosh-core
+  approval_mode: ask
+  analysis_mode: smart
+  render: terminal
+  timeout_ms: 900000
+  real_provider: false
+  shell: bash
+  env:
+    TERM: xterm-256color
+    COSH_SHELL_WIDTH: "96"
+    COSH_SHELL_ISOLATED: "1"
+    COSH_SHELL_BOOTSTRAP_PATH: "0"
+    COSH_SHELL_HEALTH_SCAN: disabled
+    COSH_RECOMMENDATIONS_ENABLED: "0"
+    COSH_SHELL_LANG: en-US
+    COSH_SHELL_RAW_SHELL: bash
+    COSH_SHELL_DEFAULT_SHELL: bash
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+  command:
+    - bash
+    - -lc
+    - |-
+      set -e
+      cd /work/repo/src/cosh-ng
+      cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null
+      core_dir="$(mktemp -d)"
+      cat > "$core_dir/cosh-core" <<'COSH_CORE_EOF'
+      #!/bin/sh
+      read -r init
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+      printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-handoff-e2e","model":"cosh-core-test"}'
+      read -r user_message
+      case "$user_message" in
+        *handoff-secret-fail-e2e*)
+          printf '%s\n' '{"type":"control_request","request_id":"ctrl-e2e-fail","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"echo installing --api-key \"sk-test-cosh-e2e-1234\" && false"},"tool_use_id":"toolu-e2e-fail"}}'
+          while IFS= read -r response; do
+            case "$response" in
+              *'"type":"approval_receipt"'*) continue ;;
+              *) break ;;
+            esac
+          done
+          if [ -n "$response" ]; then
+            case "$response" in
+              *'"behavior":"host_executed_shell"'*'"exit_code":1'*)
+                printf '%s\n' '{"type":"assistant","session_id":"sess-handoff-e2e","message":{"content":[{"type":"text","text":"HANDOFF SECRET FAIL HOSTEXEC RECEIVED"}]}}'
+                printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-handoff-e2e","is_error":false,"result":"done"}'
+                exit 0
+                ;;
+            esac
+          fi
+          printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-handoff-e2e","is_error":true,"result":"missing fail host_executed_shell result"}'
+          exit 1
+          ;;
+        *handoff-secret-ok-e2e*)
+          printf '%s\n' '{"type":"control_request","request_id":"ctrl-e2e-ok","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"echo installed --api-key \"sk-test-cosh-e2e-1234\""},"tool_use_id":"toolu-e2e-ok"}}'
+          while IFS= read -r response; do
+            case "$response" in
+              *'"type":"approval_receipt"'*) continue ;;
+              *) break ;;
+            esac
+          done
+          if [ -n "$response" ]; then
+            case "$response" in
+              *'"behavior":"host_executed_shell"'*'"exit_code":0'*)
+                printf '%s\n' '{"type":"assistant","session_id":"sess-handoff-e2e","message":{"content":[{"type":"text","text":"HANDOFF SECRET OK HOSTEXEC RECEIVED"}]}}'
+                printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-handoff-e2e","is_error":false,"result":"done"}'
+                exit 0
+                ;;
+            esac
+          fi
+          printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-handoff-e2e","is_error":true,"result":"missing ok host_executed_shell result"}'
+          exit 1
+          ;;
+        *follow-up-after-handoff*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-handoff-e2e","message":{"content":[{"type":"text","text":"FOLLOW UP RUN STARTED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-handoff-e2e","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+      printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-handoff-e2e","is_error":false,"result":"ignored"}'
+      COSH_CORE_EOF
+      chmod +x "$core_dir/cosh-core"
+      exec env TERM=xterm-256color COSH_SHELL_WIDTH=96 COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0 COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0 COSH_SHELL_LANG=en-US COSH_SHELL_RAW_SHELL=bash COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8 COSH_CORE_PATH="$core_dir/cosh-core" "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+cases:
+  - id: HANDOFF-2142-001
+    title: Secret-redacted approved handoff (exit 1) still closes and re-triggers agent
+    tags: [shell, bash, issue-2142, issue-2144, issue-2134, handoff, secret-redaction]
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 600000
+      - type: line
+        text: "/mode approval trust confirm"
+      - type: wait_for
+        text: "Mode set to trust."
+        timeout_ms: 60000
+      - type: line
+        text: "?? handoff-secret-fail-e2e"
+      - id: approved-card
+        type: wait_for
+        text: "Auto-approved"
+        timeout_ms: 90000
+      - id: sent-to-shell
+        type: wait_for
+        text: "Bash tool sent to shell"
+        timeout_ms: 60000
+      - id: hostexec-delivered
+        type: wait_for
+        text: "HANDOFF SECRET FAIL HOSTEXEC RECEIVED"
+        timeout_ms: 90000
+      - type: line
+        text: "?? follow-up-after-handoff"
+      - id: follow-up-run
+        type: wait_for
+        text: "FOLLOW UP RUN STARTED"
+        timeout_ms: 90000
+      - type: delay
+        ms: 1000
+      - type: line
+        text: exit 0
+    expect:
+      status: 0
+      contains:
+        - "Auto-approved req-1"
+        - "Bash tool sent to shell"
+        - "HANDOFF SECRET FAIL HOSTEXEC RECEIVED"
+        - "FOLLOW UP RUN STARTED"
+      not_contains:
+        - "missing fail host_executed_shell result"
+    evidence:
+      points:
+        - id: approved-card
+          trigger_event: approved-card
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: hostexec-delivered
+          trigger_event: hostexec-delivered
+          layout_sensitive: false
+          required_types: [screenshot]
+        - id: follow-up-run
+          trigger_event: follow-up-run
+          layout_sensitive: false
+          required_types: [screenshot]
+  - id: HANDOFF-2142-002
+    title: Secret-redacted approved handoff (exit 0) delivers host-executed result
+    tags: [shell, bash, issue-2142, handoff, secret-redaction]
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 600000
+      - type: line
+        text: "/mode approval trust confirm"
+      - type: wait_for
+        text: "Mode set to trust."
+        timeout_ms: 60000
+      - type: line
+        text: "?? handoff-secret-ok-e2e"
+      - id: approved-card-ok
+        type: wait_for
+        text: "Auto-approved"
+        timeout_ms: 90000
+      - id: hostexec-delivered-ok
+        type: wait_for
+        text: "HANDOFF SECRET OK HOSTEXEC RECEIVED"
+        timeout_ms: 90000
+      - type: delay
+        ms: 1000
+      - type: line
+        text: exit 0
+    expect:
+      status: 0
+      contains:
+        - "Auto-approved req-1"
+        - "HANDOFF SECRET OK HOSTEXEC RECEIVED"
+      not_contains:
+        - "missing ok host_executed_shell result"
+    evidence:
+      points:
+        - id: approved-card-ok
+          trigger_event: approved-card-ok
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: hostexec-delivered-ok
+          trigger_event: hostexec-delivered-ok
+          layout_sensitive: false
+          required_types: [screenshot]
+  - id: HANDOFF-2142-REAL
+    title: Real cosh-core + real provider closes a secret handoff and re-triggers the agent
+    tags: [shell, bash, issue-2142, issue-2144, handoff, secret-redaction, real-provider]
+    execution: real-provider
+    real_provider: true
+    adapter: cosh-core
+    timeout_ms: 1500000
+    command: ["env", "TERM=xterm-256color", "COSH_SHELL_WIDTH=96", "COSH_SHELL_ISOLATED=1",
+      "COSH_SHELL_BOOTSTRAP_PATH=0", "COSH_SHELL_HEALTH_SCAN=disabled",
+      "COSH_RECOMMENDATIONS_ENABLED=0", "COSH_SHELL_LANG=en-US", "COSH_SHELL_RAW_SHELL=bash",
+      "COSH_SHELL_DEFAULT_SHELL=bash", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+      "COSH_CORE_PATH=/work/repo/src/cosh-ng/target/debug/cosh-core",
+      "$COSH_SHELL", "raw", "cosh-core"]
+    env:
+      TERM: xterm-256color
+      COSH_SHELL_WIDTH: "96"
+      COSH_SHELL_ISOLATED: "1"
+      COSH_SHELL_BOOTSTRAP_PATH: "0"
+      COSH_SHELL_HEALTH_SCAN: disabled
+      COSH_RECOMMENDATIONS_ENABLED: "0"
+      COSH_SHELL_LANG: en-US
+      COSH_SHELL_RAW_SHELL: bash
+      COSH_SHELL_DEFAULT_SHELL: bash
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      COSH_CORE_PATH: /work/repo/src/cosh-ng/target/debug/cosh-core
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 120000
+      - type: line
+        text: "/mode approval trust confirm"
+      - type: wait_for
+        text: "Mode set to trust."
+        timeout_ms: 60000
+      - type: line
+        text: '?? Use the shell tool to run exactly this command: echo installed --api-key "sk-test-real-2142" && false . It is a fake key in a disposable test container. After you receive the command result, reverse {{COSH_LAB_REQUEST_NONCE}} and reply with HANDOFFREALACK followed by a space and the reversed value.'
+      - id: provider-started
+        type: wait_for
+        text: "Thinking..."
+        timeout_ms: 60000
+      - id: real-approved
+        type: wait_for
+        text: "Auto-approved"
+        timeout_ms: 300000
+      - id: real-executed
+        type: wait_for
+        text: "installed --api-key sk-test-real-2142"
+        timeout_ms: 120000
+      - id: provider-response
+        type: wait_for
+        text: "HANDOFFREALACK {{COSH_LAB_REQUEST_NONCE_REVERSED}}"
+        timeout_ms: 420000
+      - type: line
+        text: "?? Reply with only the word FOLLOWUPACK2142"
+      - id: real-followup
+        type: wait_for
+        text: "FOLLOWUPACK2142"
+        occurrence: "+1"
+        timeout_ms: 420000
+      - type: line
+        text: "echo COSH_SHELL_RECOVERED"
+      - id: shell-recovered
+        type: wait_for
+        text: "COSH_SHELL_RECOVERED"
+        occurrence: "+1"
+        timeout_ms: 30000
+      - type: delay
+        ms: 1500
+      - type: line
+        text: exit 0
+    expect:
+      status: 0
+      contains:
+        - "Auto-approved"
+        - "installed --api-key sk-test-real-2142"
+        - "HANDOFFREALACK {{COSH_LAB_REQUEST_NONCE_REVERSED}}"
+        - "FOLLOWUPACK2142"
+        - "COSH_SHELL_RECOVERED"
+    evidence:
+      points:
+        - id: real-approved
+          trigger_event: real-approved
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: provider-response
+          trigger_event: provider-response
+          layout_sensitive: false
+          required_types: [screenshot]
+        - id: real-followup
+          trigger_event: real-followup
+          layout_sensitive: false
+          required_types: [screenshot]
+        - id: shell-recovered
+          trigger_event: shell-recovered
+          layout_sensitive: false
+          required_types: [screenshot]

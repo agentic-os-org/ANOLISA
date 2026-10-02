@@ -1,0 +1,119 @@
+{
+  "type": "function",
+  "function": {
+    "name": "send_message",
+    "description": "Send a message to a specified Slack channel. This tool posts a message to a public channel, private channel, direct message, or multi-person direct message. It supports rich text formatting through Slack's Block Kit framework, including sections, dividers, actions, and context blocks.",
+    "parameters": {
+      "type": "object",
+      "title": "Send Message Parameters",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "title": "Channel ID",
+          "description": "The channel ID, private group ID, or user ID to send the message to. Can be an encoded ID (e.g., C123456) or a channel name."
+        },
+        "text": {
+          "type": "string",
+          "title": "Message Text",
+          "description": "The main text of the message. This field is required and supports Slack's mrkdwn formatting for bold, italic, strikethrough, links, and channel/user references."
+        },
+        "blocks": {
+          "type": "array",
+          "title": "Block Kit Blocks",
+          "description": "An array of Block Kit layout blocks that define the visual structure of the message. Supports section, divider, image, actions, context, input, file, and header block types.",
+          "items": {
+            "type": "object",
+            "title": "Block",
+            "properties": {
+              "type": {
+                "type": "string",
+                "title": "Block Type",
+                "description": "The type of block.",
+                "enum": ["section", "divider", "image", "actions", "context", "header", "input", "file"]
+              },
+              "text": {
+                "type": "object",
+                "title": "Block Text",
+                "description": "The text object for the block content.",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "title": "Text Type",
+                    "enum": ["plain_text", "mrkdwn"]
+                  },
+                  "text": {
+                    "type": "string",
+                    "title": "Text Content"
+                  }
+                }
+              },
+              "block_id": {
+                "type": "string",
+                "title": "Block ID",
+                "description": "A unique identifier for the block, used for interaction payloads."
+              }
+            },
+            "required": ["type"]
+          }
+        },
+        "attachments": {
+          "type": "array",
+          "title": "Attachments",
+          "description": "An array of legacy attachment objects. Prefer using Block Kit blocks for new integrations.",
+          "items": {
+            "type": "object",
+            "title": "Attachment",
+            "properties": {
+              "color": {
+                "type": "string",
+                "title": "Attachment Color",
+                "description": "A hex color code (e.g., #36a64f) or predefined good/warning/danger."
+              },
+              "title": {
+                "type": "string",
+                "title": "Attachment Title"
+              },
+              "text": {
+                "type": "string",
+                "title": "Attachment Text"
+              },
+              "fields": {
+                "type": "array",
+                "title": "Fields",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": { "type": "string" },
+                    "value": { "type": "string" },
+                    "short": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "thread_ts": {
+          "type": "string",
+          "title": "Thread Timestamp",
+          "description": "Provide another message's ts value to make this message a reply in a thread. Do not use the reply_broadcast parameter when also setting thread_ts."
+        },
+        "reply_broadcast": {
+          "type": "boolean",
+          "title": "Reply Broadcast",
+          "description": "Used in conjunction with thread_ts and indicates whether reply should be made visible to everyone in the channel or conversation."
+        },
+        "unfurl_links": {
+          "type": "boolean",
+          "title": "Unfurl Links",
+          "description": "Pass true to enable unfurling of primarily text-based content."
+        },
+        "unfurl_media": {
+          "type": "boolean",
+          "title": "Unfurl Media",
+          "description": "Pass false to disable unfurling of media content."
+        }
+      },
+      "required": ["channel", "text"]
+    }
+  }
+}

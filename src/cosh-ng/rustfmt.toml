@@ -1,0 +1,17 @@
+# Rust 代码格式化配置
+# 运行: cargo fmt --all
+
+# 最大行宽
+max_width = 100
+
+# 使用 4 空格缩进
+tab_spaces = 4
+
+# edition 与 Cargo.toml 保持一致
+edition = "2021"
+
+# 函数参数超出行宽时换行风格: Block (每个参数一行)
+fn_params_layout = "Tall"
+
+# 强制在文件末尾保留换行符
+newline_style = "Unix"

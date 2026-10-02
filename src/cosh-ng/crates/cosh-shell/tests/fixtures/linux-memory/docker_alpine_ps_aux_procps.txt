@@ -1,0 +1,4 @@
+USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root        13  0.0  0.0   2736  1708 ?        R    10:37   0:00 ps aux --sort=-%mem
+root         1  0.0  0.0   1724   856 ?        Ss   10:37   0:00 sh -lc apk add --no-cache procps-ng >/dev/null && echo "--- versions ---" && ps --version && free --version && top --version 2>/dev/null || true && echo "--- ps aux ---" && ps aux --sort=-%mem | head && echo "--- ps eo ---" && ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head && echo "--- free -m ---" && free -m && echo "--- top ---" && top -b -n1 | head -20
+root        14  0.0  0.0   1704   792 ?        S    10:37   0:00 head

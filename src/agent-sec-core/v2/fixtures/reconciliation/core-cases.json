@@ -1,0 +1,4146 @@
+{
+  "cases": [
+    {
+      "caseId": "REC-CORE-001",
+      "variant": "create",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-002",
+      "variant": "replace-id",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.replace-old-a-with-new-b"
+              },
+              "output": {
+                "$ref": "report.old-a.absent-new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-002",
+      "variant": "reuse-id",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.old-a.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.old-a.no-previous"
+              },
+              "output": {
+                "$ref": "report.old-a.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.reuse-old-a.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-003",
+      "variant": "delete-before-B-runs",
+      "initial": {
+        "$ref": "record.delete.old-a-pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a"
+              },
+              "output": {
+                "$ref": "report.old-a.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-004",
+      "variant": "multiple",
+      "initial": {
+        "$ref": "record.delete.old-a-present-new-b-unknown"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a-and-new-b"
+              },
+              "output": {
+                "$ref": "report.old-a-and-new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-004",
+      "variant": "empty",
+      "initial": {
+        "$ref": "record.delete.empty-pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-005",
+      "variant": "success",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "create",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.delete.new-b-present"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "admit",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-005",
+      "variant": "retryable",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.retryable-error"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "create",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.delete.new-b-unknown"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "admit",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-005",
+      "variant": "rejected",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.rejected"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "create",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.delete.new-b-unknown"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "admit",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-007",
+      "variant": "status",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "finish",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.delete.new-b-present"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "admit",
+            "finish",
+            "finish:conflict",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-007",
+      "variant": "revision",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "finish",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "APPLY_FAILED"
+                }
+              },
+              {
+                "spec": {
+                  "$ref": "binding.rev-8"
+                },
+                "status": {
+                  "phase": "PENDING_APPLY"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.reapply.rev-8-with-new-b-present"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "admit",
+            "admit",
+            "finish",
+            "finish:conflict",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-008",
+      "variant": "read-failure",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [
+            "read"
+          ],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.pending"
+          },
+          "result": {
+            "Err": "reconciliation storage unavailable"
+          },
+          "trace": [
+            "read",
+            "read:error"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-008",
+      "variant": "claim-failure",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [
+            "claim"
+          ],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.pending"
+          },
+          "result": {
+            "Err": "reconciliation storage unavailable"
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:error"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-008",
+      "variant": "claim-conflict",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": {
+            "at": "claim",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": {
+            "$ref": "record.delete.empty-pending"
+          },
+          "result": {
+            "Ok": {
+              "kind": "superseded"
+            }
+          },
+          "trace": [
+            "read",
+            "admit",
+            "claim",
+            "claim:conflict"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-009",
+      "variant": "create-registration",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            }
+          ],
+          "faults": [
+            "register"
+          ],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.claimed"
+          },
+          "result": {
+            "Err": "reconciliation storage unavailable"
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:error"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-009",
+      "variant": "update-registration",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            }
+          ],
+          "faults": [
+            "register"
+          ],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.claimed"
+          },
+          "result": {
+            "Err": "reconciliation storage unavailable"
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:error"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "old-A",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-010",
+      "variant": "recompute-after-storage-repair",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [
+            "finish"
+          ],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.registered"
+          },
+          "result": {
+            "Err": "reconciliation storage unavailable"
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:error"
+          ]
+        },
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "opaque-B",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 7,
+                "presence": "UNKNOWN",
+                "lastConfirmed": null
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "READY"
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "route": "test",
+                  "id": "opaque-B",
+                  "cleanup": [
+                    255,
+                    0,
+                    7
+                  ]
+                },
+                "revision": 7,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-011",
+      "variant": "semantic-rejection",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.unsupported-policy"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.adapter-rejected"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "UNSUPPORTED_POLICY"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-012",
+      "variant": "fault-retry-exhausted",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.fault"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.adapter-fault.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.fault"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.adapter-fault.retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 250
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 250,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.fault"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.adapter-fault.exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "RETRYABLE",
+                "code": "ADAPTER_FAULT"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-013",
+      "variant": "retryable",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.retryable-error"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.prepare-failed-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-013",
+      "variant": "rejected",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.rejected"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.prepare-rejected"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "PREPARE_ERROR"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-014",
+      "variant": "unknown-prepares-again",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 99,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.ready-after-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-015",
+      "variant": "B-unknown",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.replace-old-a-with-new-b"
+              },
+              "output": {
+                "$ref": "report.replace.partial-retryable"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.partial-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.ready-after-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-015",
+      "variant": "B-rejected",
+      "initial": {
+        "$ref": "record.replace.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.replace-old-a-with-new-b"
+              },
+              "output": {
+                "$ref": "report.replace.partial-rejected"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.replace.partial-failed"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "UPDATE_ERROR"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-016",
+      "variant": "retryable",
+      "initial": {
+        "$ref": "record.delete.old-a-and-new-b-present"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a-and-new-b"
+              },
+              "output": {
+                "$ref": "report.delete.partial-retryable"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.partial-retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-016",
+      "variant": "rejected",
+      "initial": {
+        "$ref": "record.delete.old-a-and-new-b-present"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a-and-new-b"
+              },
+              "output": {
+                "$ref": "report.delete.partial-rejected"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.partial-failed"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "DELETE_ERROR"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-016",
+      "variant": "exhausted",
+      "initial": {
+        "$ref": "record.delete.old-a-and-new-b-present"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a-and-new-b"
+              },
+              "output": {
+                "$ref": "report.delete.partial-retryable"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.partial-retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.delete.new-b-retryable"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.partial-retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 250
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 250,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.delete.new-b-retryable"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.partial-exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "RETRYABLE",
+                "code": "DELETE_ERROR"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-017",
+      "variant": "apply-budget",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 99,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 250
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 249,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        },
+        {
+          "now": 250,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "update",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "RETRYABLE",
+                "code": "REMOTE_UNKNOWN"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "update",
+            "update:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 10000,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-017",
+      "variant": "delete-budget",
+      "initial": {
+        "$ref": "record.delete.old-a-pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a"
+              },
+              "output": {
+                "$ref": "report.old-a.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 99,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        },
+        {
+          "now": 100,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a"
+              },
+              "output": {
+                "$ref": "report.old-a.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 250
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 249,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-retry-attempt-2"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        },
+        {
+          "now": 250,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.old-a"
+              },
+              "output": {
+                "$ref": "report.old-a.unknown"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "RETRYABLE",
+                "code": "REMOTE_UNKNOWN"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 10000,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.old-a-exhausted"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-018",
+      "variant": "new-delete-budget",
+      "initial": {
+        "$ref": "record.create.retry-attempt-1"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 1,
+          "calls": [
+            {
+              "operation": "delete",
+              "input": {
+                "$ref": "targets.new-b"
+              },
+              "output": {
+                "$ref": "report.new-b.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": {
+            "at": "read",
+            "desired": [
+              {
+                "spec": {
+                  "$ref": "binding.rev-7"
+                },
+                "status": {
+                  "phase": "PENDING_DELETE"
+                }
+              }
+            ]
+          },
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "admit",
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "delete",
+            "delete:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ],
+      "initialSchedule": {
+        "attemptsStarted": 1,
+        "nextAttemptAt": 100
+      }
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "ready",
+      "initial": {
+        "$ref": "record.skip.ready"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.skip.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "apply_failed",
+      "initial": {
+        "$ref": "record.skip.apply-failed"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.skip.apply-failed"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "delete_failed",
+      "initial": {
+        "$ref": "record.skip.delete-failed"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.skip.delete-failed"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "applying",
+      "initial": {
+        "$ref": "record.skip.applying"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_APPLY",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "deleting",
+      "initial": {
+        "$ref": "record.skip.deleting"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "bindingId": "10000000-0000-4000-8000-000000000001",
+                "bindingRevision": 7,
+                "policy": {
+                  "policyId": "00000000-0000-4000-8000-000000000002",
+                  "policyName": "prevent deletion",
+                  "revision": 1,
+                  "template": {
+                    "kind": "prevent_file_deletion",
+                    "files": [
+                      "/workspace/important/**",
+                      "/etc/agent/config.yaml"
+                    ]
+                  },
+                  "canonicalPolicy": {
+                    "irSchemaVersion": 1,
+                    "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+                    "policyId": "00000000-0000-4000-8000-000000000002",
+                    "revision": 1,
+                    "payload": {
+                      "resources": [
+                        {
+                          "id": "protected-file-entries",
+                          "kind": "file",
+                          "matchers": [
+                            {
+                              "path": {
+                                "type": "glob",
+                                "pattern": "/workspace/important/**"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            },
+                            {
+                              "path": {
+                                "type": "exact",
+                                "path": "/etc/agent/config.yaml"
+                              },
+                              "resolution": {
+                                "type": "path_entry"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "rules": [
+                        {
+                          "id": "deny-protected-file-deletion",
+                          "when": {
+                            "type": "atom",
+                            "atom": {
+                              "type": "resource_operation",
+                              "operation": "delete",
+                              "target": {
+                                "type": "in",
+                                "resourceSet": "protected-file-entries"
+                              }
+                            }
+                          },
+                          "outcome": {
+                            "decision": "deny",
+                            "obligations": [
+                              "audit",
+                              "emit_receipt"
+                            ],
+                            "remediation": "none"
+                          },
+                          "enforcement": {
+                            "decisionTiming": "pre_effect",
+                            "requiredEvidence": [
+                              "binding_ready",
+                              "operation_denied"
+                            ]
+                          }
+                        }
+                      ],
+                      "activation": "post_attach_allowed",
+                      "failurePolicy": {
+                        "runtime": "fail_closed",
+                        "update": "keep_last_known_good"
+                      }
+                    }
+                  }
+                },
+                "scope": {
+                  "scopeId": "20000000-0000-4000-8000-000000000001",
+                  "revision": 3,
+                  "selector": {
+                    "kind": "pid",
+                    "pid": 4242
+                  }
+                }
+              },
+              "status": {
+                "phase": "PENDING_DELETE",
+                "error": {
+                  "kind": "RETRYABLE",
+                  "code": "RECONCILE_INTERRUPTED"
+                }
+              }
+            },
+            "deployments": []
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read",
+            "finish",
+            "finish:matched",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "missing",
+      "initial": null,
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": null,
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "not-due",
+      "initial": {
+        "$ref": "record.create.retry-attempt-1"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 99,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.retry-attempt-1"
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ],
+      "initialSchedule": {
+        "attemptsStarted": 1,
+        "nextAttemptAt": 100
+      }
+    },
+    {
+      "caseId": "REC-CORE-019",
+      "variant": "old-notification",
+      "initial": {
+        "$ref": "record.reapply.rev-8-pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-8"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.reapply.rev-8-ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-020",
+      "variant": "opaque-id",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.non-uuid.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.non-uuid.no-previous"
+              },
+              "output": {
+                "$ref": "report.non-uuid.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.non-uuid.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-020",
+      "variant": "direct-seccore-id",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.binding-id.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.binding-id.no-previous"
+              },
+              "output": {
+                "$ref": "report.binding-id.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.binding-id.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-020",
+      "variant": "missing-route",
+      "initial": {
+        "$ref": "record.delete.unavailable-route-pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.delete.unavailable-route-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "read",
+            "register",
+            "register:matched",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-021",
+      "variant": "fresh-binding",
+      "initial": {
+        "$ref": "record.fresh.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000002",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.fresh"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.present"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.fresh.ready"
+          },
+          "result": {
+            "Ok": {
+              "kind": "completed"
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-014",
+      "variant": "missing-confirmation",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.empty-success"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.unconfirmed-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-014",
+      "variant": "foreign-target",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.old-a.absent"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.invalid-report-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-014",
+      "variant": "duplicate-target",
+      "initial": {
+        "$ref": "record.create.pending"
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            },
+            {
+              "operation": "create",
+              "input": {
+                "$ref": "request.new-b.no-previous"
+              },
+              "output": {
+                "$ref": "report.new-b.duplicate-observations"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "$ref": "record.create.invalid-report-retry"
+          },
+          "result": {
+            "Ok": {
+              "kind": "retry_at",
+              "at": 100
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "register",
+            "register:matched",
+            "create",
+            "create:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "REC-CORE-020",
+      "variant": "cross-route-rejected",
+      "initial": {
+        "binding": {
+          "spec": {
+            "$ref": "binding.rev-7"
+          },
+          "status": {
+            "phase": "PENDING_APPLY"
+          }
+        },
+        "deployments": [
+          {
+            "target": {
+              "$ref": "target.unavailable-route"
+            },
+            "revision": 6,
+            "presence": "PRESENT",
+            "lastConfirmed": "PRESENT"
+          }
+        ]
+      },
+      "id": "10000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "now": 0,
+          "calls": [
+            {
+              "operation": "adapter",
+              "input": {
+                "$ref": "binding.rev-7"
+              },
+              "output": {
+                "$ref": "adapter.translated"
+              }
+            },
+            {
+              "operation": "prepare",
+              "input": {
+                "$ref": "plan.opaque"
+              },
+              "output": {
+                "$ref": "prepare.new-b.ok"
+              }
+            }
+          ],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "$ref": "binding.rev-7"
+              },
+              "status": {
+                "phase": "APPLY_FAILED",
+                "error": {
+                  "kind": "REJECTED",
+                  "code": "RECONCILE_TARGET_UNAVAILABLE"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "$ref": "target.unavailable-route"
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "failed",
+              "error": {
+                "kind": "REJECTED",
+                "code": "RECONCILE_TARGET_UNAVAILABLE"
+              }
+            }
+          },
+          "trace": [
+            "read",
+            "claim",
+            "claim:matched",
+            "adapter",
+            "adapter:return",
+            "prepare",
+            "prepare:return",
+            "read",
+            "finish",
+            "finish:matched"
+          ]
+        },
+        {
+          "now": 10000,
+          "calls": [],
+          "faults": [],
+          "admission": null,
+          "expected": {
+            "binding": {
+              "spec": {
+                "$ref": "binding.rev-7"
+              },
+              "status": {
+                "phase": "APPLY_FAILED",
+                "error": {
+                  "kind": "REJECTED",
+                  "code": "RECONCILE_TARGET_UNAVAILABLE"
+                }
+              }
+            },
+            "deployments": [
+              {
+                "target": {
+                  "$ref": "target.unavailable-route"
+                },
+                "revision": 6,
+                "presence": "PRESENT",
+                "lastConfirmed": "PRESENT"
+              }
+            ]
+          },
+          "result": {
+            "Ok": {
+              "kind": "skipped"
+            }
+          },
+          "trace": [
+            "read"
+          ]
+        }
+      ]
+    }
+  ]
+}

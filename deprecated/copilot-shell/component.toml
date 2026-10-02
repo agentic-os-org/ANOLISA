@@ -1,0 +1,28 @@
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[component]
+name = "cosh"
+version = "2.8.0"
+layer = "runtime"
+domain = "tools"
+description = "Copilot shell launcher and deterministic CLI gateway"
+stability = "experimental"
+
+[install]
+modes = ["system"]
+
+[backends.rpm]
+package = "copilot-shell"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+runtime = ["node>=20"]
+
+[[health_checks]]
+name = "launcher"
+kind = "command"
+command = "{bindir}/cosh --version"

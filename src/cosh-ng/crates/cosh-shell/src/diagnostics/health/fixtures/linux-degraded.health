@@ -1,0 +1,21 @@
+# cosh-shell startup health fixture
+host=fixture-linux-degraded
+score=72
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.available_mib u64 12000 MiB
+fact memory memory.available_ratio f64 0.366 -
+fact memory memory.used_ratio f64 0.634 -
+fact cpu cpu.load_1m f64 1.2 -
+fact cpu cpu.load_5m f64 1.0 -
+fact cpu cpu.cores u64 4 -
+fact cpu cpu.load_per_core_1m f64 0.30 -
+fact cpu cpu.load_per_core_5m f64 0.25 -
+fact disk filesystem.max_used_ratio f64 0.50 -
+fact disk filesystem.available_gib f64 80.0 GiB
+fact disk filesystem.riskiest_mount str / -
+fact disk filesystem.root_used_ratio f64 0.50 -
+fact disk filesystem.root_available_gib f64 80.0 GiB
+unavailable memory timeout unavailable 1
+unavailable kernel_signal permission_denied unavailable 1
+unavailable configured_service command_missing unavailable 1

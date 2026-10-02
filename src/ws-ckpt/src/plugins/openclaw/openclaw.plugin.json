@@ -1,0 +1,15 @@
+{
+  "id": "ws-ckpt",
+  "kind": "tool",
+  "activation": { 
+    "onStartup": true 
+  },
+  "install": {
+    "npmSpec": "@openclaw/ws-ckpt"
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

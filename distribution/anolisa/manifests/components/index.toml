@@ -1,0 +1,324 @@
+schema_version = 1
+channel = "stable"
+publisher = "anolisa-local-verify"
+
+[[entries]]
+component = "agent-memory"
+version = "0.2.0"
+channel = "stable"
+artifact_id = "agent-memory-0.2.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "a7080afd543a5edd12b3c3483845c87e23d58d5137f46a75fd48cd4fcc020a76"
+size = 6155744
+
+[[entries]]
+component = "cosh"
+version = "2.6.0"
+channel = "stable"
+artifact_id = "cosh-2.6.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "a61260c77ecc79a6075c1b3bf2bc79756ed6f521deea4cb449791a6d7fd65a82"
+size = 5493504
+
+[[entries]]
+component = "os-skills"
+version = "0.6.0"
+channel = "stable"
+artifact_id = "os-skills-0.6.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "f44cefff8d71be5396d4a0a6f521b2de7ee3ffaa78061b6e48ca8369e1812792"
+size = 435129
+
+[[entries]]
+component = "skillfs"
+version = "0.3.0"
+channel = "stable"
+artifact_id = "skillfs-0.3.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "3f6986af821a718a543859381b3c5c981d6caece3f93a7e87fcf2aa8058f2d46"
+size = 2894636
+
+[[entries]]
+component = "tokenless"
+version = "0.6.0"
+channel = "stable"
+artifact_id = "tokenless-0.6.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "2d8d2e602d43f9aadf008714207a2fa80e51edbb3d0f112d89f64c58ab3e5c8e"
+size = 8143078
+
+[[entries]]
+component = "ws-ckpt"
+version = "0.4.0"
+channel = "stable"
+artifact_id = "ws-ckpt-0.4.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "ca87fd3a7d422f9ad7ce2d600cc8ca7e00efd006348591b7ff957ee9505f28d8"
+size = 2936746
+
+[[entries]]
+component = "agent-memory"
+version = "0.2.1"
+channel = "stable"
+artifact_id = "agent-memory-0.2.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "1739321709837cef053582bb0055849c36133547c2d724e5b6055342ed71f927"
+size = 6141101
+sbom_path = "agent-memory/0.2.1/linux/x86_64/agent-memory-0.2.1-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "774983e9ca608404649ccd29b1f075d0d8140cf411f20f482768f2cebb9e7d63"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "agentsight"
+version = "0.7.0"
+channel = "stable"
+artifact_id = "agentsight-0.7.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "5c45ea51b08a0b064f299038fff2efd44638c0d7c78e6017990bd75aea9ef8e2"
+size = 11851929
+sbom_path = "agentsight/0.7.0/linux/x86_64/agentsight-0.7.0-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "8a29ccf4c5bf3727dde99e4edafb256091910d61b0a987e8d40a28f37ab98c4a"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "cosh-ng"
+version = "0.11.0"
+channel = "stable"
+artifact_id = "cosh-ng-0.11.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "a2f8aea0947fd8a3e4a4e41a98960f639879033da3b19b971f9aaab513f666b8"
+size = 7703449
+sbom_path = "cosh-ng/0.11.0/linux/x86_64/cosh-ng-0.11.0-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "3f1e7ad87a92eecee9c760d30134a19184526604b98dda12b643af996fb70053"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "cosh"
+version = "2.6.1"
+channel = "stable"
+artifact_id = "cosh-2.6.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "f52e03ab86a81bbb3b243c5061c0bfa7b9005a780e56796771f528151d3462fa"
+size = 5448620
+
+[[entries]]
+component = "os-skills"
+version = "0.6.1"
+channel = "stable"
+artifact_id = "os-skills-0.6.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "4f727d47b34b41bd2d621192847d8fbb2449e8a701ca3bd208e71772e7d5a942"
+size = 336160
+
+[[entries]]
+component = "skillfs"
+version = "0.3.2"
+channel = "stable"
+artifact_id = "skillfs-0.3.2-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "c479096fc15de42711717b5bc95ff01c7f8571fe41c42a2255b24ac843c6cab7"
+size = 2904499
+sbom_path = "skillfs/0.3.2/linux/x86_64/skillfs-0.3.2-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "8ea315cb14725ece5831e60ec35e049ec2bb4ca46b8b78b11527de724d1b43e3"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "tokenless"
+version = "0.6.1"
+channel = "stable"
+artifact_id = "tokenless-0.6.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "5b67f53ff2ecf540cc65226e2252196cb9e58108a0ecd955a87b90899ea0f8fc"
+size = 8422627
+sbom_path = "tokenless/0.6.1/linux/x86_64/tokenless-0.6.1-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "15fb40671176323affc8778ce449fb3bf0ef17943dcb5e10e2e5a0965f506584"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "ws-ckpt"
+version = "0.4.1"
+channel = "stable"
+artifact_id = "ws-ckpt-0.4.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "c3361147e7d1a2c1c13c9cd97db25492bd39187015d2696e618f99d60c1c9f94"
+size = 2912560
+sbom_path = "ws-ckpt/0.4.1/linux/x86_64/ws-ckpt-0.4.1-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "9416b36dc0a6b2636b18e1af9fb0cadcab7261e94a52b98d5bc1f7ba88beae49"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "skillfs"
+version = "0.3.3"
+channel = "stable"
+artifact_id = "skillfs-0.3.3-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "4e5d812dbc19ebd7a436eb50cb5562156916764617e22c5cc4537735f04c7dbf"
+size = 2967275
+sbom_path = "skillfs/0.3.3/linux/x86_64/skillfs-0.3.3-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "19e081f1d616070843f63112cf8017203f65aed2dbfac70cdb17d4fa329d883d"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "cosh"
+version = "2.7.0"
+channel = "stable"
+artifact_id = "cosh-2.7.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "54370d5591bd3729412a73aae7ecc4f8d6a0e427491c3836984cee5e27e8619d"
+size = 5454024
+
+[[entries]]
+component = "cosh-ng"
+version = "0.12.0"
+channel = "stable"
+artifact_id = "cosh-ng-0.12.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "b35819b688fb7c241e9a0485f01dd6aff37d7ac1ab8c14651239b1f11cbb398f"
+size = 6785747
+sbom_path = "cosh-ng/0.12.0/linux/x86_64/cosh-ng-0.12.0-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "630c78acf446aa76ecfab63fcfc75ea3bee97ea98b0d54f310abaf310a5fbdeb"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "tokenless"
+version = "0.7.0"
+channel = "stable"
+artifact_id = "tokenless-0.7.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "e6a72fb9c5ca92bf5d4d376e230b6c0d43618e3ffee5fea4c1fe4aa637762d3a"
+size = 8442467
+sbom_path = "tokenless/0.7.0/linux/x86_64/tokenless-0.7.0-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "7fe95ae74b3de90e31dbad4e121af8f9085237d064b7e0e1574e419ff0c67c5e"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "agent-memory"
+version = "0.2.2"
+channel = "stable"
+artifact_id = "agent-memory-0.2.2-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "f8a00a153a98a37d2d4d16121bbf043bea9ee33a41ea9c8677f107e1ada50fca"
+size = 6138141
+sbom_path = "agent-memory/0.2.2/linux/x86_64/agent-memory-0.2.2-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "11fbb6daee2da9cd1a0fe63880f3425281b618b92717901c2680ca14c38440da"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "agent-memory"
+version = "0.2.3"
+channel = "stable"
+artifact_id = "agent-memory-0.2.3-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "c1a2f9aee9325c01d24545887daa1d92a3e850c863daf103ebcd766a856dd5de"
+size = 6138691
+sbom_path = "agent-memory/0.2.3/linux/x86_64/agent-memory-0.2.3-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "79e4261eadc12184bdcf1baaa6754c07dffeeeadc94756b48d2619cc559cc057"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"
+
+[[entries]]
+component = "agentsight"
+version = "0.8.0"
+channel = "stable"
+artifact_id = "agentsight-0.8.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+sha256 = "91dd1aa20f012e0fe8cc131f67d2fff22ef3fd607df6ef0a7401c31079837fa3"
+size = 12123825
+sbom_path = "agentsight/0.8.0/linux/x86_64/agentsight-0.8.0-linux-x86_64.tar.gz.cdx.json"
+sbom_sha256 = "b3533c8957d37b42ac7ad1adbf804a2669c7f03e25b3a4f33eba6199ec0da7f0"
+sbom_format = "cyclonedx-json"
+sbom_spec_version = "1.6"

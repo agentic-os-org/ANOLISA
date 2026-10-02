@@ -1,0 +1,25 @@
+
+OpenClaw 2026.5.22 (a374c3a) — All your chats, one OpenClaw.
+
+Usage: openclaw plugins install [options] <path-or-spec-or-plugin>
+
+Install a plugin or hook pack (path, archive, npm spec, git repo,
+clawhub:package, or marketplace entry)
+
+Arguments:
+  path-or-spec-or-plugin              Path (.ts/.js/.zip/.tgz/.tar.gz), npm
+                                      package spec, or marketplace plugin name
+
+Options:
+  --dangerously-force-unsafe-install  Bypass built-in dangerous-code install
+                                      blocking (plugin hooks may still block)
+                                      (default: false)
+  --force                             Overwrite an existing installed plugin or
+                                      hook pack (default: false)
+  -h, --help                          Display help for command
+  -l, --link                          Link a local path instead of copying
+                                      (default: false)
+  --marketplace <source>              Install a Claude marketplace plugin from a
+                                      local repo/path or git/GitHub source
+  --pin                               Record npm installs as exact resolved
+                                      <name>@<version> (default: false)

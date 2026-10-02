@@ -1,0 +1,24 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "BeforeModel",
+      "llm_request": {
+        "config": {
+          "tools": [
+            {
+              "function": {
+                "description": "Check connectivity.",
+                "name": "ping",
+                "parameters": {
+                  "properties": {},
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

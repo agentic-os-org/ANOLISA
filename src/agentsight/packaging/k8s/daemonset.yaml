@@ -1,0 +1,102 @@
+# AgentSight node-wide observability (issue #1238, shape A: hostPID).
+#
+# One pod per node observes every Agent process on that node: `hostPID: true`
+# puts the pod in the host PID namespace, and the eBPF probes attach host-wide
+# (uprobes are registered by inode, so agent binaries in other pods are
+# covered). PID attribution stays correct because AgentSight reports PIDs in
+# the observer namespace (fixed in #2360).
+#
+# Apply:
+#   kubectl apply -f daemonset.yaml
+# Verify:
+#   kubectl -n agentsight rollout status ds/agentsight
+#   kubectl -n agentsight port-forward ds/agentsight 7396:7396
+#
+# Prerequisites on every node: Linux kernel >= 5.8 with BTF
+# (/sys/kernel/btf/vmlinux present). A hostPID-free form that bind-mounts the
+# host procfs instead is planned once the procfs-root work (#2804) lands; it
+# also needs a CLI/env knob that does not exist yet — do not remove
+# `hostPID: true` from this manifest until both ship.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentsight
+  labels:
+    app.kubernetes.io/name: agentsight
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agentsight
+  namespace: agentsight
+  labels:
+    app.kubernetes.io/name: agentsight
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentsight
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentsight
+    spec:
+      hostPID: true
+      # AgentSight talks to no Kubernetes API; keep the pod credential-free.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: agentsight
+          # Replace with your registry after building
+          # packaging/docker/Dockerfile (the tag is a placeholder per your
+          # team's registry convention).
+          image: agentsight:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              # BPF+PERFMON: probe load and uprobe attach. SYS_PTRACE: reading
+              # /proc/<pid>/maps of another uid's process requires it once that
+              # process is non-dumpable (verified on kernel 6.6: without it the
+              # read is denied and the agent is silently skipped). On platforms
+              # without fine-grained eBPF capabilities, fall back to
+              # `privileged: true` instead.
+              add: ["BPF", "PERFMON", "SYS_PTRACE"]
+          # Mirrors the packaged systemd unit (CPUQuota=30%,
+          # MemoryMax=350M); the trace loop is sized for these limits.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 350Mi
+          volumeMounts:
+            # CO-RE probes read kernel BTF from the host.
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            # Collected data (SQLite) survives pod restarts.
+            - name: data
+              mountPath: /var/log/sysak
+            # Optional: override /etc/agentsight/config.json. Create the
+            # ConfigMap from the shipped default first, e.g.
+            #   kubectl -n agentsight create configmap agentsight-config \
+            #     --from-file=config.json=<repo>/src/agentsight/agentsight.json
+            # then uncomment both blocks.
+            # - name: config
+            #   mountPath: /etc/agentsight/config.json
+            #   subPath: config.json
+            #   readOnly: true
+      volumes:
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+        - name: data
+          hostPath:
+            path: /var/log/sysak
+            type: DirectoryOrCreate
+        # - name: config
+        #   configMap:
+        #     name: agentsight-config

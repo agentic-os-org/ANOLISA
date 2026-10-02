@@ -1,0 +1,17 @@
+[package]
+name = "anolisa-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anolisa-core.workspace = true
+anolisa-env.workspace = true
+anolisa-platform.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

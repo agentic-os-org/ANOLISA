@@ -1,0 +1,678 @@
+# Built-in audit policy: balanced (factory default).
+#
+# Translates the shell heuristics formerly in cosh-core's `is_safe_command`
+# into declarative rules. Rule order is significant — the FIRST matching rule
+# wins. See `docs/audit-design.md` §7.
+
+version = "v1-balanced"
+default = "RequireApproval"
+
+# ==========================================================================
+# Shell: explicit Deny for destructive single commands.
+# ==========================================================================
+
+[[rules]]
+name = "shell-deny-destructive"
+outcome = "Deny"
+reason = "Destructive or privilege-changing command"
+[rules.matches]
+subsystem = "shell"
+operation = { one_of = [
+  "rm", "dd", "shutdown", "reboot", "halt", "poweroff",
+  "init", "format", "diskutil", "curl", "wget", "sudo", "tee",
+  "chmod", "chown", "mv", "cp", "ln"
+] }
+
+[[rules]]
+name = "shell-deny-mkfs"
+outcome = "Deny"
+reason = "Filesystem creation is never auto-approved"
+[rules.matches]
+subsystem = "shell"
+operation = { glob = "mkfs*" }
+
+# ==========================================================================
+# Shell: git mutating subcommands.
+# ==========================================================================
+
+[[rules]]
+name = "shell-deny-git-mutating"
+outcome = "Deny"
+reason = "Mutating git subcommand"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = { one_of = [
+  "push", "reset", "clean", "checkout", "switch", "restore",
+  "rebase", "merge", "commit", "add", "rm", "mv",
+  "init", "clone", "fetch", "pull",
+  "tag", "apply", "am", "cherry-pick", "revert",
+  "remote", "config", "submodule", "worktree",
+  "filter-branch", "filter-repo", "gc", "prune",
+  "update-ref", "update-index", "reflog",
+  "sparse-checkout", "notes", "bisect"
+] }
+
+# git stash drop / clear / pop / apply / save / store / push / create
+[[rules]]
+name = "shell-deny-git-stash-mutating"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [
+  { key = "drop" },
+]
+
+[[rules]]
+name = "shell-deny-git-stash-clear"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "clear" }]
+
+[[rules]]
+name = "shell-deny-git-stash-pop"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "pop" }]
+
+[[rules]]
+name = "shell-deny-git-stash-apply"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "apply" }]
+
+[[rules]]
+name = "shell-deny-git-stash-save"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "save" }]
+
+[[rules]]
+name = "shell-deny-git-stash-store"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "store" }]
+
+[[rules]]
+name = "shell-deny-git-stash-create"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "create" }]
+
+[[rules]]
+name = "shell-deny-git-stash-push"
+outcome = "Deny"
+reason = "Mutating git stash operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "stash"
+arg = [{ key = "push" }]
+
+# git branch -d / -D / --delete / -m / -M / --move / -c / --copy / --force
+# Each branch flag uses a separate rule because `arg = [...]` is logical AND
+# across entries; the OR is expressed by listing alternative rules.
+[[rules]]
+name = "shell-deny-git-branch-d"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-d" }]
+
+[[rules]]
+name = "shell-deny-git-branch-D"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-D" }]
+
+[[rules]]
+name = "shell-deny-git-branch-delete"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--delete" }]
+
+[[rules]]
+name = "shell-deny-git-branch-m"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-m" }]
+
+[[rules]]
+name = "shell-deny-git-branch-M"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-M" }]
+
+[[rules]]
+name = "shell-deny-git-branch-move"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--move" }]
+
+[[rules]]
+name = "shell-deny-git-branch-c"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-c" }]
+
+[[rules]]
+name = "shell-deny-git-branch-C"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-C" }]
+
+[[rules]]
+name = "shell-deny-git-branch-copy"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--copy" }]
+
+[[rules]]
+name = "shell-deny-git-branch-f"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "-f" }]
+
+[[rules]]
+name = "shell-deny-git-branch-force"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--force" }]
+
+[[rules]]
+name = "shell-deny-git-branch-set-upstream"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--set-upstream-to" }]
+
+[[rules]]
+name = "shell-deny-git-branch-unset-upstream"
+outcome = "Deny"
+reason = "Mutating git branch operation"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = "branch"
+arg = [{ key = "--unset-upstream" }]
+
+# Catch-all for any remaining git subcommand (read-only fall-through).
+[[rules]]
+name = "shell-allow-git-fallback"
+outcome = "Allow"
+reason = "Read-only or non-mutating git subcommand"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+
+# ==========================================================================
+# sed -i / --in-place — in-place edits mutate the file.
+# ==========================================================================
+
+[[rules]]
+name = "shell-deny-sed-inplace-short"
+outcome = "Deny"
+reason = "sed in-place edit (-i)"
+[rules.matches]
+subsystem = "shell"
+operation = "sed"
+arg = [{ key = "-i" }]
+
+[[rules]]
+name = "shell-deny-sed-inplace-long"
+outcome = "Deny"
+reason = "sed in-place edit (--in-place)"
+[rules.matches]
+subsystem = "shell"
+operation = "sed"
+arg = [{ key = "--in-place" }]
+
+[[rules]]
+name = "shell-deny-sed-inplace-glob-short"
+outcome = "Deny"
+reason = "sed in-place edit (-i with suffix)"
+[rules.matches]
+subsystem = "shell"
+operation = "sed"
+arg = [{ key = { glob = "-i?*" } }]
+
+[[rules]]
+name = "shell-deny-sed-inplace-glob-long"
+outcome = "Deny"
+reason = "sed in-place edit (--in-place=...)"
+[rules.matches]
+subsystem = "shell"
+operation = "sed"
+arg = [{ key = { glob = "--in-place=*" } }]
+
+# ==========================================================================
+# find -exec / -delete / -fprint* — destructive or write-side-effects.
+# ==========================================================================
+
+[[rules]]
+name = "shell-deny-find-destructive"
+outcome = "Deny"
+reason = "find action with side effects"
+[rules.matches]
+subsystem = "shell"
+operation = "find"
+arg = [{ key = { one_of = ["-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"] } }]
+
+# ==========================================================================
+# Shell: read-only (head, subcommand) safe pairs.
+# ==========================================================================
+
+[[rules]]
+name = "shell-allow-systemctl-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "systemctl"
+target = { one_of = ["status", "is-active", "is-enabled", "list-units", "list-unit-files", "show", "cat"] }
+
+[[rules]]
+name = "shell-allow-brew-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "brew"
+target = { one_of = ["list", "info", "search", "--version"] }
+
+[[rules]]
+name = "shell-allow-apt-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "apt"
+target = { one_of = ["list", "search", "show"] }
+
+[[rules]]
+name = "shell-allow-apt-cache-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "apt-cache"
+target = { one_of = ["search", "show", "policy"] }
+
+[[rules]]
+name = "shell-allow-dpkg-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "dpkg"
+target = { one_of = ["-l", "-L", "-s", "-W", "--list"] }
+
+[[rules]]
+name = "shell-allow-dpkg-query-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "dpkg-query"
+target = { one_of = ["-W", "-l", "-s", "-L"] }
+
+[[rules]]
+name = "shell-allow-rpm-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "rpm"
+target = { one_of = ["-q", "-qa", "-qi", "-ql", "-qf"] }
+
+[[rules]]
+name = "shell-allow-dnf-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "dnf"
+target = { one_of = ["list", "search", "info", "repoquery"] }
+
+[[rules]]
+name = "shell-allow-zypper-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "zypper"
+target = { one_of = ["search", "info", "se", "if"] }
+
+[[rules]]
+name = "shell-allow-docker-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "docker"
+target = { one_of = ["ps", "images", "inspect", "logs", "version", "info"] }
+
+[[rules]]
+name = "shell-allow-kubectl-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "kubectl"
+target = { one_of = ["get", "describe", "logs", "top", "version", "config"] }
+
+[[rules]]
+name = "shell-allow-cargo-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "cargo"
+target = { one_of = ["--version", "check", "tree", "metadata", "search"] }
+
+[[rules]]
+name = "shell-allow-rustc-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "rustc"
+target = "--version"
+
+[[rules]]
+name = "shell-allow-rustup-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "rustup"
+target = { one_of = ["show", "--version"] }
+
+[[rules]]
+name = "shell-allow-node-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "node"
+target = { one_of = ["--version", "-v"] }
+
+[[rules]]
+name = "shell-allow-npm-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "npm"
+target = { one_of = ["list", "view", "outdated", "--version"] }
+
+[[rules]]
+name = "shell-allow-python-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "python"
+target = { one_of = ["--version", "-V"] }
+
+[[rules]]
+name = "shell-allow-python3-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "python3"
+target = { one_of = ["--version", "-V"] }
+
+[[rules]]
+name = "shell-allow-pip-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "pip"
+target = { one_of = ["list", "show", "--version"] }
+
+[[rules]]
+name = "shell-allow-pip3-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "pip3"
+target = { one_of = ["list", "show", "--version"] }
+
+[[rules]]
+name = "shell-allow-go-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "go"
+target = { one_of = ["version", "env", "list"] }
+
+# ==========================================================================
+# Shell: sensitive-path guard.
+#
+# Intercepts any shell command that references sensitive system or
+# credential files. Must appear BEFORE shell-allow-readonly-singletons
+# so the first-match-wins semantics give RequireApproval instead of Allow.
+# Destructive commands (rm, sudo, mv, …) are already Deny'd by earlier
+# rules, so these guards only affect commands that would otherwise be
+# Allow'd by the readonly-singletons fall-through below.
+# ==========================================================================
+
+# Exact sensitive system files.
+[[rules]]
+name = "shell-sensitive-system-files"
+outcome = "RequireApproval"
+reason = "Command references sensitive system file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { one_of = [
+  "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers"
+] } }]
+
+# Sudoers drop-in directory.
+[[rules]]
+name = "shell-sensitive-sudoersd"
+outcome = "RequireApproval"
+reason = "Command references sensitive sudoers configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/etc/sudoers.d/*" } }]
+
+# /proc/self/* — environment, cmdline, fd, etc.
+[[rules]]
+name = "shell-sensitive-proc-self"
+outcome = "RequireApproval"
+reason = "Command references process self-info"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/proc/self/*" } }]
+
+# SSH keys and config: ~/.ssh/*, /home/*/.ssh/*, /root/.ssh/*
+[[rules]]
+name = "shell-sensitive-ssh-home"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-root"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-tilde"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.ssh/*" } }]
+
+# Shell history files: ~/.bash_history, /home/*/.bash_history, /root/.bash_history
+[[rules]]
+name = "shell-sensitive-shell-history-home"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-root"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-tilde"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.bash_history" } }]
+
+# ==========================================================================
+# Shell: read-only single-token commands. Safe unless arguments reference
+# sensitive paths (guarded above).
+# ==========================================================================
+
+[[rules]]
+name = "shell-allow-readonly-singletons"
+outcome = "Allow"
+reason = "Read-only command"
+[rules.matches]
+subsystem = "shell"
+operation = { one_of = [
+  "uptime", "uname", "hostname", "whoami", "id", "pwd",
+  "ls", "ll", "la", "cat", "head", "tail", "wc",
+  "ps", "top", "htop", "df", "du", "free", "vm_stat",
+  "date", "env", "printenv", "which", "whereis", "type",
+  "echo", "file", "stat", "readlink", "realpath",
+  "find", "locate", "grep", "rg", "ag", "awk", "sed",
+  "sort", "uniq", "cut", "tr", "column",
+  "hg", "svn",
+  "netstat", "ss", "ifconfig", "ip", "lsof", "nslookup", "dig",
+  "journalctl"
+] }
+
+# ==========================================================================
+# Pkg subsystem.
+# ==========================================================================
+
+[[rules]]
+name = "pkg-readonly-allow"
+outcome = "Allow"
+reason = "Read-only pkg operations are safe"
+[rules.matches]
+subsystem = "pkg"
+operation = { one_of = ["search", "list"] }
+
+[[rules]]
+name = "pkg-mutating-approval"
+outcome = "RequireApproval"
+reason = "Pkg install/remove modifies system state"
+[rules.matches]
+subsystem = "pkg"
+operation = { one_of = ["install", "remove"] }
+
+# ==========================================================================
+# Svc subsystem.
+# ==========================================================================
+
+[[rules]]
+name = "svc-readonly-allow"
+outcome = "Allow"
+reason = "Read-only svc operations are safe"
+[rules.matches]
+subsystem = "svc"
+operation = { one_of = ["status", "list"] }
+
+[[rules]]
+name = "svc-mutating-approval"
+outcome = "RequireApproval"
+reason = "Svc start/stop/enable/disable modifies system state"
+[rules.matches]
+subsystem = "svc"
+operation = { one_of = ["start", "stop", "restart", "enable", "disable"] }
+
+# ==========================================================================
+# Checkpoint subsystem.
+# ==========================================================================
+
+[[rules]]
+name = "checkpoint-readonly-allow"
+outcome = "Allow"
+reason = "Read-only checkpoint queries"
+[rules.matches]
+subsystem = "checkpoint"
+operation = { one_of = ["list", "status", "diff"] }
+
+[[rules]]
+name = "checkpoint-mutating-approval"
+outcome = "RequireApproval"
+reason = "Checkpoint mutation"
+[rules.matches]
+subsystem = "checkpoint"
+operation = { one_of = ["create", "restore", "delete", "init", "recover", "cleanup"] }

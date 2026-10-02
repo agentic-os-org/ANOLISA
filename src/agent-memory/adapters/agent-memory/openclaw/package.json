@@ -1,0 +1,39 @@
+{
+  "name": "memory-anolisa-openclaw-plugin",
+  "version": "0.2.8",
+  "type": "module",
+  "main": "dist/index.js",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "scripts/"
+  ],
+  "_comment_openclaw_extensions": "Loaded by the OpenClaw runtime as the plugin entry. The complementary OpenClaw manifest (openclaw.plugin.json, in the same dir) declares the 4 contract tools the bundle registers; the two files must stay in sync — see Makefile's sync-versions target.",
+  "_comment_openclaw_dep": "devDependencies.openclaw is pinned to CalVer 2026.5.7 because openclaw publishes under YYYY.M.P, not semver. manifest.json declares compatibleVersions: '>=5.0.0' which the CalVer string satisfies numerically by coincidence; the constraint is informational only — the plugin-sdk surface used here has been stable since OpenClaw 5.x.",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:openclaw --define:__AGENT_MEMORY_VERSION__=\"\\\"$npm_package_version\\\"\"",
+    "build:check": "tsc --project tsconfig.json --noEmit",
+    "smoke": "npx tsx tests/smoke-test.ts",
+    "test": "npx tsx --test tests/unit/*-test.ts",
+    "test:host-policy": "node tests/host-policy-test.mjs",
+    "test:coverage": "npx c8 --reporter=cobertura --reporter=text --reports-dir=coverage tsx --test tests/unit/*-test.ts"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "devDependencies": {
+    "@types/node": ">=22",
+    "c8": "^10.1.0",
+    "esbuild": "^0.25.0",
+    "openclaw": "2026.5.7",
+    "tsx": "^4.21.0",
+    "typebox": "1.1.38",
+    "typescript": "^5.8.0"
+  }
+}

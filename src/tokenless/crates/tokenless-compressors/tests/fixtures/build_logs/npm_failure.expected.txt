@@ -1,0 +1,17 @@
+$ npm install
+npm http fetch GET 200 https://registry.npmjs.org/accepts 23ms
+npm http fetch GET 200 https://registry.npmjs.org/array-flatten 25ms
+26 package fetch lines omitted. If needed, run in shell: tokenless retrieve 1c6416be6bbcd379cdd570aa
+npm http fetch GET 200 https://registry.npmjs.org/mime-types 79ms
+npm http fetch GET 200 https://registry.npmjs.org/ms 81ms
+npm http fetch GET 404 https://registry.npmjs.org/left-padd 89ms
+npm ERR! code E404
+npm ERR! 404 Not Found - GET https://registry.npmjs.org/left-padd
+npm ERR! 404 
+npm ERR! 404  'left-padd@^1.0.0' is not in this registry.
+npm ERR! 404 
+npm ERR! 404 Note that you can also install from a
+npm ERR! 404 tarball, folder, http url, or git url.
+
+npm ERR! A complete log of this run can be found in:
+npm ERR!     /home/user/.npm/_logs/2026-08-26T09_14_02_113Z-debug-0.log

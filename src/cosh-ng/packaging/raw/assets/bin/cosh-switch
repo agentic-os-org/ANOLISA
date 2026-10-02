@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# RPM owns package switching; raw installs use anolisa install/uninstall.
+set -e
+
+if command -v rpm >/dev/null 2>&1; then
+    current="$(rpm -q --qf '%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo none)"
+    case "$current" in
+        cosh-ng)
+            echo "Current: cosh-ng -> switching to copilot-shell"
+            exec sudo yum swap cosh-ng copilot-shell
+            ;;
+        copilot-shell)
+            echo "Current: copilot-shell -> switching to cosh-ng"
+            exec sudo yum swap copilot-shell cosh-ng
+            ;;
+    esac
+fi
+
+printf '%s\n' \
+    'Error: cosh-switch is only supported for RPM-managed cosh-ng/copilot-shell.' \
+    'For ANOLISA raw installs, switch components with anolisa install/uninstall.' >&2
+exit 1

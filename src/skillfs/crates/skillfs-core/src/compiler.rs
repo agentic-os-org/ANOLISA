@@ -1,0 +1,967 @@
+//! SKILL.md conditional compiler.
+//!
+//! Transforms generic SKILL.md content into environment-specific output via two strategies:
+//!
+//! 1. **Precise compilation** (when `<!-- @if ... -->` directives are present):
+//!    Evaluates conditional blocks and emits only the content relevant to the
+//!    current environment. Directive lines are stripped from output.
+//!
+//! 2. **Heuristic normalization** (no directives present):
+//!    Applies built-in substitution rules (e.g. `pip install` → `uv pip install`
+//!    when `uv` is available) to existing SKILL.md files without modification.
+//!
+//! # Directive Syntax
+//!
+//! ```markdown
+//! <!-- @if has_command("uv") -->
+//! Use uv: `uv pip install -r requirements.txt`
+//! <!-- @else -->
+//! Use pip: `pip install -r requirements.txt`
+//! <!-- @endif -->
+//!
+//! <!-- @if os == darwin -->
+//! macOS specific content
+//! <!-- @endif -->
+//! ```
+//!
+//! # Supported Expressions
+//!
+//! | Expression | Description |
+//! |---|---|
+//! | `os == darwin\|linux\|windows` | OS comparison |
+//! | `os != darwin` | Negated OS comparison |
+//! | `has_command("tool")` | Command available in PATH |
+//! | `has_env("VAR")` | Environment variable is set |
+//! | `expr && expr` | Logical AND |
+//! | `expr \|\| expr` | Logical OR |
+
+use crate::env::EnvironmentProfile;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Compile `content` for the given `env`.
+///
+/// Returns the environment-adapted content. Never fails; returns original
+/// content on any unexpected state.
+pub fn compile(content: &str, env: &EnvironmentProfile) -> String {
+    if has_conditional_blocks(content) {
+        compile_conditional(content, env)
+    } else {
+        apply_heuristic_normalization(content, env)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conditional block compiler
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `content` contains at least one `<!-- @if` directive.
+fn has_conditional_blocks(content: &str) -> bool {
+    content.contains("<!-- @if ")
+}
+
+/// Compile content that contains `<!-- @if -->` / `<!-- @else -->` / `<!-- @endif -->` blocks.
+///
+/// Algorithm:
+/// - Maintain a stack `emit_at_depth: Vec<bool>` starting with `[true]`.
+/// - On `@if expr`: push `eval(expr)` when the parent scope is active, else push `false`.
+/// - On `@else`: toggle the top entry **only** when all parent entries are `true`.
+/// - On `@endif`: pop the top entry.
+/// - Emit a line only when all stack entries are `true`.
+fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
+    let mut output = String::with_capacity(content.len());
+    // Depth 0 = root level, always emit.
+    let mut emit_at_depth: Vec<bool> = vec![true];
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if let Some(expr) = parse_if_directive(trimmed) {
+            // Push: active iff parent scope is active AND condition true.
+            let parent_active = emit_at_depth.iter().all(|&e| e);
+            let condition = parent_active && evaluate_expr(expr, env);
+            emit_at_depth.push(condition);
+            continue;
+        }
+
+        if is_else_directive(trimmed) {
+            if emit_at_depth.len() > 1 {
+                // Toggle only when all parent depths are true.
+                let len = emit_at_depth.len();
+                let parent_active = emit_at_depth[..len - 1].iter().all(|&e| e);
+                if parent_active {
+                    let last = emit_at_depth.last_mut().unwrap();
+                    *last = !*last;
+                }
+            }
+            continue;
+        }
+
+        if is_endif_directive(trimmed) {
+            if emit_at_depth.len() > 1 {
+                emit_at_depth.pop();
+            }
+            continue;
+        }
+
+        // Emit the line when all depth conditions are satisfied.
+        if emit_at_depth.iter().all(|&e| e) {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    // Match trailing newline behaviour of the original content.
+    if !content.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+
+    output
+}
+
+fn parse_if_directive(line: &str) -> Option<&str> {
+    // Format: <!-- @if <expr> -->
+    let inner = line.strip_prefix("<!-- @if ")?.strip_suffix(" -->")?;
+    Some(inner.trim())
+}
+
+fn is_else_directive(line: &str) -> bool {
+    line == "<!-- @else -->"
+}
+
+fn is_endif_directive(line: &str) -> bool {
+    line == "<!-- @endif -->"
+}
+
+// ---------------------------------------------------------------------------
+// Expression evaluator
+// ---------------------------------------------------------------------------
+
+/// Evaluate a boolean expression string against `env`.
+///
+/// Operator precedence: `||` is evaluated before `&&` (left-to-right scan).
+/// Parentheses are not supported in Phase 1.
+fn evaluate_expr(expr: &str, env: &EnvironmentProfile) -> bool {
+    let expr = expr.trim();
+
+    // Try || first (left-most top-level occurrence).
+    if let Some(pos) = find_op(expr, "||") {
+        return evaluate_expr(&expr[..pos], env) || evaluate_expr(&expr[pos + 2..], env);
+    }
+
+    // Then &&
+    if let Some(pos) = find_op(expr, "&&") {
+        return evaluate_expr(&expr[..pos], env) && evaluate_expr(&expr[pos + 2..], env);
+    }
+
+    evaluate_primitive(expr, env)
+}
+
+/// Find the position of `op` in `expr`, ignoring occurrences inside parentheses
+/// or quoted strings.
+fn find_op(expr: &str, op: &str) -> Option<usize> {
+    let bytes = expr.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut depth: usize = 0;
+    let mut in_quote = false;
+    let mut quote_char = b'"';
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quote {
+            if b == quote_char {
+                in_quote = false;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' => {
+                    in_quote = true;
+                    quote_char = b;
+                }
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if depth == 0
+                && i + op_bytes.len() <= bytes.len()
+                && &bytes[i..i + op_bytes.len()] == op_bytes
+            {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Evaluate a single primitive expression (no boolean operators).
+fn evaluate_primitive(expr: &str, env: &EnvironmentProfile) -> bool {
+    let expr = expr.trim();
+
+    // has_command("tool")
+    if let Some(arg) = strip_func_arg(expr, "has_command") {
+        return env.has_command(unquote(arg));
+    }
+
+    // has_env("VAR")
+    if let Some(arg) = strip_func_arg(expr, "has_env") {
+        return env.has_env(unquote(arg));
+    }
+
+    // os == value
+    if let Some(pos) = expr.find("==") {
+        let lhs = expr[..pos].trim();
+        let rhs = unquote(expr[pos + 2..].trim());
+        if lhs == "os" {
+            return env.os.as_str() == rhs;
+        }
+    }
+
+    // os != value
+    if let Some(pos) = expr.find("!=") {
+        let lhs = expr[..pos].trim();
+        let rhs = unquote(expr[pos + 2..].trim());
+        if lhs == "os" {
+            return env.os.as_str() != rhs;
+        }
+    }
+
+    // Unknown expression: safe default is false.
+    false
+}
+
+/// Extract the argument from `func_name(...)`.
+fn strip_func_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
+    let prefix = format!("{}(", func_name);
+    let inner = expr.strip_prefix(prefix.as_str())?.strip_suffix(')')?;
+    Some(inner.trim())
+}
+
+/// Strip surrounding single or double quotes from a string.
+fn unquote(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Heuristic normalization
+// ---------------------------------------------------------------------------
+
+/// Apply heuristic command substitution rules to `content` without modifying
+/// the overall structure of the file.
+///
+/// Returns a clone of the original content when no rules apply (idempotent).
+fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> String {
+    let has_uv = env.has_command("uv");
+    let node_pm = detect_best_node_pm(env);
+
+    // Fast path: nothing to do.
+    if !has_uv && node_pm.is_empty() {
+        return content.to_string();
+    }
+
+    let mut output = String::with_capacity(content.len());
+
+    for line in content.lines() {
+        output.push_str(&normalize_line(line, has_uv, &node_pm));
+        output.push('\n');
+    }
+
+    // Match trailing newline of original.
+    if !content.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+
+    output
+}
+
+/// Shell tokens that may precede the command being invoked without changing
+/// what it is.
+const TRANSPARENT_PREFIXES: &[&str] = &["sudo", "doas", "env", "nohup", "exec", "command"];
+
+/// Options of transparent prefixes that consume a separate value token
+/// (`sudo -u root cmd`), so the value is not mistaken for the command word.
+/// The table is per prefix: `command -p`, for example, takes no value while
+/// `env -C /tmp` consumes `/tmp`.
+fn prefix_option_consumes_value(prefix: &str, option: &str) -> bool {
+    matches!(
+        (prefix, option),
+        (
+            "sudo",
+            "-u" | "-g" | "-p" | "-C" | "-R" | "-T" | "-U" | "-h"
+        ) | ("doas" | "env", "-u" | "-C")
+            | ("exec", "-a")
+    )
+}
+
+/// Options known to take no separate value (`env -i cmd`, `command -p cmd`).
+fn prefix_option_is_valueless(prefix: &str, option: &str) -> bool {
+    matches!(
+        (prefix, option),
+        (
+            "sudo",
+            "-b" | "-e" | "-H" | "-i" | "-k" | "-K" | "-l" | "-n" | "-P" | "-s" | "-v"
+        ) | ("doas", "-n" | "-s" | "-L")
+            | ("env", "-i" | "-0" | "-v")
+            | ("exec", "-c" | "-l")
+            | ("command", "-p")
+    )
+}
+
+/// `NAME=VALUE` environment assignment. Option-like tokens (`--key=value`)
+/// are not assignments.
+fn is_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((name, _)) => !name.is_empty() && !name.starts_with('-'),
+        None => false,
+    }
+}
+
+/// Whether the word starting at byte `pos` is the command being invoked on
+/// this line. It must begin at an independent shell token, and everything
+/// before it — back to the nearest unquoted command boundary (`&&`, `|`,
+/// `;`, `$(`, backtick) — may only be environment assignments (`FOO=1`),
+/// transparent execution prefixes (`sudo`, `env`, ...), possibly chained
+/// (`sudo env FOO=1`, `env nohup`), and their options/value tokens
+/// (`sudo -u root`). An argument or subcommand of another command
+/// (`echo sudo virtualenv`, `pip install virtualenv`, `pyenv virtualenv`) is
+/// not; a match inside a larger token (`VENV_TOOL=virtualenv`) or an option
+/// value with no following token (`sudo -u virtualenv id`) is not either.
+///
+/// Quote- and escape-aware: separators inside quotes (`LABEL='a; b'`) are
+/// not boundaries, and quoted runs stay inside their token. When the prefix
+/// ends inside an unterminated quote or escape, or hits an unrecognized
+/// option, the position cannot be determined and the caller keeps the
+/// original text.
+fn is_command_position(line: &str, pos: usize) -> bool {
+    let prefix = &line[..pos];
+    if let Some(last_char) = prefix.chars().next_back() {
+        let boundary =
+            last_char.is_whitespace() || matches!(last_char, ';' | '|' | '&' | '(' | '`');
+        if !boundary {
+            return false;
+        }
+    }
+    let Some(tokens) = last_command_segment_tokens(prefix) else {
+        return false; // unterminated quote/escape: position unknowable
+    };
+    let mut chain: Option<&str> = None; // None: waiting for the command word
+    let mut tokens = tokens.into_iter();
+    while let Some(token) = tokens.next() {
+        match chain {
+            None => {
+                if is_assignment(token) {
+                    continue; // another env assignment before the command
+                }
+                if TRANSPARENT_PREFIXES.contains(&token) {
+                    chain = Some(token);
+                    continue;
+                }
+                return false; // the command word is already present; the match is its argument
+            }
+            Some(current) => {
+                if is_assignment(token) {
+                    continue; // `env FOO=1 cmd`
+                }
+                if token.starts_with('-') {
+                    let self_contained_long = token.starts_with("--") && token.contains('=');
+                    if prefix_option_consumes_value(current, token) {
+                        if tokens.next().is_none() {
+                            // No value token left in the prefix: the match
+                            // itself is the option's value
+                            // (`sudo -u virtualenv id`).
+                            return false;
+                        }
+                    } else if !self_contained_long && !prefix_option_is_valueless(current, token) {
+                        // Unrecognized option: it may or may not consume the
+                        // match as its value, so the position is unknowable.
+                        return false;
+                    }
+                    continue;
+                }
+                if TRANSPARENT_PREFIXES.contains(&token) {
+                    chain = Some(token); // `sudo env ...`, `env FOO=1 nohup ...`
+                    continue;
+                }
+                return false; // a bare word ends the prefix chain: it is the command
+            }
+        }
+    }
+    true
+}
+
+/// Tokenize `prefix` into shell-ish words, honoring single quotes, double
+/// quotes, backslash escapes, and command boundaries (`;`, `|`, `&`, `(`,
+/// backtick). Tokens before the last unquoted boundary are dropped so the
+/// walk sees only the final command segment; a quoted run stays inside its
+/// token (`FOO='a; b'`). Returns `None` when the prefix ends inside an
+/// unterminated quote or escape — the match position cannot be determined
+/// and the caller keeps the original text.
+fn last_command_segment_tokens(prefix: &str) -> Option<Vec<&str>> {
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut token_start: Option<usize> = None;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (i, ch) in prefix.char_indices() {
+        if escaped {
+            escaped = false; // the escaped character stays inside its token
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escaped = true;
+                token_start.get_or_insert(i);
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                token_start.get_or_insert(i);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                token_start.get_or_insert(i);
+            }
+            ';' | '|' | '&' | '(' | '`' if !in_single && !in_double => {
+                if let Some(ts) = token_start.take() {
+                    tokens.push(&prefix[ts..i]);
+                }
+                tokens.clear(); // command boundary: earlier tokens are another command
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if let Some(ts) = token_start.take() {
+                    tokens.push(&prefix[ts..i]);
+                }
+            }
+            _ => {
+                token_start.get_or_insert(i);
+            }
+        }
+    }
+    if in_single || in_double || escaped {
+        return None;
+    }
+    if let Some(ts) = token_start.take() {
+        tokens.push(&prefix[ts..]);
+    }
+    Some(tokens)
+}
+
+/// Apply heuristic substitutions to a single line.
+fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
+    let mut result = line.to_string();
+
+    if has_uv {
+        // pip install / pip3 install → uv pip install
+        for pip_cmd in &["pip3 install", "pip install"] {
+            if result.contains(pip_cmd) && !result.contains("uv pip install") {
+                result = result.replace(pip_cmd, "uv pip install");
+                break; // only one replacement per line
+            }
+        }
+
+        // python -m venv / python3 -m venv → uv venv
+        for venv_cmd in &["python3 -m venv", "python -m venv"] {
+            if result.contains(venv_cmd) {
+                result = result.replace(venv_cmd, "uv venv");
+                break;
+            }
+        }
+
+        // virtualenv <name> → uv venv <name> — only when `virtualenv` is the
+        // command being invoked: mkvirtualenv, pyenv virtualenv, and
+        // `pip install virtualenv` are different words or argument positions
+        // and must pass through untouched. Position checks always run against
+        // the full (pre-substitution) line with absolute offsets, so a later
+        // match on the same line — an argument of an earlier `virtualenv` —
+        // keeps its original context.
+        if result.contains("virtualenv ") && !result.contains("uv venv") {
+            let mut out = String::with_capacity(result.len());
+            let mut copied = 0; // bytes of `result` already emitted
+            let mut search = 0; // search offset within the original line
+            while let Some(rel) = result[search..].find("virtualenv ") {
+                let abs = search + rel;
+                if is_command_position(&result, abs) {
+                    out.push_str(&result[copied..abs]);
+                    out.push_str("uv venv ");
+                    copied = abs + "virtualenv ".len();
+                }
+                search = abs + "virtualenv ".len();
+            }
+            out.push_str(&result[copied..]);
+            result = out;
+        }
+    }
+
+    // Node package manager normalization.
+    if !node_pm.is_empty() && node_pm != "npm" {
+        let npm_install = "npm install";
+        let pm_install = format!("{} install", node_pm);
+        if result.contains(npm_install) && !result.contains(&pm_install) {
+            result = result.replace(npm_install, &pm_install);
+        }
+
+        let npm_run = "npm run ";
+        let pm_run = format!("{} run ", node_pm);
+        if result.contains(npm_run) {
+            result = result.replace(npm_run, &pm_run);
+        }
+
+        let npm_test = "npm test";
+        let pm_test = format!("{} test", node_pm);
+        if result.contains(npm_test) && !result.contains(&pm_test) {
+            result = result.replace(npm_test, &pm_test);
+        }
+    }
+
+    result
+}
+
+/// Choose the best available Node package manager (pnpm > yarn > npm).
+fn detect_best_node_pm(env: &EnvironmentProfile) -> String {
+    if env.has_command("pnpm") {
+        "pnpm".to_string()
+    } else if env.has_command("yarn") {
+        "yarn".to_string()
+    } else if env.has_command("npm") {
+        "npm".to_string()
+    } else {
+        String::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::{EnvironmentProfile, OsKind};
+    use std::collections::{HashMap, HashSet};
+
+    fn env_darwin_uv() -> EnvironmentProfile {
+        let mut cmds = HashSet::new();
+        cmds.insert("uv".to_string());
+        cmds.insert("python3".to_string());
+        EnvironmentProfile {
+            os: OsKind::Darwin,
+            available_commands: cmds,
+            env_vars: HashMap::new(),
+        }
+    }
+
+    fn env_linux_no_uv() -> EnvironmentProfile {
+        let mut cmds = HashSet::new();
+        cmds.insert("python3".to_string());
+        cmds.insert("pip".to_string());
+        EnvironmentProfile {
+            os: OsKind::Linux,
+            available_commands: cmds,
+            env_vars: HashMap::new(),
+        }
+    }
+
+    fn env_node_pnpm() -> EnvironmentProfile {
+        let mut cmds = HashSet::new();
+        cmds.insert("pnpm".to_string());
+        cmds.insert("node".to_string());
+        EnvironmentProfile {
+            os: OsKind::Linux,
+            available_commands: cmds,
+            env_vars: HashMap::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // @if/@else/@endif tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_if_true_emits_if_block() {
+        let env = env_darwin_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\nC\n";
+        let result = compile(content, &env);
+        assert!(result.contains('A'), "A should be emitted");
+        assert!(result.contains('B'), "B (darwin block) should be emitted");
+        assert!(result.contains('C'), "C should be emitted");
+        assert!(!result.contains("@if"), "directives should be stripped");
+    }
+
+    #[test]
+    fn test_if_false_skips_if_block() {
+        let env = env_linux_no_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\nC\n";
+        let result = compile(content, &env);
+        assert!(result.contains('A'));
+        assert!(!result.contains('B'), "B should be skipped on linux");
+        assert!(result.contains('C'));
+    }
+
+    #[test]
+    fn test_if_else_endif() {
+        let env = env_darwin_uv();
+        let content =
+            "<!-- @if os == darwin -->\ndarwin-line\n<!-- @else -->\nlinux-line\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(
+            result.contains("darwin-line"),
+            "darwin block should be emitted"
+        );
+        assert!(
+            !result.contains("linux-line"),
+            "else block should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_if_false_else_emitted() {
+        let env = env_linux_no_uv();
+        let content =
+            "<!-- @if os == darwin -->\ndarwin-line\n<!-- @else -->\nlinux-line\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(!result.contains("darwin-line"));
+        assert!(result.contains("linux-line"));
+    }
+
+    #[test]
+    fn test_has_command_true() {
+        let env = env_darwin_uv();
+        let content = "<!-- @if has_command(\"uv\") -->\nuv-line\n<!-- @else -->\npip-line\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(result.contains("uv-line"));
+        assert!(!result.contains("pip-line"));
+    }
+
+    #[test]
+    fn test_has_command_false_uses_else() {
+        let env = env_linux_no_uv();
+        let content = "<!-- @if has_command(\"uv\") -->\nuv-line\n<!-- @else -->\npip-line\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(!result.contains("uv-line"));
+        assert!(result.contains("pip-line"));
+    }
+
+    #[test]
+    fn test_nested_if_parent_false_skips_child() {
+        let env = env_linux_no_uv();
+        // Parent @if false → both if and else blocks in child should be skipped
+        let content = "<!-- @if os == darwin -->\n<!-- @if has_command(\"uv\") -->\nA\n<!-- @else -->\nB\n<!-- @endif -->\n<!-- @endif -->\nC\n";
+        let result = compile(content, &env);
+        assert!(!result.contains('A'), "A should be skipped: parent false");
+        assert!(!result.contains('B'), "B should be skipped: parent false");
+        assert!(result.contains('C'));
+    }
+
+    #[test]
+    fn test_nested_if_both_true() {
+        let env = env_darwin_uv();
+        let content = "<!-- @if os == darwin -->\n<!-- @if has_command(\"uv\") -->\nA\n<!-- @endif -->\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(result.contains('A'));
+    }
+
+    #[test]
+    fn test_no_directives_returns_original() {
+        let env = env_linux_no_uv();
+        let content = "Hello world\nno directives here\n";
+        // env_linux_no_uv has no uv, no pnpm/yarn → nothing to normalize
+        let result = compile(content, &env);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_directives_stripped_from_output() {
+        let env = env_darwin_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\n";
+        let result = compile(content, &env);
+        assert!(!result.contains("<!-- @if"));
+        assert!(!result.contains("<!-- @endif -->"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Heuristic normalization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_heuristic_pip_to_uv_pip() {
+        let env = env_darwin_uv();
+        let content = "Run: pip install requests\n";
+        let result = compile(content, &env);
+        assert!(
+            result.contains("uv pip install"),
+            "should use uv pip install"
+        );
+        // The result should NOT contain a bare "pip install" (without the "uv " prefix).
+        // We check by splitting on "uv pip install" and ensuring no fragment starts with "pip install".
+        assert!(
+            !result
+                .replace("uv pip install", "__REPLACED__")
+                .contains("pip install"),
+            "bare pip install should be gone after substitution"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_pip3_to_uv_pip() {
+        let env = env_darwin_uv();
+        let content = "pip3 install -r requirements.txt\n";
+        let result = compile(content, &env);
+        assert!(result.contains("uv pip install -r requirements.txt"));
+    }
+
+    #[test]
+    fn test_heuristic_venv_to_uv_venv() {
+        let env = env_darwin_uv();
+        let content = "python -m venv .venv\n";
+        let result = compile(content, &env);
+        assert!(result.contains("uv venv .venv"));
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_to_uv_venv() {
+        let env = env_darwin_uv();
+        let content = "virtualenv myenv\n";
+        let result = compile(content, &env);
+        assert!(result.contains("uv venv myenv"));
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_command_position_boundaries() {
+        let env = env_darwin_uv();
+        // Boundary cases from the #3525 review: a bare word in front of the
+        // prefix chain (`echo sudo`), an assignment whose value contains the
+        // match, and a prefix option consuming a separate value token.
+        let content = "echo sudo virtualenv myenv\nVENV_TOOL=virtualenv make\nsudo -u root virtualenv myenv\nenv FOO=1 virtualenv myenv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "echo sudo virtualenv myenv");
+        assert_eq!(lines[1], "VENV_TOOL=virtualenv make");
+        assert_eq!(
+            lines[2], "sudo -u root uv venv myenv",
+            "prefix option values are walked past"
+        );
+        assert_eq!(
+            lines[3], "env FOO=1 uv venv myenv",
+            "env assignments keep the chain"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_option_values_vs_command_position() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up: an option value with no following token is
+        // the match itself (`sudo -u virtualenv id` — virtualenv is the
+        // username), and `command -p` consumes no value, so `python` stays
+        // the command word and `virtualenv` its argument.
+        let content = "sudo -u virtualenv id\ncommand -p python virtualenv myenv\nsudo env FOO=1 virtualenv .venv\nenv FOO=1 nohup virtualenv .venv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "sudo -u virtualenv id");
+        assert_eq!(lines[1], "command -p python virtualenv myenv");
+        assert_eq!(
+            lines[2], "sudo env FOO=1 uv venv .venv",
+            "chained prefixes rewrite"
+        );
+        assert_eq!(
+            lines[3], "env FOO=1 nohup uv venv .venv",
+            "assignment then chained prefix rewrite"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_multiple_matches_keep_argument() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up: the second `virtualenv` is an argument of
+        // the first; position checks must run against the full line.
+        let content = "virtualenv virtualenv --python=python3\n";
+        assert_eq!(
+            compile(content, &env),
+            "uv venv virtualenv --python=python3\n"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_quotes_escapes_and_unknown_options() {
+        let env = env_darwin_uv();
+        // #3525 review follow-up 2: quoted separators and escaped separators
+        // are not command boundaries (the match sits inside a quoted value or
+        // after an escaped one — keep the original); unrecognized options
+        // fail closed (position unknowable — keep the original); known value
+        // options consume their value and the real command after them is
+        // rewritten.
+        let content = concat!(
+            "env LABEL='example; virtualenv myenv' python app.py\n",
+            "echo a\\; virtualenv x\n",
+            "cd /tmp; virtualenv .venv\n",
+            "env -C virtualenv python app.py\n",
+            "exec -a virtualenv python app.py\n",
+            "env -C /tmp virtualenv .venv\n",
+            "sudo --preserve-env virtualenv x\n",
+        );
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(
+            lines[0], "env LABEL='example; virtualenv myenv' python app.py",
+            "a semicolon inside quotes is not a command boundary"
+        );
+        assert_eq!(
+            lines[1], "echo a\\; virtualenv x",
+            "an escaped separator is not a command boundary"
+        );
+        assert_eq!(
+            lines[2], "cd /tmp; uv venv .venv",
+            "a real command separator is honored"
+        );
+        assert_eq!(
+            lines[3], "env -C virtualenv python app.py",
+            "-C consumes the match as its value"
+        );
+        assert_eq!(
+            lines[4], "exec -a virtualenv python app.py",
+            "-a consumes the match as its argv[0]"
+        );
+        assert_eq!(
+            lines[5], "env -C /tmp uv venv .venv",
+            "after a known value option the real command is rewritten"
+        );
+        assert_eq!(
+            lines[6], "sudo --preserve-env virtualenv x",
+            "an unrecognized option fails closed"
+        );
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_only_as_invoked_command() {
+        let env = env_darwin_uv();
+        // mkvirtualenv / pyenv subcommand / package argument must not be
+        // rewritten — substring replacement corrupted all three.
+        let content = "mkvirtualenv myenv\npyenv virtualenv myenv\npip install virtualenv\nsudo virtualenv myenv\nvirtualenv myenv\n";
+        let compiled = compile(content, &env);
+        let lines: Vec<&str> = compiled.lines().collect();
+        assert_eq!(lines[0], "mkvirtualenv myenv");
+        assert_eq!(lines[1], "pyenv virtualenv myenv");
+        assert_eq!(lines[2], "uv pip install virtualenv");
+        assert_eq!(
+            lines[3], "sudo uv venv myenv",
+            "sudo-prefixed command is rewritten in place"
+        );
+        assert_eq!(lines[4], "uv venv myenv");
+    }
+
+    #[test]
+    fn test_heuristic_no_double_replace() {
+        let env = env_darwin_uv();
+        let content = "uv pip install requests\n";
+        let result = compile(content, &env);
+        // Should not become "uv uv pip install"
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_heuristic_npm_to_pnpm() {
+        let env = env_node_pnpm();
+        let content = "npm install\nnpm run build\nnpm test\n";
+        let result = compile(content, &env);
+        assert!(result.contains("pnpm install"));
+        assert!(result.contains("pnpm run build"));
+        assert!(result.contains("pnpm test"));
+    }
+
+    #[test]
+    fn test_heuristic_no_uv_unchanged() {
+        let env = env_linux_no_uv();
+        let content = "pip install requests\n";
+        // No uv available → no substitution
+        let result = compile(content, &env);
+        assert_eq!(result, content);
+    }
+
+    // -----------------------------------------------------------------------
+    // Expression evaluator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_expr_and_short_circuit() {
+        let env = env_linux_no_uv();
+        // "os == linux && has_command(uv)" → false (uv not present)
+        assert!(!evaluate_expr("os == linux && has_command(\"uv\")", &env));
+        // "os == linux && has_command(python3)" → true
+        assert!(evaluate_expr(
+            "os == linux && has_command(\"python3\")",
+            &env
+        ));
+    }
+
+    #[test]
+    fn test_expr_or() {
+        let env = env_linux_no_uv();
+        assert!(evaluate_expr("os == darwin || os == linux", &env));
+        assert!(!evaluate_expr("os == darwin || os == windows", &env));
+    }
+
+    #[test]
+    fn test_expr_os_neq() {
+        let env = env_darwin_uv();
+        assert!(evaluate_expr("os != linux", &env));
+        assert!(!evaluate_expr("os != darwin", &env));
+    }
+
+    #[test]
+    fn test_unquote_single_char_no_panic() {
+        assert_eq!(unquote("\""), "\"");
+        assert_eq!(unquote("'"), "'");
+        assert_eq!(unquote(""), "");
+    }
+
+    #[test]
+    fn test_unquote_matched_pair() {
+        assert_eq!(unquote("\"x\""), "x");
+        assert_eq!(unquote("'x'"), "x");
+        assert_eq!(unquote("\"\""), "");
+        assert_eq!(unquote("''"), "");
+    }
+
+    #[test]
+    fn test_unquote_mismatched_quotes() {
+        assert_eq!(unquote("\"x'"), "\"x'");
+        assert_eq!(unquote("'x\""), "'x\"");
+    }
+
+    #[test]
+    fn test_compile_malformed_directives_never_panic() {
+        let env = env_linux_no_uv();
+        let cases = [
+            "<!-- @if has_command(\") -->\nA\n<!-- @endif -->",
+            "<!-- @if os == \" -->\nA\n<!-- @endif -->",
+            "<!-- @if os == ' -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(\")\") -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(\"\") -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command('') -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(') -->\nA\n<!-- @endif -->",
+            "<!-- @if os == -->\nA\n<!-- @endif -->",
+        ];
+        for input in cases {
+            let _ = compile(input, &env);
+        }
+    }
+
+    #[test]
+    fn test_trailing_newline_preserved() {
+        let env = env_darwin_uv();
+        let with_newline = "line\n";
+        let without_newline = "line";
+        let r1 = compile(with_newline, &env);
+        let r2 = compile(without_newline, &env);
+        assert!(r1.ends_with('\n'));
+        assert!(!r2.ends_with('\n'));
+    }
+}

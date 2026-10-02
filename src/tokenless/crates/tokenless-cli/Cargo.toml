@@ -1,0 +1,29 @@
+[package]
+name = "tokenless-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool for LLM schema and response compression"
+
+[[bin]]
+name = "tokenless"
+path = "src/main.rs"
+
+[dependencies]
+tokenless-protocol = { path = "../tokenless-protocol" }
+tokenless-schema = { path = "../tokenless-schema" }
+tokenless-stats = { path = "../tokenless-stats" }
+tokenless-ccr = { path = "../tokenless-ccr" }
+tokenless-runtime = { path = "../tokenless-runtime" }
+dirs.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+toon-format.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+rusqlite.workspace = true
+libc.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true

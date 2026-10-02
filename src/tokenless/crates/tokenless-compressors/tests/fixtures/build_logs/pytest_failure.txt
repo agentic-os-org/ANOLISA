@@ -1,0 +1,52 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+collected 34 items
+
+tests/test_core.py::test_case_00 [1m[32mPASSED[0m [  2%]
+tests/test_core.py::test_case_01 [1m[32mPASSED[0m [  5%]
+tests/test_core.py::test_case_02 [1m[32mPASSED[0m [  8%]
+tests/test_core.py::test_case_03 [1m[32mPASSED[0m [ 11%]
+tests/test_core.py::test_case_04 [1m[32mPASSED[0m [ 14%]
+tests/test_core.py::test_case_05 [1m[32mPASSED[0m [ 17%]
+tests/test_core.py::test_case_06 [1m[32mPASSED[0m [ 20%]
+tests/test_core.py::test_case_07 [1m[32mPASSED[0m [ 23%]
+tests/test_core.py::test_case_08 [1m[32mPASSED[0m [ 26%]
+tests/test_core.py::test_case_09 [1m[32mPASSED[0m [ 29%]
+tests/test_core.py::test_case_10 [1m[32mPASSED[0m [ 32%]
+tests/test_core.py::test_case_11 [1m[32mPASSED[0m [ 35%]
+tests/test_core.py::test_case_12 [1m[32mPASSED[0m [ 38%]
+tests/test_core.py::test_case_13 [1m[32mPASSED[0m [ 41%]
+tests/test_core.py::test_case_14 [1m[32mPASSED[0m [ 44%]
+tests/test_core.py::test_case_15 [1m[32mPASSED[0m [ 47%]
+tests/test_core.py::test_case_16 [1m[32mPASSED[0m [ 50%]
+tests/test_core.py::test_case_17 [1m[32mPASSED[0m [ 52%]
+tests/test_core.py::test_case_18 [1m[32mPASSED[0m [ 55%]
+tests/test_core.py::test_case_19 [1m[32mPASSED[0m [ 58%]
+tests/test_math.py::test_answer [1m[31mFAILED[0m [ 61%]
+tests/test_core.py::test_case_20 [1m[32mPASSED[0m [ 61%]
+tests/test_core.py::test_case_21 [1m[32mPASSED[0m [ 64%]
+tests/test_core.py::test_case_22 [1m[32mPASSED[0m [ 67%]
+tests/test_core.py::test_case_23 [1m[32mPASSED[0m [ 70%]
+tests/test_core.py::test_case_24 [1m[32mPASSED[0m [ 73%]
+tests/test_core.py::test_case_25 [1m[32mPASSED[0m [ 76%]
+tests/test_core.py::test_case_26 [1m[32mPASSED[0m [ 79%]
+tests/test_core.py::test_case_27 [1m[32mPASSED[0m [ 82%]
+tests/test_core.py::test_case_28 [1m[32mPASSED[0m [ 85%]
+tests/test_core.py::test_case_29 [1m[32mPASSED[0m [ 88%]
+tests/test_core.py::test_case_30 [1m[32mPASSED[0m [ 91%]
+tests/test_core.py::test_case_31 [1m[32mPASSED[0m [ 94%]
+tests/test_core.py::test_case_32 [1m[32mPASSED[0m [ 97%]
+
+=================================== FAILURES ===================================
+_________________________________ test_answer __________________________________
+
+    def test_answer():
+>       assert compute() == 4
+E       assert 3 == 4
+E        +  where 3 = compute()
+
+tests/test_math.py:12: AssertionError
+=========================== short test summary info ============================
+[1m[31mFAILED[0m tests/test_math.py::test_answer - assert 3 == 4
+[1m[31m========================= 1 failed, 33 passed in 2.14s =========================[0m

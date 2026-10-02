@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""SessionStart hook: check tokenless availability and report version.
+
+This hook runs once per session to verify the tokenless CLI is installed
+and functional. On failure it emits a silent warning via stderr but never
+blocks the session (fail-open).
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from typing import Optional, Tuple
+
+try:
+    import pwd as _pwd
+
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+
+def _warn(msg: str) -> None:
+    print(f"[tokenless] {msg}", file=sys.stderr)
+
+
+def _known_tokenless_paths(home: Optional[str] = None) -> Tuple[str, ...]:
+    """Return standalone fallbacks for the supported installation layouts."""
+    # Codex can cache this script without common/hooks. Keep this standalone
+    # copy aligned with hook_utils.py::_known_binary_paths.
+    user_home = _REAL_HOME if home is None else home
+    user_home = user_home if user_home and os.path.isabs(user_home) else ""
+    paths = []
+    if user_home:
+        paths.append(os.path.join(user_home, ".local", "bin", "tokenless"))
+    paths.extend(("/usr/local/bin/tokenless", "/usr/bin/tokenless"))
+    if user_home:
+        paths.extend(
+            (
+                os.path.join(
+                    user_home,
+                    ".local",
+                    "share",
+                    "anolisa",
+                    "tokenless",
+                    "tokenless",
+                ),
+                os.path.join(
+                    user_home,
+                    ".local",
+                    "lib",
+                    "anolisa",
+                    "tokenless",
+                    "tokenless",
+                ),
+            )
+        )
+    return tuple(paths)
+
+
+def main() -> None:
+    # Find tokenless
+    tokenless_bin = shutil.which("tokenless")
+    if not tokenless_bin:
+        for fp in _known_tokenless_paths():
+            if os.path.isfile(fp) and os.access(fp, os.X_OK):
+                tokenless_bin = fp
+                break
+
+    if not tokenless_bin:
+        _warn("tokenless not found. Compression disabled for this session.")
+        sys.exit(0)
+
+    # Version check
+    try:
+        proc = subprocess.run(
+            [tokenless_bin, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            _warn(f"tokenless ready: {proc.stdout.strip()}")
+        else:
+            _warn(f"tokenless --version failed (exit {proc.returncode})")
+    except Exception as e:
+        _warn(f"tokenless version check failed: {e}")
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

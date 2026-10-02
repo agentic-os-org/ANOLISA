@@ -1,0 +1,9 @@
+name: tokenless
+version: "@VERSION@"
+description: "Tokenless lifecycle integration for Hermes Agent — Core-owned command rewriting and result optimization"
+author: ANOLISA
+requires_env: []
+provides_hooks:
+  - transform_tool_result
+  - pre_tool_call
+  - on_session_start

@@ -1,0 +1,62 @@
+name: CI / Tokenless prebuilt action
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/actions/build-tokenless-prebuilt/**'
+      - '.github/actions/package-source/**'
+      - '.github/actions/prebuilt-rust-common/**'
+      - '.github/workflows/tokenless-prebuilt-ci.yaml'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/release-preview.yaml'
+      - 'src/tokenless/**'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/actions/build-tokenless-prebuilt/**'
+      - '.github/actions/package-source/**'
+      - '.github/actions/prebuilt-rust-common/**'
+      - '.github/workflows/tokenless-prebuilt-ci.yaml'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/release-preview.yaml'
+      - 'src/tokenless/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+  RUSTUP_TOOLCHAIN: '1.93.0'
+
+jobs:
+  test:
+    name: Test Tokenless prebuilt action
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Install cargo-sbom
+        run: cargo install cargo-sbom --version 0.10.0 --locked
+
+      - name: Run prebuilt action regression tests
+        run: .github/actions/build-tokenless-prebuilt/test.sh
+
+      - name: Run prebuilt matrix planner tests
+        run: python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
+
+      - name: Run Tokenless raw package tests
+        run: src/tokenless/tests/test-package-raw.sh

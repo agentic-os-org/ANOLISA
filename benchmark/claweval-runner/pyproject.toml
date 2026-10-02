@@ -1,0 +1,41 @@
+[project]
+name = "ce-runner"
+dynamic = ["version"]
+description = "ClawEval runner — orchestrate openclaw agent evaluation tasks"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "mcp>=1.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pypdf",
+    "trafilatura>=1.8",
+    "requests>=2.28",
+    "docker>=7.0",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+ce-runner = "ce_runner:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "ce_runner.__version__"}
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

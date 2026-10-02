@@ -1,0 +1,42 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+cc -O2 -Wall -c src/parser.c -o build/parser.o
+cc -O2 -Wall -c src/lexer.c -o build/lexer.o
+cc -O2 -Wall -c src/codegen.c -o build/codegen.o
+cc -O2 -Wall -c src/optimizer.c -o build/optimizer.o
+cc -O2 -Wall -c src/linker.c -o build/linker.o
+cc -O2 -Wall -c src/loader.c -o build/loader.o
+cc -O2 -Wall -c src/symbol.c -o build/symbol.o
+cc -O2 -Wall -c src/types.c -o build/types.o
+cc -O2 -Wall -c src/scope.c -o build/scope.o
+cc -O2 -Wall -c src/diag.c -o build/diag.o
+cc -O2 -Wall -c src/source.c -o build/source.o
+cc -O2 -Wall -c src/token.c -o build/token.o
+cc -O2 -Wall -c src/ast.c -o build/ast.o
+cc -O2 -Wall -c src/ir.c -o build/ir.o
+cc -O2 -Wall -c src/pass.c -o build/pass.o
+cc -O2 -Wall -c src/target.c -o build/target.o
+cc -O2 -Wall -c src/emit.c -o build/emit.o
+cc -O2 -Wall -c src/debug_info.c -o build/debug_info.o
+cc -O2 -Wall -c src/runtime.c -o build/runtime.o
+cc -O2 -Wall -c src/alloc.c -o build/alloc.o
+cc -O2 -Wall -c src/gc.c -o build/gc.o
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+info: waiting for file lock on build/.lock (attempt 1)
+info: waiting for file lock on build/.lock (attempt 2)
+info: waiting for file lock on build/.lock (attempt 3)
+info: waiting for file lock on build/.lock (attempt 4)
+info: waiting for file lock on build/.lock (attempt 5)
+info: waiting for file lock on build/.lock (attempt 6)
+info: waiting for file lock on build/.lock (attempt 7)
+info: waiting for file lock on build/.lock (attempt 8)
+info: waiting for file lock on build/.lock (attempt 9)
+info: waiting for file lock on build/.lock (attempt 10)
+info: waiting for file lock on build/.lock (attempt 11)
+info: waiting for file lock on build/.lock (attempt 12)
+ar rcs build/libapp.a build/main.o build/util.o build/parser.o build/lexer.o build/codegen.o build/optimizer.o build/linker.o build/loader.o
+cc build/main.o build/libapp.a -o build/app
+make: Leaving directory '/work/project'
+Exit code: 0

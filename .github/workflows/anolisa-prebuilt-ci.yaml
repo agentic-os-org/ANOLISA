@@ -1,0 +1,53 @@
+name: CI / ANOLISA CLI prebuilt action
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/actions/build-anolisa-prebuilt/**'
+      - '.github/actions/prebuilt-rust-common/**'
+      - '.github/workflows/anolisa-prebuilt-ci.yaml'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/release-preview.yaml'
+      - 'distribution/anolisa/**'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/actions/build-anolisa-prebuilt/**'
+      - '.github/actions/prebuilt-rust-common/**'
+      - '.github/workflows/anolisa-prebuilt-ci.yaml'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/release-preview.yaml'
+      - 'distribution/anolisa/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+  RUSTUP_TOOLCHAIN: '1.93.0'
+
+jobs:
+  test:
+    name: Test ANOLISA CLI prebuilt action
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Run prebuilt action regression tests
+        run: .github/actions/build-anolisa-prebuilt/test.sh
+
+      - name: Run prebuilt matrix planner tests
+        run: python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
+
+      - name: Run ANOLISA CLI prebuilt package tests
+        run: distribution/anolisa/tests/test-package-prebuilt.sh

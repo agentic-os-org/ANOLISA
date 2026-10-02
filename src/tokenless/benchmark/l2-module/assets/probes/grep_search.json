@@ -1,0 +1,34 @@
+[
+  {
+    "question": "Does each match line include a line number after the file path? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Do the matched file paths end with the .rs extension? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Are the matched files located under a src/ directory? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Does any matched line contain the text 'fn main'? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Does any matched line contain the text 'pub struct'? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Judging by the file extensions, which programming language are the matched files written in?",
+    "expected_contains": "rust"
+  },
+  {
+    "question": "Is the separator between the file path and the line number a colon? Answer yes or no.",
+    "expected_contains": "yes"
+  },
+  {
+    "question": "Are there at least two matching lines in this output? Answer yes or no.",
+    "expected_contains": "yes"
+  }
+]

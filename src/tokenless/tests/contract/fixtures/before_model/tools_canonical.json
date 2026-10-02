@@ -1,0 +1,55 @@
+{
+  "session_id": "sess-parity",
+  "llm_request": {
+    "config": {
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "description": "Read a file from the workspace and return its contents as text. Large files are paginated into fixed-size windows and the response reports the window offset, total size, and whether more content remains, so repeated calls can walk the file deterministically. Binary files are rejected with a structured error naming the detected content type. Symbolic links are resolved inside the workspace only; a link that escapes the workspace root is refused. Use this before proposing any edit so the change is grounded in the current content, and prefer reading the smallest window that answers the question instead of the whole file.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "Absolute path to the target inside the workspace. Relative paths are resolved against the workspace root and must not escape it; paths that traverse outside the root through parent segments or symbolic links are refused with a structured error naming the offending segment."
+                },
+                "recursive": {
+                  "type": "boolean",
+                  "description": "Whether to descend into subdirectories when the target is a directory. Defaults to false and is ignored for plain files."
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "list_directory",
+            "description": "List the entries of a directory in the workspace, including file sizes, modification times, permission bits, and whether each entry is a file, directory, or symbolic link. Hidden files are included by default and can be filtered with the pattern argument. Results are sorted lexicographically for stable output across calls, and pagination fields report the continuation token when the directory holds more entries than one response can carry. Directories outside the workspace root are refused with a structured error so traversal stays inside the project.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "Absolute path to the target inside the workspace. Relative paths are resolved against the workspace root and must not escape it; paths that traverse outside the root through parent segments or symbolic links are refused with a structured error naming the offending segment."
+                },
+                "recursive": {
+                  "type": "boolean",
+                  "description": "Whether to descend into subdirectories when the target is a directory. Defaults to false and is ignored for plain files."
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

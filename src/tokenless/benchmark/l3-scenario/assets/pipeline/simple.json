@@ -1,0 +1,30 @@
+{
+ "suite": "pipeline",
+ "scenario": "simple",
+ "content_type": "simple",
+ "description": "Minimal conversation: system prompt carrying a date, one question, one answer. headroom uses it to exercise CacheAligner's date detection; it carries no tools array and no tool messages.",
+ "source": {
+  "reference": "headroom benchmarks/bench_transforms.py::TestPipelinePerformance::test_pipeline_simple (fixture messages_with_system_date)",
+  "headroom_native": true,
+  "headroom_revision": "e616dcf788e29e285b5ab5c17af49585c0d60613",
+  "headroom_dirty": false
+ },
+ "headroom_target_ms": 5.0,
+ "model_limit": 100000,
+ "message_count": 3,
+ "tool_message_count": 0,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful AI assistant.\n\nCurrent date: 2025-01-06\nToday is Monday, January 6th, 2025.\n\nYou have access to various tools for searching and querying data.\nAlways provide accurate and helpful responses."
+  },
+  {
+   "role": "user",
+   "content": "What's the current date?"
+  },
+  {
+   "role": "assistant",
+   "content": "Today is January 6th, 2025."
+  }
+ ]
+}

@@ -1,0 +1,245 @@
+name: Release / Preview
+
+# =========================================================================
+# Purpose: Manual preview packaging for debugging and content verification.
+#
+# Produces: {component}-{version}.preview.tar.gz, retained 14 days.
+# =========================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to package (preview only, NOT used by release.yaml)'
+        required: true
+        type: choice
+        options:
+          - copilot-shell
+          - cosh-ng
+          - agent-sec-core
+          - agentsight
+          - os-skills
+          - tokenless
+          - ws-ckpt
+          - agent-memory
+          - skillfs
+          - anolisa
+      version:
+        description: 'Version (e.g. 2.1.0, without v prefix)'
+        required: true
+        type: string
+      tokenless_source_tag:
+        description: 'Optional exact Tokenless source tag with Python packaging (v0.7.7+, e.g. tokenless/v0.7.14)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
+jobs:
+  # =========================================================================
+  # Package (preview) → triggered by workflow_dispatch
+  # Produces: {component}-{version}.preview.tar.gz, retained 14 days
+  # For debugging and content verification ONLY.
+  # =========================================================================
+  package-preview:
+    name: Packaging Preview ${{ inputs.component }}-${{ inputs.version }}
+    runs-on: anolisa-k8s-amd-release
+    outputs:
+      prebuilt-enabled: ${{ steps.plan-prebuilt.outputs.enabled }}
+      prebuilt-matrix: ${{ steps.plan-prebuilt.outputs.matrix }}
+    steps:
+      - name: Validate Tokenless source tag
+        if: inputs.tokenless_source_tag != ''
+        env:
+          COMPONENT: ${{ inputs.component }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_TAG: ${{ inputs.tokenless_source_tag }}
+        run: |
+          if [ "$COMPONENT" != tokenless ]; then
+            echo "::error::tokenless_source_tag is only valid for Tokenless previews"
+            exit 1
+          fi
+          if [ "$SOURCE_TAG" != "tokenless/v$VERSION" ]; then
+            echo "::error::Tokenless source tag must be tokenless/v$VERSION"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Checkout Tokenless source tag
+        if: inputs.tokenless_source_tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tokenless_source_tag) }}
+          path: tokenless-source
+          persist-credentials: false
+
+      - name: Plan precompiled packages
+        id: plan-prebuilt
+        env:
+          COMPONENT: ${{ inputs.component }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
+            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+
+      - name: Package source archive
+        uses: ./.github/actions/package-source
+        with:
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          tokenless-source-root: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
+          artifact-suffix: '.preview'
+          retention-days: 14
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          artifact-suffix: '.preview'
+          retention-days: 14
+
+  build-prebuilt-preview:
+    name: Preview precompiled packages
+    needs: package-preview
+    if: needs.package-preview.outputs.prebuilt-enabled == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package-preview.outputs.prebuilt-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build cosh-ng precompiled package
+        id: cosh-ng-prebuilt
+        if: matrix.component == 'cosh-ng'
+        uses: ./.github/actions/build-cosh-ng-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Build Tokenless precompiled package
+        id: tokenless-prebuilt
+        if: matrix.component == 'tokenless'
+        uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ inputs.tokenless_source_tag }}
+
+      - name: Build ANOLISA CLI precompiled package
+        id: anolisa-prebuilt
+        if: matrix.component == 'anolisa'
+        uses: ./.github/actions/build-anolisa-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Select precompiled package output
+        id: prebuilt
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+          ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
+          COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
+          TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+        run: |
+          case "$COMPONENT" in
+            anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
+            tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
+          esac
+          if [ -z "$ARTIFACT_DIRECTORY" ]; then
+            echo "::error::Missing prebuilt output for $COMPONENT"
+            exit 1
+          fi
+          echo "artifact-directory=$ARTIFACT_DIRECTORY" >> "$GITHUB_OUTPUT"
+
+      - name: Upload precompiled package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.component }}-prebuilt-${{ inputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Tokenless Python wheels
+        if: matrix.component == 'tokenless'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-python-wheels-${{ inputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.tokenless-prebuilt.outputs.wheel-directory }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-prebuilt-preview:
+    name: Verify preview ${{ inputs.component }} artifacts
+    needs: build-prebuilt-preview
+    if: >-
+      always() &&
+      needs.build-prebuilt-preview.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+    runs-on: anolisa-k8s-amd-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download precompiled packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.component }}-prebuilt-${{ inputs.version }}-*
+          path: /tmp/prebuilt-preview
+
+      - name: Verify precompiled packages
+        env:
+          COMPONENT: ${{ inputs.component }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
+            --directory /tmp/prebuilt-preview \
+            --component "$COMPONENT" \
+            --version "$VERSION" \
+            --layout actions
+
+      - name: Download Tokenless Python wheels
+        if: inputs.component == 'tokenless'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tokenless-python-wheels-${{ inputs.version }}-*
+          merge-multiple: true
+          path: /tmp/python-wheels-preview
+
+      - name: Verify Tokenless Python wheels
+        if: inputs.component == 'tokenless'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
+            --directory /tmp/python-wheels-preview \
+            --version "$VERSION" \
+            --layout aggregate \
+            --write-checksums /tmp/python-wheels-preview/SHA256SUMS-python-wheels.txt

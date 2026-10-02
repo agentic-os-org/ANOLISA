@@ -1,0 +1,14 @@
+rule_id: shell-persistence
+cwe_id: CWE-506
+desc_en: >-
+  Command injects persistent backdoor into the system via crontab,
+  shell profile, init scripts, or authorized_keys.
+desc_zh: >-
+  命令通过 crontab、Shell 配置文件、init 脚本或 authorized_keys
+  向系统注入持久化后门。
+regex: |-
+  >>?\s*"?(~/\.(bashrc|bash_profile|profile|zshrc)|/etc/(profile|bash\.bashrc|bashrc|cron|init\.d/)|/var/spool/cron|[^;\n&]*authorized_keys\b)
+  |\btee\b[^;\n&]*(~/\.(bashrc|bash_profile|profile|zshrc)|/etc/(profile|bash\.bashrc|bashrc|cron|init\.d/)|/var/spool/cron|authorized_keys\b)
+  |(?m:^[ \t]*(?!#)(?:(?:(?:(?:[^"'\\#\n]|\\.)|"(?:\\.|[^"\\])*"|'[^']*')*?(?:;|&&|\|\||\||&|`|[)}]|(?<![=])[({])[ \t]*|(?:(?:[^"'\\#\n]|\\.)|"(?:\\.|[^"\\])*"|'[^']*')*?"(?:\\.|[^"\\])*?(?:\$\(|`)[ \t]*|(?:sudo[ \t]+)?(?:/usr/bin/|/bin/)?(?:bash|sh|zsh|dash|ksh)[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+["'][ \t]*)?(?:(?:if|elif|then|do)[ \t]+)?(?:![ \t]+)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"\\])*"|'[^']*'|(?!["'])[^ \t;|&]+)[ \t]+)*(?:(?:command|exec|as_root)[ \t]+)?(?:sudo(?:[ \t]+(?:(?:-u|-g|-h|-p|--user|--group|--host|--prompt)[ \t]+[^ \t;|&]+|--(?:user|group|host|prompt)=[^ \t;|&]+|--|-{1,2}[A-Za-z][^ \t;|&]*))*[ \t]+)?(?:env[ \t]+(?:(?:--|-{1,2}[A-Za-z][^ \t;|&]*|[A-Za-z_][A-Za-z0-9_]*=(?:"(?:\\.|[^"\\])*"|'[^']*'|(?!["'])[^ \t;|&]+))[ \t]+)*)?(?:sudo(?:[ \t]+(?:(?:-u|-g|-h|-p|--user|--group|--host|--prompt)[ \t]+[^ \t;|&]+|--(?:user|group|host|prompt)=[^ \t;|&]+|--|-{1,2}[A-Za-z][^ \t;|&]*))*[ \t]+)?(?:(?:/usr/bin/|/bin/)?(?:bash|sh|zsh|dash|ksh)[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+["'][ \t]*)?(?:/usr/bin/|/bin/)?systemctl[ \t]+(?:-{1,2}[A-Za-z][^ \t;|&]*[ \t]+)*enable\b))
+  |\bcrontab\b(?!\s+-[lre]\b)
+severity: warn
