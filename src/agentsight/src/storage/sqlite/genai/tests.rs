@@ -405,6 +405,34 @@ fn test_get_token_timeseries_with_agent_filter() {
 }
 
 #[test]
+fn test_get_token_timeseries_zero_width_range_with_buckets() {
+    // start_ns == end_ns with buckets > 1 used to make bucket_ns = 0;
+    // SQLite evaluates x/0 as NULL, collapsing all rows into one NULL
+    // bucket whose bucket_start_ns cannot be read back as an integer.
+    let (store, path) = create_populated_store("ts_zero_width");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS, None, 30)
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].bucket_start_ns, BASE_NS);
+    assert_eq!(r[0].input_tokens, 100);
+    assert_eq!(r[0].output_tokens, 50);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_zero_width_range_with_buckets() {
+    let (store, path) = create_populated_store("model_ts_zero_width");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS, None, 30)
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].model, "gpt-4");
+    assert_eq!(r[0].total_tokens, 150);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_model_timeseries_returns_model_breakdown() {
     let (store, path) = create_populated_store("model_ts");
     let r = store

@@ -398,8 +398,10 @@ impl GenAISqliteStore {
         bucket_count: u32,
     ) -> Result<Vec<TimeseriesBucket>, Box<dyn std::error::Error>> {
         let bucket_count = bucket_count.max(1);
-        let range_ns = (end_ns - start_ns).max(1);
-        let bucket_ns = range_ns / bucket_count as i64;
+        let range_ns = end_ns.saturating_sub(start_ns).max(1);
+        // SQLite evaluates x/0 as NULL, which would collapse every row into
+        // one NULL bucket and make bucket_start_ns unreadable as an integer.
+        let bucket_ns = (range_ns / bucket_count as i64).max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -479,8 +481,10 @@ impl GenAISqliteStore {
         bucket_count: u32,
     ) -> Result<Vec<ModelTimeseriesBucket>, Box<dyn std::error::Error>> {
         let bucket_count = bucket_count.max(1);
-        let range_ns = (end_ns - start_ns).max(1);
-        let bucket_ns = range_ns / bucket_count as i64;
+        let range_ns = end_ns.saturating_sub(start_ns).max(1);
+        // SQLite evaluates x/0 as NULL, which would collapse every row into
+        // one NULL bucket and make bucket_start_ns unreadable as an integer.
+        let bucket_ns = (range_ns / bucket_count as i64).max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
