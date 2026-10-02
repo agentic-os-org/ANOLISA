@@ -283,6 +283,11 @@ impl CentralLog {
     /// the OS layer; we intentionally skip `sync_all` to avoid the per-
     /// append fsync cost — readers see the record via `query` as soon as
     /// the OS buffer accepts it.
+    ///
+    /// The same lock also covers repairing a torn trailing record left
+    /// behind by a crashed predecessor (see [`truncate_torn_tail`]) before
+    /// this record is spliced behind it, which would otherwise bury the
+    /// damaged bytes mid-file.
     pub fn append(&self, record: &LogRecord) -> Result<(), CentralLogError> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -298,6 +303,7 @@ impl CentralLog {
 
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)
             .map_err(|source| CentralLogError::Io {
@@ -308,7 +314,8 @@ impl CentralLog {
             path: self.path.clone(),
             source,
         })?;
-        let write_result = file.write_all(line.as_bytes()).and_then(|_| file.flush());
+        let write_result = truncate_torn_tail(&mut file)
+            .and_then(|()| file.write_all(line.as_bytes()).and_then(|_| file.flush()));
         let unlock_result = FileExt::unlock(&file);
         write_result.map_err(|source| CentralLogError::Io {
             path: self.path.clone(),
@@ -334,7 +341,12 @@ impl CentralLog {
     /// for an O(file-size) deserialize. Later appends extend the file
     /// past the snapshot and are not included.
     ///
-    /// # Examples
+    /// A trailing chunk that is not newline-terminated and does not
+    /// parse is skipped: it is the torn remainder of a record that a
+    /// crash or ENOSPC cut short (every complete record ends with
+    /// `\n`). Newline-terminated garbage remains a hard error — that
+    /// is genuine mid-file corruption, not a torn tail.
+    ///    /// # Examples
     ///
     /// Three records with `limit = 2` keep the last two, still in file
     /// order:
@@ -419,20 +431,36 @@ impl CentralLog {
         reader: R,
         filter: &LogFilter,
     ) -> Result<Vec<LogRecord>, CentralLogError> {
-        let reader = BufReader::new(reader);
+        let mut reader = BufReader::new(reader);
         // Keep a sliding window so `--limit` is a tail cap. Stopping at the
         // first N matches would pin `anolisa logs` to genesis records once
         // the JSONL file grew past the default 50.
         let mut matches: VecDeque<LogRecord> = VecDeque::new();
-        for line in reader.lines() {
-            let line = line.map_err(|source| CentralLogError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
-            if line.trim().is_empty() {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read =
+                reader
+                    .read_until(b'\n', &mut line)
+                    .map_err(|source| CentralLogError::Io {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            // Every complete record ends with '\n' (append writes record
+            // plus newline in one write). A final chunk without one is the
+            // torn remainder of a crashed append, never a record.
+            let complete = line.last() == Some(&b'\n');
+            if line.iter().all(|byte| byte.is_ascii_whitespace()) {
                 continue;
             }
-            let record: LogRecord = serde_json::from_str(&line)?;
+            let record: LogRecord = match serde_json::from_slice(&line) {
+                Ok(record) => record,
+                Err(source) if !complete => break,
+                Err(source) => return Err(source.into()),
+            };
             if record_matches(&record, filter) {
                 matches.push_back(record);
                 if let Some(limit) = filter.limit
@@ -444,6 +472,63 @@ impl CentralLog {
         }
         Ok(matches.into_iter().collect())
     }
+}
+
+/// Truncate a torn trailing record from the log file before the next
+/// append splices behind it.
+///
+/// `append` writes each record with one `write(2)` under the exclusive
+/// flock, but ENOSPC can cut that write short and a power loss can leave
+/// the same damage after the process is gone. `query` tolerates such a
+/// tail, yet the next append must not splice its record behind the
+/// fragment — that would move the damaged bytes mid-file where they bury
+/// every later record behind a parse error. The caller holds the
+/// exclusive flock, so the check-then-truncate is race-free.
+fn truncate_torn_tail(file: &mut File) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    if len == 0 || last_byte_is_newline(file, len)? {
+        return Ok(());
+    }
+    // A serialized record never contains a raw newline, so the last '\n'
+    // is the end of the final complete record; everything after it is the
+    // torn fragment.
+    let cut = match last_newline_offset(file, len)? {
+        Some(offset) => offset + 1,
+        None => 0,
+    };
+    file.set_len(cut)
+}
+
+/// Whether the byte at `offset` (expected: `len - 1`) is a newline.
+fn last_byte_is_newline(file: &mut File, len: u64) -> io::Result<bool> {
+    let mut byte = [0u8; 1];
+    read_at(file, len - 1, &mut byte)?;
+    Ok(byte[0] == b'\n')
+}
+
+/// Offset of the last `\n` strictly before `len`, scanning backwards in
+/// bounded chunks. `None` when the scanned region has no newline at all.
+fn last_newline_offset(file: &mut File, len: u64) -> io::Result<Option<u64>> {
+    const CHUNK: usize = 4096;
+    let mut buf = vec![0u8; CHUNK];
+    let mut pos = len;
+    while pos > 0 {
+        let start = pos.saturating_sub(CHUNK as u64);
+        let count = (pos - start) as usize;
+        read_at(file, start, &mut buf[..count])?;
+        if let Some(idx) = buf[..count].iter().rposition(|&byte| byte == b'\n') {
+            return Ok(Some(start + idx as u64));
+        }
+        pos = start;
+    }
+    Ok(None)
+}
+
+/// Read `buf` from `offset` via an explicit seek. The file is opened for
+/// append, so the cursor is irrelevant to writes.
+fn read_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buf)
 }
 
 fn record_matches(record: &LogRecord, filter: &LogFilter) -> bool {
@@ -598,6 +683,82 @@ mod tests {
         assert_eq!(all.len(), 3);
         let contents = std::fs::read_to_string(log.path()).expect("read");
         assert_eq!(contents.lines().count(), 3);
+    }
+
+    /// One complete record followed by a torn fragment (no terminating
+    /// newline) — what ENOSPC or a power loss leaves behind mid-append.
+    fn write_log_with_torn_tail(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("audit.jsonl");
+        let mut contents = String::new();
+        contents.push_str(
+            r#"{"kind":"operation","operation_id":"op-1","command":"install","source":"anolisa-cli","#,
+        );
+        contents.push_str(r#""severity":"info","message":"ok","actor":"test-actor","#);
+        contents.push_str(r#""started_at":"2026-06-01T10:00:00Z","status":"ok"}"#);
+        contents.push('\n');
+        contents.push_str(r#"{"kind":"oper"#);
+        std::fs::write(&path, contents).expect("write torn tail log");
+        path
+    }
+
+    #[test]
+    fn query_skips_a_torn_trailing_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_log_with_torn_tail(dir.path());
+        let log = CentralLog::open(path);
+
+        let hits = log.query(&LogFilter::default()).expect("query");
+        assert_eq!(hits.len(), 1, "intact prefix must stay readable");
+        assert_eq!(hits[0].operation_id.as_deref(), Some("op-1"));
+    }
+
+    #[test]
+    fn query_still_fails_on_a_newline_terminated_corrupt_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"operation","operation_id":"op-1","command":"install","#,
+                r#""source":"anolisa-cli","severity":"info","message":"ok","#,
+                r#""actor":"test-actor","started_at":"2026-06-01T10:00:00Z","status":"ok"}"#,
+                "\n",
+                r#"{"kind": not json at all}"#,
+                "\n",
+            ),
+        )
+        .expect("write corrupt log");
+
+        let log = CentralLog::open(path);
+        assert!(
+            log.query(&LogFilter::default()).is_err(),
+            "genuine mid-file corruption must stay a hard error"
+        );
+    }
+
+    #[test]
+    fn append_repairs_a_torn_tail_before_splicing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_log_with_torn_tail(dir.path());
+        let log = CentralLog::open(path.clone());
+
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-2",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append after a torn tail");
+
+        // The new record must not be spliced behind the torn fragment
+        // (which would bury it mid-file and poison every later query).
+        let hits = log.query(&LogFilter::default()).expect("query");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].operation_id.as_deref(), Some("op-1"));
+        assert_eq!(hits[1].operation_id.as_deref(), Some("op-2"));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(contents.lines().count(), 2, "torn fragment is gone");
+        assert!(contents.ends_with("}\n"));
     }
 
     #[test]
