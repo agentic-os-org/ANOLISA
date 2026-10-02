@@ -216,6 +216,17 @@ pub async fn checkpoint(
     metadata: Option<String>,
     pin: bool,
 ) -> anyhow::Result<Response> {
+    // 0. The socket is world-writable and the daemon is root-privileged, so the
+    //    id must be validated here before it reaches the backend path joins —
+    //    the CLI-side check cannot be trusted (parity with the guarded V2
+    //    endpoint, which applies the same rule to every checkpoint id).
+    if let Err(message) = ws_ckpt_common::validate_checkpoint_id_v2(id) {
+        return Ok(Response::Error {
+            code: ErrorCode::InvalidPath,
+            message,
+        });
+    }
+
     // 1. Resolve workspace (by ID, absolute path, or relative path)
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
@@ -1384,6 +1395,44 @@ mod tests {
                 );
             }
             other => panic!("{op}: expected detach error, got {other:?}"),
+        }
+    }
+
+    /// The daemon is the trust boundary for the world-writable socket, so the
+    /// legacy checkpoint must reject ids that are unsafe path components just
+    /// like the guarded V2 endpoint does (issue: legacy path reached
+    /// `backend.create_snapshot` with ids like `../../pwn`).
+    #[tokio::test]
+    async fn legacy_checkpoint_rejects_unsafe_snapshot_ids() {
+        for bad_id in ["../../pwn", "../escape", "..", ".", "a/b", "", "sp ace"] {
+            let fx = GuardFixture::new("ws-test");
+            let seed = fx
+                .state
+                .backend
+                .data_root()
+                .join("ws-test")
+                .join("seed.txt");
+            std::fs::write(&seed, b"x").unwrap();
+            let ws_ref = fx.ws_link.to_string_lossy().to_string();
+
+            let resp = checkpoint(&fx.state, &ws_ref, bad_id, None, None, false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    resp,
+                    Response::Error {
+                        code: ErrorCode::InvalidPath,
+                        ..
+                    }
+                ),
+                "id {bad_id:?}: expected InvalidPath, got {resp:?}"
+            );
+            let arc = fx.state.get_by_wsid("ws-test").unwrap();
+            assert!(
+                arc.read().await.index.snapshots.is_empty(),
+                "id {bad_id:?}: index must not gain entries"
+            );
         }
     }
 
