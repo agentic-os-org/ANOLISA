@@ -649,6 +649,56 @@ fn evidence_digest_carries_what_the_rules_used() {
 }
 
 #[test]
+fn digest_pool_snaps_multi_byte_truncation_to_the_byte_budget() {
+    use super::{EvidenceEntry, EVIDENCE_DIGEST_LIMIT};
+
+    // A CJK haystack far past the byte budget: every character is three
+    // bytes, so the char-counting form of truncation overshot the budget
+    // by ~3x and the review call carried 3x the intended payload.
+    let unit = "配置"; // 6 bytes, one char boundary at each edge.
+    let per_entry_chars = (EVIDENCE_DIGEST_LIMIT / unit.len()) * 2;
+    let haystack = unit.repeat(per_entry_chars);
+    let pool: Vec<EvidenceEntry> = (0..3)
+        .map(|i| EvidenceEntry {
+            step_id: i + 1,
+            source_call_id: None,
+            haystack: haystack.clone(),
+            numbers: vec![],
+        })
+        .collect();
+
+    let digest = super::digest_pool_for_test(&pool);
+
+    assert!(
+        digest.len() <= EVIDENCE_DIGEST_LIMIT + 64,
+        "the digest must stay within the byte budget (plus the small \
+         per-entry `[stepN] ` framing), got {} vs limit {}",
+        digest.len(),
+        EVIDENCE_DIGEST_LIMIT
+    );
+    // The truncation point must be a char boundary: the digest is valid
+    // UTF-8 by construction, and the first entry's payload must end on a
+    // whole `配置` unit rather than mid-codepoint.
+    let first_payload = digest
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("[step3] ");
+    assert!(
+        first_payload.chars().all(|c| c == '配' || c == '置'),
+        "payload must contain only whole multi-byte units: {first_payload:.30?}"
+    );
+    // Pre-fix discrimination: the char-counting form took `remaining`
+    // CHARACTERS (12k chars = 36k bytes) per entry, so the digest blew
+    // past the budget; the byte form cannot.
+    assert!(
+        digest.len() > EVIDENCE_DIGEST_LIMIT / 2,
+        "the digest should be near the budget, not trivially short: {}",
+        digest.len()
+    );
+}
+
+#[test]
 fn scenario_call_id_separator_difference_still_correlates() {
     // Observed on a live agent: the call goes out as `call_47ad…` and the result
     // comes back as `call47ad…`. Comparing literally left every call unjudgeable,
