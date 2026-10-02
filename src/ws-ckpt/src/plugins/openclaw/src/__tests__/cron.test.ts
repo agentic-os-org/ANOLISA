@@ -162,7 +162,9 @@ describe("quoted workspaces", () => {
 
     expect(await CrontabManager.sync(WS, ["0 * * * *"])).toBe(true);
     const input = mockRunCrontab.mock.calls[1][1].input;
-    const entries = input.split("\n").filter((l) => l.includes("ws-ckpt"));
+    const entries = input
+      .split("\n")
+      .filter((l: string) => l.includes("ws-ckpt"));
     expect(entries).toHaveLength(1);
     expect(entries[0]).toContain(ESCAPED);
   });
