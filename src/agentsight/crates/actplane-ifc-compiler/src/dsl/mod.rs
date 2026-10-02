@@ -455,6 +455,51 @@ rule secret:
     }
 
     #[test]
+    fn positional_arg_on_non_exec_target_is_rejected() {
+        // The engine consults a rule's arg only on the exec path, so an arg on
+        // a file/endpoint target would be a constraint that never applies and
+        // the rule would match every access to the target.
+        let err = match compile_str(
+            "rule r:\n  block read file \"/etc/passwd\" \"secret\" if A\n  because \"x\"\n",
+        ) {
+            Ok(_) => panic!("arg on a read target must be rejected at parse time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("only valid on exec"),
+            "error should name the exec-only rule: {err}"
+        );
+        let err = match compile_str(
+            "rule r:\n  block connect endpoint \"*\" \"junk\" if A\n  because \"x\"\n",
+        ) {
+            Ok(_) => panic!("arg on a connect target must be rejected at parse time"),
+            Err(err) => err,
+        };
+        assert!(err.contains("only valid on exec"));
+    }
+
+    #[test]
+    fn positional_arg_on_non_exec_since_is_rejected() {
+        let err = match compile_str(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/pytest\" since write \"src/**\" \"arg\"\n  because \"x\"\n",
+        ) {
+            Ok(_) => panic!("arg on a write invalidator must be rejected at parse time"),
+            Err(err) => err,
+        };
+        assert!(err.contains("only valid on exec"));
+    }
+
+    #[test]
+    fn positional_arg_on_exec_target_still_compiles() {
+        let c = ok("rule r:\n  block exec \"git\" \"push\" if A\n  because \"x\"\n");
+        assert_eq!(c.meta[0].target_arg.as_deref(), Some("push"));
+        let c = ok(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/confirm\" since exec \"git\" \"push\"\n  because \"x\"\n",
+        );
+        assert!(!c.bytes.is_empty());
+    }
+
+    #[test]
     fn exits_is_only_valid_for_exec_gates() {
         assert!(compile_str(
             "rule r:\n  block exec \"git\" if A unless after read \"src/**\" exits 0\n  because \"x\"\n"

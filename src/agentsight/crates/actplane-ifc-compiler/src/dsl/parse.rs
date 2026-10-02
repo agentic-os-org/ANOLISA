@@ -111,6 +111,34 @@ impl P {
             _ => Err(format!("unknown op '{}'", w)),
         }
     }
+    fn op_name(op: Op) -> &'static str {
+        match op {
+            Op::Exec => "exec",
+            Op::Read => "read",
+            Op::Write => "write",
+            Op::Unlink => "unlink",
+            Op::Connect => "connect",
+            Op::Recv => "recv",
+            Op::Open => "open",
+        }
+    }
+
+    /// Positional arguments are an exec-argv concept: the engine consults a
+    /// rule/update's arg field only on the exec path, so accepting one on any
+    /// other op would install a constraint that is silently ignored.
+    fn arg(&mut self, op: Op) -> Result<Option<String>, String> {
+        if !matches!(self.peek(), Some(Tok::Str(_))) {
+            return Ok(None);
+        }
+        let arg = self.string()?;
+        if op != Op::Exec {
+            return Err(format!(
+                "positional arguments are only valid on exec targets, not {}",
+                P::op_name(op)
+            ));
+        }
+        Ok(Some(arg))
+    }
 
     fn target(&mut self, op: Op) -> Result<Target, String> {
         let kind = if let Some(Tok::Word(w)) = self.peek() {
@@ -133,11 +161,7 @@ impl P {
         }
         // Positional arguments: additional quoted strings after the target
         // pattern are treated as arguments (replaces the old `@arg` syntax).
-        let arg = if matches!(self.peek(), Some(Tok::Str(_))) {
-            Some(self.string()?)
-        } else {
-            None
-        };
+        let arg = self.arg(op)?;
         Ok(Target { kind, pattern, arg })
     }
 
@@ -208,11 +232,7 @@ impl P {
                     loop {
                         let op = P::op(&self.word()?)?;
                         let pat = self.string()?;
-                        let arg = if matches!(self.peek(), Some(Tok::Str(_))) {
-                            Some(self.string()?)
-                        } else {
-                            None
-                        };
+                        let arg = self.arg(op)?;
                         since.push((op, pat, arg));
                         if self.is_word("or") {
                             self.next();
