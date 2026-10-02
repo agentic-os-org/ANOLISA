@@ -217,8 +217,8 @@ rpmbuild -bp kernel.spec --define "_topdir /root/rpmbuild"
 ### 5. 编译内核
 
 ```bash
-# 编译内核（不包含 debug 和文档，减少编译时间）
-rpmbuild -bc kernel.spec \
+# 编译并打包内核 RPM（不包含 debug 和文档，减少编译时间）
+rpmbuild -bb kernel.spec \
     --define "_topdir /root/rpmbuild" \
     --define "with_debug 0" \
     --define "with_doc 0" \
