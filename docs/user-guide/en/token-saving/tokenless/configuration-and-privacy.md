@@ -172,6 +172,7 @@ Local rendering and original recovery have been verified on finite samples.
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | Switch search-path sharing for API search lists (including Claude-native Grep) | On by default; `0` disables; shares consecutively recorded file paths and keeps all received hits; command output stays on its original route |
 
 ### Adapter and diagnostic variables
 
@@ -208,6 +209,20 @@ workspace directory contains a `.gitignore` with `*`, so complete tool text,
 Stash payloads, and SQLite sidecars are not staged by `git add -A`. Custom paths
 are not modified; make them accessible to the DSH shell sandbox and exclude
 them from source control or backups as required by your data policy.
+
+The DSH adapter exposes these environment variables to control its managed
+aliases within the sandbox:
+
+| Variable | Purpose |
+|----------|---------|
+| `DSH_SHELL` | Select the sandbox shell for managed alias injection |
+| `DSH_TOKENLESS_DATA_DIR` | Override the data directory the managed aliases use |
+| `DSH_TOKENLESS_STATS_DB` | Override the statistics database the managed aliases use |
+| `DSH_TOKENLESS_STASH_DB` | Override the Stash database the managed aliases use |
+
+These are read by the DSH adapter at alias-creation time (not by the
+Tokenless CLI itself) and exist so the sandbox environment can redirect
+databases independently of the inherited `TOKENLESS_*` variables.
 
 ## Local and external data
 
