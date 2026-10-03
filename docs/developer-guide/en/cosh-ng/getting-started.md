@@ -10,7 +10,7 @@ duplicated here.
 ## 1. Prepare the workspace
 
 cosh-ng is a Linux-first Rust workspace that also builds on macOS. The minimum
-Rust version is 1.74, and `rust-toolchain.toml` selects stable Rust with rustfmt
+Rust version is 1.88, and `rust-toolchain.toml` selects stable Rust with rustfmt
 and Clippy.
 
 ```bash
@@ -25,7 +25,7 @@ isolated environment.
 
 ## 2. Understand the runtime boundary
 
-There are five crates but three user-facing processes:
+There are eight crates but three user-facing processes:
 
 | Area | Start reading | Boundary |
 |---|---|---|
@@ -38,6 +38,11 @@ There are five crates but three user-facing processes:
 `cosh-shell` does not link to the other workspace crates. It launches
 `cosh-core` and communicates over the versioned JSONL/control protocol. That
 process boundary is a compatibility contract, not an implementation detail.
+
+The remaining three crates — `cosh-gateway-contracts`, `cosh-gateway`, and
+`cosh-gateway-app` — make up the Gateway Task Plane described in
+[Architecture](architecture.md); they add the local task control surface
+without changing the three-process boundary above.
 
 See [Architecture](architecture.md) for ownership and data flow.
 
