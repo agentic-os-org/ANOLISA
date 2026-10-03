@@ -206,17 +206,20 @@ def run_native_batch(task_ids: list[str], config: str | None = None,
     if resolved_config:
         cmd.extend(["--config", resolved_config])
 
-    # Task selection - use only mutually supported parameters
+    # Task selection - mirror run_ce_runner_batch precedence so both sides
+    # always run the SAME task set: range(+prefix) > tag > prefix > filter.
     if tasks_dir:
         cmd.extend(["--tasks-dir", tasks_dir])
-    elif filter_str:
-        cmd.extend(["--filter", filter_str])
+    elif range_str:
+        cmd.extend(["--range", range_str])
+        if prefix:
+            cmd.extend(["--prefix", prefix])
     elif tag:
         cmd.extend(["--tag", tag])
     elif prefix:
         cmd.extend(["--prefix", prefix])
-    elif range_str:
-        cmd.extend(["--range", range_str])
+    elif filter_str:
+        cmd.extend(["--filter", filter_str])
     elif task_ids:
         # Derive --filter from task IDs (substring match, may match MORE
         # tasks than listed; acceptable for integration testing where exact
