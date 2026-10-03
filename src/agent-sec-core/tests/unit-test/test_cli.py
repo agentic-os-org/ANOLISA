@@ -569,6 +569,37 @@ def test_events_summary_forwards_session_and_run_filters():
     assert reader.query.call_args.kwargs["run_id"] == "run-abc"
 
 
+def test_events_summary_pages_through_all_events():
+    from agent_sec_cli.security_events.schema import SecurityEvent
+
+    page_size = 10000
+
+    def event(index: int) -> SecurityEvent:
+        return SecurityEvent(
+            event_type="code_scan",
+            category="code_scan",
+            timestamp="2026-05-20T00:00:00+00:00",
+            details={"event": index},
+        )
+
+    reader = Mock()
+    reader.query.side_effect = [
+        [event(index) for index in range(page_size)],
+        [event(page_size)],
+    ]
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(app, ["events", "--summary"])
+
+    assert result.exit_code == 0
+    # The second page must be aggregated too: a single capped page would
+    # print 10000 here.
+    assert "Total events: 10001" in unstyle(result.output)
+    assert reader.query.call_count == 2
+    assert reader.query.call_args_list[0].kwargs["offset"] == 0
+    assert reader.query.call_args_list[1].kwargs["offset"] == page_size
+
+
 def test_events_help_lists_session_and_run_filters():
     result = CliRunner().invoke(app, ["events", "--help"])
 

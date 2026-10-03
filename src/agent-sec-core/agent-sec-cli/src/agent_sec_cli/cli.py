@@ -337,6 +337,10 @@ def code_scan(
 _COUNT_BY_ALLOWED = {"category", "event_type", "trace_id"}
 _OUTPUT_FORMATS = {"table", "json", "jsonl"}
 
+# `events --summary` aggregates every matching event; one page is a fetch
+# size, not a result cap, so the CLI walks pages until the store is drained.
+_SUMMARY_PAGE_SIZE = 10000
+
 # Canonical event types and categories — dynamically derived from lifecycle.py
 # _ACTION_CATEGORY mapping to ensure automatic synchronization.
 # Keys → event types, Values → categories
@@ -580,17 +584,24 @@ def events(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
 
-        events_list = reader.query(
-            event_type=event_type,
-            category=category,
-            trace_id=trace_id,
-            session_id=session_id,
-            run_id=run_id,
-            since=resolved_since,
-            until=resolved_until,
-            limit=10000,
-            offset=0,
-        )
+        events_list = []
+        offset = 0
+        while True:
+            page = reader.query(
+                event_type=event_type,
+                category=category,
+                trace_id=trace_id,
+                session_id=session_id,
+                run_id=run_id,
+                since=resolved_since,
+                until=resolved_until,
+                limit=_SUMMARY_PAGE_SIZE,
+                offset=offset,
+            )
+            events_list.extend(page)
+            if len(page) < _SUMMARY_PAGE_SIZE:
+                break
+            offset += len(page)
         time_label = (
             f"last {summary_hours:.0f} hours"
             if summary_hours is not None
