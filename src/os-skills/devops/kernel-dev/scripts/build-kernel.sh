@@ -156,7 +156,7 @@ build_srpm() {
     wait $build_pid
     
     success "SRPM build completed"
-    info "RPMs location: $OUTPUT_DIR/RPMS/x86_64/"
+    info "RPMs location: $OUTPUT_DIR/RPMS/$ARCH/"
 }
 
 # Build using Upstream method (kernel.org)
@@ -269,7 +269,7 @@ install_kernel() {
     
     if [ "$method" = "srpm" ]; then
         info "Installing RPM packages..."
-        $SUDO_CMD rpm -ivh "$OUTPUT_DIR/RPMS/x86_64/"kernel-*.rpm 2>&1 | tee -a "$LOG_FILE"
+        $SUDO_CMD rpm -ivh "$OUTPUT_DIR/RPMS/$ARCH/"kernel-*.rpm 2>&1 | tee -a "$LOG_FILE"
         
         info "Updating GRUB2 configuration..."
         $SUDO_CMD grub2-mkconfig -o /boot/grub2/grub.cfg 2>&1 | tee -a "$LOG_FILE"
