@@ -280,15 +280,15 @@ You'll see the welcome screen with your session information and recent conversat
 
 ## Step 4: Enable sandbox hooks (recommended)
 
-Copilot Shell ships with built-in sandbox-guard hooks that intercept tool calls and enforce security policies — preventing unauthorized file system access or dangerous operations. These hooks are not active until you install them.
+Copilot Shell ships with sandbox-guard hooks that intercept tool calls and enforce security policies — preventing unauthorized file system access or dangerous operations. These hooks are not active until you install the `agent-sec-core` extension that provides them.
 
-Inside Copilot Shell, run:
+From the ANOLISA repository root, run:
 
+```bash
+make -C src/agent-sec-core install-cosh-hook
 ```
-/hooks install
-```
 
-This command copies the bundled `sandbox-guard.py` script to `~/.copilot-shell/hooks/` and registers it in your user settings. You only need to run this once — the configuration is saved and persists across sessions.
+This installs the cosh extension (which bundles the sandbox-guard hooks) into Copilot Shell's extensions directory and registers its hooks automatically. You only need to run this once — the hooks persist across sessions.
 
 > [!note]
 >
@@ -442,7 +442,6 @@ Here are the most important commands for daily use:
 |---------|--------------|----------|
 | `cosh` | Start Copilot Shell | `cosh` |
 | `/auth` | Change authentication method | `/auth` |
-| `/hooks install` | Install sandbox-guard hooks (run once after install) | `/hooks install` |
 | `/hooks list` | Show all registered hooks and their status | `/hooks list` |
 | `/help` | Display help for available commands | `/help` or `/?` |
 | `/bash` | Drop into an interactive shell | `/bash` |
