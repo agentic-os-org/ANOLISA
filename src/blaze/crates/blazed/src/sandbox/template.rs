@@ -2822,11 +2822,18 @@ impl MountTable {
             let device = parse_mount_device(fields[2])?;
             let root = decode_mount_path(fields[3])?;
             let mount_point = decode_mount_path(fields[4])?;
-            if !root.is_absolute() || !mount_point.is_absolute() {
+            if !mount_point.is_absolute() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "mountinfo root and mount point must be absolute",
+                    "mountinfo mount point must be absolute",
                 ));
+            }
+            // nsfs mounts (docker/snapd namespace bind mounts) report their
+            // namespace handle (net:[...], mnt:[...]) as the root instead of an
+            // absolute path. They cannot own daemon paths, so skip them rather
+            // than failing the whole table on stock container hosts.
+            if !root.is_absolute() {
+                continue;
             }
             entries.push(MountEntry {
                 device,
@@ -6655,5 +6662,31 @@ mod tests {
         std::fs::write(source.join("vmstate.snap"), b"snapshot").expect("snapshot");
         std::fs::write(source.join("mem.bin"), b"memory").expect("memory");
         std::fs::write(source.join("rootfs.ext4"), b"rootfs").expect("rootfs");
+    }
+
+    #[test]
+    fn mount_table_accepts_nsfs_namespace_roots() {
+        // Stock mountinfo on any Docker or snapd host carries nsfs mounts whose
+        // root field is the namespace handle (net:[...], mnt:[...]) rather than
+        // an absolute path. Daemon startup loads the real /proc/self/mountinfo,
+        // so rejecting these lines makes blazed refuse to start on such hosts.
+        let contents = b"5193 29 0:4 net:[4026531840] /run/docker/netns/default rw shared:1930 - nsfs nsfs rw\n\
+                         104 25 0:26 / /data rw,relatime shared:81 - ext4 /dev/sda1 rw\n";
+        let table = MountTable::parse(contents).expect("nsfs mounts appear on stock docker hosts");
+        assert_eq!(
+            table.entries.len(),
+            1,
+            "the nsfs pseudo-mount is skipped and the real entry is kept"
+        );
+        assert_eq!(table.entries[0].root, Path::new("/"));
+        assert_eq!(table.entries[0].mount_point, Path::new("/data"));
+    }
+
+    #[test]
+    fn mount_table_rejects_relative_mount_points() {
+        let contents = b"36 35 98:0 /mnt/foo data rw - ext4 /dev/sda1 rw\n";
+        let error =
+            MountTable::parse(contents).expect_err("relative mount points must stay invalid");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }
