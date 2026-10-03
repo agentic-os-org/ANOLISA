@@ -211,6 +211,9 @@ fn parse_task(content: &str) -> Result<Task> {
                 .map(|pos| (&rest[..pos], &rest[pos + 5..]))
         })
         .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
+    // `to_markdown` writes a blank separator line after the closing fence;
+    // that blank line belongs to the delimiter, not to the context.
+    let body = body.strip_prefix('\n').unwrap_or(body);
 
     // Parse frontmatter as YAML (using serde_yaml via serde_json roundtrip).
     // We use a simple line-by-line parser for the known fields since we
@@ -688,6 +691,44 @@ mod tests {
     }
 
     #[test]
+    fn close_task_without_context_does_not_add_blank_lines() {
+        // The leaked separator newline made an empty context look non-empty,
+        // so memory_task_close stacked "\n" + "\n" before the Closed marker.
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Context-free task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = result
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(" ")
+            .next()
+            .unwrap();
+
+        memory_task_close(&svc, id, Some("All done")).unwrap();
+
+        let path = svc
+            .mount
+            .root
+            .join(TASKS_DIR)
+            .join(format!("{id}.md"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let body = content.split_once("---\n\n").expect("fence").1;
+        assert_eq!(body, "**Closed**: All done\n");
+    }
+
+    #[test]
     fn update_existing_task() {
         let (_tmp, svc) = setup();
         let result = memory_task_save(
@@ -764,6 +805,54 @@ mod tests {
         assert_eq!(parsed.progress, 75);
         assert_eq!(parsed.next_steps.len(), 2);
         assert_eq!(parsed.files_modified.len(), 1);
+    }
+
+    #[test]
+    fn parse_task_does_not_leak_frontmatter_separator_into_context() {
+        let task = Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: "Some context here.".into(),
+        };
+        let md = task.to_markdown();
+        let first = parse_task(&md).unwrap();
+        assert!(
+            !first.context.starts_with('\n'),
+            "parsed context must not include the blank separator line after the frontmatter fence: {:?}",
+            first.context
+        );
+        // Saving the parsed task and re-reading it must not grow the context.
+        let second = parse_task(&first.to_markdown()).unwrap();
+        assert_eq!(second.context, first.context);
+    }
+
+    #[test]
+    fn parse_task_empty_context_stays_empty() {
+        let task = Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: String::new(),
+        };
+        let parsed = parse_task(&task.to_markdown()).unwrap();
+        assert_eq!(parsed.context, "");
     }
 
     #[test]
