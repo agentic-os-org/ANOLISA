@@ -1282,7 +1282,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::process::CommandExt;
     #[cfg(target_os = "linux")]
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     #[cfg(target_os = "linux")]
     use std::time::Duration;
 
@@ -1869,6 +1869,29 @@ mod tests {
         }
     }
 
+    /// `execve` can transiently report ETXTBSY for a helper that was only just
+    /// copied into an overlay-backed temp dir, which fails the suite on a
+    /// scheduler race instead of a real regression. Retry the bounded way
+    /// `spawn_provider_child` already does in production.
+    #[cfg(target_os = "linux")]
+    fn spawn_helper_through_text_file_busy(command: &mut Command) -> std::io::Result<Child> {
+        const MAX_SPAWN_ATTEMPTS: usize = 3;
+
+        for attempt in 0..MAX_SPAWN_ATTEMPTS {
+            match command.spawn() {
+                Err(error)
+                    if error.kind() == ErrorKind::ExecutableFileBusy
+                        && attempt + 1 < MAX_SPAWN_ATTEMPTS =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+
+        unreachable!("the bounded helper spawn loop always returns on its final attempt")
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn an_untrusted_peer_is_rejected_as_known_no_effect() {
@@ -1894,7 +1917,7 @@ mod tests {
         if test_uid == 0 {
             command.uid(65_534);
         }
-        let mut daemon = command.spawn().unwrap();
+        let mut daemon = spawn_helper_through_text_file_busy(&mut command).unwrap();
         for _ in 0..100 {
             if socket_path.exists() {
                 break;
