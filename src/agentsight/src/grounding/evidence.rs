@@ -513,6 +513,12 @@ fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<
     // Filtering every line that appears in the command deleted real output:
     // `echo /etc/hosts` printing `/etc/hosts` is a result, not an echo, and
     // losing it makes a grounded claim read as ungrounded.
+    //
+    // The line must *open* the command to count as its echo. A successful
+    // listing prints its argument verbatim (`ls /var/log/app.log` answers
+    // `/var/log/app.log`), which `contains` treated as an echo and dropped —
+    // and for a single-line result that removed the whole observation, so the
+    // path the command had just confirmed read as ungrounded.
     let mut lines = text.lines().peekable();
     let mut leading_blanks: Vec<&str> = Vec::new();
     while lines.peek().is_some_and(|l| l.trim().is_empty()) {
@@ -520,7 +526,7 @@ fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<
     }
     if let Some(first) = lines.peek() {
         let bare = first.trim().trim_start_matches(['$', '>', '#']).trim();
-        if !bare.is_empty() && command.contains(bare) {
+        if !bare.is_empty() && command.trim().starts_with(bare) {
             lines.next();
         }
     }

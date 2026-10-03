@@ -482,6 +482,39 @@ fn scenario_probe_result_still_counts_as_evidence() {
     );
 }
 
+#[test]
+fn scenario_successful_listing_of_the_path_is_evidence() {
+    // The same command that reports a not-found (covered above) prints its
+    // argument when it succeeds: `ls /var/log/app.log` answers
+    // `/var/log/app.log`. The echo guard treated that line as an echo and
+    // dropped it, so a single-line result left the pool empty and the claim
+    // the command had just confirmed read as ungrounded.
+    let doc = traj(vec![
+        user(1, "日志在吗"),
+        acting_agent(
+            2,
+            "探测",
+            vec![call(
+                "c1",
+                "Bash",
+                serde_json::json!({"command": "ls /var/log/app.log"}),
+            )],
+            vec![ok_result("c1", "/var/log/app.log")],
+        ),
+        agent(3, "/var/log/app.log 存在。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(
+            grounding_for(&index, "/var/log/app.log"),
+            Grounding::Grounded { .. }
+        ),
+        "a successful listing of the path is a real observation: {:?}",
+        index.claims
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 13..14 — abstention input and blame scoping
 // ---------------------------------------------------------------------------
