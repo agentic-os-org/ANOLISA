@@ -354,3 +354,75 @@ describe('mcp add command', () => {
     });
   });
 });
+
+describe('mcp add -e env parsing', () => {
+  let parser: yargs.Argv;
+  let mockSetValue: vi.Mock;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    const yargsInstance = yargs([]).command(addCommand);
+    parser = yargsInstance;
+    mockSetValue = vi.fn();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    mockedLoadSettings.mockReturnValue({
+      forScope: () => ({ settings: {} }),
+      setValue: mockSetValue,
+      workspace: { path: '/path/to/project' },
+      user: { path: '/home/user' },
+    });
+  });
+
+  it('should keep env values that contain = characters', async () => {
+    await parser.parseAsync(
+      'add api-server /path/to/server run -e "API_ENDPOINT=https://x.io/path?a=1&b=2"',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'mcpServers',
+      {
+        'api-server': {
+          command: '/path/to/server',
+          args: ['run'],
+          env: { API_ENDPOINT: 'https://x.io/path?a=1&b=2' },
+        },
+      },
+    );
+  });
+
+  it('should keep base64-style padding in env values', async () => {
+    await parser.parseAsync(
+      'add auth-server /path/to/server -e "PRIVATE_TOKEN=YWJjZGVmZ2hpamtsbW5vcA=="',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'mcpServers',
+      {
+        'auth-server': {
+          command: '/path/to/server',
+          args: [],
+          env: { PRIVATE_TOKEN: 'YWJjZGVmZ2hpamtsbW5vcA==' },
+        },
+      },
+    );
+  });
+
+  it('should parse simple KEY=value env entries unchanged', async () => {
+    await parser.parseAsync('add simple-server /path/to/server -e FOO=bar');
+
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'mcpServers',
+      {
+        'simple-server': {
+          command: '/path/to/server',
+          args: [],
+          env: { FOO: 'bar' },
+        },
+      },
+    );
+  });
+});
