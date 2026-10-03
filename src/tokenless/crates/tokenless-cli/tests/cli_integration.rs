@@ -459,6 +459,63 @@ fn compress_response_from_stdin() {
 }
 
 #[test]
+fn compress_response_passthrough_stdout_is_byte_exact() {
+    // With compression disabled the output is the input verbatim: stdout
+    // must neither gain nor lose a trailing newline (automation detects
+    // passthrough by comparing stdout with the input payload).
+    for response in [
+        r#"{"data":"value","debug":"remove"}"#,
+        "{\"data\":\"value\",\"debug\":\"remove\"}\n",
+    ] {
+        let output = tokenless_bin()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "0")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args(["compress-response"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(response.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), response);
+    }
+}
+
+#[test]
+fn compress_schema_passthrough_stdout_is_byte_exact() {
+    // Same contract as compress-toon: passthrough reproduces the input
+    // byte-for-byte, without an appended trailing newline.
+    for schema in [
+        r#"{"type":"object","properties":{"a":{"type":"string"}}}"#,
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}\n",
+    ] {
+        let output = tokenless_bin()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "0")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args(["compress-schema"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(schema.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), schema);
+    }
+}
+
+#[test]
 fn compress_response_cli_matches_runtime_library() {
     let response = serde_json::to_string(&serde_json::json!({
         "items": (0..100).collect::<Vec<_>>(),
@@ -500,10 +557,9 @@ fn compress_response_cli_matches_runtime_library() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        expected.output,
-    );
+    // Byte-exact: the CLI must not append or strip any trailing newline
+    // (the recorded `after` is measured without one).
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected.output);
 }
 
 #[test]
