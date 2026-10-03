@@ -18,6 +18,45 @@ const TOOL: &str = "memory_search";
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
 /// an embedding provider.
+/// Resolve the effective agent scope for a search-driven tool call:
+/// an explicit per-call scope wins; otherwise `[memory].agent_scope`
+/// ("shared" → None) combined with `MCP_CLIENT_NAME`.
+///
+/// We never silently widen the visibility domain: an explicitly configured
+/// `isolated`/`filter` scope with no `MCP_CLIENT_NAME` is a misconfiguration,
+/// so we warn and run the search *unscoped* (shared semantics) rather than
+/// erroring on every request — the operator-facing warn surfaces the
+/// misconfiguration, while still letting the agent read its shared memory.
+/// Invalid configured values warn and degrade to shared the same way.
+///
+/// Every tool that drives the index from an agent-visible tool call
+/// (memory_search, memory_about, memory_forget) must resolve its scope
+/// through this helper; searching unscoped would silently widen the
+/// visibility domain the config promises.
+pub fn resolve_effective_scope(svc: &MemoryService, explicit: Option<&str>) -> Option<String> {
+    if let Some(s) = explicit {
+        return Some(s.to_string());
+    }
+    let config_scope = &svc.config.memory.agent_scope;
+    if config_scope.is_empty() || config_scope == "shared" {
+        return None;
+    }
+    if !matches!(config_scope.as_str(), "isolated" | "filter") {
+        tracing::warn!(
+            "memory.agent_scope={config_scope:?} is not a recognised value              (expected \"shared\", \"isolated\", or \"filter\");              falling back to shared (unscoped) search."
+        );
+        return None;
+    }
+    if let Ok(agent_id) = std::env::var("MCP_CLIENT_NAME") {
+        Some(format!("{config_scope}:{agent_id}"))
+    } else {
+        tracing::warn!(
+            "memory.agent_scope={config_scope:?} requires MCP_CLIENT_NAME but it is unset;              falling back to shared (unscoped) search. Set MCP_CLIENT_NAME or switch              agent_scope to \"shared\" to silence this warning."
+        );
+        None
+    }
+}
+
 pub fn memory_search(
     svc: &MemoryService,
     query: &str,
@@ -38,38 +77,8 @@ pub fn memory_search(
         }
     };
 
-    // Determine effective agent scope from parameter or config.
-    // We never silently widen the visibility domain: an explicitly configured
-    // `isolated`/`filter` scope with no `MCP_CLIENT_NAME` is a misconfiguration,
-    // so we warn and run the search *unscoped* (shared semantics) rather than
-    // erroring on every request — the operator-facing warn surfaces the
-    // misconfiguration, while still letting the agent read its shared memory.
-    let config_scope_owned;
-    let scope_ref = if let Some(s) = agent_scope {
-        Some(s)
-    } else {
-        let config_scope = &svc.config.memory.agent_scope;
-        if config_scope.is_empty() || config_scope == "shared" {
-            None
-        } else if !matches!(config_scope.as_str(), "isolated" | "filter") {
-            tracing::warn!(
-                "memory.agent_scope={config_scope:?} is not a recognised value \
-                 (expected \"shared\", \"isolated\", or \"filter\"); \
-                 falling back to shared (unscoped) search."
-            );
-            None
-        } else if let Ok(agent_id) = std::env::var("MCP_CLIENT_NAME") {
-            config_scope_owned = format!("{config_scope}:{agent_id}");
-            Some(config_scope_owned.as_str())
-        } else {
-            tracing::warn!(
-                "memory.agent_scope={config_scope:?} requires MCP_CLIENT_NAME but it is unset; \
-                 falling back to shared (unscoped) search. Set MCP_CLIENT_NAME or switch \
-                 agent_scope to \"shared\" to silence this warning."
-            );
-            None
-        }
-    };
+    let effective_scope = resolve_effective_scope(svc, agent_scope);
+    let scope_ref = effective_scope.as_deref();
 
     match mode {
         "bm25" => {
