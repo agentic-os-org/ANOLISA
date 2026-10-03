@@ -27,7 +27,9 @@ from pathlib import Path
 
 # 配置
 MAX_DAYS = 7  # 最大允许天数
-TIMEOUT = 180  # 爬取超时时间（秒）
+# 爬取超时时间（秒）。爬虫自身最坏情况约 13 页 × (30s 请求超时 + 0.5s 间隔) ≈ 396s，
+# 外层超时必须大于该预算，否则慢网络下爬取永远先被外层杀死。
+TIMEOUT = 420
 
 # 目录常量
 USER_CACHE_DIR = Path.home() / ".cache" / "anolisa"
@@ -182,12 +184,18 @@ def run_crawl(output_dir: Path) -> bool:
             timeout=TIMEOUT
         )
         
-        if result.returncode == 0:
-            print("[成功] 文档已更新")
-            return True
-        else:
+        if result.returncode != 0:
             print(f"[失败] {result.stderr}")
             return False
+
+        # crawl_docs.py 即使全部页面抓取失败也以 0 退出，退出码不能作为成功依据；
+        # 重新校验缓存时效性，只有确实产出新鲜文档才算成功
+        fresh, msg = check_freshness(output_dir)
+        if fresh:
+            print("[成功] 文档已更新")
+            return True
+        print(f"[失败] 爬取未产出可用文档（{msg}），忽略本次缓存")
+        return False
             
     except subprocess.TimeoutExpired:
         print("[超时] 爬取超时")
