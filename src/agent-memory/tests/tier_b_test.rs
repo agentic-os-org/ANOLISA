@@ -413,6 +413,27 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+#[test]
+fn search_malformed_agent_scope_param_errors() {
+    // The explicit agent_scope parameter must not silently widen to shared:
+    // "isolated" without ":<id>" resolved to Ok(None) and returned every
+    // agent's memories. It must surface as an InvalidArgument error instead.
+    let (_tmp, svc) = setup();
+    svc.write("a/alpha.md", "agent note from alpha", false)
+        .unwrap();
+    svc.write("b/beta.md", "agent note from beta", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 3));
+
+    let err = svc
+        .memory_search("agent note", 10, None, None, Some("isolated"))
+        .unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "expected InvalidArgument, got {err:?}"
+    );
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic

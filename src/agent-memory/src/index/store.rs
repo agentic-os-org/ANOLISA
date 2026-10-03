@@ -298,17 +298,19 @@ impl BM25Store {
 
     /// Search with optional agent scope filter.
     /// `agent_scope` can be:
-    /// - None: return all results (shared mode, default)
+    /// - None or Some("shared"): return all results (shared mode, default)
     /// - Some("isolated:<agent_id>"): only results tagged with this agent_id
     /// - Some("filter:<agent_id>"): results tagged with this agent_id plus
     ///   any unscoped (agent_id IS NULL) memories
     ///
     /// Returns `InvalidArgument` when the scope prefix is recognised but the
     /// agent_id contains characters that would let it escape the parameterised
-    /// binding path (`'`, `"`, `;`, `\`, `/`, control bytes). Callers must
-    /// surface the error rather than silently falling back to shared mode,
-    /// otherwise a misconfigured `MCP_CLIENT_NAME` would silently widen the
-    /// visibility domain.
+    /// binding path (`'`, `"`, `;`, `\`, `/`, control bytes), and for any
+    /// other malformed value — a recognised prefix missing the `:<agent_id>`
+    /// part (e.g. `"isolated"`) or an unknown string; `None`/`"shared"` are
+    /// the only shared-mode spellings. Callers must surface the error rather
+    /// than silently falling back to shared mode, otherwise a misconfigured
+    /// `MCP_CLIENT_NAME` would silently widen the visibility domain.
     pub fn search_scoped(
         &self,
         query: &str,
@@ -1097,8 +1099,17 @@ fn resolve_agent_scope(agent_scope: Option<&str>) -> Result<AgentScope> {
     let Some(scope) = agent_scope else {
         return Ok(None);
     };
-    if !scope.starts_with("isolated:") && !scope.starts_with("filter:") {
+    if scope == "shared" {
         return Ok(None);
+    }
+    if !scope.starts_with("isolated:") && !scope.starts_with("filter:") {
+        // A recognised prefix missing the ":<id>" part ("isolated",
+        // "filter") or an entirely unknown value. The contract above
+        // promises an error here: Ok(None) meant shared mode, silently
+        // returning every agent's memories instead.
+        return Err(MemoryError::InvalidArgument(format!(
+            "invalid agent_scope {scope:?}: expected \"shared\", \"isolated:<id>\", or \"filter:<id>\""
+        )));
     }
     let agent_id = scope.split_once(':').map(|x| x.1).unwrap_or("");
     if agent_id.contains(|c: char| {
@@ -2079,5 +2090,55 @@ mod tests {
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_scope_malformed_prefix_errors_not_shared() {
+        // Regression: "isolated"/"filter" without the ":<id>" part resolved
+        // to Ok(None) = shared, returning EVERY agent's memories instead of
+        // erroring as the search_scoped contract promises.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert(
+            "a/alpha.md",
+            100,
+            10,
+            "agent note from alpha",
+            Some("alpha"),
+        )
+        .unwrap();
+        s.upsert("b/beta.md", 100, 10, "agent note from beta", Some("beta"))
+            .unwrap();
+
+        // Recognised prefix missing the id: must error, never silently widen.
+        for bad in ["isolated", "filter"] {
+            let err = s
+                .search_scoped("agent note", 10, true, Some(bad))
+                .unwrap_err();
+            assert!(
+                matches!(err, MemoryError::InvalidArgument(_)),
+                "expected InvalidArgument for {bad:?}"
+            );
+        }
+        // Unknown strings are not documented scope values either: error
+        // rather than silently resolving to shared.
+        let err = s
+            .search_scoped("agent note", 10, true, Some("bogus"))
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidArgument(_)));
+
+        // "shared" stays explicitly global: both agents' rows visible.
+        let hits = s
+            .search_scoped("agent note", 10, true, Some("shared"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"a/alpha.md"));
+        assert!(paths.contains(&"b/beta.md"));
+
+        // A valid isolated scope still narrows to exactly that agent.
+        let hits = s
+            .search_scoped("agent note", 10, true, Some("isolated:beta"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["b/beta.md"]);
     }
 }
