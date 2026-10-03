@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `docker-admin` skill for single-host Docker/Podman container
+  administration: install and daemon.json configuration (registry mirrors,
+  log rotation, data-root migration), runtime diagnostics, safe log/inspect
+  troubleshooting, disk governance with plan-before-prune cleanup, and
+  idempotent compose lifecycle management. (#3529)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

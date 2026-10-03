@@ -9,7 +9,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 | Category | Directory | Description |
 |----------|-----------|-------------|
 | **AI Tools** | `ai/` | AI programming tool integration (Claude Code, OpenClaw, QwenPaw, MCP setup) |
-| **System Admin** | `system-admin/` | Package management, storage, networking, kernel, shell scripting |
+| **System Admin** | `system-admin/` | Package management, storage, networking, kernel, shell scripting, containers |
 | **DevOps** | `devops/` | Git workflows, CI/CD, kernel development, diagnostics |
 | **Alibaba Cloud** | `aliyun/` | ECS instance management, cloud networking, GPU/AI deployment |
 | **Security** | `security/` | CVE queries, compliance checks, system hardening |
@@ -29,6 +29,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### System Admin
 - **alinux-admin** — ALinux 4 system management (systemd, SSH, firewalld, NetworkManager)
 - **backup-restore** — System backup and restore
+- **docker-admin** — Docker/Podman container administration (diagnostics, logs, safe cleanup, compose)
 - **regex-mastery** — Regular expression guide
 - **shell-scripting** — Bash/Zsh scripting and automation
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)

@@ -9,7 +9,7 @@
 | 分类 | 目录 | 说明 |
 |------|------|------|
 | **AI 工具** | `ai/` | AI 编程工具集成（Claude Code、OpenClaw、QwenPaw、MCP 配置） |
-| **系统管理** | `system-admin/` | 包管理、存储、网络、内核、Shell 脚本 |
+| **系统管理** | `system-admin/` | 包管理、存储、网络、内核、Shell 脚本、容器 |
 | **开发运维** | `devops/` | Git 工作流、CI/CD、内核开发、系统诊断 |
 | **阿里云** | `aliyun/` | ECS 实例管理、云网络、GPU/AI 部署 |
 | **安全** | `security/` | CVE 查询、合规检查、系统加固 |
@@ -29,6 +29,7 @@
 ### 系统管理
 - **alinux-admin** — ALinux 4 系统管理（systemd、SSH、firewalld、NetworkManager）
 - **backup-restore** — 系统备份与恢复
+- **docker-admin** — 容器管理（Docker/Podman 运行诊断、日志排查、安全清理、Compose 生命周期）
 - **regex-mastery** — 正则表达式指南
 - **shell-scripting** — Bash/Zsh 脚本编写与自动化
 - **storage-resize** — 阿里云磁盘扩容（XFS/EXT4/Btrfs）

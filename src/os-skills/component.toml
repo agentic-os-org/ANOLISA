@@ -115,6 +115,10 @@ name = "backup-restore"
 source = "{datadir}/skills/backup-restore/"
 
 [[adapters.openclaw.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
+
+[[adapters.openclaw.skills]]
 name = "ktuner"
 source = "{datadir}/skills/ktuner/"
 
@@ -233,6 +237,10 @@ source = "{datadir}/skills/alinux-admin/"
 [[adapters.hermes.skills]]
 name = "backup-restore"
 source = "{datadir}/skills/backup-restore/"
+
+[[adapters.hermes.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
 
 [[adapters.hermes.skills]]
 name = "ktuner"
