@@ -1,0 +1,88 @@
+[
+  {
+    "id": "git_log_oneline",
+    "category": "command",
+    "argv": ["git", "log", "--oneline", "-50"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "git_show_stat",
+    "category": "command",
+    "argv": ["git", "show", "--stat", "HEAD"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "rg_fn_main",
+    "category": "grep",
+    "argv": ["rg", "-n", "fn main", "src/", "-g", "*.rs"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "rg_pub_struct",
+    "category": "grep",
+    "argv": ["rg", "-n", "pub struct", "src/tokenless/crates", "-g", "*.rs"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "git_diff_tokenless",
+    "category": "diff",
+    "argv": ["git", "diff", "HEAD~5", "HEAD", "--", "src/tokenless"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "git_diff_head1",
+    "category": "diff",
+    "argv": ["git", "diff", "HEAD~1", "HEAD"],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "read",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff_aggressive",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "read",
+      "-l",
+      "aggressive",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  },
+  {
+    "id": "static_code_diff_smart",
+    "category": "diff",
+    "argv": [
+      "cat",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "rtk_argv": [
+      "smart",
+      "src/tokenless/benchmark/l2-module/assets/fixtures/static_code_diff.diff"
+    ],
+    "cwd_rel": ".",
+    "ground_truth_source": "dynamic"
+  }
+]

@@ -1,0 +1,13 @@
+rule_id: py-weak-crypto
+cwe_id: CWE-327
+desc_en: >-
+  Code uses broken or weak cryptographic algorithms such as
+  DES, 3DES, Blowfish, or ARC4 that are no longer secure.
+desc_zh: >-
+  代码使用已被破解或强度不足的加密算法（DES、3DES、Blowfish、ARC4）。
+regex: |-
+  \bDES\.new\s*\(
+  |\bBlowfish\.new\s*\(
+  |\bARC4\.new\s*\(
+  |\bDES3\.new\s*\(
+severity: warn

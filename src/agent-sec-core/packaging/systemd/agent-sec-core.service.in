@@ -1,0 +1,40 @@
+# Rendered for the selected package layout before systemd consumes the unit.
+[Unit]
+Description=Agent Security Core daemon
+# Rate-limit restarts: stop after 5 failures within 5 minutes to prevent
+# a persistent crash-loop from consuming CPU and filling logs.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Provide a fallback XDG_RUNTIME_DIR for environments where PAM/pam_systemd
+# does not set it (e.g. loginctl enable-linger at boot, minimal containers).
+# %U is a systemd specifier that resolves to the numeric UID of the service user.
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+ExecStart="{bindir}/agent-sec-daemon" serve
+RuntimeDirectory=agent-sec-core
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=2
+
+# --- Sandboxing / hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths="{datadir}"
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# NOTE: The following require per-deployment syscall profiling; enable after
+# verifying the daemon and its background workers (skill-ledger, prompt-scanner)
+# function correctly under these restrictions:
+# SystemCallFilter=@system-service
+# SystemCallArchitectures=native
+# MemoryDenyWriteExecute=true
+# CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
+
+[Install]
+WantedBy=default.target

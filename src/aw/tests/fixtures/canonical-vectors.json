@@ -1,0 +1,42 @@
+[
+  {
+    "input": {
+      "z": "中文\n\t\u0001",
+      "a": [
+        -9007199254740991,
+        9007199254740991,
+        true,
+        null
+      ]
+    },
+    "canonical": "{\"a\":[-9007199254740991,9007199254740991,true,null],\"z\":\"中文\\n\\t\\u0001\"}",
+    "digest": "1071d5c04e3b3dbb85a0dd6df96f083e87406021626f59c181cf3eac0e7f7ec5"
+  },
+  {
+    "input": {
+      "b": "😀/é ",
+      "a": {
+        "two": 2,
+        "one": 1
+      }
+    },
+    "canonical": "{\"a\":{\"one\":1,\"two\":2},\"b\":\"😀/é \"}",
+    "digest": "b7c5e47642a108b871a6b449f8b9df20ed6a9da88170c95c488125a95aed42f2"
+  },
+  {
+    "input": {
+      "stringified_arguments": "{\"float\":1.2,\"非ASCII\":true}"
+    },
+    "canonical": "{\"stringified_arguments\":\"{\\\"float\\\":1.2,\\\"非ASCII\\\":true}\"}",
+    "digest": "dc988073895da533caed4dcb28b3973b34988e697d05fe559e962f46c1bfe4b3"
+  },
+  {
+    "input": {
+      "2": "two",
+      "10": "ten",
+      "a": "after"
+    },
+    "canonical": "{\"10\":\"ten\",\"2\":\"two\",\"a\":\"after\"}",
+    "digest": "cd3d25c4dba69ed0aa625ac5de7fdf9cc282263404a8972baf5be44a923410e4"
+  }
+]

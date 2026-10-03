@@ -1,0 +1,51 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/asc_agentsight_client-3db159c536e4c851)
+
+running 6 tests
+test process::tests::parser_rejects_missing_and_zero_start_times ... ok
+test process::tests::parser_uses_field_22_after_a_command_containing_spaces_and_parentheses ... ok
+test process::tests::production_resolver_reads_current_process_and_boot_identity ... ok
+test transport::tests::configuration_rejects_malformed_authorities_and_ports ... ok
+test transport::tests::configuration_rejects_unsafe_urls_and_tokens ... ok
+test transport::tests::debug_output_redacts_credentials_and_request_bodies ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/client.rs (target/debug/deps/client-fcce06a829478f3b)
+
+running 7 tests
+test apply_checks_health_and_reuses_the_derived_idempotency_identity ... ok
+test apply_fails_closed_when_file_delete_guard_is_unavailable ... ok
+test apply_rejects_an_unsupported_plan_format_before_target_io ... ok
+test delete_treats_no_content_and_binding_not_found_as_absent ... ok
+test different_binding_revisions_derive_different_target_ids ... ok
+test local_transport_and_process_failures_keep_stable_retry_categories ... ok
+test remote_errors_are_classified_without_exposing_target_messages ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/prepared_client.rs (target/debug/deps/prepared_client-fa18289b8514fe8e)
+
+running 14 tests
+test boot_identity_is_required_only_for_the_new_preparation_port ... ok
+test corrupt_payload_route_and_target_are_rejected_before_modification ... ok
+test delete_requires_the_exact_absence_signal_and_sanitizes_errors ... ok
+test delete_works_after_process_exit_and_preserves_unknown_subresults ... ok
+test failed_update_preflight_does_not_remove_old_enforcement ... ok
+test partial_update_retry_with_no_old_targets_does_not_delete_new_id ... ok
+test pid_change_during_old_cleanup_keeps_confirmed_deletion_and_blocks_post ... ok
+test prepare_is_http_free_and_matches_complete_frozen_payloads ... ok
+test replay_rejects_pid_reuse_exit_and_boot_change_without_http ... ok
+test route_identity_is_validated_and_never_retargets_saved_cleanup ... ok
+test trait_create_retries_the_exact_saved_bytes_after_unknown ... ok
+test update_deletes_old_before_create_and_returns_partial_result ... ok
+test update_does_not_create_until_every_old_target_is_confirmed_absent ... ok
+test update_never_deletes_its_new_target_and_rejects_duplicate_cleanup ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests asc_agentsight_client
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

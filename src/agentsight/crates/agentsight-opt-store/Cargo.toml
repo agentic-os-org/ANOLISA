@@ -1,0 +1,10 @@
+[package]
+name = "agentsight-opt-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentsight-sqlite-lifecycle = { path = "../agentsight-sqlite-lifecycle" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

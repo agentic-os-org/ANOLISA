@@ -1,0 +1,99 @@
+{
+  "_meta": {
+    "version": "1.1",
+    "description": "Unified tool categorization for both tool-ready and compression strategies",
+    "purpose": "Single source of truth for tool classification and compression thresholds across all adapters",
+    "_aliases_note": "The '_aliases' section below is a reference mapping only — not consumed by code. It documents canonical tool name normalization for human readers."
+  },
+
+  "layer_1_skip": {
+    "_description": "Layer 1: Skip all compression (preserve integrity for content retrieval)",
+    "_tool_ready_category": "Read",
+    "_rationale": "These tools return file content or search results that should not be truncated",
+    "tools": [
+      "Read",
+      "read",
+      "read_file",
+      "read_many_files",
+      "Glob",
+      "glob",
+      "search_file",
+      "list_directory",
+      "list_dir",
+      "Grep",
+      "grep",
+      "grep_code",
+      "grep_search",
+      "search_files",
+      "Lsp",
+      "lsp",
+      "NotebookRead",
+      "notebook_read",
+      "notebookread"
+    ]
+  },
+
+  "layer_2_shell": {
+    "_description": "Layer 2: Moderate truncation for shell/exec tools",
+    "_tool_ready_category": "Shell",
+    "_rationale": "Shell commands produce text output that can be safely truncated if too long",
+    "tools": [
+      "Bash",
+      "bash",
+      "Shell",
+      "shell",
+      "exec",
+      "terminal",
+      "run_shell_command",
+      "run_in_terminal",
+      "get_terminal_output",
+      "execute_command",
+      "process"
+    ],
+    "thresholds": {
+      "truncate_strings_at": 65536,
+      "truncate_arrays_at": 128,
+      "max_depth": 8
+    }
+  },
+
+  "layer_3_api": {
+    "_description": "Layer 3: Zero-truncation for API/structured tools (default for tools not in layer_1 or layer_2)",
+    "_tool_ready_categories": ["WebFetch", "Write"],
+    "_rationale": "API responses and structured data should not be truncated; tools in this layer are implicit — any tool not in layer_1_skip or layer_2_shell falls here",
+    "thresholds": {
+      "truncate_strings_at": 1048576,
+      "truncate_arrays_at": 65536,
+      "max_depth": 32
+    }
+  },
+
+  "_aliases": {
+    "_description": "Canonical name mappings (reference only — not consumed by code)",
+    "bash": "Bash",
+    "shell": "Shell",
+    "grep": "Grep",
+    "grep_code": "Grep",
+    "grep_search": "Grep",
+    "search_files": "Grep",
+    "glob": "Glob",
+    "search_file": "Glob",
+    "list_dir": "Read",
+    "read": "Read",
+    "read_file": "Read",
+    "web_fetch": "WebFetch",
+    "fetch_content": "WebFetch",
+    "web_search": "WebSearch",
+    "search_web": "WebSearch",
+    "write": "Write",
+    "write_file": "Write",
+    "create_file": "Write",
+    "edit": "Edit",
+    "edit_file": "Edit",
+    "search_replace": "Edit",
+    "delete_file": "Write",
+    "run_in_terminal": "Bash",
+    "get_terminal_output": "Bash",
+    "notebook_read": "NotebookRead"
+  }
+}

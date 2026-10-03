@@ -1,0 +1,113 @@
+{
+  "_meta": {
+    "version": "2.0",
+    "description": "Dormant legacy Tool Ready dependency spec. Release builds do not read it while the hard bypass is active.",
+    "related_files": {
+      "tool_categories.json": "Unified tool categorization for compression strategies. Tool names in 'aliases' must match those in tool_categories.json to ensure consistent behavior across tool-ready and compression."
+    },
+    "schema": {
+      "tool_entry": {
+        "aliases": "Cross-framework tool name mapping. Cosh/openclaw/hermes use different tool names; aliases collect all variants for reverse lookup.",
+        "required": "Hard dependencies. Any missing → NOT_READY, triggers auto-fix.",
+        "recommended": "Soft dependencies. Missing → PARTIAL. System tools (git, docker, cargo, uv) are shell-invoked, grouped under Shell.",
+        "config_files": "Required config file paths (~ expansion supported). Missing → PARTIAL.",
+        "permissions": "Required system permissions: file_read, file_write, exec_shell. Missing → NOT_READY. Install readiness only, not runtime state.",
+        "network": "Removed. Network connectivity is runtime state, not install readiness."
+      },
+      "dep_entry": {
+        "binary": "CLI tool name for command -v detection",
+        "version": "Version constraint, e.g. >=0.35",
+        "package": "Package name in the manager",
+        "apt_package": "Override package name when detected manager is apt (Debian/Ubuntu). Optional; defaults to package.",
+        "apk_package": "Override package name when detected manager is apk (Alpine). Optional; defaults to package.",
+        "manager": "Package manager type. Default rpm (auto-detects yum/dnf/apt/apk at runtime)",
+        "pip_name": "pip package name (default = package)",
+        "uv_name": "uv package name (default = package)",
+        "npm_name": "npm package name (default = package)",
+        "use_npx": "Whether to use npx for execution",
+        "url": "Download URL for curl_pipe_sh install",
+        "args": "Extra args for curl_pipe_sh install",
+        "fallback": "Fallback install strategies, tried sequentially on primary failure"
+      }
+    },
+    "supported_managers": {
+      "rpm": "System package manager (auto-detects yum/dnf/apt-get/apk by runtime environment)",
+      "apt": "apt-get — Debian/Ubuntu (only when explicitly specified)",
+      "pip": "pip / pip3 — Python packages",
+      "uv": "uv tool install / uv pip install — modern Python package manager",
+      "npm": "npm install -g — Node.js global packages",
+      "npx": "npx -y — Node.js ephemeral execution",
+      "cargo": "cargo install --locked — Rust crates.io",
+      "cargo_build": "cargo build --manifest-path — local source build",
+      "symlink": "ln -sf — pre-built binary symlink",
+      "path": "export PATH — directory injection",
+      "dir": "mkdir -p — directory creation",
+      "curl_pipe_sh": "curl/wget | sh — official install script (fallback only)"
+    },
+    "categories": "4 agent tool categories: Shell/WebFetch/Read/Write. System tools (git, docker, cargo, uv) invoked via shell → grouped under Shell.recommended."
+  },
+
+  "Shell": {
+    "_description": "Shell — base command execution environment for AI agents",
+    "_compression_layer": "layer_2_shell",
+    "aliases": ["Bash", "bash", "Shell", "shell", "run_shell_command", "run_in_terminal", "get_terminal_output", "terminal", "exec", "execute_command", "process"],
+    "required": [
+      { "binary": "bash", "package": "bash", "manager": "rpm" },
+      { "binary": "jq", "package": "jq", "manager": "rpm" }
+    ],
+    "recommended": [
+      { "binary": "git", "package": "git", "manager": "rpm" },
+      { "binary": "ssh", "package": "openssh-clients", "apt_package": "openssh-client", "manager": "rpm" },
+      { "binary": "docker", "package": "docker-ce", "apt_package": "docker.io", "manager": "rpm",
+        "fallback": [
+          { "method": "rpm", "binary": "docker", "package": "docker" }
+        ]
+      },
+      { "binary": "uv", "package": "uv", "manager": "pip", "pip_name": "uv",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "uv", "url": "https://astral.sh/uv/install.sh" },
+          { "method": "cargo", "binary": "uv", "package": "uv" }
+        ]
+      },
+      { "binary": "python3", "package": "python3", "manager": "rpm" },
+      { "binary": "cargo", "package": "cargo", "manager": "rpm" },
+      { "binary": "rustc", "package": "rustc", "manager": "rpm" }
+    ],
+    "permissions": ["exec_shell"],
+    "network": []
+  },
+
+  "WebFetch": {
+    "_description": "WebFetch — web request tool for AI agents",
+    "_compression_layer": "layer_3_api",
+    "aliases": ["WebFetch", "web_fetch", "fetch_content", "WebSearch", "web_search", "search_web", "web_extract", "x_search"],
+    "required": [
+      { "binary": "curl", "package": "curl", "manager": "rpm" }
+    ],
+    "recommended": [],
+    "permissions": [],
+    "network": []
+  },
+
+  "Read": {
+    "_description": "Read — file read and search tool for AI agents",
+    "_compression_layer": "layer_1_skip",
+    "aliases": ["Read", "read", "read_file", "read_many_files", "Glob", "glob", "search_file", "list_directory", "list_dir", "Grep", "grep", "grep_code", "grep_search", "search_files", "Lsp", "lsp", "NotebookRead", "notebook_read", "notebookread"],
+    "required": [],
+    "recommended": [],
+    "config_files": [],
+    "permissions": ["file_read"],
+    "network": []
+  },
+
+  "Write": {
+    "_description": "Write — file write and edit tool for AI agents",
+    "_compression_layer": "layer_3_api",
+    "aliases": ["Write", "write", "write_file", "create_file", "Edit", "edit", "edit_file", "search_replace", "delete_file", "apply_patch", "patch"],
+    "required": [],
+    "recommended": [],
+    "config_files": [],
+    "permissions": ["file_write"],
+    "network": []
+  }
+}

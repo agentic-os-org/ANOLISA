@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "enforcer_unavailable",
+    "message": "sensitive target detail that must not leave the Client",
+    "retryable": true
+  }
+}

@@ -1,0 +1,29 @@
+macro_rules! recommendation_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            RecommendationTitle,
+            RecommendationNextStepTitle,
+            AnalysisResultTitle,
+            RecommendationEmptyBody,
+            RecommendationFooter,
+            RecommendationNoSelectableTitle,
+            RecommendationNoSelectableBody,
+            RecommendationUnavailableTitle,
+            RecommendationUnavailableBody,
+            RecommendationSelectedTitle,
+            RecommendationSelectedBody,
+            RecommendationCopiedTitle,
+            RecommendationCopiedBody,
+            RecommendationInsertTitle,
+            RecommendationInsertBody,
+            RecommendationDetailsTitle,
+            RecommendationDetailsBody,
+            RecommendationDisplayOnlyBody,
+            RecommendationCopyOnlyBody,
+            RecommendationInsertOnlyBody,
+            RecommendationDetailsOnlyBody,
+        );
+    };
+}

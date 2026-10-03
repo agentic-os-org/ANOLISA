@@ -1,0 +1,301 @@
+manifest_version = 2
+
+[component]
+name = "sec-core"
+version = "0.13.2"
+layer = "runtime"
+domain = "security"
+display_name = "Agent Security Core"
+description = "Agent security runtime, sandbox, adapters, and security skills"
+owner = "agent-sec-core-team"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.3.15"
+
+[backends.rpm]
+package = "agent-sec-core"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+min_kernel = "5.4"
+
+[[component.dependencies]]
+name = "bubblewrap"
+kind = "system-package"
+probe = "bwrap --version"
+packages = { rpm = "bubblewrap", deb = "bubblewrap" }
+
+[[component.dependencies]]
+name = "gnupg"
+kind = "system-package"
+probe = "gpg --version"
+packages = { rpm = "gnupg2", deb = "gnupg" }
+
+[[component.dependencies]]
+name = "systemd"
+kind = "system-package"
+probe = "systemctl --version"
+packages = { rpm = "systemd", deb = "systemd" }
+
+[[component.dependencies]]
+name = "nodejs"
+kind = "system-package"
+probe = "node --version"
+packages = { rpm = "nodejs", deb = "nodejs" }
+
+[[component.dependencies]]
+name = "jq"
+kind = "system-package"
+probe = "jq --version"
+packages = { rpm = "jq", deb = "jq" }
+
+[component.layout]
+modes = ["system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/sec-core/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/agent-sec-cli"
+target = "{bindir}/agent-sec-cli"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/agent-sec-daemon"
+target = "{bindir}/agent-sec-daemon"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/agent-sec-python"
+target = "{bindir}/agent-sec-python"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "bin/linux-sandbox"
+target = "{bindir}/linux-sandbox"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/runtime/bin/python3.11"
+target = "{libdir}/sec-core/python3.11/runtime/bin/python3.11"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/runtime/lib/"
+target = "{libdir}/sec-core/python3.11/runtime/lib/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/runtime/PROVENANCE.toml"
+target = "{libdir}/sec-core/python3.11/runtime/PROVENANCE.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/runtime/LICENSES.sha256"
+target = "{libdir}/sec-core/python3.11/runtime/LICENSES.sha256"
+mode = "0644"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core/python3.11/site-packages/"
+target = "{libdir}/sec-core/python3.11/site-packages/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/skills/"
+target = "{datadir}/skills/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/sec-core/agent-sec-core.service.in"
+target = "{userunitdir}/agent-sec-core.service"
+mode = "0644"
+render = "anolisa-paths-v1"
+
+[[component.layout.files]]
+source = "share/doc/sec-core/LICENSE"
+target = "{datadir}/doc/sec-core/LICENSE"
+mode = "0644"
+
+[[component.services]]
+unit = "agent-sec-core.service"
+scope = "user"
+enable = false
+start = false
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/agent-sec-cli"
+timeout_secs = 15
+
+[[adapters]]
+framework = "openclaw"
+name = "sec-core-openclaw"
+display_name = "Agent Security Core for OpenClaw"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec"
+source = "adapters/sec-core/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"
+detect = { binary = "openclaw" }
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/openclaw-plugin/"
+managed_packages = ["agent-sec-openclaw-hook", "agent-sec-skills"]
+
+[adapters.compat]
+framework_version = ">=2026.4.14"
+
+[adapters.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[adapters.openclaw.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[[adapters.openclaw.config]]
+key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+value = true
+framework_version = ">=2026.4.24"
+
+[[adapters.openclaw.skills]]
+name = "code-scanner"
+source = "{datadir}/skills/code-scanner/"
+
+[[adapters.openclaw.skills]]
+name = "prompt-scanner"
+source = "{datadir}/skills/prompt-scanner/"
+
+[[adapters.openclaw.skills]]
+name = "pii-checker"
+source = "{datadir}/skills/pii-checker/"
+
+[[adapters.openclaw.skills]]
+name = "skill-ledger"
+source = "{datadir}/skills/skill-ledger/"
+
+[[adapters]]
+framework = "hermes"
+name = "sec-core-hermes"
+display_name = "Agent Security Core for Hermes"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec-core-hermes-plugin"
+source = "adapters/sec-core/hermes"
+dest = "{datadir}/adapters/{component}/hermes/"
+detect = { binary = "hermes" }
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/hermes-plugin/src/"
+managed_packages = ["agent-sec-hermes-hook", "agent-sec-skills"]
+
+[adapters.bundle]
+schema = 1
+entry = "plugin.yaml"
+
+[adapters.hermes.bundle]
+schema = 1
+entry = "plugin.yaml"
+
+[[adapters.hermes.skills]]
+name = "code-scanner"
+source = "{datadir}/skills/code-scanner/"
+
+[[adapters.hermes.skills]]
+name = "prompt-scanner"
+source = "{datadir}/skills/prompt-scanner/"
+
+[[adapters.hermes.skills]]
+name = "pii-checker"
+source = "{datadir}/skills/pii-checker/"
+
+[[adapters.hermes.skills]]
+name = "skill-ledger"
+source = "{datadir}/skills/skill-ledger/"
+
+[[adapters]]
+framework = "codex"
+name = "sec-core-codex"
+display_name = "Agent Security Core for Codex"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec-core"
+source = "adapters/sec-core/codex"
+dest = "{datadir}/adapters/{component}/codex/"
+detect = { binary = "codex" }
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/codex-plugin/hooks-plugin/"
+managed_packages = ["agent-sec-codex-hook"]
+
+[adapters.bundle]
+schema = 1
+entry = ".codex-plugin/plugin.json"
+
+[[adapters]]
+framework = "qoder"
+name = "sec-core-qoder"
+display_name = "Agent Security Core for Qoder"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec-core"
+source = "adapters/sec-core/qoder"
+dest = "{datadir}/adapters/{component}/qoder/"
+detect = { binary = "qodercli" }
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/qoder-plugin/"
+managed_packages = ["agent-sec-qoder-hook"]
+
+[adapters.bundle]
+schema = 1
+entry = ".qoder-plugin/plugin.json"
+
+[[adapters]]
+framework = "qwencode"
+name = "sec-core-qwencode"
+display_name = "Agent Security Core for Qwen Code"
+adapter_type = "extension"
+trust = "first-party"
+plugin_id = "agent-sec-core-qwen-code-extension"
+source = "adapters/sec-core/qwencode"
+dest = "{datadir}/adapters/{component}/qwencode/"
+detect = { binary = "qwen" }
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/qwen-code-extension/"
+managed_packages = ["agent-sec-qwen-code-hook"]
+
+[adapters.bundle]
+schema = 1
+entry = "qwen-extension.json"
+
+[[adapters]]
+framework = "cosh"
+name = "sec-core-cosh"
+display_name = "Agent Security Core for Cosh"
+adapter_type = "extension"
+trust = "first-party"
+plugin_id = "agent-sec-core"
+source = "adapters/sec-core/cosh"
+dest = "{datadir}/extensions/{component}/"
+detect = { binary = "cosh" }
+
+[adapters.backends.rpm]
+resource_root = "{datadir}/extensions/agent-sec-core/"
+managed_packages = ["agent-sec-cosh-hook"]
+
+[adapters.bundle]
+schema = 1
+entry = "cosh-extension.json"

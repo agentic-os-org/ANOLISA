@@ -1,0 +1,9 @@
+# component	rpm_package	status	reason
+agent-memory	agent-memory	run	portable raw artifact with multiple published versions
+tokenless	tokenless	run	portable raw artifact with multiple published versions
+agentsight	agentsight	skip	requires a privileged eBPF-capable runtime for meaningful validation
+cosh	copilot-shell	skip	needs an isolated conflict fixture because cosh-ng is preinstalled in the image
+cosh-ng	cosh-ng	skip	needs an isolated conflict fixture because cosh is preinstalled in the image
+os-skills	os-skills	skip	published contract still uses the legacy manifest layout
+skillfs	skillfs	skip	requires FUSE and /dev/fuse
+ws-ckpt	ws-ckpt	skip	requires systemd and a btrfs test filesystem

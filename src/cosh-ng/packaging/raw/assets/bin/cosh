@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Resolve cosh-ng's private runtime in both ANOLISA install modes.
+set -e
+
+resolve_script_path() {
+    local source_path="${BASH_SOURCE[0]}"
+    local source_dir link_target depth=0
+
+    while [ -L "$source_path" ]; do
+        depth=$((depth + 1))
+        [ "$depth" -le 40 ] || return
+        source_dir="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd -P)" || return
+        link_target="$(readlink "$source_path")" || return
+        case "$link_target" in
+            /*) source_path="$link_target" ;;
+            *) source_path="$source_dir/$link_target" ;;
+        esac
+    done
+
+    source_dir="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd -P)" || return
+    printf '%s/%s\n' "$source_dir" "$(basename "$source_path")"
+}
+
+script_path="$(resolve_script_path || true)"
+
+prefix=""
+if [ -n "$script_path" ]; then
+    bindir="$(dirname "$script_path")"
+    if ! prefix="$(cd "$bindir/.." 2>/dev/null && pwd -P)"; then
+        prefix=""
+    fi
+fi
+
+for runtime_dir in \
+    "${prefix:+$prefix/libexec/anolisa/cosh-ng}" \
+    "${prefix:+$prefix/lib/anolisa/libexec/cosh-ng}" \
+    "${HOME:-}/.local/lib/anolisa/libexec/cosh-ng" \
+    "/usr/local/libexec/anolisa/cosh-ng" \
+    "/usr/libexec/anolisa/cosh-ng"; do
+    if [ -n "$runtime_dir" ] && \
+        [ -x "$runtime_dir/cosh-shell" ] && \
+        [ -x "$runtime_dir/cosh-core" ] && \
+        [ -x "$runtime_dir/cosh-gateway" ]; then
+        export PATH="$runtime_dir:$PATH"
+        # This wrapper only resolves the private runtime; the TUI-vs-
+        # passthrough decision is cosh-shell's invocation classifier,
+        # keyed off the forwarded invocation name.
+        exec -a "$0" "$runtime_dir/cosh-shell" "$@"
+    fi
+done
+
+echo "Error: cosh-ng runtime not found under ANOLISA libexec directories." >&2
+exit 127

@@ -1,0 +1,510 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index fa05581..4112e90 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -108,7 +108,7 @@ checksum = "e8b5778837666541195063243828c5b6139221b47dc4ec3ba81738e532469ab1"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -208,7 +208,7 @@ dependencies = [
+  "heck",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -339,7 +339,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -838,7 +838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+ dependencies = [
+  "proc-macro2",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -882,7 +882,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+ dependencies = [
+  "getrandom 0.2.17",
+  "libredox",
+- "thiserror",
++ "thiserror 1.0.69",
+ ]
+
+ [[package]]
+@@ -952,6 +952,7 @@ dependencies = [
+  "serde_json",
+  "sha2",
+  "tempfile",
++ "thiserror 2.0.20",
+  "toml",
+  "toml_edit",
+  "ureq",
+@@ -1070,7 +1071,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1160,6 +1161,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+
++[[package]]
++name = "syn"
++version = "3.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
+ [[package]]
+ name = "synstructure"
+ version = "0.13.2"
+@@ -1168,7 +1180,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1190,7 +1202,16 @@ version = "1.0.69"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+ dependencies = [
+- "thiserror-impl",
++ "thiserror-impl 1.0.69",
++]
++
++[[package]]
++name = "thiserror"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
++dependencies = [
++ "thiserror-impl 2.0.20",
+ ]
+
+ [[package]]
+@@ -1201,7 +1222,18 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
++]
++
++[[package]]
++name = "thiserror-impl"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.5",
+ ]
+
+ [[package]]
+@@ -1397,7 +1429,7 @@ dependencies = [
+  "bumpalo",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wasm-bindgen-shared",
+ ]
+
+@@ -1503,7 +1535,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1514,7 +1546,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1743,7 +1775,7 @@ dependencies = [
+  "heck",
+  "indexmap",
+  "prettyplease",
+- "syn",
++ "syn 2.0.117",
+  "wasm-metadata",
+  "wit-bindgen-core",
+  "wit-component",
+@@ -1759,7 +1791,7 @@ dependencies = [
+  "prettyplease",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wit-bindgen-core",
+  "wit-bindgen-rust",
+ ]
+@@ -1826,7 +1858,7 @@ checksum = "b659052874eb698efe5b9e8cf382204678a0086ebf46982b79d6ca3182927e5d"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -1847,7 +1879,7 @@ checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1867,7 +1899,7 @@ checksum = "d71e5d6e06ab090c67b5e44993ec16b72dcbaabc526db883a360057678b48502"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -1907,7 +1939,7 @@ checksum = "eadce39539ca5cb3985590102671f2567e659fca9666581ad3411d59207951f3"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index 89376bf..de9c222 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -13,6 +13,7 @@ keywords = ["cli", "llm", "token", "filter", "productivity"]
+ categories = ["command-line-utilities", "development-tools"]
+
+ [dependencies]
++thiserror = "2"
+ clap = { version = "4", features = ["derive"] }
+ anyhow = "1.0"
+ # Console code page decoding for child-process output. Kept off the
+diff --git a/src/core/tracking.rs b/src/core/tracking.rs
+index f5d1a39..f4f332c 100644
+--- a/src/core/tracking.rs
++++ b/src/core/tracking.rs
+@@ -1731,6 +1731,8 @@ impl TimedExecution {
+         let input_tokens = estimate_tokens(input);
+         let output_tokens = estimate_tokens(output);
+
++        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
++
+         if let Ok(tracker) = Tracker::new() {
+             let _ = tracker.record(
+                 original_cmd,
+@@ -1792,6 +1794,206 @@ pub fn args_display(args: &[OsString]) -> String {
+         .join(" ")
+ }
+
++/// Estimate token count from character count using ~4 chars/token heuristic.
++fn estimate_tokens_from_chars(chars: usize) -> usize {
++    if chars == 0 {
++        return 0;
++    }
++    chars.div_ceil(4)
++}
++
++/// Resolve caller context from environment variables (primary) or
++/// .rewrite-context file (fallback for backwards compatibility).
++fn resolve_tokenless_context() -> (String, Option<String>, Option<String>) {
++    // Primary: environment variables set by the hook
++    let env_agent = std::env::var("TOKENLESS_AGENT_ID").ok();
++    let env_session = std::env::var("TOKENLESS_SESSION_ID").ok();
++    let env_toolcall = std::env::var("TOKENLESS_TOOL_USE_ID").ok();
++
++    if env_agent.is_some() || env_session.is_some() || env_toolcall.is_some() {
++        let agent = env_agent.unwrap_or_else(|| "cli".to_string());
++        let sid = env_session.filter(|s| !s.is_empty());
++        let tuid = env_toolcall.filter(|t| !t.is_empty());
++        return (agent, sid, tuid);
++    }
++
++    // Fallback: .rewrite-context file (legacy compat)
++    let context_file = tokenless_trusted_home_dir()
++        .map(|d| d.join(".tokenless/.rewrite-context"))
++        .filter(|p| p.exists())
++        .and_then(|p| std::fs::read_to_string(p).ok());
++    if let Some(ctx) = &context_file {
++        let mut lines = ctx.lines();
++        let agent = lines.next().unwrap_or("").trim().to_string();
++        let session = lines.next().unwrap_or("").trim().to_string();
++        let toolcall = lines.next().unwrap_or("").trim().to_string();
++        let agent = if !agent.is_empty() {
++            agent
++        } else {
++            "cli".to_string()
++        };
++        let sid = if session.is_empty() {
++            None
++        } else {
++            Some(session)
++        };
++        let tuid = if toolcall.is_empty() {
++            None
++        } else {
++            Some(toolcall)
++        };
++        return (agent, sid, tuid);
++    }
++
++    ("cli".to_string(), None::<String>, None::<String>)
++}
++
++/// Check if tokenless stats are enabled.
++fn is_tokenless_stats_enabled() -> bool {
++    if let Ok(val) = std::env::var("TOKENLESS_STATS_ENABLED") {
++        return val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes");
++    }
++    tokenless_trusted_home_dir()
++        .map(|d| d.join(".tokenless/config.json"))
++        .and_then(|p| std::fs::read_to_string(p).ok())
++        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
++        .and_then(|v| v.get("stats_enabled").and_then(|b| b.as_bool()))
++        .unwrap_or(true)
++}
++
++#[allow(unsafe_code)] // Shared passwd lookup requires libc and contains documented safety proofs.
++#[path = "../../../../crates/tokenless-stats/src/home.rs"]
++mod tokenless_home;
++#[path = "../../../../crates/tokenless-stats/src/path_policy.rs"]
++mod tokenless_path_policy;
++
++fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
++    let home = tokenless_home::get_home_dir();
++    (!home.is_empty()).then(|| std::path::PathBuf::from(home))
++}
++
++fn resolve_tokenless_stats_db() -> Option<std::path::PathBuf> {
++    let home = tokenless_trusted_home_dir();
++    let data_dir_override = std::env::var("TOKENLESS_DATA_DIR").ok();
++    let stats_db_override = std::env::var("TOKENLESS_STATS_DB").ok();
++    resolve_tokenless_stats_db_with(
++        home.as_deref(),
++        data_dir_override.as_deref(),
++        stats_db_override.as_deref(),
++    )
++}
++
++fn resolve_tokenless_stats_db_with(
++    home: Option<&std::path::Path>,
++    data_dir_override: Option<&str>,
++    stats_db_override: Option<&str>,
++) -> Option<std::path::PathBuf> {
++    let data_dir = tokenless_path_policy::resolve_data_dir(home, data_dir_override);
++
++    let mut trusted_roots = Vec::with_capacity(2);
++    if let Some(home) = home {
++        trusted_roots.push(home);
++    }
++    if let Ok(data_dir) = data_dir.as_deref() {
++        trusted_roots.push(data_dir);
++    }
++
++    if let Some(path) = stats_db_override
++        .filter(|path| !path.is_empty())
++        .map(std::path::PathBuf::from)
++        .and_then(|path| tokenless_path_policy::validate_database_path(&path, &trusted_roots).ok())
++    {
++        return Some(path);
++    }
++
++    let data_dir = data_dir.ok()?;
++    tokenless_path_policy::validate_database_path(&data_dir.join("stats.db"), &[data_dir.as_path()])
++        .ok()
++}
++
++/// Record RTK command output compression stats to the tokenless stats database.
++///
++/// Fails silently so RTK output is never blocked by database errors.
++fn record_to_tokenless_stats(
++    original_cmd: &str,
++    rtk_cmd: &str,
++    raw_output: &str,
++    filtered_output: &str,
++) {
++    let _ = (original_cmd, rtk_cmd);
++
++    if !is_tokenless_stats_enabled() {
++        return;
++    }
++
++    let (agent_id, session_id, tool_use_id) = resolve_tokenless_context();
++
++    let Some(db_path) = resolve_tokenless_stats_db() else {
++        return;
++    };
++
++    let before_chars = raw_output.len();
++    let after_chars = filtered_output.len();
++
++    let before_tokens = estimate_tokens_from_chars(before_chars);
++    let after_tokens = estimate_tokens_from_chars(after_chars);
++
++    // Skip recording if there was no actual token savings
++    if after_tokens >= before_tokens {
++        return;
++    }
++
++    let _ = (|| -> anyhow::Result<()> {
++        if let Some(parent) = db_path.parent() {
++            tokenless_path_policy::ensure_state_dir(parent)?;
++        }
++        let conn = rusqlite::Connection::open(&db_path)?;
++        conn.execute_batch(
++            "CREATE TABLE IF NOT EXISTS stats (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                timestamp TEXT NOT NULL,
++                operation TEXT NOT NULL,
++                agent_id TEXT NOT NULL,
++                source_pid INTEGER,
++                session_id TEXT,
++                tool_use_id TEXT,
++                before_chars INTEGER NOT NULL,
++                before_tokens INTEGER NOT NULL,
++                after_chars INTEGER NOT NULL,
++                after_tokens INTEGER NOT NULL,
++                before_text TEXT,
++                after_text TEXT
++            );
++            CREATE INDEX IF NOT EXISTS idx_stats_timestamp ON stats(timestamp);
++            CREATE INDEX IF NOT EXISTS idx_stats_operation ON stats(operation);
++            CREATE INDEX IF NOT EXISTS idx_stats_agent_id ON stats(agent_id);
++            CREATE INDEX IF NOT EXISTS idx_stats_session_id ON stats(session_id);",
++        )?;
++        conn.execute(
++            "INSERT INTO stats (
++                timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
++                before_chars, before_tokens, after_chars, after_tokens,
++                before_text, after_text
++            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
++            rusqlite::params![
++                chrono::Utc::now().to_rfc3339(),
++                "rewrite-command",
++                agent_id,
++                Some(std::process::id() as i64),
++                session_id,
++                tool_use_id,
++                before_chars as i64,
++                before_tokens as i64,
++                after_chars as i64,
++                after_tokens as i64,
++                raw_output,
++                filtered_output,
++            ],
++        )?;
++        Ok(())
++    })();
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -1804,6 +2006,65 @@ mod tests {
+     /// and can race on the same global env var under parallel `cargo test`.
+     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
++    #[test]
++    fn tokenless_data_dir_accepts_nonexistent_descendant() {
++        let home = tempfile::tempdir().unwrap();
++        let candidate = home.path().join("nested/data");
++        let resolved =
++            tokenless_path_policy::resolve_data_dir(Some(home.path()), candidate.to_str()).unwrap();
++        assert_eq!(resolved, candidate);
++    }
++
++    #[test]
++    fn tokenless_data_dir_accepts_outside_home() {
++        let home = tempfile::tempdir().unwrap();
++        let outside = tempfile::tempdir().unwrap();
++        let resolved =
++            tokenless_path_policy::resolve_data_dir(Some(home.path()), outside.path().to_str())
++                .unwrap();
++        assert_eq!(resolved, outside.path().canonicalize().unwrap());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn tokenless_data_dir_canonicalizes_symlink() {
++        use std::os::unix::fs::symlink;
++
++        let home = tempfile::tempdir().unwrap();
++        let outside = tempfile::tempdir().unwrap();
++        let link = home.path().join("redirect");
++        symlink(outside.path(), &link).unwrap();
++        let candidate = link.join("data");
++        let resolved = tokenless_path_policy::validate_data_dir(&candidate).unwrap();
++        assert_eq!(
++            resolved,
++            outside.path().canonicalize().unwrap().join("data")
++        );
++    }
++
++    #[test]
++    fn tokenless_stats_db_uses_external_data_dir() {
++        let home = tempfile::tempdir().unwrap();
++        let external = tempfile::tempdir().unwrap();
++        let data_dir = external.path().join("tokenless-data");
++        let resolved =
++            resolve_tokenless_stats_db_with(Some(home.path()), data_dir.to_str(), None).unwrap();
++        assert_eq!(resolved, data_dir.join("stats.db"));
++    }
++
++    #[test]
++    fn tokenless_stats_db_override_wins_over_invalid_data_dir() {
++        let home = tempfile::tempdir().unwrap();
++        let stats_db = home.path().join("stats.db");
++        let resolved = resolve_tokenless_stats_db_with(
++            Some(home.path()),
++            Some("relative/data"),
++            stats_db.to_str(),
++        )
++        .unwrap();
++        assert_eq!(resolved, stats_db);
++    }
++
+     // 1. estimate_tokens — verify ~4 chars/token ratio
+     #[test]
+     fn test_estimate_tokens() {

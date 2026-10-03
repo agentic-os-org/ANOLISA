@@ -1,0 +1,25 @@
+id:1
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"message":{"content":"1","role":"assistant"},"finish_reason":"null"}]},"usage":{"total_tokens":29,"output_tokens":1,"input_tokens":28,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"d987911c-c426-9cbc-8b45-d02bdd24930f"}
+
+id:2
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"message":{"content":"1 2","role":"assistant"},"finish_reason":"null"}]},"usage":{"total_tokens":31,"output_tokens":3,"input_tokens":28,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"d987911c-c426-9cbc-8b45-d02bdd24930f"}
+
+id:3
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"message":{"content":"1 2 3 ","role":"assistant"},"finish_reason":"null"}]},"usage":{"total_tokens":34,"output_tokens":6,"input_tokens":28,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"d987911c-c426-9cbc-8b45-d02bdd24930f"}
+
+id:4
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"message":{"content":"1 2 3 4 5","role":"assistant"},"finish_reason":"null"}]},"usage":{"total_tokens":37,"output_tokens":9,"input_tokens":28,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"d987911c-c426-9cbc-8b45-d02bdd24930f"}
+
+id:5
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"message":{"content":"1 2 3 4 5","role":"assistant"},"finish_reason":"stop"}]},"usage":{"total_tokens":37,"output_tokens":9,"input_tokens":28,"prompt_tokens_details":{"cached_tokens":0}},"request_id":"d987911c-c426-9cbc-8b45-d02bdd24930f"}
+

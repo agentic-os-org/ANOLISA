@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anolisa-tokenless-agentscope"
+version = "@VERSION@"
+description = "Complete Tokenless lifecycle integration for AgentScope"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "agentscope>=1.0.11,<2.1",
+    "anolisa-tokenless==@VERSION@",
+    # AgentScope 2.0.0 does not cap MCP and is incompatible with MCP 2.x.
+    "mcp>=1.13,<2",
+    # AgentScope 1.x imports tqdm at package import time without declaring it;
+    # it used to arrive transitively through openai, which dropped tqdm in
+    # 3.3.0. PEP 508 markers cannot condition on the resolved AgentScope
+    # version, so declare it unconditionally to keep the whole 1.x support
+    # range installable (harmless extra dependency for AgentScope 2.x users).
+    "tqdm",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

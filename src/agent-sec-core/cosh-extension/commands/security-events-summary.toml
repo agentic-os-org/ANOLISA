@@ -1,0 +1,2 @@
+description = "Show security posture summary from agent-sec-cli events"
+run = "agent-sec-cli events --summary  {{args}}"

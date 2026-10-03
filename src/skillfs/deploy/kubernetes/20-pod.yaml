@@ -1,0 +1,351 @@
+# SkillFS FUSE sidecar reference Pod for Kubernetes 1.29 or later.
+#
+# DEPLOYMENT PREREQUISITES — read before applying:
+#
+#   1. The cluster must already permit privileged containers in this namespace.
+#      The SkillFS sidecar needs `privileged: true` to open /dev/fuse and to use
+#      `mountPropagation: Bidirectional`. This is a cluster policy decision
+#      made by the cluster administrator.
+#
+#   2. The namespace must permit the `/dev/fuse` hostPath volume below.
+#
+#   3. Kubernetes >= 1.29 is required, because the SkillFS container is a native
+#      sidecar (`initContainers[].restartPolicy: Always`). See SIDECAR FORM.
+#
+#   If a prerequisite is missing, the Pod is rejected at admission — see the
+#   deployment guide for the exact policy to request and how to capture the
+#   admission error.
+#
+# TOPOLOGY
+#
+#   volume: skill-example   ConfigMap, read-only, example content only
+#   volume: skill-source    emptyDir, writable physical source root
+#   volume: skill-shared    emptyDir (Memory), carries the propagated FUSE mount
+#   volume: fuse-device     hostPath /dev/fuse (CharDevice)
+#
+#   initContainer seed-example               regular init container
+#     └── copies skill-example -> skill-source        (no FUSE, no privilege)
+#
+#   initContainer skillfs (restartPolicy: Always)     NATIVE SIDECAR
+#                                            PRIVILEGED — the only such container
+#     ├── /dev/fuse                          from fuse-device
+#     ├── /var/lib/skillfs/source            from skill-source (physical source)
+#     └── /var/lib/skillfs/shared            from skill-shared, Bidirectional
+#         └── mount/                         FUSE mount created here
+#
+#   container agent                          NON-PRIVILEGED, uid 10001
+#     └── /var/lib/skillfs/shared            from skill-shared, HostToContainer
+#         └── mount/skills/...               propagated SkillFS view
+#
+#   The agent does NOT mount skill-source, so the physical source tree is not
+#   reachable from the workload container.
+#
+#   The FUSE mount is created at `<shared volume>/mount`, a subdirectory of the
+#   propagated volume, rather than over the volume root. Mount propagation
+#   carries mounts made *inside* the shared volume; over-mounting the volume
+#   root is not the supported arrangement.
+#
+# SIDECAR FORM — why a native sidecar
+#
+#   SkillFS is declared as a native sidecar: an entry in `initContainers` with
+#   `restartPolicy: Always`. This is not cosmetic. It buys two guarantees a plain
+#   `containers` entry cannot provide:
+#
+#     - A real start barrier. The kubelet does not start the next init container
+#       or any main container until this sidecar's startupProbe succeeds, so the
+#       agent cannot begin initializing against a mountpoint that has no FUSE
+#       mount yet. With a plain sidecar the containers start concurrently and
+#       only Pod *readiness* is gated — which does nothing for a workload that
+#       reads skills during its own startup.
+#
+#     - Correct shutdown ordering. Native sidecars are terminated only after the
+#       main containers exit, so SkillFS keeps serving the view until the agent
+#       is gone. With a plain sidecar both receive SIGTERM together and the agent
+#       can be left reading a dead FUSE endpoint.
+#
+#   Native sidecars require Kubernetes >= 1.29 (the SidecarContainers feature is
+#   enabled by default from 1.29 and GA in 1.33). Only this one form is
+#   maintained by this example.
+#
+#   For a cluster below 1.29, move this entry into `containers` and remove its
+#   `restartPolicy`. Understand that doing so gives up both guarantees above; the
+#   agent readiness probe is then the only gate, and it protects Pod readiness
+#   only.
+#
+# The `skillfs.anolisa.io/*` and `app.kubernetes.io/*` labels are
+# informational.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: skillfs-sidecar-example
+  labels:
+    app.kubernetes.io/name: skillfs
+    app.kubernetes.io/component: fuse-sidecar
+    app.kubernetes.io/part-of: anolisa
+    skillfs.anolisa.io/purpose: sidecar-example
+spec:
+  # A sidecar restart does not recreate the Pod, so the source emptyDir
+  # survives a remount.
+  restartPolicy: Always
+  # Enough time for SkillFS to answer SIGTERM, drain the FUSE session, and
+  # unmount before the kubelet escalates to SIGKILL and leaves a stale mount.
+  # This budget covers the agent shutting down first, then the sidecar.
+  terminationGracePeriodSeconds: 30
+
+  initContainers:
+    # -----------------------------------------------------------------------
+    # Example seeding — a regular init container, runs to completion first.
+    # -----------------------------------------------------------------------
+    # The ConfigMap cannot be the source directly: ConfigMap volumes are
+    # read-only and SkillFS requires a writable source root for write
+    # passthrough.
+    #
+    # Runs as root only to set predictable ownership and modes on the seeded
+    # tree; it needs no privilege, no FUSE device, and no propagation.
+    - name: seed-example
+      image: skillfs-sidecar:dev
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          src=/etc/skillfs-example
+          dst=/var/lib/skillfs/source
+          echo "[seed-example] seeding $dst from $src"
+          # Start from a clean tree so a Pod restart cannot accumulate state
+          # from an earlier run and make assertions ambiguous.
+          rm -rf "$dst"/* "$dst"/.[!.]* 2>/dev/null || true
+          install -d -m 0755 "$dst/skillfs-container-example/reference"
+          install -d -m 0755 "$dst/skillfs-container-reserve"
+          install -m 0644 "$src/skillfs-views.toml"  "$dst/skillfs-views.toml"
+          install -m 0644 "$src/SKILL.md"            "$dst/skillfs-container-example/SKILL.md"
+          install -m 0644 "$src/reference.md"        "$dst/skillfs-container-example/reference/reference.md"
+          install -m 0644 "$src/reserve-SKILL.md"    "$dst/skillfs-container-reserve/SKILL.md"
+          echo "[seed-example] result:"
+          find "$dst" -printf '%M %10s %p\n' | sort
+      securityContext:
+        privileged: false
+        allowPrivilegeEscalation: false
+        runAsUser: 0
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: skill-example
+          mountPath: /etc/skillfs-example
+          readOnly: true
+        - name: skill-source
+          mountPath: /var/lib/skillfs/source
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 128Mi
+
+    # -----------------------------------------------------------------------
+    # SkillFS native sidecar — the ONLY privileged container in this Pod.
+    # -----------------------------------------------------------------------
+    - name: skillfs
+      image: skillfs-sidecar:dev
+      imagePullPolicy: IfNotPresent
+      # This is what makes it a sidecar rather than an init container: it keeps
+      # running for the life of the Pod, it is restarted independently, and the
+      # kubelet waits for its startupProbe before starting the agent.
+      restartPolicy: Always
+      env:
+        - name: SKILLFS_SOURCE
+          value: /var/lib/skillfs/source
+        # A subdirectory of the shared volume, never the volume root.
+        - name: SKILLFS_MOUNTPOINT
+          value: /var/lib/skillfs/shared/mount
+        # Paths advertised by skill-discover must be readable by the agent,
+        # which sees the FUSE view but not the physical source volume.
+        - name: SKILLFS_DISCOVER_ROOT
+          value: /var/lib/skillfs/shared/mount/skills
+        # Probe path, relative to the mountpoint. SkillFS exposes the view
+        # under `<mountpoint>/skills/`.
+        - name: SKILLFS_PROBE_FILE
+          value: skills/skillfs-container-example/SKILL.md
+        - name: SKILLFS_PROBE_TIMEOUT
+          value: "5"
+        # The in-container supervisor repairs a failed FUSE session before the
+        # slower kubelet liveness probe needs to restart the whole sidecar.
+        - name: SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS
+          value: "2"
+        - name: SKILLFS_SUPERVISOR_FAILURE_THRESHOLD
+          value: "2"
+        # Only a recovery that survives three liveness probes resets the retry
+        # budget, preventing a rapid mount/crash loop from running forever.
+        - name: SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES
+          value: "3"
+        - name: RUST_LOG
+          value: info
+      securityContext:
+        # Required for /dev/fuse and for Bidirectional mount propagation.
+        # Bidirectional propagation is rejected by the kubelet on a
+        # non-privileged container, so this cannot be narrowed to
+        # capabilities alone in this phase.
+        privileged: true
+        runAsUser: 0
+      volumeMounts:
+        # Declared explicitly rather than relying on a privileged container
+        # implicitly receiving the host /dev. That behavior is a container
+        # runtime detail, not a Kubernetes API guarantee.
+        - name: fuse-device
+          mountPath: /dev/fuse
+        - name: skill-source
+          mountPath: /var/lib/skillfs/source
+        - name: skill-shared
+          mountPath: /var/lib/skillfs/shared
+          # Propagates the FUSE mount created inside this volume back to the
+          # host mount namespace, from where it reaches the agent container.
+          mountPropagation: Bidirectional
+      # `skillfs --version` is deliberately not used as a health signal: it
+      # succeeds while the FUSE session is absent, hung, or disconnected. Each
+      # probe asserts the mount is in mountinfo AND the probe file reads through
+      # the FUSE view within a bounded time.
+      #
+      # For a native sidecar this startupProbe is also the start barrier: the
+      # agent is not started until it succeeds.
+      startupProbe:
+        exec:
+          command: ["/usr/local/bin/skillfs-mount-probe", "--startup"]
+        periodSeconds: 2
+        timeoutSeconds: 10
+        failureThreshold: 30
+      readinessProbe:
+        exec:
+          command: ["/usr/local/bin/skillfs-mount-probe", "--readiness"]
+        # Remove the Pod from service after the first failed FUSE read. This
+        # probe changes readiness only; it does not restart the sidecar.
+        periodSeconds: 2
+        timeoutSeconds: 5
+        failureThreshold: 1
+      # Fails when the FUSE session stops answering, including the hung case
+      # where the process is still alive. The startup probe gates this one, so
+      # no initialDelaySeconds is needed.
+      livenessProbe:
+        exec:
+          command: ["/usr/local/bin/skillfs-mount-probe", "--liveness"]
+        # Restart after two consecutive failed FUSE reads. This 10-second
+        # termination budget is shorter than this Pod's 30-second shutdown
+        # budget so a dead mount cannot leave the container Running indefinitely.
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 2
+        terminationGracePeriodSeconds: 10
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi
+
+  containers:
+    # -----------------------------------------------------------------------
+    # Agent / workload container — non-privileged, different UID.
+    # -----------------------------------------------------------------------
+    - name: agent
+      image: skillfs-sidecar:dev
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "exec sleep infinity"]
+      env:
+        - name: SKILLFS_VIEW
+          value: /var/lib/skillfs/shared/mount/skills
+      securityContext:
+        privileged: false
+        allowPrivilegeEscalation: false
+        # A different UID from the sidecar: cross-UID access through the mount
+        # is what `--allow-other` exists for, so the example uses a different
+        # identity from the sidecar.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        # Only the propagated view. skill-source is intentionally absent, so
+        # the physical source tree is not reachable from this container.
+        - name: skill-shared
+          mountPath: /var/lib/skillfs/shared
+          mountPropagation: HostToContainer
+      # Defence in depth. The native sidecar's startupProbe already guarantees
+      # the mount exists before this container starts; this probe additionally
+      # confirms the view is readable from *this* container and *this* UID, which
+      # is what catches a mount-propagation failure.
+      #
+      # `timeout` bounds the read so a wedged FUSE session fails the probe
+      # instead of hanging it. The checks prove both the transformed default
+      # skill and the synthesized skill-discover view crossed the container
+      # boundary.
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              p="$SKILLFS_VIEW/skillfs-container-example/SKILL.md"
+              d="$SKILLFS_VIEW/skill-discover/SKILL.md"
+              timeout 5 test -f "$p"
+              timeout 5 grep -q SKILLFS_TRANSFORM_LINUX "$p"
+              timeout 5 grep -q '^name: skill-discover$' "$d"
+              timeout 5 grep -q '^## reserve$' "$d"
+              r="$SKILLFS_VIEW/skillfs-container-reserve/SKILL.md"
+              timeout 5 grep -Fq "| skillfs-container-reserve |" "$d"
+              timeout 5 grep -Fq "$r" "$d"
+              ! ls -1 "$SKILLFS_VIEW" | grep -Fxq skillfs-container-reserve
+              timeout 5 grep -q '^name: skillfs-container-reserve$' "$r"
+        initialDelaySeconds: 3
+        periodSeconds: 2
+        timeoutSeconds: 10
+        failureThreshold: 1
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+
+  volumes:
+    - name: skill-example
+      configMap:
+        name: skillfs-example-source
+        defaultMode: 0444
+
+    # Physical source root. emptyDir is Pod-scoped, so it survives a sidecar
+    # container restart and keeps writes available after a remount.
+    #
+    # To persist across Pod recreation, replace this entry with a PVC:
+    #
+    #   - name: skill-source
+    #     persistentVolumeClaim:
+    #       claimName: skillfs-source
+    #
+    # Nothing else in this manifest changes; the sidecar and the init container
+    # keep the same mountPath. Note that the init container wipes the source
+    # tree on every start, so remove or guard that step before pointing this
+    # volume at a PVC holding real skills.
+    - name: skill-source
+      emptyDir: {}
+
+    # Carrier for the propagated FUSE mount. Memory-backed emptyDir is the
+    # form the Kubernetes mount-propagation documentation uses for this
+    # pattern. It only ever holds the mountpoint directory itself; skill
+    # content lives in skill-source and is served through FUSE.
+    - name: skill-shared
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
+
+    # The FUSE character device. `type: CharDevice` makes the kubelet verify
+    # that the host path really is a character device instead of silently
+    # creating a directory.
+    - name: fuse-device
+      hostPath:
+        path: /dev/fuse
+        type: CharDevice

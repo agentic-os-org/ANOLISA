@@ -1,0 +1,26 @@
+{
+  "name": "@tokenless/openclaw-plugin",
+  "version": "@VERSION@",
+  "description": "OpenClaw lifecycle adapter for Tokenless Protocol v2",
+  "type": "module",
+  "main": "dist/index.js",
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.4.22"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc --project tsconfig.json && cp ../common/hooks/tool_categories.json dist/"
+  },
+  "peerDependencies": {
+    "tokenless": ">=0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": ">=22",
+    "typescript": "^5.8.0"
+  },
+  "files": ["dist/", "openclaw.plugin.json", "scripts/"],
+  "license": "Apache-2.0"
+}

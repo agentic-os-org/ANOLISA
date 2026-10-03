@@ -1,0 +1,34 @@
+[graph]
+targets = []
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "0BSD",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+unused-allowed-license = "allow"
+
+[[licenses.clarify]]
+name = "agentsight"
+expression = "Apache-2.0"
+license-files = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/chengshuyi/hf-hub.git"]

@@ -1,0 +1,50 @@
+$ cargo build
+[1m[32m   Compiling[0m proc-macro2 v1.0.0
+[1m[32m   Compiling[0m unicode-ident v1.0.1
+[1m[32m   Compiling[0m quote v1.0.2
+[1m[32m   Compiling[0m syn v1.0.3
+[1m[32m   Compiling[0m serde v1.0.4
+[1m[32m   Compiling[0m libc v1.0.5
+[1m[32m   Compiling[0m cfg-if v1.0.6
+[1m[32m   Compiling[0m autocfg v1.0.7
+[1m[32m   Compiling[0m memchr v1.0.8
+[1m[32m   Compiling[0m once_cell v1.0.9
+[1m[32m   Compiling[0m thiserror-impl v1.0.10
+[1m[32m   Compiling[0m thiserror v1.0.11
+[1m[32m   Compiling[0m hashbrown v1.0.12
+[1m[32m   Compiling[0m equivalent v1.0.13
+[1m[32m   Compiling[0m indexmap v1.0.14
+[1m[32m   Compiling[0m winnow v1.0.15
+[1m[32m   Compiling[0m toml_datetime v1.0.16
+[1m[32m   Compiling[0m toml_edit v1.0.17
+[1m[32m   Compiling[0m itoa v1.0.18
+[1m[32m   Compiling[0m ryu v1.0.19
+[1m[32m   Compiling[0m serde_json v1.0.20
+[1m[32m   Compiling[0m aho-corasick v1.0.21
+[1m[32m   Compiling[0m regex-syntax v1.0.22
+[1m[32m   Compiling[0m regex-automata v1.0.23
+[1m[32m   Compiling[0m regex v1.0.24
+[1m[32m   Compiling[0m heck v1.0.25
+[1m[32m   Compiling[0m bitflags v1.0.26
+[1m[32m   Compiling[0m smallvec v1.0.27
+[1m[32m   Compiling[0m log v1.0.28
+[1m[32m   Compiling[0m parking_lot_core v1.0.29
+[1m[32m   Compiling[0m lock_api v1.0.30
+[1m[32m   Compiling[0m parking_lot v1.0.31
+[1m[32m   Compiling[0m scopeguard v1.0.32
+[1m[32m   Compiling[0m either v1.0.33
+[1m[32m   Compiling[0m rayon-core v1.0.34
+[1m[32m   Compiling[0m rayon v1.0.35
+[1m[32m   Compiling[0m crossbeam-utils v1.0.36
+[1m[32m   Compiling[0m crossbeam-epoch v1.0.37
+[1m[32m   Compiling[0m crossbeam-deque v1.0.38
+[1m[32m   Compiling[0m getrandom v1.0.39
+[1m[32m   Compiling[0m app v0.1.0 (/work/app)
+[1m[31merror[E0308][0m[1m: mismatched types[0m
+  --> src/main.rs:12:5
+   |
+12 |     let x: u32 = "hello";
+   |                  ^^^^^^^ expected `u32`, found `&str`
+   |
+For more information about this error, try `rustc --explain E0308`.
+[1m[31merror[0m: could not compile `app` (bin "app") due to 1 previous error

@@ -1,0 +1,20 @@
+$ npm test
+PASS src/component-00.test.js completed successfully
+PASS src/component-01.test.js completed successfully
+6 passing test suite lines omitted. If needed, run in shell: tokenless retrieve eda00052102640c88016b691
+PASS src/component-08.test.js completed successfully
+PASS src/component-09.test.js completed successfully
+FAIL src/critical.test.js
+  critical validation
+    Error: expected true to be false
+        at verify (/work/src/critical.test.js:14:9)
+        at runValidation (/work/src/runner.js:22:3)
+PASS src/component-10.test.js completed successfully
+PASS src/component-11.test.js completed successfully
+6 passing test suite lines omitted. If needed, run in shell: tokenless retrieve 803de4b5926881cfbe4b6252
+PASS src/component-18.test.js completed successfully
+PASS src/component-19.test.js completed successfully
+Test Suites: 1 failed, 20 passed, 21 total
+Tests:       1 failed, 200 passed, 201 total
+Snapshots:   0 total
+Time:        9.711 s

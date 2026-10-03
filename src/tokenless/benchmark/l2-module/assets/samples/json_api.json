@@ -1,0 +1,97 @@
+{
+  "category": "json",
+  "description": "One-round JSON tool responses. Main sample is the canonical benchmark fixture (loaded from ../../../l1-compressor/fixtures/tool_response.json at run time, byte-identical to the L0/L1 suites); two inline variants stress deep nesting and null/empty-array density.",
+  "samples": [
+    {
+      "id": "tool_response_main",
+      "content_path": "../../../l1-compressor/fixtures/tool_response.json",
+      "ground_truth": [
+        "search_code",
+        "src/module_0/file_0.rs",
+        "item-0"
+      ]
+    },
+    {
+      "id": "deep_nested",
+      "content_json": {
+        "request_id": "req-8f3a91",
+        "gateway": {
+          "region": "cn-hangzhou",
+          "upstream": {
+            "service": "order-api",
+            "pool": {
+              "shard": "shard-03",
+              "node": {
+                "host": "node-17",
+                "runtime": {
+                  "container": {
+                    "process": {
+                      "thread": {
+                        "frame": {
+                          "call": {
+                            "error_code": "E_TIMEOUT_DEEP",
+                            "message": "deadline exceeded while awaiting upstream response",
+                            "retry_limit": 7,
+                            "elapsed_ms": 30012
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "breadcrumbs": [
+          { "hop": 1, "component": "ingress" },
+          { "hop": 2, "component": "router" },
+          { "hop": 3, "component": "order-api" }
+        ]
+      },
+      "ground_truth": [
+        "E_TIMEOUT_DEEP",
+        "req-8f3a91",
+        "deadline exceeded",
+        { "regex": "retry_limit\\D*7" }
+      ]
+    },
+    {
+      "id": "null_dense",
+      "content_json": {
+        "user_id": "user-4211",
+        "session": null,
+        "email": null,
+        "phone": null,
+        "avatar_url": null,
+        "preferences": {},
+        "tags": [],
+        "recent_orders": [],
+        "linked_accounts": [null, null, null],
+        "payment": {
+          "status": "PAYMENT_DECLINED",
+          "decline_reason": "insufficient_funds",
+          "retryable": false,
+          "gateway_response": null,
+          "attempts": [
+            { "id": "att-1", "result": null, "code": null },
+            { "id": "att-2", "result": null, "code": null },
+            { "id": "att-3", "result": "declined", "code": "51" }
+          ]
+        },
+        "audit": {
+          "created_by": null,
+          "updated_by": null,
+          "deleted_at": null,
+          "history": []
+        }
+      },
+      "ground_truth": [
+        "user-4211",
+        "PAYMENT_DECLINED",
+        "insufficient_funds",
+        "att-3"
+      ]
+    }
+  ]
+}

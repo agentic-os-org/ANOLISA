@@ -1,0 +1,41 @@
+# sandbox.toml — osbase sandbox scenario registry
+# 用户可编辑：添加/删除 scenario、修改包名、调整内核要求
+
+manifest_version = 2
+
+[[scenario]]
+name = "runc"
+packages = ["runc", "containerd", "docker", "docker-client"]
+packages_optional = ["nerdctl"]
+services = ["containerd", "docker"]
+verify_commands = ["runc --version", "systemctl is-active containerd", "docker version", "docker info"]
+requires_kvm = false
+requires_kernel = ">=4.18"
+
+[[scenario]]
+name = "rund"
+packages = ["kata-containers-rund"]
+verify_commands = ["kata-runtime --version"]
+requires_kvm = true
+requires_kernel = ">=5.10"
+
+[[scenario]]
+name = "firecracker"
+packages = ["firecracker", "firecracker-jailer"]
+packages_optional = ["firecracker-kernel", "firecracker-rootfs"]
+verify_commands = ["firecracker --version", "jailer --version"]
+requires_kvm = true
+requires_kernel = ">=4.14"
+
+[[scenario]]
+name = "gvisor"
+packages = ["gvisor"]
+verify_commands = ["runsc --version"]
+requires_kvm = false
+requires_kernel = ">=5.10"
+
+[[scenario]]
+name = "landlock"
+packages = []
+requires_kvm = false
+requires_kernel = ">=5.13"

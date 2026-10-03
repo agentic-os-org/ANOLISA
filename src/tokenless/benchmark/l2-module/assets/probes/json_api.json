@@ -1,0 +1,42 @@
+[
+  {
+    "question": "Which tool produced this response, according to the 'tool' field?",
+    "expected_contains": "search_code"
+  },
+  {
+    "question": "What is the file path of the search result named item-0?",
+    "expected_contains": "src/module_0/file_0.rs"
+  },
+  {
+    "question": "What is the name of the result whose id is 0?",
+    "expected_contains": "item-0"
+  },
+  {
+    "question": "What is the overall status field of this response?",
+    "expected_contains": "ok"
+  },
+  {
+    "question": "What is the request id of this payload?",
+    "expected_contains": "req-8f3a91"
+  },
+  {
+    "question": "What error code is reported at the deepest call frame?",
+    "expected_contains": "E_TIMEOUT_DEEP"
+  },
+  {
+    "question": "What is the value of retry_limit?",
+    "expected_contains": "7"
+  },
+  {
+    "question": "Which region does the gateway report?",
+    "expected_contains": "cn-hangzhou"
+  },
+  {
+    "question": "What is the user id in this payload?",
+    "expected_contains": "user-4211"
+  },
+  {
+    "question": "What is the payment status and its decline reason?",
+    "expected_contains": "insufficient_funds"
+  }
+]

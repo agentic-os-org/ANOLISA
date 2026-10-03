@@ -1,0 +1,10 @@
+rule_id: py-download-exec
+cwe_id: CWE-829
+desc_en: >-
+  Code downloads content from a remote URL and immediately executes
+  it via exec() or eval(), potentially running untrusted code.
+desc_zh: >-
+  代码从远程 URL 下载内容并通过 exec() 或 eval() 立即执行，可能运行不受信任的代码。
+regex: |-
+  \b(exec|eval)\s*\([^)]*\b(urlopen|requests\.(get|post)|urllib)\b
+severity: warn

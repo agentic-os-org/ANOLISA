@@ -1,0 +1,54 @@
+name: Build cosh-ng prebuilt package
+description: Build and package one cosh-ng release target on the release Cross runner.
+
+inputs:
+  version:
+    description: Component version without the v prefix.
+    required: true
+  target-os:
+    description: Package target operating system.
+    required: true
+  target-arch:
+    description: Package target architecture.
+    required: true
+  profile:
+    description: Prepared Cross release profile.
+    required: true
+  tag:
+    description: Release tag to bind to the checked-out commit. Empty for previews.
+    required: false
+    default: ''
+
+outputs:
+  artifact-directory:
+    description: Directory containing the tar, checksums, and CycloneDX SBOM.
+    value: ${{ steps.build.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Build precompiled package
+      id: build
+      shell: bash
+      env:
+        COSH_NG_OUTPUT_DIR: ${{ runner.temp }}/cosh-ng-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        COSH_NG_VERSION: ${{ inputs.version }}
+        COSH_NG_TARGET_OS: ${{ inputs.target-os }}
+        COSH_NG_TARGET_ARCH: ${{ inputs.target-arch }}
+        COSH_NG_PROFILE: ${{ inputs.profile }}
+        COSH_NG_TAG: ${{ inputs.tag }}
+      run: |
+        "$GITHUB_ACTION_PATH/build.sh" \
+          --source-repo "$GITHUB_WORKSPACE" \
+          --output-dir "$COSH_NG_OUTPUT_DIR" \
+          --version "$COSH_NG_VERSION" \
+          --target-os "$COSH_NG_TARGET_OS" \
+          --target-arch "$COSH_NG_TARGET_ARCH" \
+          --profile "$COSH_NG_PROFILE" \
+          --tag "$COSH_NG_TAG"
+        echo "artifact-directory=$COSH_NG_OUTPUT_DIR" >> "$GITHUB_OUTPUT"

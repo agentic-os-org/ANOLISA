@@ -1,0 +1,71 @@
+# ANOLISA repository configuration (schema v1).
+#
+# Declares the install backends `anolisa install` can resolve components
+# from, and which backend is used by default. One configuration table per
+# backend. Selection chain: `--backend` (CLI, one-off) > `default_backend`.
+# There is NO cross-backend fallback: when the selected backend cannot
+# resolve a component, install fails instead of silently trying others,
+# so where an installed component came from is always deterministic.
+#
+# base_url rules:
+#
+#   * It is a directory root, not a file. What lives under it is a
+#     per-backend convention: raw → the v1 distribution root containing
+#     `index.toml`; rpm → handed to dnf as-is (must contain `repodata/`);
+#     npm → the registry API root.
+#   * It may reference `$os`, `$arch`, `$basearch`, `$releasever`,
+#     `$channel`. Values come from host detection, overridable in
+#     `[vars]`. Referencing an unknown or unset variable is a hard
+#     error — never a silent pass-through.
+#   * Schemes: `file://` and `https://` are always allowed. `http://`
+#     requires `insecure = true` on the backend entry. No query string
+#     or fragment.
+#
+# Per-component package names default to the component name itself
+# (npm additionally applies `scope`). Site-local deviations go in the
+# backend's `package_map`; one-off overrides use `install --package`.
+
+schema_version = 1
+
+# Backend used when `--backend` is not passed on the CLI.
+default_backend = "raw"
+
+[vars]
+channel = "stable"
+releasever = "4"
+
+# raw — tar.gz artifacts resolved through the ANOLISA distribution index.
+# Every archive must embed its authoritative `.anolisa/component.toml`.
+#
+# base_url is the raw v1 distribution root. `index.toml` lives directly
+# under this directory. For every index row that omits `url`, the client
+# appends the code-owned layout:
+#
+#   {component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}{ext}
+#
+# `{component}` is the backend-native package name from the index row;
+# `{version}` / `{os}` / `{arch}` come from the resolved row; `{ext}` is
+# derived from artifact_type.
+#
+# Rows may still carry a repo-relative `url` (joined onto the static
+# prefix) or an absolute `url` as an escape hatch — an explicit url
+# always wins over the derived layout. The index itself stays mandatory
+# either way: it is the version list and sha256 manifest — resolution
+# and verification never run on URL guessing.
+#
+# The index is re-fetched on every run and an unreachable repository fails
+# the command; there is no index cache and no stale-index fallback.
+[backends.raw]
+base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/"
+
+# rpm — resolution/install delegated to dnf against this repo.
+[backends.rpm]
+base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/agentic-os/$basearch/os/"
+insecure = true
+gpgcheck = true
+
+# npm — Node-ecosystem components.
+#
+# [backends.npm]
+# base_url = "https://registry.npmjs.org"
+# scope = "@anolisa"

@@ -1,0 +1,8 @@
+# Tokenless native bundle layer for DeepSeek Harness.
+#
+# The dsh adapter installs this bundle through the framework's own plugin
+# lifecycle.  Resolve the installed package by its published name so dsh can
+# load the bundle through its normal npm package lookup.
+- insert:
+    - id: anolisa-tokenless
+      name: '@anolisa/dsh-tokenless'

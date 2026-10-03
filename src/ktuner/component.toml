@@ -1,0 +1,24 @@
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[component]
+name = "ktuner"
+version = "0.1.0"
+layer = "runtime"
+domain = "tools"
+description = "Deterministic kernel-tuning engine for ANOLISA agents"
+stability = "experimental"
+
+[install]
+modes = ["system"]
+
+[backends.rpm]
+package = "ktuner"
+
+[environment]
+requires_os = "linux"
+
+[[health_checks]]
+name = "binary"
+kind = "command"
+command = "{bindir}/ktuner --version"

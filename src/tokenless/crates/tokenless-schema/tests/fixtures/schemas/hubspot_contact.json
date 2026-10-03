@@ -1,0 +1,187 @@
+{
+  "type": "function",
+  "function": {
+    "name": "create_or_update_contact",
+    "description": "Create a new contact in HubSpot CRM or update an existing contact with provided information. This function handles all contact-related operations including creation, updates, and association with companies and deals. It supports batch operations and can process multiple contacts simultaneously for improved performance.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "title": "Contact Email Address",
+          "description": "The primary email address of the contact. This field is used as a unique identifier and must be a valid email format. Example: john.doe@company.com",
+          "format": "email",
+          "examples": ["john.doe@company.com", "jane.smith@enterprise.org"]
+        },
+        "properties": {
+          "type": "object",
+          "title": "Contact Properties",
+          "description": "A collection of standard and custom properties to set on the contact. Standard properties include firstname, lastname, phone, etc. Custom properties must be created in HubSpot first.",
+          "properties": {
+            "firstname": {
+              "type": "string",
+              "title": "First Name",
+              "description": "The contact's first name. Will be used in personalization tokens and display.",
+              "maxLength": 100,
+              "examples": ["John", "Jane"]
+            },
+            "lastname": {
+              "type": "string",
+              "title": "Last Name",
+              "description": "The contact's last name or family name. Combined with firstname for full name display.",
+              "maxLength": 100,
+              "examples": ["Doe", "Smith"]
+            },
+            "phone": {
+              "type": "string",
+              "title": "Phone Number",
+              "description": "Primary phone number for the contact. Supports international formats with country codes.",
+              "pattern": "^[+]?[(]?[0-9]{1,4}[)]?[-\\s./0-9]*$",
+              "examples": ["+1-555-123-4567", "(555) 987-6543"]
+            },
+            "company": {
+              "type": "string",
+              "title": "Company Name",
+              "description": "The name of the company where the contact works. This is a text field, not an association.",
+              "maxLength": 200
+            },
+            "jobtitle": {
+              "type": "string",
+              "title": "Job Title",
+              "description": "The contact's job title or position within their company. Used for segmentation and personalization.",
+              "maxLength": 150,
+              "examples": ["Software Engineer", "VP of Sales", "CEO"]
+            },
+            "lifecyclestage": {
+              "type": "string",
+              "title": "Lifecycle Stage",
+              "description": "The current stage of the contact in your sales/marketing funnel. This is a key property for automation and reporting.",
+              "enum": ["subscriber", "lead", "marketingqualifiedlead", "salesqualifiedlead", "opportunity", "customer", "evangelist", "other"],
+              "default": "lead"
+            },
+            "hs_lead_status": {
+              "type": "string",
+              "title": "Lead Status",
+              "description": "The current status of the lead in your sales process. Helps track progress through the pipeline.",
+              "enum": ["NEW", "OPEN", "IN_PROGRESS", "OPEN_DEAL", "UNQUALIFIED", "ATTEMPTED_TO_CONTACT", "CONNECTED", "BAD_TIMING"]
+            },
+            "hubspot_owner_id": {
+              "type": "string",
+              "title": "HubSpot Owner ID",
+              "description": "The ID of the HubSpot user who owns this contact. Use the owners API to get valid owner IDs."
+            },
+            "address": {
+              "type": "string",
+              "title": "Street Address",
+              "description": "The street address of the contact's primary location."
+            },
+            "city": {
+              "type": "string",
+              "title": "City",
+              "description": "The city where the contact is located."
+            },
+            "state": {
+              "type": "string",
+              "title": "State/Region",
+              "description": "The state, province, or region where the contact is located."
+            },
+            "zip": {
+              "type": "string",
+              "title": "Postal Code",
+              "description": "The postal or ZIP code for the contact's address."
+            },
+            "country": {
+              "type": "string",
+              "title": "Country",
+              "description": "The country where the contact is located. Use ISO 3166-1 alpha-2 codes."
+            },
+            "website": {
+              "type": "string",
+              "title": "Website URL",
+              "description": "The personal or company website associated with this contact.",
+              "format": "uri"
+            },
+            "hs_persona": {
+              "type": "string",
+              "title": "Persona",
+              "description": "The buyer persona that best describes this contact. Personas are defined in your HubSpot settings."
+            },
+            "industry": {
+              "type": "string",
+              "title": "Industry",
+              "description": "The industry sector in which the contact's company operates."
+            },
+            "annualrevenue": {
+              "type": "number",
+              "title": "Annual Revenue",
+              "description": "The annual revenue of the contact's company in your account's default currency."
+            },
+            "numberofemployees": {
+              "type": "integer",
+              "title": "Number of Employees",
+              "description": "The approximate number of employees at the contact's company."
+            }
+          },
+          "additionalProperties": true
+        },
+        "associations": {
+          "type": "array",
+          "title": "Object Associations",
+          "description": "List of associations to create between this contact and other HubSpot objects like companies, deals, or tickets.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "object",
+                "description": "The target object to associate with this contact.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "The ID of the object to associate with."
+                  }
+                },
+                "required": ["id"]
+              },
+              "types": {
+                "type": "array",
+                "description": "The types of associations to create.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "associationCategory": {
+                      "type": "string",
+                      "enum": ["HUBSPOT_DEFINED", "USER_DEFINED"]
+                    },
+                    "associationTypeId": {
+                      "type": "integer",
+                      "description": "The numeric ID of the association type. 1 = Primary company, 279 = Contact to deal."
+                    }
+                  },
+                  "required": ["associationCategory", "associationTypeId"]
+                }
+              }
+            },
+            "required": ["to", "types"]
+          }
+        },
+        "options": {
+          "type": "object",
+          "title": "Operation Options",
+          "description": "Additional options controlling how the operation is performed.",
+          "properties": {
+            "idProperty": {
+              "type": "string",
+              "description": "The property to use for identifying existing contacts. Default is 'email'.",
+              "default": "email"
+            },
+            "inputs": {
+              "type": "array",
+              "description": "For batch operations, an array of input objects. Each follows the same schema as the parent."
+            }
+          }
+        }
+      },
+      "required": ["email"]
+    }
+  }
+}

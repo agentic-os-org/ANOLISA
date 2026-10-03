@@ -1,0 +1,87 @@
+[package]
+name = "agent-memory"
+version = "0.2.8"
+edition = "2024"
+# edition 2024 stabilised in rustc 1.85; let-chains land in 1.88 so we
+# avoid them. Anolis ships 1.86, which is fine for build but won't take
+# `edition = "2024"` without this rust-version gate complaining cleanly.
+rust-version = "1.85"
+description = "Agent memory — filesystem memory for AI agents (Rust MCP Server, Linux-only)"
+license = "Apache-2.0"
+authors = ["Shile Zhang"]
+repository = "https://github.com/alibaba/anolisa"
+homepage = "https://github.com/alibaba/anolisa"
+keywords = ["memory", "agent", "mcp", "filesystem"]
+categories = ["filesystem", "command-line-utilities"]
+
+# This crate targets Linux only. user_namespace, mount(2), cgroup v2,
+# inotify, journald are all required at runtime. Build on macOS/Windows
+# will fail — push to a Linux host and build there (`make remote-build`
+# / `make remote-test`); ../../docs/BUILDING.md lists the host
+# prerequisites (CMake, libsystemd headers, Node.js).
+
+[dependencies]
+# MCP Server & Client
+rmcp = { version = "0.1", features = ["server", "client", "transport-io", "transport-child-process"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# JSON Schema for MCP tool parameters
+schemars = "1"
+
+# File operations (Tier A)
+walkdir = "2"
+globset = "0.4"
+regex = "1"
+diffy = "0.4"
+
+# Index worker (Tier B / Phase 4): SQLite FTS5 + cross-platform fs watcher
+rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+notify = "6"
+
+# Snapshot (Phase 6.3): tar.gz fallback for non-CoW filesystems
+tar = "0.4"
+flate2 = "1"
+
+# Git versioning (Phase 6.2): vendored libgit2, no system dep
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+ulid = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6"
+shellexpand = "3"
+async-trait = "0.1"
+
+# HTTP client for embedding providers
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Linux syscalls + systemd integration (always required — Linux-only crate)
+nix = { version = "0.29", features = ["fs", "mount", "sched", "user"] }
+libsystemd = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+toml = "0.8"
+
+[[bin]]
+name = "agent-memory"
+path = "src/main.rs"
+
+[[example]]
+name = "mcp-harness"
+path = "examples/mcp_harness.rs"

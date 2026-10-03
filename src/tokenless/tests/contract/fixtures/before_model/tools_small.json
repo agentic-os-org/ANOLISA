@@ -1,0 +1,20 @@
+{
+  "session_id": "sess-parity",
+  "llm_request": {
+    "config": {
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "ping",
+            "description": "Check connectivity.",
+            "parameters": {
+              "type": "object",
+              "properties": {}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

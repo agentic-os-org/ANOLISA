@@ -1,0 +1,31 @@
+# Cargo build artifacts
+**/target/
+
+# Vim temporary files
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+__MACOSX/
+.Spotlight-V100
+.Trashes
+
+# Rust backup files
+*.rs.bk
+
+# Test artifacts (benchmark scripts, CSV data, logs)
+artifacts/
+
+# nodejs
+node_modules/
+dist/
+
+# test coverage
+.coverage
+htmlcov/
+coverage/
+
+# agent output
+docs/agents/*

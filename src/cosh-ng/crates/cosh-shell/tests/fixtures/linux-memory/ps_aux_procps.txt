@@ -1,0 +1,10 @@
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root         543  0.0  2.3 1281176 42116 ?       Ssl  17:14   0:01 /usr/local/bin/lima-guestagent daemon --vsock-port 2222 --runtime-dir=/run/lima-guestagent
+root         620  0.3  1.4 478568 25684 ?        Ssl  17:14   0:13 /usr/libexec/platform-python -Es /usr/sbin/tuned -l -P
+polkitd      770  0.0  1.1 1522764 19732 ?       Ssl  17:14   0:00 /usr/lib/polkit-1/polkitd --no-debug
+root         615  0.0  1.0 475224 18524 ?        Ssl  17:14   0:00 /usr/sbin/NetworkManager --no-daemon
+root         455  0.0  0.7  37112 13348 ?        Ss   17:14   0:00 /usr/lib/systemd/systemd-journald
+root         838  0.0  0.6 347272 11284 ?        Ssl  17:14   0:00 /usr/sbin/rsyslogd -n
+root           1  0.0  0.5 104052  9888 ?        Ss   17:14   0:00 /usr/lib/systemd/systemd --switched-root --system --deserialize 17
+root        1359  0.0  0.5  20720  9380 ?        Ss   17:14   0:00 sshd: quejianming [priv]
+quejian+     860  0.0  0.4  20812  8520 ?        Ss   17:14   0:00 /usr/lib/systemd/systemd --user

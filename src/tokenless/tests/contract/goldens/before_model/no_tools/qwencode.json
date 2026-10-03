@@ -1,0 +1,5 @@
+{
+  "envelope": {
+    "systemMessage": "BeforeModel event carries no tool declarations at llm_request.config.tools or llm_request.tools, so schema compression was skipped. If the host declares tools, its event format may not match the hook. Passing through unchanged (warned once per session)."
+  }
+}

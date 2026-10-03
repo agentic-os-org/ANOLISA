@@ -1,0 +1,49 @@
+{
+  "name": "agent-sec-openclaw-plugin",
+  "version": "0.13.2",
+  "type": "module",
+  "main": "dist/index.js",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "scripts/"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "minHostVersion": ">=2026.4.14"
+    },
+    "compat": {
+      "pluginApi": ">=2026.4.14"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc --project tsconfig.json",
+    "e2e:openclaw": "node tests/e2e/openclaw-plugin-e2e-pilot.mjs",
+    "pack": "npm run build && npm pack",
+    "smoke": "npx tsx tests/smoke-test.ts",
+    "test": "npx tsx --test tests/unit/*test.ts",
+    "test:coverage": "npx c8 --reporter=cobertura --reporter=text --reports-dir=coverage tsx --test tests/unit/*test.ts"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.14"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": ">=22",
+    "c8": "^10.1.0",
+    "openclaw": "2026.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.0"
+  }
+}
