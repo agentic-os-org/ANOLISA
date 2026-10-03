@@ -686,10 +686,13 @@ Examples:
         sum(1 for tr in t.get("trials", []) if tr.get("passed"))
         for t in data
     )
+    # `(x or 1)` guards: an empty batch_results.json must still print a
+    # 0-task summary (after the LLM report phase already ran) instead of
+    # crashing — same guard build_structured_data applies to its ratios.
     summary_text = (
         table_txt
-        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/total_tasks*100:.1f}%)\n"
-        + f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
+        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/(total_tasks or 1)*100:.1f}%)\n"
+        + f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/(total_trials or 1)*100:.1f}%)\n"
     )
     summary_csv = render_csv(rows)
 
