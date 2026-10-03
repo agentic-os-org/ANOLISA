@@ -36,8 +36,12 @@ sudo ktuner rollback
 | 退出码 | 含义 |
 |--------|------|
 | 0      | 成功（check：系统已最优；tune/fix/rollback：已应用） |
-| 1      | check：存在调优建议（非错误，表示系统可改善）；tune：存在建议但当前环境均不可应用（status "blocked"，如容器内只读 /proc/sys） |
+| 1      | check：存在调优建议（非错误，表示系统可改善）；tune：存在建议但当前环境均不可应用（status "blocked"，如容器内只读 /proc/sys）；rollback：恢复未完成 |
 | 2      | 错误（详情见 stderr JSON） |
+
+`rollback` 在所有记录值恢复完成时返回 `0`（空记录为成功的无操作），
+任一值恢复失败或路径缺失时返回 `1`，记录读取失败等命令错误返回 `2`。
+未完成的恢复仍在 stdout 输出 JSON 计数，并保留回滚记录以便重试。
 
 ### check 输出
 

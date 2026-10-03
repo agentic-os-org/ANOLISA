@@ -72,7 +72,11 @@ ktuner why net.core.somaxconn
 sudo ktuner rollback
 ```
 
-All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success, `1` check found recommendations (not an error), `2` error.
+All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success,
+`1` check found recommendations or rollback left values unrestored, `2` command error.
+Rollback returns `1` for failed writes or missing paths, including partial restoration;
+its JSON counts remain on stdout and the ledger is kept for retry. An empty ledger
+is a successful no-op (`0`); an unreadable or missing ledger is a command error (`2`).
 
 ---
 

@@ -70,7 +70,10 @@ ktuner why net.core.somaxconn
 sudo ktuner rollback
 ```
 
-所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、`1` check 发现可改进项（非错误）、`2` 错误。
+所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、
+`1` check 发现可改进项或 rollback 仍有值未恢复、`2` 命令错误。
+回滚遇到写入失败或路径缺失时返回 `1`（包括部分恢复），仍在 stdout 输出 JSON 计数，
+并保留记录以便重试。空记录为成功的无操作（`0`）；记录缺失或无法读取为命令错误（`2`）。
 
 ---
 

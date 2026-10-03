@@ -36,8 +36,13 @@ All output goes to **stdout as JSON**. Errors go to **stderr as JSON**. No ANSI 
 | Code | Meaning |
 |------|---------|
 | 0    | Success (check: system already optimal; tune/fix/rollback: applied OK) |
-| 1    | check: has recommendations (not an error, system can be improved); tune: recommendations exist but none are applicable here (status "blocked", e.g. read-only /proc/sys in a container) |
+| 1    | check: has recommendations (not an error, system can be improved); tune: recommendations exist but none are applicable here (status "blocked", e.g. read-only /proc/sys in a container); rollback: restoration incomplete |
 | 2    | Error (details in stderr JSON) |
+
+`rollback` returns `0` when all recorded values are restored (an empty ledger
+is a successful no-op), `1` when any value failed or its path was missing,
+and `2` for a command error such as an unreadable ledger. Incomplete restoration
+keeps its JSON counts on stdout and preserves the ledger for retry.
 
 ### check output
 
