@@ -20,8 +20,9 @@ tags: ["qwenpaw"]
 
 **1. 编写 HEARTBEAT.md**
 
-文件位于工作目录下，默认路径：`~/.qwenpaw/HEARTBEAT.md`。
-可通过环境变量 `QWENPAW_HEARTBEAT_FILE` 更改文件名。
+文件位于该智能体的工作区（workspace）目录下，默认路径：`~/.qwenpaw/workspaces/<agent_id>/HEARTBEAT.md`
+（`QWENPAW_WORKING_DIR` 默认为 `~/.qwenpaw`；`<agent_id>` 如 `default`）。
+可通过环境变量 `QWENPAW_HEARTBEAT_FILE` 更改文件名（仅文件名，仍位于该智能体工作区根目录）。
 
 直接用文本编辑器或 `cat` / `echo` 写入即可，内容是每次心跳要问 QwenPaw 的问题：
 
@@ -38,38 +39,37 @@ tags: ["qwenpaw"]
 
 **2. 配置心跳参数**
 
-心跳参数有两层配置：
+心跳参数保存在该智能体独立的配置文件中：
 
-- **全局默认**：`~/.qwenpaw/config.json` → `agents.defaults.heartbeat`（对所有智能体生效）
-- **智能体独立**：`~/.qwenpaw/workspaces/{agent_id}/agent.json` → `heartbeat`（覆盖全局默认）
+- **智能体配置（实时生效）**：`~/.qwenpaw/workspaces/{agent_id}/agent.json` → `heartbeat`（与控制台「控制 → 心跳」页面保存的配置一致）
+- **全局 config.json（仅旧版迁移）**：根目录 `config.json` → `agents.defaults.heartbeat` 不再作为实时全局配置，仅在从旧版迁移时被合并进默认智能体的 `agent.json`；新配置一律写 `agent.json`
 
 可用字段：
 
 | 字段                  | 类型        | 默认值      | 说明                                                        |
 | --------------------- | ----------- | ----------- | ----------------------------------------------------------- |
-| `every`             | string      | `"30m"`   | 间隔，支持 `Nh`、`Nm`、`Ns` 组合（如 `"1h30m"`）    |
-| `target`            | string      | `"main"`  | `"main"` 仅执行不投递；`"last"` 发到上次对话的频道/用户 |
+| `enabled`           | bool        | `false`   | 是否启用心跳；仅 `true` 时才按计划执行（示例必须显式开启） |
+| `every`             | string      | `"6h"`    | 间隔，支持 `Nh`、`Nm`、`Ns` 组合（如 `"1h30m"`）    |
+| `target`            | string      | `"main"`  | `"main"` 仅执行不投递；`"last"` 发到上次对话的频道/用户；`"inbox"` 发送到收件箱 |
 | `activeHours`       | object/null | `null`    | 可选活跃时段限制                                            |
 | `activeHours.start` | string      | `"08:00"` | 开始时间（HH:MM）                                           |
 | `activeHours.end`   | string      | `"22:00"` | 结束时间（HH:MM）                                           |
 
-配置示例（每 30 分钟自检，不发到频道，写在 config.json 中）：
-
-```json
-"agents": {
-  "defaults": {
-    "heartbeat": {
-      "every": "30m",
-      "target": "main"
-    }
-  }
-}
-```
-
-配置示例（每 1 小时，发到上次频道，限 08:00-22:00，写在 agent.json 中）：
+配置示例（开启心跳，每 30 分钟自检，不发到频道，写在 `workspaces/<agent_id>/agent.json` 中）：
 
 ```json
 "heartbeat": {
+  "enabled": true,
+  "every": "30m",
+  "target": "main"
+}
+```
+
+配置示例（开启心跳，每 1 小时，发到上次频道，限 08:00-22:00，写在 agent.json 中）：
+
+```json
+"heartbeat": {
+  "enabled": true,
   "every": "1h",
   "target": "last",
   "activeHours": { "start": "08:00", "end": "22:00" }
@@ -92,7 +92,7 @@ qwenpaw daemon reload-config
 | ---- | ------------------------------------------ | ---------------------------- |
 | 数量 | 每个智能体只有一份 HEARTBEAT.md            | 可创建多个                   |
 | 间隔 | 一个全局间隔                               | 每个任务独立 cron 表达式     |
-| 投递 | 仅 `main`（不发）或 `last`（上次频道） | 每个任务独立指定频道和用户   |
+| 投递 | 仅 `main`（不发）、`last`（上次频道）或 `inbox`（收件箱） | 每个任务独立指定频道和用户   |
 | 适用 | 固定的一套自检/摘要                        | 多条不同时间、不同内容的任务 |
 
 > 如果用户需要的是「每天 9 点发早安到钉钉」「每 2 小时检查待办发到飞书」这类多条独立任务，应引导使用 `qwenpaw cron create`（参见下方定时任务部分），而非心跳。
@@ -104,8 +104,8 @@ qwenpaw daemon reload-config
 执行步骤：
 
 ```bash
-# 1. 写入心跳内容
-cat > ~/.qwenpaw/HEARTBEAT.md << 'EOF'
+# 1. 写入心跳内容（<agent_id> 换成实际智能体，如 default）
+cat > ~/.qwenpaw/workspaces/<agent_id>/HEARTBEAT.md << 'EOF'
 # 心跳任务
 
 - 检查收件箱是否有新邮件
@@ -113,9 +113,10 @@ cat > ~/.qwenpaw/HEARTBEAT.md << 'EOF'
 - 如果有紧急邮件，标注提醒
 EOF
 
-# 2. 编辑 agent.json 中的 heartbeat 配置
-# 将 heartbeat 设为：
+# 2. 编辑 ~/.qwenpaw/workspaces/<agent_id>/agent.json 中的 heartbeat 配置
+# 将 heartbeat 设为（enabled 不写默认 false，必须显式开启）：
 # {
+#   "enabled": true,
 #   "every": "1h",
 #   "target": "last",
 #   "activeHours": { "start": "08:00", "end": "22:00" }
