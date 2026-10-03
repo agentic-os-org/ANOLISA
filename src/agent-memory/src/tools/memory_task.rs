@@ -13,6 +13,7 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::os::fd::AsFd;
 
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
@@ -299,7 +300,14 @@ fn load_all_tasks(svc: &MemoryService) -> Result<Vec<Task>> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        // Skip symlinked entries (consistent with memory_export): a link at
+        // tasks/<id>.md must never leak an outside file into the listing.
+        match entry.file_type() {
+            Ok(ft) if ft.is_symlink() => continue,
+            _ => {}
+        }
+        let rel = std::path::Path::new(TASKS_DIR).join(entry.file_name());
+        let content = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -313,13 +321,45 @@ fn load_all_tasks(svc: &MemoryService) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
-/// Save a task to the tasks/ directory.
+/// Save a task to the tasks/ directory. Task IO is anchored to the mount's
+/// `root_fd` like every other content tool (see `safe_fs`'s module doc): a
+/// symlink planted at `tasks/<id>.md` must fail with `PathOutsideMount`,
+/// never redirect the write outside the mount.
 fn save_task(svc: &MemoryService, task: &Task) -> Result<()> {
-    let dir = svc.mount.root.join(TASKS_DIR);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.md", task.id));
-    std::fs::write(&path, task.to_markdown())?;
+    let rel = std::path::Path::new(TASKS_DIR).join(format!("{}.md", task.id));
+    // Same pattern as tools/write.rs: validate the parent path against
+    // symlink swaps before the unsandboxed create_dir_all; the write itself
+    // is openat2(RESOLVE_BENEATH|NO_SYMLINKS), so a symlinked tasks/<id>.md
+    // fails instead of writing through it.
+    crate::safe_fs::assert_no_symlink_traversal(
+        svc.mount.root_fd.as_fd(),
+        std::path::Path::new(TASKS_DIR),
+    )?;
+    std::fs::create_dir_all(svc.mount.root.join(TASKS_DIR))?;
+    crate::safe_fs::write(
+        svc.mount.root_fd.as_fd(),
+        &rel,
+        task.to_markdown().as_bytes(),
+    )?;
     Ok(())
+}
+
+/// Read a task by id through the sandbox anchor. A symlinked `tasks/<id>.md`
+/// fails with `PathOutsideMount` instead of returning the outside file's
+/// content to the model.
+fn read_task(svc: &MemoryService, id: &str) -> Result<Task> {
+    validate_task_id(id)?;
+    let rel = std::path::Path::new(TASKS_DIR).join(format!("{id}.md"));
+    let content = crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel)?;
+    parse_task(&content)
+}
+
+/// Whether a task file exists, without following symlinks: a symlinked
+/// `tasks/<id>.md` reports as absent so callers surface NotFound instead of
+/// reading or writing through the link.
+fn task_exists(svc: &MemoryService, id: &str) -> bool {
+    let rel = std::path::Path::new(TASKS_DIR).join(format!("{id}.md"));
+    crate::safe_fs::exists(svc.mount.root_fd.as_fd(), &rel)
 }
 
 // ── MCP Tool: memory_task_save ──────────────────────────────────
@@ -351,14 +391,8 @@ pub fn memory_task_save(
     // no matching task exists, create a new task with that id (the tool
     // description promises "update if exists, otherwise create new").
     let mut task = if let Some(existing_id) = id {
-        let path = svc
-            .mount
-            .root
-            .join(TASKS_DIR)
-            .join(format!("{existing_id}.md"));
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            parse_task(&content)?
+        if task_exists(svc, existing_id) {
+            read_task(svc, existing_id)?
         } else {
             Task {
                 id: existing_id.to_string(),
@@ -456,11 +490,13 @@ pub fn memory_task_save(
 /// Load a task by id and return its full context for resuming work.
 pub fn memory_task_resume(svc: &MemoryService, id: &str) -> Result<String> {
     validate_task_id(id)?;
-    let path = svc.mount.root.join(TASKS_DIR).join(format!("{id}.md"));
-    if !path.exists() {
+    if !task_exists(svc, id) {
         return Err(MemoryError::NotFound(format!("task {id}")));
     }
-    let content = std::fs::read_to_string(&path)?;
+    let content = {
+        let rel = std::path::Path::new(TASKS_DIR).join(format!("{id}.md"));
+        crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel)?
+    };
     let task = parse_task(&content)?;
 
     svc.audit_log(
@@ -550,12 +586,10 @@ pub fn memory_task_list(svc: &MemoryService, status_filter: Option<&str>) -> Res
 /// Mark a task as done or cancelled.
 pub fn memory_task_close(svc: &MemoryService, id: &str, reason: Option<&str>) -> Result<String> {
     validate_task_id(id)?;
-    let path = svc.mount.root.join(TASKS_DIR).join(format!("{id}.md"));
-    if !path.exists() {
+    if !task_exists(svc, id) {
         return Err(MemoryError::NotFound(format!("task {id}")));
     }
-    let content = std::fs::read_to_string(&path)?;
-    let mut task = parse_task(&content)?;
+    let mut task = read_task(svc, id)?;
 
     task.status = TaskStatus::Done;
     task.progress = 100;
