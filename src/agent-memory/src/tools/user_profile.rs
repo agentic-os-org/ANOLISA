@@ -108,6 +108,14 @@ pub fn synthesize_profile(svc: &MemoryService) -> Result<UserProfile> {
 }
 
 /// Analyze session log files for behavioral patterns.
+/// True when the extracted query is the `len=N` marker `memory_search`
+/// writes into the audit log instead of the raw query text.
+fn is_sanitized_query_marker(query: &str) -> bool {
+    query
+        .strip_prefix("len=")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
     let mut tool_frequency: HashMap<String, usize> = HashMap::new();
     let mut search_topics: HashMap<String, usize> = HashMap::new();
@@ -147,7 +155,10 @@ fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
                 // Extract query from path field (format: "mode:query")
                 if let Some(query) = path_str.split(':').nth(1) {
                     let query = query.trim().to_lowercase();
-                    if query.len() > 3 {
+                    // `memory_search` sanitizes queries to a `len=N` marker
+                    // in the audit log; the actual topic is unrecoverable,
+                    // so the marker must not be counted as one.
+                    if !is_sanitized_query_marker(&query) && query.len() > 3 {
                         *search_topics.entry(query).or_insert(0) += 1;
                     }
                 }
@@ -405,5 +416,50 @@ mod tests {
         let toml_str = toml::to_string(&entry).unwrap();
         assert!(toml_str.contains("test"));
         assert!(toml_str.contains("5"));
+    }
+
+    #[test]
+    fn sanitized_search_marker_is_not_a_topic() {
+        // `memory_search` logs "bm25:len=N" instead of the raw query; the
+        // marker must not be counted as a search topic.
+        assert!(is_sanitized_query_marker("len=14"));
+        assert!(!is_sanitized_query_marker("kernel config"));
+        assert!(!is_sanitized_query_marker("len="));
+        assert!(!is_sanitized_query_marker("len=12ab"));
+    }
+
+    #[test]
+    fn session_log_reader_counts_only_recorded_queries() {
+        // Reader-path regression: two sanitized markers previously became a
+        // repeated "len=9" topic and surfaced as "interested in: len=9";
+        // a recorded query must still be counted.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("session.jsonl");
+        let lines = [
+            r#"{"tool":"memory_search","path":"bm25:len=9"}"#,
+            r#"{"tool":"memory_search","path":"bm25:len=9"}"#,
+            r#"{"tool":"memory_search","path":"bm25:rust ownership"}"#,
+            r#"{"tool":"memory_search","path":"bm25:rust ownership"}"#,
+        ];
+        std::fs::write(&log, lines.join("\n")).unwrap();
+
+        let mut profile = UserProfile::default();
+        analyze_session_logs(dir.path(), &mut profile).unwrap();
+
+        let descriptions: Vec<&str> = profile
+            .context
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert!(
+            !descriptions.iter().any(|d| d.contains("len=")),
+            "sanitized markers must not become topics: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("interested in: rust ownership")),
+            "a recorded query must still become a topic: {descriptions:?}"
+        );
     }
 }
