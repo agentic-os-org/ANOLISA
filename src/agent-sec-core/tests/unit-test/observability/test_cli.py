@@ -739,24 +739,15 @@ def test_report_with_security_reader(monkeypatch: pytest.MonkeyPatch) -> None:
         events=[],
     )
 
-    def _fake_candidate(category, result="succeeded"):
-        c = MagicMock()
-        c.event = MagicMock()
-        c.event.category = category
-        c.event.result = result
-        return c
-
     sec = MagicMock()
-    sec.query_correlation_candidates.return_value = [
-        _fake_candidate("code_scan", "succeeded"),
-        _fake_candidate("code_scan", "failed"),
-        _fake_candidate("prompt_scan", "succeeded"),
-    ]
+    counts = {
+        "code_scan": {"succeeded": 1, "failed": 1},
+        "prompt_scan": {"succeeded": 1},
+    }
+    sec.count_session_results.return_value = counts
     sec.close = MagicMock()
 
-    monkeypatch.setattr(
-        observability_sqlite_reader, "ObservabilityReader", lambda: stub
-    )
+    monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", lambda: stub)
     monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", lambda: sec)
     result = _report_runner.invoke(
         app,

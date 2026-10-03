@@ -131,6 +131,12 @@ class SqliteEventReader:
             offset=offset,
         )
 
+    def count_session_results(
+        self, session_id: str, categories: tuple[str, ...] | list[str]
+    ) -> dict[str, dict[str, int]] | None:
+        """Return complete session result counts, or None when querying fails."""
+        return self._repository.count_session_results(session_id, categories)
+
     def count_by(
         self,
         group_field: str,
