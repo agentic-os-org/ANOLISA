@@ -3,7 +3,7 @@
 # Supports both SRPM method (Alinux4 official) and Upstream method (kernel.org)
 # Usage: ./build-kernel.sh [srpm|upstream] [options]
 
-set -e
+set -eo pipefail
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
