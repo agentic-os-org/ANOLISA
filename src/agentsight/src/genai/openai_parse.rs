@@ -396,11 +396,16 @@ impl GenAIBuilder {
     /// Anthropic streams carry no `choices` array at all, so when none of the
     /// chunks is OpenAI-shaped the Anthropic aggregation below runs instead —
     /// the live path reconstructs Anthropic content through the analyzer's
-    /// message parser, but the drain path has only this merger.
+    /// message parser, but the drain path has only this merger. The OpenAI
+    /// **Responses** protocol (`response.*` events) is the same story and gets
+    /// its own aggregation first.
     pub(super) fn merge_sse_chunks(
         chunks: &[serde_json::Value],
     ) -> (Vec<MessagePart>, Option<String>) {
         if !chunks.iter().any(|c| c.get("choices").is_some()) {
+            if let Some(merged) = Self::merge_responses_sse_chunks(chunks) {
+                return merged;
+            }
             if let Some(merged) = Self::merge_anthropic_sse_chunks(chunks) {
                 return merged;
             }
@@ -665,6 +670,125 @@ impl GenAIBuilder {
                 _ => {}
             }
         }
+
+        Some((parts, finish_reason))
+    }
+
+    /// Aggregate OpenAI **Responses** API SSE chunks into parts.
+    ///
+    /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
+    /// `response.*` events: text arrives as `response.output_text.delta`,
+    /// function calls as `response.output_item.added` (type `function_call`)
+    /// plus `response.function_call_arguments.delta`, and the stream closes
+    /// with `response.completed`. The live path reconstructs this through the
+    /// analyzer's message parser (`aggregate_responses_sse_chunks`), but the
+    /// dead-pid/flush drain path persists through `extract_sse_enrichment` →
+    /// `merge_sse_chunks`, which understood none of it — a drained Responses
+    /// stream lost its entire output (`output_messages = None`) while the same
+    /// stream captured live kept it.
+    ///
+    /// Mirrors the analyzer's aggregation, including its parallel-tool-use
+    /// semantics: an in-flight call is flushed when the next call starts,
+    /// because the stream is not required to send
+    /// `response.function_call_arguments.done` for each call.
+    pub(super) fn merge_responses_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        fn push_tool_call(parts: &mut Vec<MessagePart>, id: &str, name: &str, arguments: &str) {
+            if name.is_empty() {
+                return;
+            }
+            let arguments = if arguments.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(arguments).ok()
+            };
+            parts.push(MessagePart::ToolCall {
+                id: if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                },
+                name: name.to_string(),
+                arguments,
+            });
+        }
+
+        let mut text_buf = String::new();
+        let mut tool_parts: Vec<MessagePart> = Vec::new();
+        let mut tc_id = String::new();
+        let mut tc_name = String::new();
+        let mut tc_args = String::new();
+        let mut saw_responses_event = false;
+
+        for chunk in chunks {
+            let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match event_type {
+                "response.output_text.delta" => {
+                    saw_responses_event = true;
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        text_buf.push_str(delta);
+                    }
+                }
+                "response.output_item.added" => {
+                    saw_responses_event = true;
+                    if let Some(item) = chunk.get("item") {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                            // Parallel tool use: a new call starting must not
+                            // discard the previous one (same invariant the
+                            // analyzer's aggregator holds).
+                            push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+                            tc_name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tc_id = item
+                                .get("call_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tc_args.clear();
+                        }
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        tc_args.push_str(delta);
+                    }
+                }
+                "response.function_call_arguments.done" => {
+                    push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+                    tc_name.clear();
+                    tc_id.clear();
+                    tc_args.clear();
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_responses_event {
+            return None;
+        }
+
+        // Flush any in-flight call (truncated stream without the done event).
+        push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+
+        let mut parts = Vec::new();
+        if !text_buf.is_empty() {
+            parts.push(MessagePart::Text { content: text_buf });
+        }
+        parts.extend(tool_parts);
+
+        // Same finish-reason convention as the analyzer's aggregator.
+        let finish_reason = if parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::ToolCall { .. }))
+        {
+            Some("tool_calls".to_string())
+        } else {
+            Some("stop".to_string())
+        };
 
         Some((parts, finish_reason))
     }
@@ -1103,6 +1227,42 @@ mod tests {
         let (parts, finish) = GenAIBuilder::merge_sse_chunks(&chunks);
         assert!(parts.is_empty(), "no content blocks means no parts");
         assert_eq!(finish.as_deref(), Some("end_turn"));
+    }
+
+    /// Responses-API SSE bodies (codex 0.137+ via /v1/responses) carry no
+    /// `choices` array either; the merger must aggregate their `response.*`
+    /// events instead of yielding no parts. Same merger the drain path
+    /// persists through.
+    #[test]
+    fn test_extract_parts_from_sse_body_responses_events() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}},
+            {"type":"response.output_text.delta","delta":"Hel"},
+            {"type":"response.output_text.delta","delta":"lo"},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"},
+            {"type":"response.function_call_arguments.delta","delta":"\"/tmp/a.md\"}"},
+            {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments, &Some(serde_json::json!({"path": "/tmp/a.md"})));
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert_eq!(finish.as_deref(), Some("tool_calls"));
     }
 
     #[test]

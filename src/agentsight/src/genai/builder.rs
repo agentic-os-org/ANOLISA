@@ -528,9 +528,27 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // The Responses protocol nests both the model and the response
+                // id inside the `response` object of response.created /
+                // response.completed; its chunks carry no top-level keys for
+                // either.
+                if model.is_none() {
+                    if let Some(m) = json.pointer("/response/model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
                 // Extract response id (trace_id) from first chunk that has it
                 if trace_id.is_none() {
                     if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            trace_id = Some(id.to_string());
+                        }
+                    }
+                }
+                if trace_id.is_none() {
+                    if let Some(id) = json.pointer("/response/id").and_then(|v| v.as_str()) {
                         if !id.is_empty() {
                             trace_id = Some(id.to_string());
                         }
@@ -946,6 +964,145 @@ mod tests {
             &parsed[0].parts[1],
             MessagePart::Text { content } if content == "answer"
         ));
+    }
+
+    /// A drained OpenAI **Responses** stream (codex 0.137+ via /v1/responses)
+    /// must keep its output content, model and trace_id. The live path
+    /// reconstructs `response.*` events through the analyzer's message parser,
+    /// but the drain path had no Responses aggregation at all — the persisted
+    /// row lost `output_messages`, the model (nested in `response.model`) and
+    /// the trace_id (nested in `response.id`).
+    #[test]
+    fn test_extract_sse_enrichment_responses_stream_keeps_content() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}}"#,
+            ),
+            make_sse_event(r#"{"type":"response.output_text.delta","delta":"Hel"}"#),
+            make_sse_event(r#"{"type":"response.output_text.delta","delta":"lo"}"#),
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"path\":"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"\"/tmp/a.md\"}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_1","model":"qwen3-coder-plus","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+
+        assert_eq!(
+            enrichment.model.as_deref(),
+            Some("qwen3-coder-plus"),
+            "model must be read from response.model"
+        );
+        assert_eq!(
+            enrichment.trace_id.as_deref(),
+            Some("resp_1"),
+            "trace_id must be read from response.id"
+        );
+        assert_eq!(enrichment.input_tokens, Some(100));
+        assert_eq!(enrichment.output_tokens, Some(7));
+
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(parsed[0].parts.len(), 2, "text part + tool_call part");
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parsed[0].parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"path": "/tmp/a.md"})),
+                    "argument deltas must concatenate"
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    /// Parallel Responses tool calls without per-call `done` events must all
+    /// survive the drain path (same invariant the analyzer aggregator holds).
+    #[test]
+    fn test_extract_sse_enrichment_responses_parallel_tool_calls() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"a\": 1}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_2","name":"list_dir"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"b\": 2}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_2","model":"m","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        let tool_calls: Vec<&MessagePart> = parsed[0]
+            .parts
+            .iter()
+            .filter(|p| matches!(p, MessagePart::ToolCall { .. }))
+            .collect();
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "both in-flight calls must survive without done events"
+        );
+        match tool_calls[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments, &Some(serde_json::json!({"a": 1})));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        match tool_calls[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_2"));
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments, &Some(serde_json::json!({"b": 2})));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
     }
 
     #[test]
