@@ -1033,6 +1033,7 @@ dependencies = [
  "libc",
  "regex",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokenless-ccr",
