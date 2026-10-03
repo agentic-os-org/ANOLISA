@@ -16,6 +16,7 @@ import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
   SettingScope,
+  ExtensionUpdateState,
   type ExtensionManagerOptions,
   validateName,
   getExtensionId,
@@ -776,6 +777,115 @@ describe('extension tests', () => {
         expect(mockSubagentRefreshCache).toHaveBeenCalledOnce();
         expect(mockRefreshHierarchicalMemory).toHaveBeenCalledOnce();
       });
+    });
+  });
+
+  describe('updateExtension', () => {
+    it('should restore the previously installed files when the update fails', async () => {
+      const sourceDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-code-test-source-'),
+      );
+      try {
+        fs.writeFileSync(
+          path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'my-extension',
+            version: '2.0.0',
+            settings: [
+              {
+                name: 'apiKey',
+                description: 'API key used by the extension',
+                envVar: 'MY_EXTENSION_API_KEY',
+              },
+            ],
+          }),
+        );
+
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          version: '1.0.0',
+          addContextFile: true,
+          installMetadata: { type: 'local', source: sourceDir },
+        });
+
+        const manager = createExtensionManager({
+          requestSetting: vi.fn().mockRejectedValue(new Error('declined')),
+        });
+        await manager.refreshCache();
+        const extension = manager
+          .getLoadedExtensions()
+          .find((ext) => ext.name === 'my-extension');
+        expect(extension).toBeDefined();
+
+        await expect(
+          manager.updateExtension(
+            extension!,
+            ExtensionUpdateState.UPDATE_AVAILABLE,
+            () => {},
+          ),
+        ).rejects.toThrow();
+
+        expect(
+          fs.existsSync(path.join(extDir, EXTENSIONS_CONFIG_FILENAME)),
+        ).toBe(true);
+        expect(
+          JSON.parse(
+            fs.readFileSync(
+              path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+              'utf-8',
+            ),
+          ).version,
+        ).toBe('1.0.0');
+        expect(fs.existsSync(path.join(extDir, 'COPILOT.md'))).toBe(true);
+      } finally {
+        fs.rmSync(sourceDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should install the new version on a successful update', async () => {
+      const sourceDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-code-test-source-'),
+      );
+      try {
+        fs.writeFileSync(
+          path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'my-extension',
+            version: '2.0.0',
+          }),
+        );
+
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          version: '1.0.0',
+          installMetadata: { type: 'local', source: sourceDir },
+        });
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = manager
+          .getLoadedExtensions()
+          .find((ext) => ext.name === 'my-extension');
+        expect(extension).toBeDefined();
+
+        const updateInfo = await manager.updateExtension(
+          extension!,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          () => {},
+        );
+
+        expect(updateInfo?.updatedVersion).toBe('2.0.0');
+        expect(
+          JSON.parse(
+            fs.readFileSync(
+              path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+              'utf-8',
+            ),
+          ).version,
+        ).toBe('2.0.0');
+      } finally {
+        fs.rmSync(sourceDir, { recursive: true, force: true });
+      }
     });
   });
 

@@ -1251,6 +1251,10 @@ export class ExtensionManager {
       const previousExtensionConfig = this.loadExtensionConfig({
         extensionDir: extension.path,
       });
+      // Back up the currently installed files before updating: installing the
+      // update uninstalls the old version before the new one is copied over,
+      // so this backup is the only content the rollback below can restore.
+      await copyExtension(extension.path, tempDir);
       let updatedExtension: Extension;
       try {
         updatedExtension = await this.installExtension(
