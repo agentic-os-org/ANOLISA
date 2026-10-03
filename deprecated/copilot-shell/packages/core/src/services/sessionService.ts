@@ -531,6 +531,12 @@ export class SessionService {
   /**
    * Renames a session by appending a session_name system record.
    *
+   * The appended record is chained to the last record in the file (via
+   * parentUuid) so that reconstructHistory() can still walk the full
+   * conversation when the session is resumed. This mirrors how
+   * ChatRecordingService.recordSessionName() records renames for the
+   * current session.
+   *
    * @param sessionId The session ID to rename
    * @param name The new name for the session
    * @returns true if renamed, false if session not found
@@ -540,7 +546,7 @@ export class SessionService {
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      const records = await jsonl.read<ChatRecord>(filePath);
       if (records.length === 0) {
         return false;
       }
@@ -550,10 +556,10 @@ export class SessionService {
         return false;
       }
 
-      // Append a session_name system record
+      // Append a session_name system record chained to the last record
       const nameRecord: ChatRecord = {
         uuid: randomUUID(),
-        parentUuid: null,
+        parentUuid: records[records.length - 1].uuid,
         sessionId,
         timestamp: new Date().toISOString(),
         type: 'system',
