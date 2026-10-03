@@ -125,7 +125,7 @@ export class HookPlanner {
     const deduplicated: HookRegistryEntry[] = [];
 
     for (const entry of entries) {
-      const key = getHookKey(entry.config);
+      const key = `${getHookKey(entry.config)}|${entry.matcher ?? ''}`;
 
       if (!seen.has(key)) {
         seen.add(key);

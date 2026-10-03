@@ -105,6 +105,33 @@ describe('HookPlanner', () => {
 
       expect(result!.hookConfigs).toHaveLength(1);
     });
+
+    it('should keep hooks with the same command but different matchers', () => {
+      const editEntry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'Edit',
+        enabled: true,
+      };
+      const wildcardEntry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.User,
+        eventName: HookEventName.PreToolUse,
+        matcher: '*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        editEntry,
+        wildcardEntry,
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'Edit',
+      });
+
+      expect(result!.hookConfigs).toHaveLength(2);
+    });
   });
 
   describe('matchesContext', () => {
