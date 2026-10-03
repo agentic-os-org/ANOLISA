@@ -1235,11 +1235,19 @@ install_node_deps() {
         # NOTE: @whiskeysockets/baileys is fetched directly from GitHub (not npm registry),
         # so --registry mirror does NOT help. We use a timeout to avoid hanging.
         if [ -f "$INSTALL_DIR/scripts/whatsapp-bridge/package.json" ]; then
-            log_info "Installing WhatsApp Bridge dependencies (timeout 120s)..."
+            log_info "Installing WhatsApp Bridge dependencies (timeout 60s)..."
             log_warn "Note: WhatsApp Bridge has a GitHub dependency (@whiskeysockets/baileys)."
             log_warn "This step may be slow or fail in environments with restricted GitHub access."
             cd "$INSTALL_DIR/scripts/whatsapp-bridge"
-            if timeout 60 npm install --registry="$NPM_REGISTRY" --silent 2>/dev/null; then
+            # timeout(1) is not available on all supported OSes (e.g. macOS);
+            # without it run npm directly instead of failing with "timeout: not found".
+            bridge_status=0
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 60 npm install --registry="$NPM_REGISTRY" --silent 2>/dev/null || bridge_status=$?
+            else
+                npm install --registry="$NPM_REGISTRY" --silent 2>/dev/null || bridge_status=$?
+            fi
+            if [ "$bridge_status" -eq 0 ]; then
                 log_success "WhatsApp Bridge dependencies installed"
             else
                 log_warn "WhatsApp Bridge npm install timed out or failed (WhatsApp tools will not work)"
