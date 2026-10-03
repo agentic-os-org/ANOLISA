@@ -998,14 +998,22 @@ export interface InterruptionTypeStat {
 
 /**
  * Fetch per-type interruption stats within a time range.
+ *
+ * `agentName` must match the agent used for the count and the per-session /
+ * per-conversation breakdowns: the overview card renders the severity badges
+ * from the agent-scoped count and hangs this per-type breakdown under them as
+ * the tooltip, so an unscoped stats query makes the tooltip count every
+ * agent while its badge counts one.
  */
 export async function fetchInterruptionStats(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<InterruptionTypeStat[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
   return apiFetch<InterruptionTypeStat[]>(
     `${API_BASE}/api/interruptions/stats?${params.toString()}`
   );
