@@ -294,6 +294,17 @@ impl RegistrationManager {
 
         // Try v1 migration
         if let Ok(v1) = serde_json::from_str::<RegisterRecordV1>(&content) {
+            // Historical v1 files always carried version 1; a larger value is
+            // a schema this binary does not understand. Mirror the v2 guard
+            // above: warn and treat as INIT rather than honoring its state.
+            if v1.version > 1 {
+                eprintln!(
+                    "[anolisa] warn: {} has version {} (expected 1); treating as INIT",
+                    path.display(),
+                    v1.version
+                );
+                return None;
+            }
             let migrated: RegisterRecord = v1.into();
             return Some(migrated);
         }
@@ -693,6 +704,22 @@ mod tests {
             r#"{"schema_version":"2.0","state":"registered","history":[]}"#,
         );
         assert_eq!(m.read_state(), ConsentState::InitFresh);
+    }
+
+    #[test]
+    fn test_future_v1_version_treated_as_init() {
+        // A v1-shaped record carrying a version newer than 1 must be rejected
+        // like a future v2 schema version, in both consent flavors.
+        for v1_json in [
+            r#"{"version":3,"state":"registered"}"#,
+            r#"{"version":99,"state":"unregistered"}"#,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let m = mgr(&dir);
+            write_register_file(&m.register_path, v1_json);
+            assert_eq!(m.read_state(), ConsentState::InitFresh);
+            assert!(m.read_record().is_none());
+        }
     }
 
     #[test]
