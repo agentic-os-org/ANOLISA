@@ -569,6 +569,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_response_with_unmodeled_block_keeps_the_text() {
+        // Extended-thinking redaction adds a block type this build does not
+        // model (`redacted_thinking`); the server-tool blocks do the same.
+        // Parsing used to fail wholesale, which left the call with no output
+        // messages at all and reported a healthy 200 answer as EmptyResponse.
+        let json = serde_json::json!({
+            "id": "msg_unknown_block",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "EmwKAhgBEgy3vdaL"},
+                {"type": "text", "text": "Here is the answer."}
+            ],
+            "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 8}
+        });
+
+        let response = AnthropicParser::parse_response(&json)
+            .expect("one unmodeled block must not fail the whole response");
+        assert_eq!(response.content.len(), 2);
+        assert!(
+            response.content.iter().any(|block| matches!(
+                block,
+                AnthropicContentBlock::Text { text, .. } if text == "Here is the answer."
+            )),
+            "the answer text must survive the unmodeled block: {:?}",
+            response.content
+        );
+    }
+
+    #[test]
     fn test_parse_response_with_cache_tokens() {
         let json = serde_json::json!({
             "id": "msg_123",

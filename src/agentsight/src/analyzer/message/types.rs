@@ -496,6 +496,14 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// A block type this build does not model, such as `redacted_thinking`
+    /// (extended thinking with redacted content) or the server-tool blocks.
+    ///
+    /// Kept as a variant so one unrecognised block cannot fail the whole
+    /// response — the streaming path degrades the same way for unknown
+    /// `content_block_start` types.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Anthropic image source
