@@ -134,7 +134,7 @@ anolisa env
 ls ~/.config/cosh/hooks/
 
 # Reinstall the hook
-/usr/share/tokenless/scripts/install.sh --cosh
+anolisa adapter enable tokenless cosh
 
 # Check cosh hook config
 cat ~/.config/cosh/config.toml | grep -A5 hooks
