@@ -36,7 +36,7 @@
 
 ### 组件更新
 
-- **cosh-ng**：更新到 v0.24.1，改进提示词路由、终端重绘、历史召回、自定义 Tab 行为、登录 profile PATH 加载、凭据脱敏和 Hook 信任信息，并移除系统 OpenSSL 依赖，用户可保留现有 Shell 配置并稳定使用 Agent 协助，不会丢失命令、输出或敏感历史保护（#2967、#2983、#2996、#2999、#3004、#3030、#3050、#3058、#3156）
+- **cosh-ng**：更新到 v0.24.1，改进提示词路由、终端重绘、历史召回、自定义 Tab 行为、登录 profile PATH 加载、凭据脱敏和 Hook 信任信息，并移除系统 OpenSSL 依赖，用户可保留现有 Shell 配置并稳定使用 Agent 协助，不会丢失命令、输出或敏感历史保护（#2967、#2983、#2996、#3004、#3050、#3058、#3156）
 - **agent-sec-core**：更新到 v0.12.0，在 legacy cosh 与 cosh-ng 中执行相同的 Skill 策略，降低扫描误报，通过 `skill-ledger` 与 `check` 报告全部完整性结果，并加快容器健康检查，用户可获得一致执行、更清晰的校验结论和更快的就绪检查（#2707、#2871、#2879、#2928）
 - **agentsight**：更新到 v0.12.1，新增无 eBPF 采集、DashScope 原生与 Kubernetes 部署支持、Agent 资源监控和 cosh-ng 流量采集，并改进归因准确性、工具结果保留、策略同步、Token 计量、流式请求收尾、重复记录抑制、启动恢复和采集自动恢复，运维人员可信任时间线与用量统计，并让监控和防护在长期负载及短暂故障后持续运行（#2916、#2954、#2976、#2979、#3005、#3011、#3016、#3081、#3087、#3135、#3147、#3191）
 - **tokenless**：更新到 v0.8.1，新增 QwenPaw 集成、大型 JSON 集合、构建日志和 CSV/TSV 输出的可恢复缩减、通过现有 Shell 工具取回省略内容以及 Trace 关联，并修复各支持宿主的安装与兼容问题，Agent 可对更多工具结果减少上下文占用，并在需要时恢复精确原文（#2249、#3009、#3047、#3052、#3067、#3068、#3075、#3085、#3089、#3094）
@@ -89,11 +89,11 @@
 
 ### 组件更新
 
-- **cosh-ng**：更新到 v0.22.2，新增通过 `cosh agent task|doctor|run` 暴露的本地 Gateway 控制面、有界的 transcript 内存与 32 MB `run_command` 输出上限、亚毫秒级交互回显、包管理目录外系统扩展的自动发现，以及 `/hooks enable|disable` 的层级消歧；修复终端显示与输入路由（已批准命令与斜杠命令执行后终端残留内部标记行、批量粘贴的斜杠输入误路由、含路径的中文提示词、斜杠命令历史召回、中断后终端滞留 raw 模式）、安全与审计缺口（trust 模式下被 Hook 拦截的命令仍被执行、审批批次竞态、Hook 输出畸形时工具调用被静默放行、中断的 `precmd` 标记退出码被伪造）以及打包问题（RPM 卸载残留悬挂登录 Shell、systemd 255 上 Gateway 启动失败、`dnf --dry-run` 误报、代码扫描漏检 awk `system()` 调用），用户获得输出归属可见、内存有界且审批可审计的原生 Shell（#2125、#2400、#2402、#2405、#2529、#2599、#2603、#2605、#2622、#2655、#2667、#2682、#2709、#2843、#2880、#2909、#2914、#2917、#2918、#2938、#2943、#2949、#2955、#2968）
+- **cosh-ng**：更新到 v0.22.2，新增通过 `cosh agent task|doctor|run` 暴露的本地 Gateway 控制面、有界的 transcript 内存与 32 MB `run_command` 输出上限、亚毫秒级交互回显、包管理目录外系统扩展的自动发现，以及 `/hooks enable|disable` 的层级消歧；修复终端显示与输入路由（已批准命令与斜杠命令执行后终端残留内部标记行、批量粘贴的斜杠输入误路由、含路径的中文提示词、斜杠命令历史召回、中断后终端滞留 raw 模式）、安全与审计缺口（trust 模式下被 Hook 拦截的命令仍被执行、审批批次竞态、Hook 输出畸形时工具调用被静默放行、中断的 `precmd` 标记退出码被伪造）以及打包问题（RPM 卸载残留悬挂登录 Shell、systemd 255 上 Gateway 启动失败、`dnf --dry-run` 误报、代码扫描漏检 awk `system()` 调用），用户获得输出归属可见、内存有界且审批可审计的原生 Shell（#2125、#2529、#2599、#2603、#2605、#2622、#2655、#2667、#2682、#2709、#2843、#2909、#2914、#2917、#2918、#2938、#2943、#2949、#2955、#2968）
 - **agent-sec-core**：更新到 v0.11.1，新增 SkillFS HMAC 对端认证、`agent-sec-cli capabilities` 子命令以及 `verify` 的 `CHECKED`/`PASSED`/`FAILED` 显式计数；只读系统 Skill 不再让批量扫描失败，占位的 `set-policy`/`rotate-keys` 不再虚报成功，daemon 健康检查不再夸大就绪状态，非回环模型服务地址不再被接受，用户可在跨容器部署中审计 Skill 并信任 CLI 的校验结论（#2356、#2493、#2875、#2876、#2892、#2893、#2906）
 - **agentsight**：更新到 v0.11.2，新增历史 Agent 活动视图、会话语义搜索、双语 Dashboard、LLM 延迟指标与存储大小上限；修复模型流量抓取失效后无法自行恢复、采集器因内存占用被终止后不自动重启、事件突增时内存不受控，以及中断事件分组计数与总数不一致，用户在长时间运行中获得存储有界、抓取可自愈的可观测能力（#2578、#2612、#2644、#2733、#2792、#2796、#2817、#2925）
-- **tokenless**：更新到 v0.7.14，新增提供框架中立生命周期的 `anolisa-tokenless` Python Wheel、AgentScope 与 DeepSeek Harness 集成、Gemini `functionDeclarations` Schema 压缩以及可配置的数组尾部窗口；修复 Codex 集成重复压缩与小负载 TOON 处理不一致，更多框架上的 Agent 可节省 Token，并通过截断标记内嵌的可执行命令恢复被截断内容（#2433、#2507、#2581、#2627、#2663、#2866、#2869、#2885）
-- **anolisa**：更新到 v0.3.8，新增 Linux x64/arm64 与 macOS arm64 的已验证预编译 CLI 归档、原生 DSH Adapter 驱动、容器运行时 Telemetry 与基于 schema v2 的目标可用性判定；修复 raw 安装误展开渲染内容中的 `${VAR}`、`--quiet` 下 Adapter 输出不干净、`--dry-run` forget 与 restart 预览失真，以及卸载后 systemd 模板实例仍在运行，用户可按平台安装独立 CLI，并在无副作用的前提下预览操作（#2533、#2580、#2603、#2642、#2752、#2762、#2774、#2883、#2903）
+- **tokenless**：更新到 v0.7.14，新增提供框架中立生命周期的 `anolisa-tokenless` Python Wheel、AgentScope 与 DeepSeek Harness 集成、Gemini `functionDeclarations` Schema 压缩以及可配置的数组尾部窗口；修复 Codex 集成重复压缩与小负载 TOON 处理不一致，更多框架上的 Agent 可节省 Token，并通过截断标记内嵌的可执行命令恢复被截断内容（#2433、#2507、#2581、#2627、#2866、#2869、#2885）
+- **anolisa**：更新到 v0.3.8，新增 Linux x64/arm64 与 macOS arm64 的已验证预编译 CLI 归档、原生 DSH Adapter 驱动、容器运行时 Telemetry 与基于 schema v2 的目标可用性判定；修复 raw 安装误展开渲染内容中的 `${VAR}`、`--quiet` 下 Adapter 输出不干净、`--dry-run` forget 与 restart 预览失真，以及卸载后 systemd 模板实例仍在运行，用户可按平台安装独立 CLI，并在无副作用的前提下预览操作（#2533、#2580、#2603、#2752、#2762、#2774、#2883、#2903）
 - **os-skills**：更新到 v0.6.3，RPM 补充 `anolisa-component(os-skills)` 声明，仓库侧组件索引不可用时用户仍可执行 `anolisa upgrade` 升级 OS Skills（#2576）
 - **ws-ckpt**：更新到 v0.4.5，新增 k8s Sidecar 部署（含中英文指南，#2034、#2965）与受保护的 checkpoint 协议；修复 daemon 内存泄漏最终耗尽内存导致进程被终止（#2554）、并发 IO 下 loop 设备后端 checkpoint 延迟（最多降低至原来的 1/5，#2523）、bootstrap 失败遗留悬空镜像与 loop 设备及启动失败静默退出（#1956）、`config --global` 写入未被 daemon 实际加载（#2813），以及 loop 设备全部被占用时的间歇性 bootstrap 失败（#2965），用户可在容器中以更低延迟做快照并获得明确的启动诊断
 - **skillfs**：更新到 v0.4.2，新增 Kubernetes Sidecar 部署、双向 HMAC-SHA256 socket 认证、可选的 Alibaba Cloud Linux 4 Sidecar 镜像，以及启动 reconcile 对晚启动 notify daemon 的有界退避重试；修复 flat normal 模式挂载下分类 Skill 无法被找到，非特权工作负载可使用经认证且在 daemon 重启后自动收敛的 Skill View（#2057、#2449、#2777、#2787、#2790、#2901）
@@ -131,7 +131,7 @@
 - **agent-sec-core**：更新到 v0.10.1，新增 OpenClaw 代码扫描拦截模式、更广的提示词扫描入站字段覆盖、只读 Skill 分析、把未打包的 Skill 目录纳入账本检查、加载 Skill 包前先验证清单签名，以及事件查询的会话与运行过滤，用户可拦截风险代码、检查未打包 Skill 并按会话查询安全事件（#2044、#2132、#2185、#2201、#2242、#2277）
 - **agentsight**：更新到 v0.10.1，新增 Codex 轨迹转换为 ATIF、抓取到的模型流量附带进程归属信息且进程号在观测者命名空间内解析（#2360）与 Dashboard 本地化；修复工具调用结束后回合被提前关闭、暂停事件被误判为异常中断（#2320）、流式响应被截断、QwenCode 轨迹数据不准、cosh 重启后会话丢失，以及 cosh 会话临时文件写入未被映射（#2080），用户可在浏览器语言环境下获得准确的跨运行时轨迹
 - **tokenless**：更新到 v0.7.6，`TOKENLESS_DATA_DIR` 支持用户 Home 之外的绝对目录，硬关闭 Tool Ready 调用前检查与阻断；修复 JSON Schema 被重复 Stash、Dry-run 配置被环境变量覆盖与 `retrieve` 额外添加换行，Agent 一次 Retrieve 即可恢复内容，且不再被错误的就绪判定阻塞（#2380、#2386、#2396、#2399、#2425、#2434、#2487）
-- **anolisa**：更新到 v0.2.19，新增 `anolisa update` 后的 Adapter 变更提示、Qoder 原生插件生命周期支持、Codex Hook 信任持久化、`OPENCLAW_STATE_DIR` 处理与遗留命令的标准 JSON 信封，并将 Telemetry 迁移到 `SLS_PROJECT_PREFIX`，用户可跨框架管理 Adapter，并以同一方式解析所有 JSON 输出（#2018、#2221、#2260、#2281、#2319、#2337）
+- **anolisa**：更新到 v0.2.19，新增 `anolisa update` 后的 Adapter 变更提示、Qoder 原生插件生命周期支持、Codex Hook 信任持久化、`OPENCLAW_STATE_DIR` 处理与遗留命令的标准 JSON 信封，并将 Telemetry 迁移到 `SLS_PROJECT_PREFIX`，用户可跨框架管理 Adapter，并以同一方式解析所有 JSON 输出（#2018、#2221、#2281、#2319、#2337）
 - **os-skills**：更新到 v0.6.2，新增用于确定性内核诊断、调优与回滚的 `ktuner` 技能，移除遗留的 OpenClaw 与 Hermes 适配器脚本，并补齐技能账本的认证恢复说明，用户可获得基于规则的调优建议并一键应用与回滚（#1172、#1278、#2185）
 
 ## [1.1] - 2026-08-08
@@ -155,7 +155,7 @@
 
 ### 重点特性
 
-- **cosh-ng**：更新到 v0.14.0，新增可恢复的 Workspace Session、MCP 管理、运行时状态查询和 DashScope Prompt Cache，Agent 可恢复长时间任务、扩展能力并降低重复 Prompt 成本（#1546、#1592、#1778、#1949、#2046）
+- **cosh-ng**：更新到 v0.14.0，新增可恢复的 Workspace Session、MCP 管理、运行时状态查询和 DashScope Prompt Cache，Agent 可恢复长时间任务、扩展能力并降低重复 Prompt 成本（#1546、#1592、#1778、#1949）
 - **agentsight**：更新到 v0.9.1，新增优化与 Trajectory 分析以及 Case Containment、System Audit 和 ActPlane 风险执行，用户可诊断 Agent 质量与成本并调查、遏制风险行为（#1728、#1789、#2051）
 - **agent-sec-core**：更新到 v0.9.0，将 Prompt、PII、Code 和 Observability Hook 扩展到 Qoder CLI、Qwen Code 和 Codex，用户可在受支持的 Agent Runtime 间应用一致的安全策略（#1473、#1480、#1495、#1501、#1529、#1535）
 - **tokenless**：更新到 v0.7.3，新增带 MCP 检索的可逆压缩以及 Cosh-NG 响应与命令压缩，Agent 可减少 Model Context 并按需恢复被截断的内容（#1285、#1376、#1669）
@@ -168,10 +168,10 @@
 - **agentsight**：更新到 v0.9.1，新增 ATIF v1.7 Trajectory 分析、准确性/性能/成本 Workspace、Case Containment、System Audit 和风险 Dashboard，用户可追踪多 Agent 行为并处理优化或安全发现（#1728、#1789、#1828、#2051）
 - **tokenless**：更新到 v0.7.3，新增基于 Stash 的可逆压缩、MCP 检索服务器、Cosh-NG 压缩和 macOS/Qwencode Adapter 支持，Agent 可在更多 Runtime 中节省 Token 而不永久丢失压缩内容（#1285、#1376、#1669、#1894、#1964）
 - **agent-memory**：更新到 v0.2.6，新增同步索引以及聚焦 Query 和 OR 排序 Recall Fallback，Agent 可从冗长或包含较多停用词的 Prompt 中检索刚捕获的记忆（#1520、#1574、#2047）
-- **anolisa**：更新到 v0.2.15，新增精确版本 RPM/Raw 安装、Telemetry 控制、macOS arm64 npm 交付、文件元数据修复和分阶段进度，用户可跨 Linux 与 macOS 选择已发布版本、控制上报并修复 Linux 安装漂移（#1619、#1700、#1740、#1962、#1987、#2036）
+- **anolisa**：更新到 v0.2.15，新增精确版本 RPM/Raw 安装、Telemetry 控制、macOS arm64 npm 交付、文件元数据修复和分阶段进度，用户可跨 Linux 与 macOS 选择已发布版本、控制上报并修复 Linux 安装漂移（#1700、#1740、#1962、#1987、#2036）
 - **skillfs**：更新到 v0.4.0，新增 Hermes 嵌套 Skill 兼容、可配置读取时转换、认证的 Live Source 解析和强化的权限边界，Agent 可使用适配后的 Skill View，同时 Source Mutation 仍受安全控制（#1146、#1484、#1517）
 - **ws-ckpt**：更新到 v0.4.2，新增 Telemetry Gate 和孤立 Pre-init Backup 自动恢复，用户可在初始化中断后恢复 Workspace 而不受陈旧备份状态影响（#1509、#1601）
-- **cosh-ng**：更新到 v0.14.0，新增 Session 恢复、MCP Tool、Slash Command 状态查询和 Prompt Cache 可观测，Agent 可恢复复杂任务、扩展能力并诊断 Cache 节省效果（#1530、#1546、#1592、#1778、#1949、#2046、#2075）
+- **cosh-ng**：更新到 v0.14.0，新增 Session 恢复、MCP Tool、Slash Command 状态查询和 Prompt Cache 可观测，Agent 可恢复复杂任务、扩展能力并诊断 Cache 节省效果（#1530、#1546、#1592、#1778、#1949）
 
 ## [1.0] - 2026-07-06
 
