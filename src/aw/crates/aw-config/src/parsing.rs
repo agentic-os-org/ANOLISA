@@ -174,5 +174,101 @@ pub(super) fn parse(input: &[u8]) -> Result<Value, Error> {
     if encoded.len() > MAX_DOCUMENT_BYTES {
         return Err(invalid("expanded document exceeds size limit"));
     }
+    if contains_float(&value) {
+        reject_rounded_integers(input, &value)?;
+    }
     Ok(value)
+}
+
+/// Whether the parsed document holds a number that only an `f64` could represent.
+fn contains_float(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => number.is_f64(),
+        Value::Array(values) => values.iter().any(contains_float),
+        Value::Object(values) => values.values().any(contains_float),
+        _ => false,
+    }
+}
+
+/// Rejects integer literals resolved by the YAML layer's lossy float fallback.
+///
+/// A plain decimal integer that still fits `u128` reaches the visitor as an
+/// integer, but a longer one arrives as an `f64` that has lost its exact value.
+/// The visitor cannot tell it from `1e40`, so a second pass over the same YAML
+/// events reads back the scalar text of every number that parsed as a float;
+/// anchors and aliases resolve to the scalar they name.
+fn reject_rounded_integers(input: &str, value: &Value) -> Result<(), Error> {
+    let document = serde_yaml_ng::Deserializer::from_str(input)
+        .next()
+        .ok_or(Error::Document {
+            reason: "expected one document",
+            line: None,
+            column: None,
+        })?;
+    Literals { shape: value }
+        .deserialize(document)
+        .map_err(|error| Error::Document {
+            reason: "integer literal is outside the supported range",
+            line: error.location().map(|location| location.line()),
+            column: error.location().map(|location| location.column()),
+        })
+}
+
+/// Walks a document whose shape the first pass already checked.
+struct Literals<'a> {
+    shape: &'a Value,
+}
+
+impl<'de> DeserializeSeed<'de> for Literals<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        match self.shape {
+            Value::Object(_) => deserializer.deserialize_map(self),
+            Value::Array(_) => deserializer.deserialize_seq(self),
+            Value::Number(number) if number.is_f64() => deserializer.deserialize_str(self),
+            _ => deserializer
+                .deserialize_ignored_any(de::IgnoredAny)
+                .map(drop),
+        }
+    }
+}
+
+impl<'de> Visitor<'de> for Literals<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("the document checked by the first pass")
+    }
+
+    fn visit_str<E: de::Error>(self, literal: &str) -> Result<(), E> {
+        let digits = literal.strip_prefix(['-', '+']).unwrap_or(literal);
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(E::custom("integer literal is outside the supported range"));
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let Value::Array(values) = self.shape else {
+            return Err(de::Error::custom("document changed between passes"));
+        };
+        for shape in values {
+            seq.next_element_seed(Literals { shape })?;
+        }
+        Ok(())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let Value::Object(values) = self.shape else {
+            return Err(de::Error::custom("document changed between passes"));
+        };
+        while let Some(key) = map.next_key::<String>()? {
+            let shape = values
+                .get(&key)
+                .ok_or_else(|| de::Error::custom("document changed between passes"))?;
+            map.next_value_seed(Literals { shape })?;
+        }
+        Ok(())
+    }
 }

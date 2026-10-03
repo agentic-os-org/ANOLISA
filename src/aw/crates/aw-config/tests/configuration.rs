@@ -285,6 +285,77 @@ fn yaml_rejects_duplicate_keys_tags_merge_keys_non_string_keys_and_multiple_docu
 }
 
 #[test]
+fn unrepresentable_integer_literals_cannot_become_rounded_floats() {
+    for literal in [
+        "340282366920938463463374607431768211456",
+        "10000000000000000000000000000000000000000",
+        "-170141183460469231731687303715884105729",
+    ] {
+        for value in [
+            format!("project: {literal}"),
+            format!("project: [{literal}]"),
+            format!("project:\n          - {literal}"),
+        ] {
+            let input = EXAMPLE.replace("project: platform", &value);
+            assert!(
+                input.contains(literal),
+                "{literal} is absent from the example"
+            );
+            assert!(
+                VALIDATOR.parse(input.as_bytes()).is_err(),
+                "{value} was accepted"
+            );
+        }
+    }
+    for config in [
+        "project: 18446744073709551615",
+        "project: 0.75",
+        "project: 1e300",
+        "project: 1.7976931348623157e308",
+        "project: \"10000000000000000000000000000000000000000\"",
+        "project: platform\n        notes: |\n          10000000000000000000000000000000000000000",
+    ] {
+        let input = EXAMPLE.replace("project: platform", config);
+        assert!(
+            VALIDATOR.parse(input.as_bytes()).is_ok(),
+            "{config} was rejected"
+        );
+    }
+}
+
+#[test]
+fn anchored_and_aliased_integer_literals_are_still_rejected() {
+    for config in [
+        "project: &id 10000000000000000000000000000000000000000",
+        "project: &id platform\n        limit: &n 10000000000000000000000000000000000000000\n        again: *n",
+        "project: [&n 10000000000000000000000000000000000000000, *n]",
+    ] {
+        let input = EXAMPLE.replace("project: platform", config);
+        assert!(
+            VALIDATOR.parse(input.as_bytes()).is_err(),
+            "{config} was accepted"
+        );
+    }
+}
+
+#[test]
+fn digits_outside_a_plain_scalar_do_not_reject_the_document() {
+    for config in [
+        "project: platform # x: 10000000000000000000000000000000000000000\n        limit: 1e40",
+        "project: \"x: 10000000000000000000000000000000000000000\"\n        limit: 1e40",
+        "project: 'x, 10000000000000000000000000000000000000000'\n        limit: 1e40",
+        "project: |\n          x: 10000000000000000000000000000000000000000\n          - 10000000000000000000000000000000000000000\n        limit: 1e40",
+        "project: >-\n          [10000000000000000000000000000000000000000]\n        limit: 1e40",
+    ] {
+        let input = EXAMPLE.replace("project: platform", config);
+        assert!(
+            VALIDATOR.parse(input.as_bytes()).is_ok(),
+            "{config} was rejected"
+        );
+    }
+}
+
+#[test]
 fn errors_locate_invalid_fields_without_echoing_secret_values() {
     let mut value = example();
     value["spec"]["providers"]["security"]["timeout_ms"] = json!("sensitive-value-123");
