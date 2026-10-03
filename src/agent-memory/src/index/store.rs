@@ -661,7 +661,14 @@ impl BM25Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let cutoff_ms = now_ms - (cold_after_days as i64 * 86_400_000);
+        // `cold_after_days` is an unbounded user-facing setting; a value large
+        // enough to overflow `i64` milliseconds means "nothing is old enough
+        // to compact", not a wrapped-around cutoff that marks fresh files
+        // cold (release) or panics (debug).
+        let days_ms = i64::try_from(cold_after_days)
+            .ok()
+            .and_then(|days| days.checked_mul(86_400_000));
+        let cutoff_ms = days_ms.map_or(i64::MIN, |ms| now_ms.saturating_sub(ms));
 
         let tx = self.conn.transaction()?;
 
