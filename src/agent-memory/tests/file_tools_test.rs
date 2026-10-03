@@ -282,6 +282,62 @@ fn grep_respects_glob_filter() {
     assert_eq!(hits[0].path, "notes/a.md");
 }
 
+#[test]
+fn grep_truncates_a_long_multibyte_line_on_a_char_boundary() {
+    let (_t, svc) = setup();
+    // 1500 CJK chars make the line 4506 bytes, past grep's 4096-byte cap,
+    // and the cut lands mid-character (4096 - 6 bytes of "match " is not a
+    // multiple of 3), so `String::truncate(4096)` panics with "byte index
+    // 4096 is not a char boundary" instead of returning a hit.
+    let long = "\u{8bb0}".repeat(1500);
+    let body = format!("match {long}\n");
+    svc.write("notes/cjk.md", &body, false).unwrap();
+
+    let hits = svc.grep("match", GrepOptions::default()).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "long multibyte line must still produce a hit"
+    );
+    assert_eq!(hits[0].path, "notes/cjk.md");
+    assert_eq!(hits[0].line, 1);
+    // Truncated, not split: the returned text is still a byte-exact
+    // prefix of the line and fits the documented cap.
+    assert!(
+        body.starts_with(&hits[0].text),
+        "truncation split a character instead of backing off to a boundary"
+    );
+    assert!(
+        hits[0].text.len() <= 4096,
+        "text is {} bytes, over the 4096 cap",
+        hits[0].text.len()
+    );
+    assert!(
+        hits[0].text.len() >= 4093,
+        "text is only {} bytes: a char-boundary back-off loses at most 3",
+        hits[0].text.len()
+    );
+}
+
+#[test]
+fn grep_skips_a_non_utf8_line_and_keeps_scanning_the_file() {
+    let (_t, svc) = setup();
+    // The tool contract says non-UTF8 lines are skipped, so the stray
+    // 0xFF on line 1 must not stop the scan: line 3 still matches.
+    let raw = b"broken \xff line\nplain\nmatch here\n";
+    std::fs::write(svc.mount.root.join("mixed.md"), raw).unwrap();
+
+    let hits = svc.grep("match", GrepOptions::default()).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "lines after a non-UTF8 line must still be scanned"
+    );
+    assert_eq!(hits[0].path, "mixed.md");
+    assert_eq!(hits[0].line, 3);
+    assert_eq!(hits[0].text, "match here");
+}
+
 // ---------- mem_diff ----------
 
 #[test]
