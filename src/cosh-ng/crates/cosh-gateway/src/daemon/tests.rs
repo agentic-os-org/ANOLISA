@@ -1539,3 +1539,72 @@ fn bind_replaces_only_an_owned_stale_socket() {
 
 #[path = "tests/snapshot.rs"]
 mod snapshot;
+
+#[test]
+fn cancel_and_its_idempotent_replay_keep_the_launch_projection() {
+    let root = private_tempdir();
+    let socket_path = private_directory(&root, "runtime").join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+    let config = daemon_config(socket_path.clone(), database_path);
+    let workspace = config.launch_catalog.default_workspace().clone();
+    let mut daemon = GatewayDaemon::bind(config).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server = std::thread::spawn(move || daemon.serve_until(&server_shutdown));
+    let client = LocalGatewayClient::new(socket_path);
+
+    let launch = TaskLaunchSpecV1::new(
+        BoundedText::new("inspect the failed service").unwrap(),
+        TaskRuntime::Core,
+        workspace,
+        CheckpointPolicy::Off,
+        ApprovalPolicy::AllowAll,
+    );
+    let GatewayResult::Task(submitted) = client
+        .submit_launch(SubmitLaunch {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("cancel-projection").unwrap(),
+            launch: launch.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("launch submission must return its Task")
+    };
+    let expected_launch =
+        TaskLaunchDescriptorV1::from_spec(sha256_digest(launch.goal.as_str().as_bytes()), &launch);
+    assert_eq!(submitted.launch.as_ref(), Some(&expected_launch));
+
+    let cancel = |key: &'static str| {
+        client
+            .cancel(CancelTask {
+                request_id: RequestId::new(),
+                idempotency_key: IdempotencyKey::new(key).unwrap(),
+                task_id: submitted.task_id.clone(),
+                run_id: submitted.active_run_id.clone().unwrap(),
+                expected_revision: None,
+            })
+            .unwrap()
+    };
+    let GatewayResult::Cancelled(cancelled) = cancel("cancel-projection-run") else {
+        panic!("cancellation must return its Task")
+    };
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(
+        cancelled.launch.as_ref(),
+        Some(&expected_launch),
+        "cancel must keep the launch projection submit returned"
+    );
+
+    let GatewayResult::Cancelled(replayed) = cancel("cancel-projection-run") else {
+        panic!("replayed cancellation must return its Task")
+    };
+    assert_eq!(replayed.revision, cancelled.revision);
+    assert_eq!(
+        replayed.launch.as_ref(),
+        Some(&expected_launch),
+        "the idempotent cancel replay must keep the launch projection"
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    server.join().unwrap().unwrap();
+}

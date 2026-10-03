@@ -274,7 +274,7 @@ impl TaskCoordinator {
         {
             let task = self.store.load_task(&receipt.task_id)?;
             authorize(&task, actor_id)?;
-            return Ok(TaskView::from(&task));
+            return self.task_view(&task);
         }
         let current = self.store.load_task(&request.task_id)?;
         authorize(&current, actor_id)?;
@@ -361,7 +361,7 @@ impl TaskCoordinator {
             self.store.commit_task(&commit)?
         };
         let task = self.store.load_task(receipt_task_id(&outcome))?;
-        Ok(TaskView::from(&task))
+        self.task_view(&task)
     }
 
     fn retry_admitted(
