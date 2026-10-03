@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
     BuildLogCompressor, BuildLogOperation, HtmlExtractor, JsonCompressionConfig,
-    JsonCompressionContext, JsonCompressor, JsonOperation, SearchResultsCompressor,
+    JsonCompressionContext, JsonCompressor, JsonError, JsonOperation, SearchResultsCompressor,
     TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
@@ -209,9 +209,20 @@ impl PostToolPipeline {
                 min_toon_chars: config.min_toon_chars,
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
             };
-            let outcome = JsonCompressor::new(config.json.clone())
+            let outcome = match JsonCompressor::new(config.json.clone())
                 .compress(&request.content, &context)
-                .map_err(|error| PostToolPipelineError(error.to_string()))?;
+            {
+                Ok(outcome) => outcome,
+                // The bracket sniff that routed this content here inspects
+                // only the first and last non-whitespace bytes, so
+                // concatenated documents (for example stream JSON printed
+                // one object per line) reach the JSON compressor without
+                // parsing. The compressor is the parsing authority; treat
+                // the misroute as passthrough instead of failing the call.
+                Err(JsonError::InvalidJson(_)) => {
+                    return Ok(passthrough(request, before_tokens, content_type));
+                }
+            };
             DomainCandidate {
                 output: outcome.output,
                 operations: json_operations(&outcome.operations),
@@ -594,6 +605,23 @@ mod tests {
             assert_eq!(run.response.disposition, Disposition::NoSavings);
             assert!(run.response.applied_operations.is_empty());
         }
+    }
+
+    #[test]
+    fn bracket_sniffed_non_json_passes_through_instead_of_failing() {
+        // Two concatenated JSON documents look like JSON to the bracket
+        // sniff but do not parse. The detector delegates authority to the
+        // JSON compressor, so this misroute must degrade to passthrough
+        // rather than failing the whole PostTool call.
+        let input = "{\"items\": [1, 2, 3]}\n{\"second\": \"document\"}\n";
+        let mut req = request(input);
+        req.tool_name = "WebFetch".into();
+        let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+        assert_eq!(run.response.disposition, Disposition::Passthrough);
+        assert_eq!(run.response.output, input);
+        assert_eq!(run.response.content_type, Some(ContentType::Json));
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
     }
 
     #[derive(Default)]
