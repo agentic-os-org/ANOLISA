@@ -7,8 +7,6 @@
 //! cache, LLM merging, Markdown export) live in `crate::preferences::api`
 //! and are shared with the macOS local server.
 
-use std::collections::HashSet;
-
 use actix_web::{HttpResponse, Responder, get, web};
 use agentsight_opt::preference::{LlmPreference, analyze_user_turns};
 
@@ -16,7 +14,7 @@ use super::AppState;
 use crate::preferences::api::{
     AutoResolution, DEFAULT_TURNS_LIMIT, MAX_TURNS_LIMIT, PreferenceSourceParam, PreferencesQuery,
     TurnsQuery, cache_get, cache_put, clamp_window_days, merge_llm_preferences, render_markdown,
-    resolve_auto, window_start_ns,
+    resolve_auto, select_recent_turns, window_start_ns,
 };
 use crate::preferences::{aggregator, analyze_rows, detector, genai_source, trajectory_source};
 
@@ -266,19 +264,196 @@ pub async fn get_preference_turns(
         .limit
         .unwrap_or(DEFAULT_TURNS_LIMIT)
         .clamp(1, MAX_TURNS_LIMIT);
-    let mut seen: HashSet<String> = HashSet::new();
-    let turns: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.user_text.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| seen.insert(s.clone()))
-        .take(limit)
-        .collect();
+    let turns = select_recent_turns(&rows, limit);
     HttpResponse::Ok().json(serde_json::json!({
         "window_days": window_days,
         "source": resolved.as_str(),
         "turns_count": turns.len(),
         "turns": turns,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+    use std::time::Instant;
+
+    use actix_web::App;
+    use actix_web::body::to_bytes;
+    use actix_web::http::StatusCode;
+    use actix_web::test as awtest;
+    use actix_web::web;
+
+    use crate::genai::exporter::GenAIExporter;
+    use crate::genai::semantic::{
+        GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
+        TokenUsage,
+    };
+    use crate::grader::EvaluationStore;
+    use crate::health::HealthStore;
+    use crate::storage::sqlite::genai::GenAISqliteStore;
+
+    use super::*;
+
+    /// Seed one completed main-flow llm_call whose user query is `query`,
+    /// timestamped `start_ns`, into the store at `path`.
+    fn write_turn_event(path: &std::path::Path, query: &str, start_ns: u64, index: usize) {
+        let store =
+            GenAISqliteStore::new_with_path(path, crate::config::PeriodicStoragePolicy::default())
+                .unwrap();
+        let mut call = LLMCall::new(
+            format!("call-{index}"),
+            start_ns,
+            "anthropic".to_string(),
+            "claude".to_string(),
+            LLMRequest {
+                messages: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            1234,
+            "claude".to_string(),
+        );
+        call.agent_name = Some("claude".to_string());
+        call.set_response(
+            LLMResponse {
+                messages: vec![OutputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "done".to_string(),
+                    }],
+                    name: None,
+                    finish_reason: Some("stop".to_string()),
+                }],
+                streamed: false,
+                raw_body: None,
+            },
+            start_ns + 500,
+        );
+        call.set_token_usage(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.metadata
+            .insert("conversation_id".to_string(), "conv-turns".to_string());
+        call.metadata
+            .insert("response_id".to_string(), format!("trace-{index}"));
+        call.metadata
+            .insert("session_id".to_string(), "session-turns".to_string());
+        call.metadata
+            .insert("user_query".to_string(), query.to_string());
+        store.export(&[GenAISemanticEvent::LLMCall(call)]);
+        store.flush();
+    }
+
+    fn turns_app_state(path: &std::path::Path) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: path.to_path_buf(),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    path,
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Regression for the "oldest slice" bug: the genai store returns the
+    /// window's rows oldest-first, and the handler used to iterate them
+    /// forward and keep the first `limit` — the OLDEST turns of the window,
+    /// the stale part the row cap keeps only because it is not stale.
+    /// The documented contract is newest unique turns first.
+    #[actix_web::test]
+    async fn preference_turns_serve_the_newest_slice_newest_first() {
+        let root = std::env::temp_dir().join(format!(
+            "agentsight_pref_turns_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("events.db");
+
+        // Five turns one minute apart, starting five minutes ago — well
+        // inside the requested window and below the row cap.
+        let minute = 60_000_000_000u64;
+        let base = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            - 5 * minute;
+        let queries = ["turn one", "turn two", "turn three", "turn four", "turn five"];
+        for (index, query) in queries.iter().enumerate() {
+            write_turn_event(&db_path, query, base + (index as u64) * minute, index);
+        }
+
+        let data = turns_app_state(&db_path);
+        let app =
+            awtest::init_service(App::new().app_data(data).service(get_preference_turns)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/preferences/turns?window_days=30&limit=3")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+        let turns: Vec<&str> = body["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            turns,
+            vec!["turn five", "turn four", "turn three"],
+            "turns must be the newest three, newest first"
+        );
+        assert_eq!(body["turns_count"], 3);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -139,8 +139,11 @@ impl GenAISqliteStore {
     ///
     /// When the window is over the cap the NEWEST rows are kept — preference
     /// analysis is about recent behavior ("wider windows only add stale
-    /// evidence"), and the trajectory provider below agrees
-    /// (`list_recent_atif_jsons` also fetches DESC then reverses). The
+    /// evidence"). The trajectory provider below agrees in spirit
+    /// (`list_recent_atif_jsons` also fetches newest-first, though it does
+    /// NOT reverse — it returns newest documents in place, with turns
+    /// chronological inside each; the preference layer orders by per-turn
+    /// timestamp rather than trusting either source's row order). The
     /// previous ASC-first LIMIT kept the OLDEST rows, freezing every
     /// preference/turns/export view on the start of the window on any box
     /// past ~43 calls/day. Rows are returned oldest-first for consumer

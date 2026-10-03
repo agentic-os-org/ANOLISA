@@ -6,8 +6,6 @@
 //! macOS, so `source=genai` fails loudly and `source=auto` degrades
 //! straight to `trajectories.db`.
 
-use std::collections::HashSet;
-
 use actix_web::{HttpResponse, Responder, get, web};
 use agentsight_opt::preference::{LlmPreference, analyze_user_turns};
 use agentsight_trajectory_collector::TrajectoryStore;
@@ -16,7 +14,7 @@ use super::optimize::OptimizeAppState;
 use crate::preferences::api::{
     AutoResolution, DEFAULT_TURNS_LIMIT, MAX_TURNS_LIMIT, PreferenceSourceParam, PreferencesQuery,
     TurnsQuery, cache_get, cache_put, clamp_window_days, merge_llm_preferences, render_markdown,
-    resolve_auto, window_start_ns,
+    resolve_auto, select_recent_turns, window_start_ns,
 };
 use crate::preferences::{aggregator, analyze_rows, detector, trajectory_source};
 
@@ -209,15 +207,7 @@ pub async fn get_preference_turns(
         .limit
         .unwrap_or(DEFAULT_TURNS_LIMIT)
         .clamp(1, MAX_TURNS_LIMIT);
-    let mut seen: HashSet<String> = HashSet::new();
-    let turns: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.user_text.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| seen.insert(s.clone()))
-        .take(limit)
-        .collect();
+    let turns = select_recent_turns(&rows, limit);
     HttpResponse::Ok().json(serde_json::json!({
         "window_days": window_days,
         "source": resolved.as_str(),

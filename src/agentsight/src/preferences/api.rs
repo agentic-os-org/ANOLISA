@@ -7,13 +7,14 @@
 //! LLM-result merging and the Markdown export — so both handler sets stay
 //! thin and behave identically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentsight_opt::preference::LlmPreference;
 use serde::Deserialize;
 
+use super::detector::PreferenceEventRow;
 use super::signals::{Preference, PreferenceCategory, PreferenceSource, PreferenceStatus};
 use super::{DEFAULT_WINDOW_DAYS, EXPORT_MIN_CONFIDENCE, MAX_WINDOW_DAYS};
 
@@ -297,6 +298,43 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+// ─── Turn selection ──────────────────────────────────────────────────────────
+
+/// Select the newest `limit` unique, non-empty user turns, newest first.
+///
+/// Both `/api/preferences/turns` handlers document "newest unique turns
+/// first; `limit` bounds the count", but their sources disagree about row
+/// order: the genai store returns chronological rows (oldest first), while
+/// the trajectory provider returns newest *documents* with chronological
+/// turns inside each. Selecting by per-turn timestamp instead of trusting
+/// source order makes both handlers honor the same contract and keeps the
+/// newest slice — with the window cap keeping the newest rows, handing an
+/// agent the oldest `limit` of them serves exactly the stale part the cap
+/// had kept because it was not stale.
+///
+/// Rows without a timestamp keep their relative input order after every
+/// timed row: their recency is unknown, so they must not displace a turn
+/// the source could order.
+pub fn select_recent_turns(rows: &[PreferenceEventRow], limit: usize) -> Vec<String> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| match (rows[a].timestamp_ns, rows[b].timestamp_ns) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let mut seen: HashSet<String> = HashSet::new();
+    order
+        .into_iter()
+        .filter_map(|index| rows[index].user_text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| text.to_string())
+        .filter(|text| seen.insert(text.clone()))
+        .take(limit)
+        .collect()
+}
+
 /// Minimal Markdown escaping for free-form text (keys/values include tool
 /// names lifted straight from captured traffic): backslash-prefix every
 /// character that could open emphasis/links/headings and break the exported
@@ -318,6 +356,72 @@ fn escape_markdown(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::preferences::detector::PreferenceEventRow;
+
+    fn turn_row(text: &str, timestamp_ns: Option<i64>) -> PreferenceEventRow {
+        PreferenceEventRow {
+            id: 0,
+            session_id: None,
+            conversation_id: None,
+            timestamp_ns,
+            user_text: Some(text.to_string()),
+            tool_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn turn_selection_keeps_the_newest_slice_newest_first() {
+        // Five turns one minute apart; the handler's documented contract is
+        // "newest unique turns first; limit bounds the count".
+        let rows: Vec<PreferenceEventRow> = ["turn one", "turn two", "turn three", "turn four", "turn five"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                turn_row(
+                    text,
+                    Some(1_700_000_000_000_000_000 + (i as i64) * 60_000_000_000),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            select_recent_turns(&rows, 3),
+            vec!["turn five", "turn four", "turn three"]
+        );
+        // No limit pressure: all five, newest first.
+        assert_eq!(
+            select_recent_turns(&rows, 10),
+            vec!["turn five", "turn four", "turn three", "turn two", "turn one"]
+        );
+    }
+
+    #[test]
+    fn turn_selection_orders_mixed_source_rows_by_timestamp() {
+        // The trajectory provider returns newest documents first with turns
+        // chronological inside each — a global newest-first answer must come
+        // from the timestamps, not the row order.
+        let rows = vec![
+            turn_row("doc-new turn 1", Some(1_000)),
+            turn_row("doc-new turn 2", Some(2_000)),
+            turn_row("doc-old turn 1", Some(500)),
+        ];
+
+        assert_eq!(
+            select_recent_turns(&rows, 2),
+            vec!["doc-new turn 2", "doc-new turn 1"]
+        );
+    }
+
+    #[test]
+    fn turn_selection_dedupes_by_newest_occurrence() {
+        let rows = vec![
+            turn_row("do it", Some(2_000)),
+            turn_row("do it", Some(5_000)),
+        ];
+
+        assert_eq!(select_recent_turns(&rows, 5), vec!["do it"]);
+    }
 
     fn pref(
         category: PreferenceCategory,
