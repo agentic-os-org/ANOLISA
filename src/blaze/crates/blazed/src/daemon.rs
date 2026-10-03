@@ -160,13 +160,7 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
         );
     }
 
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = claim_api_socket(&socket_path)?;
     tracing::info!(socket = %socket_path.display(), "blaze UDS API listening");
 
     // Optional TCP listener for remote platform API
@@ -181,6 +175,37 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
     };
 
     serve(listener, tcp_listener, state, sync_schedule, sync_timeout).await
+}
+
+/// Bind the daemon API socket, refusing to displace a live daemon.
+///
+/// A leftover socket file from a crashed daemon must be removed before
+/// `bind`, but a file that a running daemon is bound to is not leftover:
+/// unlinking it would strand that daemon's clients on a dead inode while
+/// this process serves an empty state store. The two are indistinguishable
+/// by `exists()` alone and trivially distinguishable by connecting — only
+/// a stale file refuses the connection.
+fn claim_api_socket(socket_path: &Path) -> Result<UnixListener> {
+    if socket_path.exists() {
+        match std::os::unix::net::UnixStream::connect(socket_path) {
+            // The probe closes without speaking HTTP, so the live daemon
+            // only sees one accepted-and-dropped connection.
+            Ok(_) => {
+                return Err(BlazeDaemonError::Conflict(format!(
+                    "another daemon is serving on {} — set a different daemon.socket or stop it first",
+                    socket_path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(socket_path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(UnixListener::bind(socket_path)?)
 }
 
 fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
@@ -465,8 +490,55 @@ fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener as StdUnixListener;
 
     use super::*;
+
+    #[test]
+    fn claim_api_socket_refuses_a_live_listener() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("api.sock");
+        let live = StdUnixListener::bind(&socket).expect("live listener");
+        let error = claim_api_socket(&socket).expect_err("a live listener must not be displaced");
+        match &error {
+            BlazeDaemonError::Conflict(message) => {
+                assert!(message.contains("another daemon is serving"));
+                assert!(message.contains(socket.to_str().expect("utf-8 path")));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // The live daemon's socket file must survive the refused claim.
+        assert!(socket.exists());
+        drop(live);
+    }
+
+    #[tokio::test]
+    async fn claim_api_socket_removes_a_stale_socket_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("api.sock");
+        // Simulate a crashed daemon: bind, then drop the listener without
+        // unlinking, leaving a socket file that refuses connections.
+        let stale = StdUnixListener::bind(&socket).expect("stale listener");
+        drop(stale);
+        let listener = claim_api_socket(&socket).expect("stale socket must be reclaimable");
+        // The claim owns the path: another bind on it now fails.
+        assert!(StdUnixListener::bind(&socket).is_err());
+        // And the claimed (tokio) listener accepts a connection.
+        let probe = std::os::unix::net::UnixStream::connect(&socket).expect("claimed listener");
+        drop(probe);
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn claim_api_socket_binds_an_absent_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("nested/run/api.sock");
+        let listener = claim_api_socket(&socket).expect("absent path must be claimable");
+        assert!(socket.parent().expect("parent").is_dir());
+        let probe = std::os::unix::net::UnixStream::connect(&socket).expect("fresh listener");
+        drop(probe);
+        drop(listener);
+    }
 
     #[test]
     fn policy_boundary_fallback_prevents_a_later_directory_rescan() {
