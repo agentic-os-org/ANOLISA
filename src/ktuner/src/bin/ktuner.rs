@@ -394,7 +394,7 @@ fn cmd_rollback() -> Result<i32> {
         "status": format!("{status:?}"),
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(0)
+    Ok(if outcome.is_complete() { 0 } else { 1 })
 }
 
 fn gather() -> Result<(detect::SystemInfo, rules::EvalResult)> {

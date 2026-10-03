@@ -741,6 +741,14 @@ pub struct RollbackOutcome {
     pub skipped: usize,
 }
 
+impl RollbackOutcome {
+    /// Whether all recorded values were restored, including an empty ledger.
+    /// Failed writes and missing paths leave restoration incomplete.
+    pub fn is_complete(&self) -> bool {
+        rollback_should_finalize(self.failed, self.skipped)
+    }
+}
+
 /// How to summarise a rollback to the user. Kept as a pure classifier so the
 /// "系统恢复原状" (fully restored) claim is only made when it is actually true —
 /// the caller previously printed it unconditionally, even when 0 params were
@@ -1237,6 +1245,29 @@ mod tests {
             }),
             RollbackStatus::Nothing
         );
+    }
+
+    #[test]
+    fn rollback_completeness_includes_failed_and_skipped_entries() {
+        for (restored, failed, skipped, complete) in [
+            (0, 0, 0, true),
+            (3, 0, 0, true),
+            (0, 1, 0, false),
+            (0, 0, 1, false),
+            (2, 1, 0, false),
+            (2, 0, 1, false),
+            (2, 1, 1, false),
+        ] {
+            assert_eq!(
+                RollbackOutcome {
+                    restored,
+                    failed,
+                    skipped
+                }
+                .is_complete(),
+                complete
+            );
+        }
     }
 
     #[test]
