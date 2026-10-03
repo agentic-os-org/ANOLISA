@@ -263,6 +263,28 @@ fn depth_truncation_stashes_the_exact_subtree() {
 }
 
 #[test]
+fn max_depth_keeps_scalar_leaves() {
+    let store = InMemoryStore::new();
+    let compressor = JsonCompressor::new(JsonCompressionConfig {
+        max_depth: 1,
+        ..JsonCompressionConfig::default()
+    });
+    let input = serde_json::to_string(&serde_json::json!({
+        "big": {"deep": {"payload": "x".repeat(600)}},
+        "meta": {"keep": 1}
+    }))
+    .unwrap();
+    let outcome = compressor.compress(&input, &context(Some(&store))).unwrap();
+    let value = output_value(&outcome);
+    assert!(value["big"]["deep"]
+        .as_str()
+        .unwrap()
+        .starts_with("object truncated at depth 2"));
+    assert_eq!(value["meta"]["keep"], 1);
+    assert_eq!(outcome.stash_writes.len(), 1);
+}
+
+#[test]
 fn stashed_array_tail_round_trips_exactly() {
     let store = InMemoryStore::new();
     let compressor = JsonCompressor::new(JsonCompressionConfig {

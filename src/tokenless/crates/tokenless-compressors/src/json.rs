@@ -551,15 +551,15 @@ impl<'a> Session<'a> {
 
     fn compress_value(&mut self, value: &Value, depth: usize) -> Value {
         if self.bounds_enabled && depth > self.config.max_depth {
-            self.truncations += 1;
             let type_name = match value {
-                Value::Null => "null",
-                Value::Bool(_) => "bool",
-                Value::Number(_) => "number",
+                // Scalars cannot nest further; bounding them would replace
+                // short values with longer markers while bounding nothing.
+                Value::Null | Value::Bool(_) | Value::Number(_) => return value.clone(),
                 Value::String(_) => "string",
                 Value::Array(_) => "array",
                 Value::Object(_) => "object",
             };
+            self.truncations += 1;
             if let Ok(serialized) = serde_json::to_string(value)
                 && let Some(key) = self.stash_payload(&serialized)
             {
