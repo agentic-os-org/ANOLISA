@@ -48,6 +48,7 @@
       "run_in_terminal",
       "get_terminal_output",
       "execute_command",
+      "RunCommand",
       "process"
     ],
     "thresholds": {
@@ -94,6 +95,8 @@
     "delete_file": "Write",
     "run_in_terminal": "Bash",
     "get_terminal_output": "Bash",
-    "notebook_read": "NotebookRead"
+    "notebook_read": "NotebookRead",
+    "run_command": "Bash",
+    "RunCommand": "Bash"
   }
 }

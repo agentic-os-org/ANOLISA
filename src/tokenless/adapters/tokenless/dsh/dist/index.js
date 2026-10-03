@@ -58,6 +58,7 @@ const COMMAND_TOOLS = new Set([
   'run_in_terminal',
   'get_terminal_output',
   'execute_command',
+  'runcommand',
   'process',
 ])
 

@@ -94,6 +94,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
+- **Trae (TraeCode) 适配器** — Tool Ready（已硬关闭）+ `RunCommand` 命令重写 + 环境失败诊断；Trae 协议不支持替换原始输出，因此不追加压缩副本
 - **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
@@ -361,6 +362,22 @@ make qwenpaw-install
 离线或镜像网络可用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测；
 `ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。完整参考见
 [故障排查](../../docs/user-guide/zh/token-saving/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
+
+### Trae (TraeCode) 安装
+
+Trae 没有插件 CLI：适配器会把 tokenless Hook 组合并入每个已安装版本的全局
+`hooks.json`（国内版 `~/.trae-cn/hooks.json`，国际版 `~/.trae/hooks.json`）。
+PreToolUse 阶段通过 `hookSpecificOutput.updatedInput` 改写 `RunCommand` 输入；
+由于 Trae 的 PostToolUse 不支持替换工具输出，Tokenless 不会追加压缩副本
+（那会让模型可见内容变大），只在识别出环境失败时通过 `additionalContext`
+追加可操作的诊断上下文。用户自行配置的 Hook 会被保留，tokenless 条目以命令中的
+`TOKENLESS_AGENT_ID=trae` 标记识别，卸载只移除安装写入的内容。
+
+```bash
+make trae-install
+```
+
+不存在任何 Trae 版本目录时该命令安全跳过。安装或卸载后重启 Trae 生效。
 
 ### DeepSeek Harness 插件
 
