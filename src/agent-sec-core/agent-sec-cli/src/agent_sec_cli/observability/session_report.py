@@ -43,12 +43,19 @@ def _epoch_to_iso(epoch: float) -> str:
 
 
 def _parse_metrics(metrics_json: str | None) -> dict[str, Any]:
+    """Decode an event's metrics JSON, treating any non-object shape as absent.
+
+    Stored metrics are expected to be JSON objects, but a scalar, array, or
+    null payload must not crash report aggregation with an AttributeError on
+    ``.get`` — one malformed event would take down the whole session report.
+    """
     if not metrics_json:
         return {}
     try:
-        return json.loads(metrics_json)
+        decoded = json.loads(metrics_json)
     except (json.JSONDecodeError, TypeError):
         return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def build_session_report(
