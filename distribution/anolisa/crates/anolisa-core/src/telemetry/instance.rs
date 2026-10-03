@@ -447,19 +447,39 @@ pub fn write_instance_snapshot(
 
 // ── Parsing helpers ──────────────────────────────────────────────────
 
-/// Parse `/sys/devices/system/cpu/present` format (e.g. "0-3" → 4, "0" → 1)
+/// Parse a kernel CPU list, as exported by `/sys/devices/system/cpu/present`
+/// and friends: comma-separated segments, each a `lo-hi` range or a single
+/// CPU id (e.g. `"0-3"`, `"0"`, `"0-1,16-17"`). Returns the number of CPUs
+/// the list denotes, or `None` when the content is not a valid cpu list.
+///
+/// `present` is not necessarily contiguous: CPU hotplug and some
+/// virtualization/NUMA layouts leave holes, and a lone id like `"3"` means
+/// exactly one present CPU.
 fn parse_cpu_present(content: &str) -> Option<u32> {
-    let s = content.trim();
-    if s.contains('-') {
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
-        if parts.len() == 2 {
-            let lo: u32 = parts[0].parse().ok()?;
-            let hi: u32 = parts[1].parse().ok()?;
-            return Some(hi - lo + 1);
-        }
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    // Single CPU: "0"
-    s.parse::<u32>().ok().map(|v| v + 1)
+    let mut total: u32 = 0;
+    for segment in trimmed.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        let count = if let Some((lo, hi)) = segment.split_once('-') {
+            let lo: u32 = lo.trim().parse().ok()?;
+            let hi: u32 = hi.trim().parse().ok()?;
+            if hi < lo {
+                return None; // the kernel never emits a reversed range
+            }
+            hi - lo + 1
+        } else {
+            segment.parse::<u32>().ok()?; // must be a valid single id
+            1 // a lone id denotes exactly one CPU
+        };
+        total = total.checked_add(count)?;
+    }
+    Some(total)
 }
 
 /// Parse `image_id="..."` from `/etc/image-id` content.
@@ -868,5 +888,48 @@ mod tests {
         assert_eq!(parse_cpu_present("0-7"), Some(8));
         assert_eq!(parse_cpu_present("0"), Some(1));
         assert_eq!(parse_cpu_present("2-5"), Some(4));
+        assert_eq!(parse_cpu_present("0-3\n"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_multi_range() {
+        // CPU hotplug / NUMA layouts leave holes; each segment counts.
+        assert_eq!(parse_cpu_present("0-1,16-17"), Some(4));
+        assert_eq!(parse_cpu_present("0-3,8-11"), Some(8));
+        assert_eq!(parse_cpu_present("2-5,7"), Some(5));
+        assert_eq!(parse_cpu_present("0-1,16-17\n"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_lone_nonzero_id() {
+        // A lone id means exactly one present CPU, not id+1.
+        assert_eq!(parse_cpu_present("3"), Some(1));
+        assert_eq!(parse_cpu_present("1"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_rejects_garbage() {
+        assert_eq!(parse_cpu_present(""), None);
+        assert_eq!(parse_cpu_present("   "), None);
+        assert_eq!(parse_cpu_present("abc"), None);
+        assert_eq!(parse_cpu_present("0-"), None);
+        assert_eq!(parse_cpu_present("-3"), None);
+        // Reversed ranges never come from the kernel; the old parser
+        // underflowed here in release builds.
+        assert_eq!(parse_cpu_present("3-1"), None);
+        assert_eq!(parse_cpu_present("0,,1"), None);
+        assert_eq!(parse_cpu_present("0-1,"), None);
+        assert_eq!(parse_cpu_present("0-3,abc"), None);
+    }
+
+    #[test]
+    fn test_probe_vcpu_count_reads_multi_range_present() {
+        let dir = TempDir::new().unwrap();
+        let p = prober(&dir);
+        // On main this fails to parse and silently falls back to `nproc`,
+        // which reports the process affinity mask (the container's quota),
+        // not the present-CPU count.
+        fs::write(&p.cpu_present_path, "0-1,16-17\n").unwrap();
+        assert_eq!(p.probe_vcpu_count(), Some(4));
     }
 }
