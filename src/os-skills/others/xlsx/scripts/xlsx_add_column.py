@@ -76,8 +76,75 @@ def col_letter(n: int) -> str:
     return r
 
 
+def parse_col(value: str) -> str:
+    """Validate a column letter (1-3 ASCII letters, e.g. 'G', 'AB').
+
+    Rejects digits and cell refs ('7', 'G2', 'A_B') which otherwise produce
+    corrupt cell refs and silently wrong style lookups downstream.
+    """
+    if not re.fullmatch(r"[A-Za-z]{1,3}", value):
+        print(f"ERROR: --col must be a column letter like G or AB, got '{value}'",
+              file=sys.stderr)
+        sys.exit(2)
+    return value.upper()
+
+
+def parse_row_range(value: str) -> tuple[int, int]:
+    """Validate a 'start:end' row range with start >= 1 and start <= end."""
+    m = re.fullmatch(r"(\d+):(\d+)", value)
+    if not m:
+        print(f"ERROR: --formula-rows must look like 2:9, got '{value}'",
+              file=sys.stderr)
+        sys.exit(2)
+    start, end = int(m.group(1)), int(m.group(2))
+    if start < 1 or start > end:
+        print(f"ERROR: --formula-rows must be start<=end and >=1, got '{value}'",
+              file=sys.stderr)
+        sys.exit(2)
+    return start, end
+
+
+def parse_or_die(path: str) -> ET.ElementTree:
+    """Parse XML, failing with the file path instead of a raw traceback."""
+    try:
+        return ET.parse(path)
+    except ET.ParseError as e:
+        print(f"ERROR: {path} is not well-formed XML: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def upsert_cell(row_el, ref: str):
+    """Insert <c r=ref> in column order, REPLACING an existing cell at ref.
+
+    Re-running the script (an agent retry, or re-applying with a corrected
+    --formula) must not create duplicate <c> elements at the same ref —
+    duplicate cell refs are invalid OOXML and Excel's repair dialog drops
+    them unpredictably. Returns (cell, created).
+    """
+    target = col_number(re.match(r"[A-Z]+", ref).group(0))
+    for i, existing in enumerate(row_el):
+        ecol = re.match(r"[A-Z]+", existing.get("r", ""))
+        if not ecol:
+            continue
+        existing_num = col_number(ecol.group(0))
+        if existing_num == target:
+            row_el.remove(existing)  # replace in place, preserving position
+            cell = ET.Element(_tag("c"))
+            cell.set("r", ref)
+            row_el.insert(i, cell)
+            return cell, False
+        if existing_num > target:
+            cell = ET.Element(_tag("c"))
+            cell.set("r", ref)
+            row_el.insert(i, cell)
+            return cell, True
+    cell = ET.SubElement(row_el, _tag("c"))
+    cell.set("r", ref)
+    return cell, True
+
+
 def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
-    wb_tree = ET.parse(os.path.join(work_dir, "xl", "workbook.xml"))
+    wb_tree = parse_or_die(os.path.join(work_dir, "xl", "workbook.xml"))
     rid = None
     for sheet in wb_tree.getroot().iter(_tag("sheet")):
         if sheet_name is None or sheet.get("name") == sheet_name:
@@ -88,7 +155,8 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
         print(f"ERROR: Sheet not found: {sheet_name}")
         sys.exit(1)
 
-    rels_tree = ET.parse(os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels"))
+    rels_tree = parse_or_die(
+        os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels"))
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
             target = rel.get("Target")
@@ -103,7 +171,7 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
 
 def add_shared_string(work_dir: str, text: str) -> int:
     ss_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
-    tree = ET.parse(ss_path)
+    tree = parse_or_die(ss_path)
     root = tree.getroot()
 
     idx = 0
@@ -138,7 +206,7 @@ def get_cell_style(ws_tree: ET.ElementTree, col: str, row: int) -> int:
 def ensure_numfmt_style(work_dir: str, ref_style_idx: int, numfmt_code: str) -> int:
     """Clone a cellXfs entry with the given numfmt. Returns new style index."""
     styles_path = os.path.join(work_dir, "xl", "styles.xml")
-    tree = ET.parse(styles_path)
+    tree = parse_or_die(styles_path)
     root = tree.getroot()
 
     # Find or add numFmt
@@ -194,7 +262,7 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
                          border_style: str, new_col: str) -> None:
     """Apply a top border to ALL cells in the specified row (A through new_col)."""
     styles_path = os.path.join(work_dir, "xl", "styles.xml")
-    st_tree = ET.parse(styles_path)
+    st_tree = parse_or_die(styles_path)
     st_root = st_tree.getroot()
 
     # 1. Create a new border entry with the specified top style
@@ -265,12 +333,25 @@ def main() -> None:
                         help="Border style: thin, medium, thick (default: medium)")
     args = parser.parse_args()
 
-    col = args.col.upper()
+    col = parse_col(args.col)
     prev_col = col_letter(col_number(col) - 1) if col_number(col) > 1 else "A"
 
+    if args.total_row is not None:
+        if args.total_row < 1:
+            print(f"ERROR: --total-row must be >= 1, got {args.total_row}",
+                  file=sys.stderr)
+            sys.exit(2)
+        if args.total_row == 1 and args.header:
+            print("ERROR: --total-row 1 collides with the header cell at "
+                  f"{col}1; choose a different total row", file=sys.stderr)
+            sys.exit(2)
+
+    formula_range = parse_row_range(args.formula_rows) if args.formula_rows else None
+
     ws_path = find_ws_path(args.work_dir, args.sheet)
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_or_die(ws_path)
     changes = 0
+    updated = 0
 
     print(f"Adding column {col} to {os.path.basename(ws_path)}")
 
@@ -278,9 +359,8 @@ def main() -> None:
     header_style = get_cell_style(ws_tree, prev_col, 1) if args.header else 0
 
     data_style = None
-    if args.formula_rows:
-        start_row = int(args.formula_rows.split(":")[0])
-        ref = get_cell_style(ws_tree, prev_col, start_row)
+    if formula_range:
+        ref = get_cell_style(ws_tree, prev_col, formula_range[0])
         data_style = (ensure_numfmt_style(args.work_dir, ref, args.numfmt)
                       if args.numfmt else ref)
 
@@ -294,7 +374,7 @@ def main() -> None:
     header_idx = add_shared_string(args.work_dir, args.header) if args.header else None
 
     # Re-parse worksheet (sharedStrings write may have changed state)
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_or_die(ws_path)
     root = ws_tree.getroot()
     sheet_data = root.find(_tag("sheetData"))
 
@@ -306,18 +386,19 @@ def main() -> None:
 
     # Add header cell
     if args.header and 1 in row_map:
-        cell = ET.SubElement(row_map[1], _tag("c"))
-        cell.set("r", f"{col}1")
+        cell, created = upsert_cell(row_map[1], f"{col}1")
         cell.set("s", str(header_style))
         cell.set("t", "s")
         v = ET.SubElement(cell, _tag("v"))
         v.text = str(header_idx)
         changes += 1
-        print(f"  {col}1 = \"{args.header}\" (header, style={header_style})")
+        updated += 0 if created else 1
+        status = "updated existing" if not created else "header"
+        print(f"  {col}1 = \"{args.header}\" ({status}, style={header_style})")
 
     # Add formula cells
-    if args.formula and args.formula_rows:
-        start, end = map(int, args.formula_rows.split(":"))
+    if args.formula and formula_range:
+        start, end = formula_range
         for row_num in range(start, end + 1):
             if row_num not in row_map:
                 row_el = ET.SubElement(sheet_data, _tag("row"))
@@ -326,13 +407,13 @@ def main() -> None:
 
             formula_text = args.formula.replace("{row}", str(row_num))
             formula_text = formula_text.lstrip("=")
-            cell = ET.SubElement(row_map[row_num], _tag("c"))
-            cell.set("r", f"{col}{row_num}")
+            cell, created = upsert_cell(row_map[row_num], f"{col}{row_num}")
             if data_style is not None:
                 cell.set("s", str(data_style))
             f_el = ET.SubElement(cell, _tag("f"))
             f_el.text = formula_text
             changes += 1
+            updated += 0 if created else 1
 
         print(f"  {col}{start}:{col}{end} = formulas (style={data_style})")
 
@@ -344,14 +425,15 @@ def main() -> None:
             row_map[args.total_row] = row_el
 
         total_f = args.total_formula.lstrip("=")
-        cell = ET.SubElement(row_map[args.total_row], _tag("c"))
-        cell.set("r", f"{col}{args.total_row}")
+        cell, created = upsert_cell(row_map[args.total_row], f"{col}{args.total_row}")
         if total_style is not None:
             cell.set("s", str(total_style))
         f_el = ET.SubElement(cell, _tag("f"))
         f_el.text = total_f
         changes += 1
-        print(f"  {col}{args.total_row} = ={total_f} (style={total_style})")
+        updated += 0 if created else 1
+        status = "updated existing" if not created else "total"
+        print(f"  {col}{args.total_row} = ={total_f} ({status}, style={total_style})")
 
     # Update dimension
     for dim in root.iter(_tag("dimension")):
@@ -391,7 +473,7 @@ def main() -> None:
                              col)
 
     _write_tree(ws_tree, ws_path)
-    print(f"\nDone. {changes} cells added.")
+    print(f"\nDone. {changes} cells written ({updated} updated existing).")
     print(f"\nNext: python3 xlsx_pack.py {args.work_dir} output.xlsx")
 
 
