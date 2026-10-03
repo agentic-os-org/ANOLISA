@@ -29,9 +29,9 @@ fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected run, validate, serve, status, request or stop")?;
+        .ok_or("expected run, install, validate, serve, status, request or stop")?;
     if command == "--help" {
-        println!("aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- [AGENT_ARGS]\naw validate --config FILE\naw serve --config FILE --state-dir ABSOLUTE_DIR\naw status|stop (--config FILE | --socket ABSOLUTE_PATH)\naw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json");
+        println!("aw run --config FILE --agent TARGET [--native-settings JSON_FILE | --native-profile ABSOLUTE_DIR] -- [AGENT_ARGS]\naw install --config FILE --agent TARGET --native-profile ABSOLUTE_DIR\naw validate --config FILE\naw serve --config FILE --state-dir ABSOLUTE_DIR\naw status|stop (--config FILE | --socket ABSOLUTE_PATH)\naw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json");
         return Ok(cli::Exit::Code(0));
     }
     let args = cli::Arguments::parse(args)?;

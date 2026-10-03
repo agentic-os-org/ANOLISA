@@ -1,6 +1,7 @@
 //! Native launch commands share the daemon client; Agent arguments remain literal.
 
 mod adapter;
+mod adapters;
 mod hook;
 mod qoder;
 mod readiness;

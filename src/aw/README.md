@@ -3,10 +3,10 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI with configured tool Hooks, runs external Providers
-and keeps execution metadata independently of the Agent session. Users retain
-Qoder's terminal interface and native Hook scheduling. QwenPaw, OpenClaw and
-Hermes adapters remain planned; the current interfaces are experimental.
+Linux, it starts Qoder CLI and Hermes through verified native entrypoints,
+runs external Providers and keeps execution metadata independently of an Agent
+session. Native scheduling and permissions remain with the framework; the
+current interfaces are experimental.
 
 ## Available today
 
@@ -14,10 +14,11 @@ Hermes adapters remain planned; the current interfaces are experimental.
 | --- | --- |
 | Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
 | Start Qoder CLI 1.1.64 and connect before/after tool Hooks | ✅ Linux source build |
-| Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
-| Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |
+| Run structured Providers before tools (`observe`/`block`) and after tools (`observe`) | ✅ Outcome coverage depends on the framework |
+| Execute native Hook commands with unchanged callback input | ✅ Native output and exit semantics; portable rewrites and approval excluded |
 | Start or reuse a standalone service and query execution metadata | ✅ |
-| Start QwenPaw, OpenClaw or Hermes through AW | ❌ |
+| Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
+| Start the remaining first-release frameworks | ❌ Separate adapter delivery |
 | Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
 
 ## Run Qoder
@@ -48,6 +49,19 @@ The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains native
 settings coexistence, serial/parallel Hooks, Provider configuration, explicit
 service startup and record queries. Native Hooks retain their framework's
 limits; service status alone does not prove that Qoder adopted a policy.
+
+## Run Hermes
+
+Use Hermes official revision `952c941e` with its existing native model configuration.
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
+required profile options and supported tool lifecycle. From `src/aw`:
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
 
 ## Integration and development
 

@@ -161,7 +161,7 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-exec": {"libc", "thiserror"},
         "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
-        "aw-service": {"aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"},
+        "aw-service": {"aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"},
     }
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]

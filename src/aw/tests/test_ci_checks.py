@@ -167,7 +167,7 @@ class GateTests(unittest.TestCase):
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
-                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
         ):
             (directory / "src").mkdir(parents=True)
