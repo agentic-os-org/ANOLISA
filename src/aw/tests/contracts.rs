@@ -93,6 +93,31 @@ fn admits_current_binding_and_rejects_stale_or_unsupported_descriptors() {
 }
 
 #[test]
+fn scope_session_claims_require_a_runtime_binding_session() {
+    let f = fixtures();
+    let check = |f: &Value| {
+        REGISTRY.validate_invocation(
+            &f["capability-invocation-v1"],
+            &f["provider-descriptor-v1"],
+            &f["boundary-descriptor-v1"],
+            &f["runtime-binding-v1"],
+            1000,
+        )
+    };
+    let mut sessionless = f.clone();
+    sessionless["runtime-binding-v1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    assert!(check(&sessionless).is_err());
+    sessionless["capability-invocation-v1"]["scope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    check(&sessionless).unwrap();
+}
+
+#[test]
 fn result_correlation_and_budgets_reject_false_success() {
     let f = fixtures();
     result(&f).unwrap();

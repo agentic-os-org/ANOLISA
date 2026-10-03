@@ -146,6 +146,11 @@ impl Registry {
         )?;
         if runtime.get("session_id").is_some() {
             same(scope, runtime, &["session_id"])?;
+        } else {
+            require(
+                scope.get("session_id").is_none(),
+                "scope session is not confirmed by the runtime binding",
+            )?;
         }
         require(
             scope["runtime_generation"] == runtime["generation"] && runtime["state"] == "running",
