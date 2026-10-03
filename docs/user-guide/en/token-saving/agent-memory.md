@@ -696,5 +696,5 @@ For deeper investigation: start with `RUST_LOG=agent_memory=debug` and inspect b
 ---
 
 **License**: Apache-2.0
-**Version**: 0.2.1
+**Version**: 0.2.8
 **Document version**: 2.0 (aligned with ANOLISA-design user-guide structure)
