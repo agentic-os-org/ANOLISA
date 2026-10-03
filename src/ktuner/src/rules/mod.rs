@@ -866,10 +866,21 @@ fn eval_tcp_rmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 131072, 16777216])
+        } else {
+            "4096 131072 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_rmem".to_string(),
             current_value: content,
-            recommended_value: "4096 131072 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 接收缓冲区上限，充分利用带宽-延迟积".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -894,10 +905,21 @@ fn eval_tcp_wmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 65536, 16777216])
+        } else {
+            "4096 65536 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_wmem".to_string(),
             current_value: content,
-            recommended_value: "4096 65536 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 发送缓冲区上限，避免大流量传输时发送端瓶颈".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -943,6 +965,14 @@ fn eval_ip_local_port_range(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
+    // Deliberately NOT per-field raise-only (unlike kernel.sem / tcp_rmem /
+    // tcp_wmem): the operative quantity here is the port COUNT, and the fix
+    // for a narrow range is widening — lowering the low endpoint and raising
+    // the high one. The recommendation is a strict superset of the current
+    // range, so no port the administrator allowed is lost; a range narrowed
+    // for hardening (e.g. "50000 60000") trips this rule only because its
+    // count is below what high-concurrency outbound workloads need, and the
+    // operator can decline the recommendation.
     if parts.len() == 2 && parts[1] - parts[0] < 30000 {
         recs.push(Recommendation {
             param: "net.ipv4.ip_local_port_range".to_string(),
@@ -4115,7 +4145,11 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if vals.len() >= 4 && (vals[0] < 1024 || vals[1] < 65536 || vals[3] < 4096) {
+    // Raise-only per field: the old fixed quadruple "1024 65536 256 4096"
+    // lowered semmns/semopm/semmni an administrator deliberately raised
+    // whenever any single checked field was low, and semopm was rewritten
+    // without ever being checked.
+    if let Some(recommended) = sem_recommendation(&vals) {
         let current_str = vals
             .iter()
             .map(|v| v.to_string())
@@ -4124,7 +4158,7 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         recs.push(Recommendation {
             param: "kernel.sem".to_string(),
             current_value: current_str,
-            recommended_value: "1024 65536 256 4096".to_string(),
+            recommended_value: recommended,
             reason: "数据库场景下信号量参数过低，可能导致连接数受限或 semget() 失败".to_string(),
             confidence: Confidence::Medium,
             category: Category::Performance,
@@ -5509,6 +5543,31 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Formats `vals` with each field raised to at least its floor, preserving
+/// any value an administrator deliberately set above the floor. Rewriting a
+/// multi-field sysctl with fixed numbers would lower those fields instead
+/// (e.g. kernel.sem "512 1024000000 500 32000" → "1024 65536 256 4096"
+/// collapses semmns by four orders of magnitude).
+fn per_field_max(vals: &[u64], floors: &[u64]) -> String {
+    vals.iter()
+        .zip(floors.iter().chain(std::iter::repeat(&0)))
+        .map(|(v, floor)| v.max(floor).to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Per-field floors for `kernel.sem` (semmsl, semmns, semopm, semmni) on a
+/// database host. The recommendation raises each field to at least its floor
+/// and otherwise keeps the current value. Returns `None` when every field
+/// already meets its floor.
+fn sem_recommendation(vals: &[u64]) -> Option<String> {
+    const FLOORS: [u64; 4] = [1024, 65536, 256, 4096];
+    if vals.len() < 4 || vals.iter().zip(FLOORS).all(|(v, floor)| *v >= floor) {
+        return None;
+    }
+    Some(per_field_max(vals, &FLOORS))
+}
+
 fn read_sysctl_string(path: &str) -> String {
     std::fs::read_to_string(path)
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -5519,6 +5578,50 @@ fn read_sysctl_string(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::detect::*;
+
+    #[test]
+    fn sem_recommendation_only_raises_fields() {
+        // Everything at or above the floors: no recommendation.
+        assert_eq!(sem_recommendation(&[32000, 1024000000, 500, 32000]), None);
+        // One low field: raise it, keep every other field (the old fixed
+        // quadruple collapsed semmns from 1024000000 to 65536 here).
+        assert_eq!(
+            sem_recommendation(&[512, 1024000000, 500, 32000]).as_deref(),
+            Some("1024 1024000000 500 32000")
+        );
+        // semopm low alone is now detected (it was rewritten before without
+        // ever being part of the trigger).
+        assert_eq!(
+            sem_recommendation(&[32000, 1024000000, 100, 32000]).as_deref(),
+            Some("32000 1024000000 256 32000")
+        );
+        // All four low: the full floor tuple.
+        assert_eq!(
+            sem_recommendation(&[250, 32000, 32, 128]).as_deref(),
+            Some("1024 65536 256 4096")
+        );
+        // Malformed input: no recommendation rather than a partial write.
+        assert_eq!(sem_recommendation(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn tcp_buffer_recommendations_keep_raised_defaults() {
+        // A raised default (262144 / 131072) survives; only the max field
+        // is lifted to the 10-GbE floor.
+        assert_eq!(
+            per_field_max(&[4096, 262144, 8388608], &[4096, 131072, 16777216]),
+            "4096 262144 16777216"
+        );
+        assert_eq!(
+            per_field_max(&[4096, 131072, 8388608], &[4096, 65536, 16777216]),
+            "4096 131072 16777216"
+        );
+        // Untouched defaults below the floors are raised to them.
+        assert_eq!(
+            per_field_max(&[4096, 87380, 6291456], &[4096, 131072, 16777216]),
+            "4096 131072 16777216"
+        );
+    }
 
     fn rec(param: &str, conf: Confidence) -> Recommendation {
         Recommendation {
