@@ -7,13 +7,14 @@
 //! LLM-result merging and the Markdown export — so both handler sets stay
 //! thin and behave identically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentsight_opt::preference::LlmPreference;
 use serde::Deserialize;
 
+use super::detector::PreferenceEventRow;
 use super::signals::{Preference, PreferenceCategory, PreferenceSource, PreferenceStatus};
 use super::{DEFAULT_WINDOW_DAYS, EXPORT_MIN_CONFIDENCE, MAX_WINDOW_DAYS};
 
@@ -114,6 +115,34 @@ pub const DEFAULT_TURNS_LIMIT: usize = 200;
 /// Hard maximum for `limit` — a misbehaving caller must not be able to pull an
 /// unbounded blob of raw conversation text out of the API.
 pub const MAX_TURNS_LIMIT: usize = 1000;
+
+/// Select the turns-endpoint response list: the deduped, trimmed, non-empty
+/// user turns of the window, at most `requested_limit` of them (default
+/// [`DEFAULT_TURNS_LIMIT`], capped at [`MAX_TURNS_LIMIT`]).
+///
+/// `rows` must already arrive newest-first: iteration order is the response
+/// order, so `take(limit)` keeps the NEWEST slice of an over-limit window
+/// and a turn repeated across the window dedupes at its newest position,
+/// per the endpoint's documented "newest unique turns first" contract. The
+/// trajectory source (`list_recent_atif_jsons`) is natively newest-first;
+/// the genai store returns chronological rows, so the Linux handler
+/// reverses (`.rev()`) before calling — the one intentional difference
+/// between the twin handlers.
+pub fn select_unique_turns<'a>(
+    rows: impl Iterator<Item = &'a PreferenceEventRow>,
+    requested_limit: Option<usize>,
+) -> Vec<String> {
+    let limit = requested_limit
+        .unwrap_or(DEFAULT_TURNS_LIMIT)
+        .clamp(1, MAX_TURNS_LIMIT);
+    let mut seen: HashSet<String> = HashSet::new();
+    rows.filter_map(|r| r.user_text.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .take(limit)
+        .collect()
+}
 
 /// Clamp the requested window into `1..=MAX_WINDOW_DAYS`, defaulting to
 /// [`DEFAULT_WINDOW_DAYS`].
@@ -565,5 +594,99 @@ mod tests {
         );
         // The same window/llm pair under a different source is a miss.
         assert!(cache_get((29, true, PreferenceSourceParam::Genai)).is_none());
+    }
+
+    // ─── turns selection ────────────────────────────────────────────────────
+
+    fn turn_row(id: i64, text: &str) -> PreferenceEventRow {
+        PreferenceEventRow {
+            id,
+            session_id: Some(format!("s-{id}")),
+            conversation_id: Some(format!("c-{id}")),
+            timestamp_ns: Some(id * 60_000_000_000),
+            user_text: Some(text.to_string()),
+            tool_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn turns_selection_keeps_the_newest_slice_newest_first() {
+        // The audit scenario: five turns one minute apart, limit=3 — the
+        // newest three, newest first. The pre-fix Linux handler iterated its
+        // chronological rows forward and answered one/two/three instead.
+        let rows: Vec<PreferenceEventRow> =
+            (1..=5).map(|i| turn_row(i, &format!("turn {i}"))).collect();
+        let turns = select_unique_turns(rows.iter().rev(), Some(3));
+        assert_eq!(turns, vec!["turn 5", "turn 4", "turn 3"]);
+    }
+
+    #[test]
+    fn turns_selection_dedupes_at_the_newest_position_and_trims() {
+        let rows = [
+            turn_row(1, "always run tests"),
+            turn_row(2, "  always run tests  "),
+            turn_row(3, "prefer concise replies"),
+        ];
+        // Newest-first input: the duplicate collapses onto its newest slot.
+        let turns = select_unique_turns(rows.iter().rev(), None);
+        assert_eq!(turns, vec!["prefer concise replies", "always run tests"]);
+    }
+
+    #[test]
+    fn turns_selection_skips_rows_without_usable_text() {
+        let rows = [
+            turn_row(1, ""),
+            turn_row(2, "   "),
+            turn_row(3, "real turn"),
+        ];
+        let turns = select_unique_turns(rows.iter().rev(), Some(10));
+        assert_eq!(turns, vec!["real turn"]);
+    }
+
+    #[test]
+    fn turns_limit_defaults_to_200_and_caps_at_1000() {
+        // More unique turns than the hard cap, so both bounds are observable.
+        let chronological: Vec<PreferenceEventRow> = (1..=1005)
+            .map(|i| turn_row(i, &format!("turn {i}")))
+            .collect();
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), None).len(),
+            DEFAULT_TURNS_LIMIT
+        );
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), Some(5000)).len(),
+            MAX_TURNS_LIMIT
+        );
+    }
+
+    #[test]
+    fn turns_selection_is_identical_for_both_source_row_orders() {
+        // Twin consistency at the shared level: the genai store yields
+        // chronological rows (the Linux handler reverses them before
+        // calling) while the trajectory source yields newest-first rows
+        // (the macOS handler passes them through) — both must select the
+        // same newest slice in the same order. The macOS twin is cfg-gated
+        // off Linux, so its handler cannot run there; this pins the shared
+        // contract both handlers call.
+        let texts = [
+            "plan first",
+            "write tests",
+            "keep it short",
+            "use rust",
+            "be concise",
+        ];
+        let chronological: Vec<PreferenceEventRow> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| turn_row(i as i64 + 1, t))
+            .collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), Some(3)),
+            select_unique_turns(newest_first.iter(), Some(3)),
+            "genai (reversed chronological) and trajectory (native DESC) \
+             inputs must answer identically"
+        );
     }
 }
