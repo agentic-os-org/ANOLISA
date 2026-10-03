@@ -41,6 +41,7 @@ def get_page_content(url):
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         }
         response = requests.get(BASE_URL + url, headers=headers, timeout=30)
+        response.raise_for_status()
         response.encoding = 'utf-8'
         return response.text
     except Exception as e:
@@ -188,7 +189,18 @@ def crawl_all_docs(reference_dir):
         
         # 提取 Markdown
         data = extract_markdown(html, url)
-        
+
+        # 空内容（页面结构变化/错误页）不允许覆盖已有的参考文档
+        if not data['content'].strip():
+            print(f"  ❌ 未提取到页面内容，跳过保存")
+            results.append({
+                'filename': filename,
+                'url': url,
+                'status': 'failed',
+                'error': '页面内容为空'
+            })
+            continue
+
         # 保存文件
         output_path = reference_dir / f"{filename}.md"
         save_markdown_file(data, output_path)
