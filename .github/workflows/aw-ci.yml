@@ -34,13 +34,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          sparse-checkout: |
+            /src/aw/scripts/check.py
+            /src/aw/tests/test_ci_checks.py
+          sparse-checkout-cone-mode: false
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12.3'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.15.0'
       - name: Check the gate and select AW changes
         id: scope
         run: python3 src/aw/scripts/check.py scope
@@ -88,10 +86,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          sparse-checkout: /src/aw/scripts/check.py
+          sparse-checkout-cone-mode: false
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12.3'
       - name: Require the expected result
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}

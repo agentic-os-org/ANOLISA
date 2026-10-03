@@ -10,6 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+if sys.version_info < (3, 9):
+    raise SystemExit("AW CI control jobs require Python 3.9 or newer")
+
 AW = Path(__file__).resolve().parents[1]
 REPO = AW.parents[1]
 
@@ -209,7 +212,7 @@ def structure(metadata: dict, root: Path) -> None:
                     print(f"AW layout: {relative}: {lines} lines (ceiling {limit})", flush=True)
 
 
-def selftest() -> None:
+def selftest(scope_only: bool = False) -> None:
     """Run the gate's behavior tests, rejecting missing or empty discovery."""
     run(
         [
@@ -220,6 +223,8 @@ def selftest() -> None:
 import sys
 import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_ci_checks.py')
+if sys.argv[1] == "scope":
+    suite = unittest.defaultTestLoader.loadTestsFromName("test_ci_checks.ScopeTests")
 if suite.countTestCases() == 0:
     raise SystemExit('AW gate self-tests are missing or empty')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -227,6 +232,7 @@ if result.testsRun == len(result.skipped):
     raise SystemExit('AW gate self-tests were all skipped')
 sys.exit(not result.wasSuccessful())
 """,
+            "scope" if scope_only else "all",
         ],
         AW,
         timeout=120,
@@ -287,7 +293,7 @@ def main() -> int:
     try:
         if command == "scope":
             actual = candidate()
-            selftest()
+            selftest(scope_only=True)
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
             selected = scope(os.environ["GITHUB_EVENT_NAME"], event, actual)
             output(selected=str(selected).lower(), candidate_sha=actual)
