@@ -293,13 +293,32 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in input.chars() {
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             token.push(ch);
             escaped = false;
             continue;
         }
         if ch == '\\' && quote != Some('\'') {
+            if quote == Some('"') {
+                // Inside double quotes a backslash stays literal except
+                // before $ ` " \ and a newline.
+                match chars.peek().copied() {
+                    Some('$') | Some('`') | Some('"') | Some('\\') => {
+                        escaped = true;
+                        continue;
+                    }
+                    Some('\n') => {
+                        chars.next();
+                        continue;
+                    }
+                    _ => {
+                        token.push(ch);
+                        continue;
+                    }
+                }
+            }
             escaped = true;
             continue;
         }
@@ -416,5 +435,68 @@ mod tests {
         );
         assert!(parse("settings set example.ops region value extra").is_err());
         assert!(parse("settings list example.ops --scope project").is_err());
+    }
+
+    #[test]
+    fn double_quoted_backslash_stays_literal_except_before_specials() {
+        // POSIX sh: inside double quotes a backslash is literal unless it
+        // precedes $ ` " \ or a newline.
+        assert_eq!(
+            parse("settings set example.ops pattern \"a\\d+\"").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "pattern".to_string(),
+                value: "a\\d+".to_string(),
+                scope: "user".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new \"C:\\path\\name\"").unwrap(),
+            ExtensionCommand::New {
+                path: "C:\\path\\name".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        // The escapes double quotes do honor:
+        assert_eq!(
+            parse("settings set example.ops key \"a\\\"b\\$c\\`d\\\\e\"").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "key".to_string(),
+                value: "a\"b$c`d\\e".to_string(),
+                scope: "user".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn backslash_handling_keeps_single_quotes_and_bare_escapes() {
+        // Single quotes keep every character literal, backslash included.
+        assert_eq!(
+            parse("settings set example.ops pattern 'a\\d+'").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "pattern".to_string(),
+                value: "a\\d+".to_string(),
+                scope: "user".to_string(),
+            }
+        );
+        // Outside quotes a backslash still escapes any single character.
+        assert_eq!(
+            parse("install example\\ source").unwrap(),
+            ExtensionCommand::Install {
+                source: "example source".to_string(),
+                git_ref: None,
+            }
+        );
+        assert_eq!(
+            parse("settings set example.ops key \\\"quoted\\\"").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "key".to_string(),
+                value: "\"quoted\"".to_string(),
+                scope: "user".to_string(),
+            }
+        );
     }
 }
