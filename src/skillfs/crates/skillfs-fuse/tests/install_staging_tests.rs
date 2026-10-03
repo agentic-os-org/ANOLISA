@@ -3359,3 +3359,163 @@ fn hermes_post_publish_grace_allows_whitelisted() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes root listing: the ordinary-view filters
+//
+// The Hermes root listing is the physical workspace, so it must apply the
+// same filters the flat `/skills` listing applies: activation-hidden skills
+// (D1.1), installer staging roots and pending installs (I2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Normal-mode Hermes mount with a staging matcher, a pending-install
+/// controller, and an activation resolver that only learns `visible`.
+struct HermesOrdinaryViewFixture {
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+    #[allow(dead_code)]
+    notify_controller: Arc<NotifyController>,
+    #[allow(dead_code)]
+    pending_controller: Arc<PendingInstallController>,
+}
+
+impl HermesOrdinaryViewFixture {
+    fn new(visible: &[&str], seed: impl FnOnce(&Path)) -> Self {
+        let source = tempfile::tempdir().unwrap();
+        seed(source.path());
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let mountpoint = tempfile::tempdir().unwrap();
+        let notify_client = Arc::new(InMemoryNotifyClient::new());
+        let notify_ctrl = NotifyController::new(
+            notify_client,
+            source.path().to_path_buf(),
+            Duration::from_millis(50),
+            5000,
+        );
+
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+        for name in visible {
+            resolver.set(
+                (*name).to_string(),
+                ActiveTarget::Current {
+                    source_dir: source.path().join(name),
+                },
+            );
+        }
+
+        let staging_matcher = Arc::new(StagingMatcher::new(StagingConfig {
+            patterns: vec![StagingPattern::PrefixStar(
+                ".openclaw-install-stage-".to_string(),
+            )],
+            ..StagingConfig::default()
+        }));
+        let staging_ctrl =
+            InstallerStagingController::new(staging_matcher.clone(), notify_ctrl.clone());
+        let pending_ctrl = PendingInstallController::new(
+            notify_ctrl.clone(),
+            Duration::from_millis(5000),
+            source.path().to_path_buf(),
+        );
+
+        let config = MountConfig {
+            notify_controller: Some(notify_ctrl.clone()),
+            active_resolver: Some(resolver),
+            pending_install_controller: Some(pending_ctrl.clone()),
+            staging_matcher: Some(staging_matcher),
+            staging_controller: Some(staging_ctrl),
+            skill_layout: Some(SkillLayout::Hermes),
+            ..MountConfig::default()
+        };
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            false,
+            config,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+            notify_controller: notify_ctrl,
+            pending_controller: pending_ctrl,
+        }
+    }
+
+    fn mp(&self) -> &Path {
+        self.mountpoint.path()
+    }
+
+    fn skills_root(&self) -> PathBuf {
+        self.mp().join("skills")
+    }
+}
+
+impl Drop for HermesOrdinaryViewFixture {
+    fn drop(&mut self) {
+        self.pending_controller.shutdown();
+        self.notify_controller.shutdown();
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+#[test]
+fn hermes_root_listing_applies_the_ordinary_view_filters() {
+    skip_if_no_fuse!();
+
+    let fixture = HermesOrdinaryViewFixture::new(&["visible-skill", "nested-skill"], |src| {
+        create_skill(src, "visible-skill");
+        create_skill(&src.join("apple"), "nested-skill");
+        // A skill the activation resolver never learns about, and a staging
+        // root: both exist physically at the top level.
+        create_skill(src, "hidden-skill");
+        std::fs::create_dir_all(src.join(".openclaw-install-stage-x")).unwrap();
+    });
+
+    let entries = common::list_dir_names(&fixture.skills_root());
+    assert!(
+        entries.contains(&"visible-skill".to_string()),
+        "a resolved skill must stay visible: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"apple".to_string()),
+        "a category directory must stay visible: {entries:?}"
+    );
+    assert!(
+        !entries.contains(&"hidden-skill".to_string()),
+        "an activation-hidden skill must not be listed: {entries:?}"
+    );
+    assert!(
+        !entries.contains(&".openclaw-install-stage-x".to_string()),
+        "a staging root must not be listed: {entries:?}"
+    );
+
+    // The filter is a view concern: the hidden skill and the staging root
+    // are still on disk.
+    assert!(fixture.source.path().join("hidden-skill").is_dir());
+    assert!(
+        fixture
+            .source
+            .path()
+            .join(".openclaw-install-stage-x")
+            .is_dir()
+    );
+}

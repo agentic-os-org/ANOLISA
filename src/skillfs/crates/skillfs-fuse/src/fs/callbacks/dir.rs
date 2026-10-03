@@ -68,9 +68,10 @@ impl SkillFs {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().to_string();
-                        // S3: reserved lifecycle roots are never ordinary hub
-                        // content, whatever their physical shape.
-                        if is_reserved_lifecycle_name(&name) {
+                        // The ordinary view hides the same top-level entries
+                        // the flat `/skills` listing hides (S3 reserved roots,
+                        // I2 staging roots, D1.1 hidden skills).
+                        if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
                             continue;
                         }
                         let kind = dir_entry_file_type(&entry);
@@ -710,9 +711,11 @@ impl SkillFs {
                                 continue;
                             }
                             let name = entry.file_name().to_string_lossy().to_string();
-                            // S3: reserved lifecycle roots are never ordinary
-                            // hub content, whatever their physical shape.
-                            if is_reserved_lifecycle_name(&name) {
+                            // The ordinary view hides the same top-level
+                            // entries the flat `/skills` listing hides (S3
+                            // reserved roots, I2 staging roots, D1.1 hidden
+                            // skills).
+                            if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
                                 continue;
                             }
                             let kind = dir_entry_file_type(&entry);
