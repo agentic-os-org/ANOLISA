@@ -225,20 +225,34 @@ export function useSessionPicker({
     }
     setRenameIndex(null);
     setRenameValue('');
-    // Reload sessions to reflect the change
+    // Reload sessions to reflect the change, without discarding pages that
+    // were already loaded beyond the first one.
     try {
       const result: ListSessionsResult = await sessionService.listSessions({
-        size: SESSION_PAGE_SIZE,
+        size: Math.max(SESSION_PAGE_SIZE, sessionState.sessions.length),
       });
-      setSessionState({
-        sessions: result.items,
-        hasMore: result.hasMore,
-        nextCursor: result.nextCursor,
+      setSessionState((prev) => {
+        const refreshedById = new Map(
+          result.items.map((session) => [session.sessionId, session]),
+        );
+        return {
+          sessions: prev.sessions.map(
+            (session) => refreshedById.get(session.sessionId) ?? session,
+          ),
+          hasMore: result.hasMore,
+          nextCursor: result.nextCursor,
+        };
       });
     } catch {
       // Ignore reload errors
     }
-  }, [renameIndex, renameValue, sessionService, filteredSessions]);
+  }, [
+    renameIndex,
+    renameValue,
+    sessionService,
+    filteredSessions,
+    sessionState.sessions.length,
+  ]);
 
   const onRenameCancel = useCallback(() => {
     setRenameIndex(null);
