@@ -1,5 +1,30 @@
 use super::*;
 
+/// How long the `*_before_guard_shadow` fixtures wait for the relay to raise
+/// the gated Bash slash route after the DEBUG-trap setup line, before they
+/// submit `/mode`.
+///
+/// This bounds host scheduling, not product behaviour. With `slash_via_shell`
+/// the relay hands a slash line to Bash only while the prompt gate is up
+/// (`shell_host/raw_runner.rs`: "prompt_ready raises the gated route; submits
+/// lower it"), and the gate rises once the parser thread has consumed the
+/// prompt that follows the previous submit. On a contended runner that lands
+/// later than the 200 ms this fixture waited, so the relay takes the Rust
+/// intercept instead: Bash never runs the readline assignment, the fixture's
+/// DEBUG trap never fires, and the assertion below used to report "the guard
+/// filter dropped" output that the filter had never seen.
+///
+/// Measured under 6-way CPU contention on 2 cores: at 200 ms both
+/// `*_before_guard_shadow` tests failed 8/8 (trap installed -- `trap -p DEBUG`
+/// dumped it -- but never fired), at this budget they passed 5/5, and moving
+/// the *pre*-trap wait to 3 s instead changed nothing, which is what pins the
+/// race to the submit that lowers the gate. CI hit the same assertion twice
+/// from branches that do not touch this file:
+/// `preserves_partial_debug_output_before_guard_shadow` (2026-09-15) and
+/// `preserves_carriage_return_debug_output_before_guard_shadow` (2026-09-18,
+/// on #3349, whose diff is `tests/protocol/ecs_probe.rs` only).
+const SLASH_ROUTE_GATE_BUDGET: Duration = Duration::from_secs(3);
+
 fn xtrace_record_contains_secret(rendered: &str, trace_prefix: &str, secret: &str) -> bool {
     rendered
         .split(['\r', '\n'])
@@ -680,7 +705,7 @@ fn assert_bash_guard_preserves_partial_debug_output(
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line(&trap_setup),
-            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::wait(SLASH_ROUTE_GATE_BUDGET),
             RawRelayAction::line("/mode"),
             RawRelayAction::wait(Duration::from_millis(600)),
             RawRelayAction::line("trap - DEBUG"),
@@ -699,7 +724,9 @@ fn assert_bash_guard_preserves_partial_debug_output(
     }));
     assert!(
         rendered_text.contains(expected_output),
-        "the guard filter dropped unrelated partial output: {rendered_text}"
+        "the shell slash route lost unrelated partial output: either the gated route \
+         was still down after SLASH_ROUTE_GATE_BUDGET and the DEBUG trap never fired, \
+         or the guard filter dropped what that trap wrote: {rendered_text}"
     );
     assert!(
         !rendered_text.contains("__cosh_slash_guard__"),
