@@ -1,7 +1,9 @@
 //! Native launch commands share the daemon client; Agent arguments remain literal.
 
+mod adapter;
 mod hook;
 mod qoder;
+mod readiness;
 mod run;
 
 use std::{collections::BTreeMap, io::Read, path::Path};
@@ -96,6 +98,7 @@ pub(crate) fn read_file(path: impl AsRef<Path>, limit: usize) -> Result<Vec<u8>>
 pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
     match command {
         "run" => run::launch(args),
+        "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
         _ => Err("unknown launch command".into()),
     }

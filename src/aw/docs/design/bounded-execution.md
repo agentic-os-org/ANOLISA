@@ -70,6 +70,11 @@ forwards signals supplied by the caller. An interactive session has no command
 time limit; cancellation starts bounded shutdown. This API does not replace the
 separate daemon lifecycle owner.
 
+`run_foreground_observed` adds a one-shot callback after successful spawn and
+terminal handoff. It reports the owned leader PID (also its process-group ID)
+so callers can bind startup evidence to the actual Agent. The callback must
+return promptly and must not reap the child; executor cleanup ownership is unchanged.
+
 ## Native semantics and future enforcement
 
 The current delivery serves `tool.before` and `tool.after`. Scheduling remains

@@ -64,6 +64,9 @@ pub struct CallRecord {
 /// Execution failure, never a successful Provider policy block.
 #[derive(Debug, thiserror::Error)]
 pub enum Failure {
+    /// Invalid or oversized native callback environment; no command was started.
+    #[error("invalid native callback environment: {0}")]
+    NativeEnvironment(&'static str),
     /// Includes deadline, cancellation, byte limits and unverifiable cleanup.
     #[error(transparent)]
     Transport(#[from] aw_exec::Error),

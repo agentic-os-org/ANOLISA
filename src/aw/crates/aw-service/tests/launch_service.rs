@@ -239,20 +239,39 @@ fn stale_socket_is_preserved_and_never_triggers_a_replacement_daemon() {
 fn startup_timeout_terminates_and_reaps_only_its_owned_child() {
     let fixture = Fixture::new();
     let executable = fixture.0.join("unready-provider");
-    fs::write(&executable, b"#!/usr/bin/python3\nimport os, pathlib, sys, time\npathlib.Path(sys.argv[-1], 'fixture.pid').write_text(str(os.getpid()))\ntime.sleep(5)\n").unwrap();
+    fs::write(
+        &executable,
+        b"#!/bin/sh\nprintf '%s\\n' \"$$\" > fixture.pid\nexec /bin/sleep 30\n",
+    )
+    .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let started = Instant::now();
-    assert!(ensure_service(
-        &fixture.config("on_demand"),
-        &executable,
-        started + Duration::from_millis(400)
-    )
-    .is_err());
-    assert!(started.elapsed() < Duration::from_secs(3));
-    let pid: u32 = fs::read_to_string(fixture.0.join("state/fixture.pid"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let (observed, result) = thread::scope(|scope| {
+        let worker = scope
+            .spawn(|| ensure_service(&fixture.config("on_demand"), &executable, started + TIMEOUT));
+        // Observe the child before its startup deadline: timing out before exec
+        // cannot demonstrate that the launcher terminated and reaped a process.
+        let observation_deadline = started + TIMEOUT / 2;
+        let observed = loop {
+            if let Ok(text) = fs::read_to_string(fixture.0.join("state/fixture.pid")) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    break Some((pid, Path::new(&format!("/proc/{pid}")).exists()));
+                }
+            }
+            if worker.is_finished() || Instant::now() >= observation_deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        (observed, worker.join().unwrap())
+    });
+    assert!(
+        matches!(result, Err(aw_service::Error::Rejected(ref code)) if code == "service_startup_deadline")
+    );
+    assert!(started.elapsed() < TIMEOUT + Duration::from_secs(5));
+    let (pid, was_running) =
+        observed.expect("startup fixture did not publish its PID before timeout");
+    assert!(was_running, "startup fixture exited before the deadline");
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
     assert!(!fixture.0.join("state/aw.sock").exists());
 }

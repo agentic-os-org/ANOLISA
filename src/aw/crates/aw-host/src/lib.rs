@@ -32,6 +32,12 @@ use transport::{check, Exchange, Transport};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Maximum combined key/value bytes in an explicit native callback environment.
+///
+/// Includes one `=` and trailing NUL per entry. The snapshot also permits at
+/// most 4096 entries and rejects empty keys, `=` in keys, and embedded NULs.
+pub const MAX_NATIVE_ENVIRONMENT_BYTES: usize = MAX_MESSAGE_BYTES;
+
 /// Complete local execution context retained unchanged for all Provider methods.
 ///
 /// This is supplied by the embedding application, not Provider output. The Host

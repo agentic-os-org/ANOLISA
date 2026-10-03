@@ -145,6 +145,10 @@ pub enum Operation {
         instance_id: String,
         /// Admitted step; may be attempted once in this event.
         step_id: String,
+        /// Complete native callback environment; only native-hook steps use it.
+        /// Missing values preserve the bound context. Not event data or audit payload.
+        #[serde(default, with = "environment::optional")]
+        native_environment: Option<BTreeMap<OsString, OsString>>,
     },
     /// Cancel unfinished work, join children and release event resources.
     CloseEvent {

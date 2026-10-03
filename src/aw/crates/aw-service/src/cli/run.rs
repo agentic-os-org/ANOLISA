@@ -1,6 +1,9 @@
 //! One foreground Agent instance owns its generated files, not the shared service.
 
-use super::{qoder, read_file, Arguments, Exit, Result};
+use super::{
+    adapter::{self, HookBinding, LaunchContext, LaunchInput},
+    read_file, readiness, Arguments, Exit, Result,
+};
 use aw_exec::CommandSpec;
 use aw_service::{launch_service, Binding, Operation};
 use std::{
@@ -25,7 +28,7 @@ extern "C" fn signal(value: libc::c_int) {
     CANCELLED.store(true, std::sync::atomic::Ordering::Release);
 }
 
-struct Artifacts(PathBuf);
+pub(super) struct Artifacts(pub(super) PathBuf);
 
 impl Artifacts {
     fn create(state: &Path) -> Result<Self> {
@@ -35,7 +38,7 @@ impl Artifacts {
         Ok(Self(path))
     }
 
-    fn write(&self, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    pub(super) fn write(&self, name: &str, bytes: &[u8]) -> Result<PathBuf> {
         let path = self.0.join(name);
         let mut file = OpenOptions::new()
             .write(true)
@@ -62,14 +65,24 @@ impl Drop for Artifacts {
 }
 
 pub(super) fn launch(args: &Arguments) -> Result<Exit> {
-    args.check(&["--config", "--agent", "--native-settings"], true)?;
+    args.check(
+        &[
+            "--config",
+            "--agent",
+            "--native-settings",
+            "--native-profile",
+            "--native-state-dir",
+        ],
+        true,
+    )?;
     let bytes = read_file(args.required("--config")?, 4 * 1024 * 1024)?;
     let config = aw_config::Validator::new()?.parse(&bytes)?;
     let target = args.required("--agent")?;
     let agent = &config.as_value()["spec"]["agents"][target];
-    if agent["adapter"] != "qoder" {
-        return Err("aw run currently supports configured Qoder targets only".into());
-    }
+    let name = agent["adapter"]
+        .as_str()
+        .ok_or("configured Agent target not found")?;
+    let adapter = adapter::select(name)?;
     let argv: Vec<String> = agent["argv"]
         .as_array()
         .ok_or("Agent argv missing")?
@@ -82,47 +95,30 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         .collect::<std::result::Result<_, _>>()?;
     let mut native = argv[1..].to_vec();
     native.extend(args.native.clone());
-    qoder::check_args(&native)?;
     let cwd = std::env::current_dir()?.canonicalize()?;
-    let settings = qoder::settings(args.flags.get("--native-settings"))?;
-    qoder::check_sources(&cwd, &settings)?;
     install_signals()?;
-    let environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    let mut command = CommandSpec {
+    let command = CommandSpec {
         program: argv[0].clone().into(),
-        args: vec!["--version".into()],
+        args: native.iter().map(OsString::from).collect(),
         cwd: cwd.clone(),
-        environment,
+        environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
     };
-    let version = aw_exec::run(
-        &command,
-        &[],
-        aw_exec::Limits {
-            input_bytes: 0,
-            stdout_bytes: 4096,
-            stderr_bytes: 4096,
-        },
-        Instant::now() + Duration::from_secs(5),
-        &AtomicBool::new(false),
-    )?;
-    if !version.status.success() || std::str::from_utf8(&version.stdout)?.trim() != qoder::VERSION {
-        return Err(format!("Qoder CLI {} is required by this adapter", qoder::VERSION).into());
-    }
+    let mut prepared = adapter.prepare(LaunchInput {
+        document: config.as_value().clone(),
+        target: target.into(),
+        flags: args.flags.clone(),
+        command,
+    })?;
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
-    let capabilities = qoder::capabilities(&native);
+    let capabilities = prepared.capabilities();
+    if capabilities.adapter != name {
+        return Err("prepared Adapter does not match configured target".into());
+    }
     let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
+    prepared.validate_steps(&steps)?;
     let executable = std::env::current_exe()?;
-    // Validate generated settings and budgets before creating a service or binding.
-    qoder::generate(
-        settings.clone(),
-        config.as_value(),
-        target,
-        &steps,
-        &executable,
-        Path::new("/binding.json"),
-    )?;
     let service = launch_service::ensure_service(
         &bytes,
         &executable,
@@ -133,92 +129,66 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     }
     let artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");
-    let (settings, events) = qoder::generate(
-        settings,
-        config.as_value(),
-        target,
-        &steps,
-        &executable,
-        &binding_path,
-    )?;
-    let settings_path = artifacts.write("settings.json", &serde_json::to_vec(&settings)?)?;
-    let mut environment = command.environment.clone();
-    // Qoder adds these to command hooks. Pin the same verified project directory
-    // without allowing arbitrary callback environment to replace Provider context.
-    for name in ["QODER_PROJECT_DIR", "CLAUDE_PROJECT_DIR"] {
-        environment.insert(
-            name.into(),
-            cwd.to_str().ok_or("non-UTF-8 working directory")?.into(),
+    let mut instance = None;
+    let executed: Result<Exit> = (|| {
+        let plan = prepared.configure(&LaunchContext {
+            files: &artifacts,
+            binding_path: &binding_path,
+            executable: &executable,
+            steps: &steps,
+        })?;
+        let bound = service.client.call_cancellable(
+            Operation::Bind {
+                target: target.into(),
+                capabilities,
+                cwd: cwd.to_str().ok_or("non-UTF-8 working directory")?.into(),
+                environment: plan.provider_environment,
+            },
+            Instant::now() + Duration::from_secs(30),
+            &CANCELLED,
         );
-    }
-    let source = if environment
-        .get(std::ffi::OsStr::new("QODER_WORK_INTEGRATION_MODE"))
-        .is_some_and(|v| v == "1")
-    {
-        "qoderwork"
-    } else {
-        "cli"
-    };
-    let version = environment
-        .get(std::ffi::OsStr::new("QODER_CLIENT_VERSION"))
-        .filter(|v| !v.is_empty())
-        .cloned()
-        .unwrap_or_else(|| qoder::VERSION.into());
-    environment.insert("QODER_HOOK_SOURCE".into(), source.into());
-    environment.insert("QODER_HOOK_VERSION".into(), version);
-    environment.insert("QODER_SITE".into(), "GLOBAL".into());
-    let bound = service.client.call_cancellable(
-        Operation::Bind {
-            target: target.into(),
-            capabilities,
-            cwd: cwd.to_str().ok_or("non-UTF-8 working directory")?.into(),
-            environment,
-        },
-        Instant::now() + Duration::from_secs(30),
-        &CANCELLED,
-    );
-    let binding: Binding = match bound {
-        Ok(value) => serde_json::from_value(value)?,
-        Err(error) => return interrupted().map(Ok).unwrap_or_else(|| Err(error.into())),
-    };
-    let instance = binding.instance_id.clone();
-    let executed: Result<std::process::ExitStatus> = (|| {
-        if let Some(Exit::Signal(signal)) = interrupted() {
-            return Ok(std::process::ExitStatus::from_raw(signal));
-        }
-        let hook_binding = qoder::HookBinding {
+        let binding: Binding = match bound {
+            Ok(value) => serde_json::from_value(value)?,
+            Err(error) => return interrupted().map(Ok).unwrap_or_else(|| Err(error.into())),
+        };
+        instance = Some(binding.instance_id.clone());
+        let hook_binding = HookBinding {
+            adapter: name.into(),
             binding,
             socket: service.paths.socket.clone(),
             cwd,
-            events,
+            events: plan.events,
         };
         artifacts.write("binding.json", &serde_json::to_vec(&hook_binding)?)?;
-        // The flag layer carries only owned generated hooks plus explicitly merged settings.
-        // Place it before native arguments so a native `--` cannot turn it into a prompt.
-        command.args = vec![OsString::from("--settings"), settings_path.into_os_string()];
-        command.args.extend(native.iter().map(OsString::from));
+        if let Some(exit) = interrupted() {
+            return Ok(exit);
+        }
         eprintln!(
-            "AW instance {instance}; service {} (pid {})",
+            "AW instance {}; service {} (pid {})",
+            hook_binding.binding.instance_id,
             service.paths.socket.display(),
             service.pid
         );
-        aw_exec::run_foreground(&command, &SIGNAL).map_err(Into::into)
+        let status = readiness::run(&plan.command, &SIGNAL, plan.readiness)?;
+        Ok(match status.code() {
+            Some(code) => Exit::Code(code),
+            None => Exit::Signal(status.signal().ok_or("Agent exit has no status")?),
+        })
     })();
-    let released = service.client.call(
-        Operation::ReleaseInstance {
-            instance_id: instance,
-        },
-        Instant::now() + Duration::from_secs(5),
-    );
+    let released = instance
+        .map(|instance_id| {
+            service.client.call(
+                Operation::ReleaseInstance { instance_id },
+                Instant::now() + Duration::from_secs(5),
+            )
+        })
+        .transpose();
+    let native_cleaned = prepared.finish();
     let cleaned = artifacts.cleanup();
-    // Report teardown failures even when the Agent itself already failed.
     released?;
+    native_cleaned?;
     cleaned?;
-    let status: std::process::ExitStatus = executed?;
-    Ok(match status.code() {
-        Some(code) => Exit::Code(code),
-        None => Exit::Signal(status.signal().ok_or("Agent exit has no status")?),
-    })
+    executed
 }
 
 fn interrupted() -> Option<Exit> {

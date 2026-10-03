@@ -49,6 +49,12 @@ settings coexistence, serial/parallel Hooks, Provider configuration, explicit
 service startup and record queries. Native Hooks retain their framework's
 limits; service status alone does not prove that Qoder adopted a policy.
 
+`aw --help` lists the launcher commands and adapter-specific options. Qoder
+accepts `--native-settings` with `aw run`; it rejects `--native-profile`,
+`--native-state-dir` and `aw install`. The `install` command dispatches persistent
+native Hook setup, with no supporting adapter in this build; it does not install
+AW or an Agent. See the user guide for the command and option support table.
+
 ## sec-core Provider
 
 The Linux `aw-provider-sec-core` binary maps configured tool inputs to the public

@@ -55,6 +55,10 @@ Linux 在 exec 前设置 `PR_SET_PDEATHSIG(SIGKILL)` 并检查父进程是否已
 交互会话没有命令执行时限，取消后开始有界关闭。这一 API 不替代独立的 daemon
 生命周期管理。
 
+`run_foreground_observed` 在成功 spawn 和终端交接后调用一次回调，报告受管主进程
+PID（也是进程组 ID），供调用方将启动证据绑定到实际 Agent。回调必须及时返回且
+不得回收子进程；执行器继续独占清理责任。
+
 ## 原生语义与后续防护
 
 当前交付服务于 `tool.before` 和 `tool.after`。调度仍由原生 Adapter 负责：并发调用

@@ -29,13 +29,23 @@ fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected run, validate, serve, status, request or stop")?;
+        .ok_or("expected run, install, validate, serve, status, request or stop")?;
     if command == "--help" {
-        println!("aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- [AGENT_ARGS]\naw validate --config FILE\naw serve --config FILE --state-dir ABSOLUTE_DIR\naw status|stop (--config FILE | --socket ABSOLUTE_PATH)\naw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json");
+        println!(
+            "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
+aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
+aw validate --config FILE\n\
+aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
+aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
+aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
+Current adapter: Qoder CLI 1.1.64; run accepts --native-settings.\n\
+No current adapter supports install, --native-profile or --native-state-dir.\n\
+install dispatches native Hook installation; it does not install AW or an Agent."
+        );
         return Ok(cli::Exit::Code(0));
     }
     let args = cli::Arguments::parse(args)?;
-    if matches!(command.as_str(), "run" | "hook") {
+    if matches!(command.as_str(), "run" | "hook" | "install") {
         return cli::dispatch(&command, &args);
     }
     let flags = &args.flags;

@@ -49,7 +49,7 @@ running service.
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
-| `invoke_step` | `event_id`, `instance_id`, `step_id` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
+| `invoke_step` | `event_id`, `instance_id`, `step_id`, optional `native_environment` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
 | `close_event` | `event_id`, `instance_id` | Cancel unfinished work, join children and acknowledge closure |
 | `audit` | Preparation or event `key` | Verified durable envelopes and a `terminal` flag |
 | `stop` | None | Acknowledge requested shutdown; process exit completes cleanup |
@@ -76,6 +76,15 @@ the Provider work and releases its slot after cleanup. A failed binding response
 write also releases the created instance. `aw run` observes termination while
 waiting for this reply; the reusable client exposes `call_cancellable` for callers
 with their own cancellation flag. Preparation side effects are not rolled back.
+
+For raw native commands, `invoke_step.native_environment` can carry the complete
+callback environment using the same byte-preserving encoding. It replaces, rather
+than merges with, the bound environment;
+an omitted value retains the bound environment. Structured Providers ignore it.
+The snapshot permits at most 4096 entries and 1 MiB, rejects invalid keys and NUL,
+and never enters event input, correlation digests or audit. An invalid snapshot
+consumes the step claim and produces a visible execution failure without extending
+the event deadline. It is an RPC field, not a new `aw.yaml` option.
 
 The current service admits structured `tool.before` with `observe`/`block`,
 `tool.after` with `observe`, and explicit native steps at those tool points. It

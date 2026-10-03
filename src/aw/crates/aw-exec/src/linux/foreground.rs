@@ -87,7 +87,11 @@ impl Drop for Terminal {
     }
 }
 
-pub(crate) fn run(spec: &CommandSpec, signal: &AtomicI32) -> Result<ExitStatus, Error> {
+pub(crate) fn run(
+    spec: &CommandSpec,
+    signal: &AtomicI32,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus, Error> {
     let mut terminal = Terminal::capture().map_err(|e| io_error("terminal transfer", e))?;
     let mut child = OwnedChild::spawn_foreground(spec)?;
     if let Err(error) = terminal.transfer(child.id()) {
@@ -97,6 +101,7 @@ pub(crate) fn run(spec: &CommandSpec, signal: &AtomicI32) -> Result<ExitStatus, 
         })?;
         return Err(io_error("terminal transfer", error));
     }
+    started(child.id());
     let waited = (|| {
         if terminal.0.is_some() {
             // A fast child may have read stdin before the foreground handoff.

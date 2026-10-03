@@ -31,6 +31,13 @@ pub(super) fn serialize<S: Serializer>(
 pub(super) fn deserialize<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Environment, D::Error> {
+    decode(deserializer, true)
+}
+
+fn decode<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    validate_entries: bool,
+) -> Result<Environment, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Encoded {
@@ -46,7 +53,9 @@ pub(super) fn deserialize<'de, D: Deserializer<'de>>(
     };
     let mut environment = BTreeMap::new();
     for (key, value) in entries {
-        if key.is_empty() || key.contains(&0) || key.contains(&b'=') || value.contains(&0) {
+        if validate_entries
+            && (key.is_empty() || key.contains(&0) || key.contains(&b'=') || value.contains(&0))
+        {
             return Err(serde::de::Error::custom("invalid environment entry"));
         }
         if environment
@@ -57,6 +66,35 @@ pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         }
     }
     Ok(environment)
+}
+
+pub(super) mod optional {
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        environment: &Option<Environment>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Encoded<'a>(#[serde(with = "super")] &'a Environment);
+        environment.as_ref().map(Encoded).serialize(serializer)
+    }
+
+    // The Host validates native entries after claiming the step so malformed
+    // snapshots follow on_error and produce the same audited failure as before.
+    fn native_snapshot<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Environment, D::Error> {
+        super::decode(deserializer, false)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Environment>, D::Error> {
+        #[derive(Deserialize)]
+        struct Encoded(#[serde(deserialize_with = "native_snapshot")] Environment);
+        Ok(Option::<Encoded>::deserialize(deserializer)?.map(|value| value.0))
+    }
 }
 
 #[cfg(test)]

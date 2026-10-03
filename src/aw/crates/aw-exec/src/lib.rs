@@ -164,13 +164,31 @@ pub fn run_foreground(
     command: &CommandSpec,
     signal: &std::sync::atomic::AtomicI32,
 ) -> Result<ExitStatus, Error> {
+    run_foreground_observed(command, signal, |_| {})
+}
+
+/// Run a foreground Agent and report its owned leader PID after terminal handoff.
+///
+/// `started` runs once on the caller's thread after successful spawn and terminal
+/// transfer, before waiting for exit. The PID is also the owned process-group ID.
+/// The callback must return promptly and must not reap the child; the executor
+/// retains exclusive cleanup ownership. Spawn/transfer failure does not call it.
+/// See [`run_foreground`] for signal, terminal and lifetime guarantees.
+///
+/// # Errors
+/// Returns the same execution and cleanup errors as [`run_foreground`].
+pub fn run_foreground_observed(
+    command: &CommandSpec,
+    signal: &std::sync::atomic::AtomicI32,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus, Error> {
     #[cfg(target_os = "linux")]
     {
-        linux::foreground::run(command, signal)
+        linux::foreground::run(command, signal, started)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (command, signal);
+        let _ = (command, signal, started);
         Err(Error::UnsupportedPlatform)
     }
 }

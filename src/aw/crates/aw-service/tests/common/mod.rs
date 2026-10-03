@@ -252,6 +252,7 @@ pub fn open(client: &Client, binding: &Binding, value: Value) -> EventHandle {
 
 pub fn invoke(handle: &EventHandle, step: &str) -> Operation {
     Operation::InvokeStep {
+        native_environment: None,
         event_id: handle.event_id.clone(),
         instance_id: handle.instance_id.clone(),
         step_id: step.into(),

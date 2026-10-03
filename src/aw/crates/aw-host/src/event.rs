@@ -10,7 +10,8 @@ use aw_provider::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     sync::{atomic::AtomicBool, Mutex},
     time::{Duration, Instant},
 };
@@ -170,6 +171,33 @@ impl Event<'_> {
     /// Returns a selection error for unknown/already claimed steps. All call failures,
     /// including pre-spawn cancellation/deadline, are recorded inside the invocation.
     pub fn invoke(&self, step_id: &str) -> Result<Invocation, Error> {
+        self.invoke_with_environment(step_id, None)
+    }
+
+    /// Execute a step with the complete environment observed by its native callback.
+    ///
+    /// Only native-hook steps use this snapshot, replacing their bound environment
+    /// without restoring variables removed by the Agent. Structured Providers keep
+    /// their prepared context. Environment bytes are not event data or call metadata.
+    /// This method shares the original event deadline and once-only step claims.
+    ///
+    /// # Errors
+    /// Returns the same selection errors as [`Self::invoke`]. Invalid native
+    /// environments produce a recorded [`Failure::NativeEnvironment`] and consume
+    /// the step claim, preserving its configured failure action.
+    pub fn invoke_with_native_environment(
+        &self,
+        step_id: &str,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Result<Invocation, Error> {
+        self.invoke_with_environment(step_id, Some(environment))
+    }
+
+    fn invoke_with_environment(
+        &self,
+        step_id: &str,
+        environment: Option<&BTreeMap<OsString, OsString>>,
+    ) -> Result<Invocation, Error> {
         let step = self
             .steps()
             .find(|step| step.step_id == step_id)
@@ -204,7 +232,7 @@ impl Event<'_> {
                     .native_input
                     .as_ref()
                     .ok_or(Error::Invalid("native callback input is missing"))?;
-                transport.native(record, input)
+                transport.native(record, input, environment)
             }
             StepExecution::Provider { operation, effects } => {
                 let request_id = record.request_id.clone();

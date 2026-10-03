@@ -135,11 +135,28 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | 命令 | 用途 |
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
-| `aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
+| `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 分派持久化原生 Hook 安装；当前没有支持它的 Adapter，Qoder 也不支持 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
+
+`--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
+当前版本只实现了 Qoder CLI 1.1.64 Adapter。`aw install` 校验配置后分派到对应
+Adapter；Qoder 不需要持久化安装，会返回不支持安装的错误。该命令不安装 AW 包
+或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
+
+| Adapter 专用参数 | 命令 | 当前支持情况 |
+| --- | --- | --- |
+| `--native-settings JSON_FILE` | `run` | Qoder：可选的附加 JSON 配置，与生成的 Hook 合并，原文件保持不变 |
+| `--native-profile PROFILE` | `run`、`install` | Adapter 的 profile 选择参数；当前没有 Adapter 接受。Qoder 的 `run` 拒绝此参数，也不支持 `install` |
+| `--native-state-dir DIRECTORY` | `run` | 原生 Agent 状态目录；当前没有 Adapter 接受。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
+
+公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。当前版本仍不
+支持 OpenClaw、Hermes 和 QwenPaw。受支持的 AW 参数放在 `--` 前，之后的参数
+按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
+和当前支持范围。
 
 源码构建时将 `aw` 替换为 `target/debug/aw`。`aw hook` 是启动器生成的内部回调，
 无需用户手写。服务记录包含执行元数据，不包含工具输入或结果、Provider 私有配置

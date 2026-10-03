@@ -45,6 +45,11 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 串并行、Provider 配置、显式服务启动和记录查询。原生 Hook 仍受框架自身能力约束，
 仅凭服务状态不能证明 Qoder 已采用策略。
 
+`aw --help` 列出启动命令及 Adapter 专用参数。Qoder 的 `aw run` 支持
+`--native-settings`，拒绝 `--native-profile`、`--native-state-dir` 和 `aw install`。
+`install` 用于分派持久化原生 Hook 安装，当前版本没有支持它的 Adapter；它不安装
+AW 或 Agent 软件。完整命令及参数支持表见使用指南。
+
 ## sec-core Provider
 
 Linux 二进制 `aw-provider-sec-core` 将配置中选定的工具输入传给公开的
