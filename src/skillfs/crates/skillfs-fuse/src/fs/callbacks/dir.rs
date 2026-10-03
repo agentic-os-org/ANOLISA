@@ -68,6 +68,11 @@ impl SkillFs {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().to_string();
+                        // S3: reserved lifecycle roots are never ordinary hub
+                        // content, whatever their physical shape.
+                        if is_reserved_lifecycle_name(&name) {
+                            continue;
+                        }
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -705,6 +710,11 @@ impl SkillFs {
                                 continue;
                             }
                             let name = entry.file_name().to_string_lossy().to_string();
+                            // S3: reserved lifecycle roots are never ordinary
+                            // hub content, whatever their physical shape.
+                            if is_reserved_lifecycle_name(&name) {
+                                continue;
+                            }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = self.skill_inode_path(&name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
