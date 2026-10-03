@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import chdir
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,13 +19,15 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
-class GateTests(unittest.TestCase):
+class GateFixture(unittest.TestCase):
     def setUp(self) -> None:
         (AW / "target").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
+
+class ScopeTests(GateFixture):
     def git(self, *args: str) -> str:
         return subprocess.check_output(
             ["git", *args], cwd=self.root, text=True, stderr=subprocess.PIPE, timeout=10
@@ -93,6 +94,33 @@ class GateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.sha(invalid)
 
+    def test_required_result_truth_table(self) -> None:
+        sha = "a" * 40
+        valid = {
+            "GITHUB_SHA": sha,
+            "SCOPE_RESULT": "success",
+            "CHECKS_RESULT": "success",
+            "SELECTED": "true",
+            "CANDIDATE_SHA": sha,
+            "TESTED_SHA": sha,
+        }
+        gate.required(valid)
+        gate.required({**valid, "SELECTED": "false", "CHECKS_RESULT": "skipped", "TESTED_SHA": ""})
+        failures = [{key: ""} for key in valid]
+        failures += [{"CHECKS_RESULT": value} for value in ("failure", "cancelled", "skipped")]
+        failures += [
+            {"SCOPE_RESULT": "failure"},
+            {"SELECTED": "false"},
+            {"TESTED_SHA": "b" * 40},
+            {"CANDIDATE_SHA": "b" * 40},
+            {"SELECTED": "unknown"},
+        ]
+        for changes in failures:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                gate.required({**valid, **changes})
+
+
+class GateTests(GateFixture):
     def test_inventory_rejects_empty_ignored_and_missing_targets(self) -> None:
         cargo = self.root / "cargo"
         cargo.write_text(
@@ -141,6 +169,8 @@ class GateTests(unittest.TestCase):
                 gate.inventory(malformed)
 
     def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
+        from contextlib import chdir
+
         core = self.root / "crates/aw-core"
         packages = []
         for name, directory, dependencies in (
@@ -264,25 +294,67 @@ class GateTests(unittest.TestCase):
         tests = self.root / "tests"
         tests.mkdir()
         module = tests / "test_ci_checks.py"
-        with patch.object(gate, "AW", self.root):
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text("# Empty test module\n", encoding="utf-8")
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text(
-                "import unittest\n@unittest.skip('fixture')\nclass Fixture(unittest.TestCase):\n"
-                "    def test_skipped(self): self.fail('must not run')\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text(
-                "import unittest\nclass Fixture(unittest.TestCase):\n"
-                "    def test_present(self): self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-            gate.selftest()
+        for scope_only in (False, True):
+            with self.subTest(scope_only=scope_only), patch.object(gate, "AW", self.root):
+                module.unlink(missing_ok=True)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                module.write_text("# Empty test module\n", encoding="utf-8")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                name = "ScopeTests" if scope_only else "Fixture"
+                module.write_text(
+                    f"import unittest\nclass {name}(unittest.TestCase): pass\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                module.write_text(
+                    f"import unittest\n@unittest.skip('fixture')\nclass {name}(unittest.TestCase):\n"
+                    "    def test_skipped(self): self.fail('must not run')\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                if scope_only:
+                    module.write_text(
+                        "import unittest\nclass UnrelatedTests(unittest.TestCase):\n"
+                        "    def test_present(self): self.assertTrue(True)\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        gate.selftest(scope_only=True)
+                module.write_text(
+                    f"import unittest\nclass {name}(unittest.TestCase):\n"
+                    "    def test_present(self): self.assertTrue(True)\n",
+                    encoding="utf-8",
+                )
+                gate.selftest(scope_only=scope_only)
+
+    def test_scope_selftests_run_with_sparse_files_and_no_node(self) -> None:
+        sparse = self.root / "sparse"
+        (sparse / "scripts").mkdir(parents=True)
+        (sparse / "tests").mkdir()
+        shutil.copyfile(AW / "scripts/check.py", sparse / "scripts/check.py")
+        module = sparse / "tests/test_ci_checks.py"
+        source = Path(__file__).read_text(encoding="utf-8")
+        # A mistaken full discovery must fail immediately, without recursively
+        # launching this integration fixture again.
+        module.write_text(
+            source + "\nclass GateTests(unittest.TestCase):\n"
+            "    def test_full_gate_must_not_run(self):\n"
+            "        self.fail('full gate selected for sparse scope checkout')\n",
+            encoding="utf-8",
+        )
+        tools = self.root / "bin"
+        tools.mkdir()
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "scope fixtures require Git")
+        (tools / "git").symlink_to(git)
+        self.assertIsNone(shutil.which("node", path=str(tools)))
+        self.assertFalse((sparse / "tests/fixtures").exists())
+        with patch.dict(os.environ, {"PATH": str(tools)}), patch.object(gate, "AW", sparse):
+            gate.selftest(scope_only=True)
 
     def test_timeout_stops_an_ignoring_descendant(self) -> None:
         pid_file = self.root / "child.pid"
@@ -331,32 +403,6 @@ class GateTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, valid, result.stderr)
                     if vector == damaged:
                         self.assertIn("Python canonical digest differs", result.stderr)
-
-    def test_required_result_truth_table(self) -> None:
-        sha = "a" * 40
-        valid = {
-            "GITHUB_SHA": sha,
-            "SCOPE_RESULT": "success",
-            "CHECKS_RESULT": "success",
-            "SELECTED": "true",
-            "CANDIDATE_SHA": sha,
-            "TESTED_SHA": sha,
-        }
-        gate.required(valid)
-        gate.required({**valid, "SELECTED": "false", "CHECKS_RESULT": "skipped", "TESTED_SHA": ""})
-        failures = [{key: ""} for key in valid]
-        failures += [{"CHECKS_RESULT": value} for value in ("failure", "cancelled", "skipped")]
-        failures += [
-            {"SCOPE_RESULT": "failure"},
-            {"SELECTED": "false"},
-            {"TESTED_SHA": "b" * 40},
-            {"CANDIDATE_SHA": "b" * 40},
-            {"SELECTED": "unknown"},
-        ]
-        for changes in failures:
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                gate.required({**valid, **changes})
-
 
 if __name__ == "__main__":
     unittest.main()

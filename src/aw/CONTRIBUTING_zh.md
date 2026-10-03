@@ -28,8 +28,18 @@ ignored、向量错误及命令失败均返回非零。每条命令都有超时�
 需要在分支保护中选择该检查才能强制执行。工作流取消不代表门禁通过。
 
 上游 CI 使用自部署 `anolisa-k8s-general-ci-x64` runner；fork CI 使用 GitHub 托管
-Ubuntu 24.04。两者均使用 Python 3.12.3、Node.js 24.15.0 和固定 Rust 工具链。
-本地验证另使用 Linux ARM64。
+Ubuntu 24.04。范围判断与完整验证分别执行：
+
+- `AW / scope` 仅检出门禁脚本及其测试，保留完整 Git 历史，以判断整个 PR 的改动
+  和基线推进带入合并结果的变化。使用 runner 自带的 Python 3.9 或更新版本运行
+  范围判定及 required 结果测试，无需安装 Python 或 Node.js。
+- `AW / contracts` 保留浅历史的完整工作树，供 Cargo 枚举包文件；使用 Python
+  3.12.3、Node.js 24.15.0 和固定 Rust 工具链运行完整门禁，包括全部门禁行为测试。
+- `AW / required` 仅检出门禁脚本，使用 runner 自带的 Python 3.9 或更新版本
+  核对 job 结果及候选 SHA。
+
+两个控制 job 使用 sparse checkout 限制文件内容的下载范围，同时保留范围判定所需的提交。
+三个 job 的超时限制仍分别为 5、25、5 分钟。本地验证另使用 Linux ARM64。
 
 ## Crate 职责
 
