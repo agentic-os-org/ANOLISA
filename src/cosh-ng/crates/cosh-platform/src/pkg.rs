@@ -601,8 +601,10 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
             PKG_TIMEOUT,
             "pkg",
         ),
+        // Unfiltered listing covers formulae and casks alike, matching the
+        // scope `brew search` results come from.
         PkgManager::Brew => run_command(
-            Command::new("brew").args(["list", "--formula", "-1"]),
+            Command::new("brew").args(["list", "-1"]),
             PKG_TIMEOUT,
             "pkg",
         ),
@@ -921,6 +923,49 @@ mod tests {
     fn test_parse_installed_version_unknown_mgr() {
         let version = parse_installed_version("bash", PkgManager::Unknown);
         assert!(version.is_empty());
+    }
+
+    // --- installed-name lookup with a stubbed brew ---
+
+    #[test]
+    fn test_get_installed_names_brew_lists_casks_too() {
+        // Re-exec pattern: the stub PATH is set only for a child process
+        // running this same test, so sibling tests keep the real PATH.
+        if std::env::var_os("COSH_PKG_BREW_STUB_RUN").is_some() {
+            let names = get_installed_names(PkgManager::Brew);
+            assert!(names.contains("git"), "formulae must be listed: {names:?}");
+            assert!(
+                names.contains("visual-studio-code"),
+                "installed casks must be listed: {names:?}"
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cosh-brew-stub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create stub dir");
+        let stub = dir.join("brew");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\ncase \"$*\" in\n'list -1') printf 'git\\nvisual-studio-code\\n' ;;\n'list --formula -1') printf 'git\\n' ;;\nesac\nexit 0\n",
+        )
+        .expect("write brew stub");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod brew stub");
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("pkg::tests::test_get_installed_names_brew_lists_casks_too")
+            .arg("--nocapture")
+            .env("COSH_PKG_BREW_STUB_RUN", "1")
+            .env("PATH", &dir)
+            .status()
+            .expect("re-run test binary with stubbed brew");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            status.success(),
+            "brew installed-name lookup must include casks (child status: {status})"
+        );
     }
 
     // --- dnf search output parsing ---
