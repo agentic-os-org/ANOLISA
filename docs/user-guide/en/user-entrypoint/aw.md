@@ -7,10 +7,9 @@ its normal interface. You describe the programs and events in `aw.yaml`; AW
 starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
-The current Linux source build supports Qoder CLI 1.1.64. QwenPaw, OpenClaw and
-Hermes are the other first-release targets, but their launch adapters are not
-available yet. AW does not install an Agent or configure its model account.
-Keep Qoder's existing login and model settings.
+The current Linux source build supports Qoder CLI 1.1.64 and QwenPaw 2.2.2b4 / AgentScope 2.0.8.
+Other first-release adapters are delivered separately. AW does not install an
+Agent or configure its model account; retain the framework's native configuration.
 
 ## Current support
 
@@ -19,15 +18,16 @@ Keep Qoder's existing login and model settings.
 | Validate one configuration with all 16 event names | ✅ Recognizing an event does not install a Hook |
 | Start Qoder CLI 1.1.64 through AW | ✅ Interactive and print entrypoints |
 | Run structured Providers before tools | ✅ `observe` and `block` |
-| Run structured Providers after successful tools | ✅ `observe` through `PostToolUse` |
+| Run structured Providers after tools | ✅ `observe`; success, error and blocked-attempt coverage depends on the framework |
 | Run native scripts and commands before/after tools | ✅ Unchanged callback input; byte output and exit status forwarded |
 | Preserve existing Qoder Hooks and their scheduling | ✅ Default settings and an explicit extra settings file |
 | Keep a shared service and persistent execution metadata | ✅ On-demand or externally started service |
-| Start QwenPaw, OpenClaw or Hermes | ❌ Adapters pending; QwenPaw is distinct from Qwen Code |
+| Start QwenPaw through AW | ✅ the official App/API entrypoint |
+| Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a published AW package or generate a default configuration | ❌ Copy the example manually |
 
-`tool.after` currently maps to successful `PostToolUse` callbacks. Qoder's
+For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
 `PostToolUseFailure` is a separate event and is not connected in this adapter.
 Native Hook commands remain subject to Qoder's own response semantics. Passing
 through a native approval response does not establish portable AW approval
@@ -71,6 +71,41 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## Start QwenPaw
+
+Install QwenPaw 2.2.2b4 with AgentScope 2.0.8 and initialize its model configuration
+through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
+`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
+its owned temporary plugin, preserves existing plugins and native configuration,
+and removes its plugin after the App exits.
+
+Native middleware retains onion ordering: before runs forward, after unwinds in
+reverse, and the host controls concurrent tools. After observes terminal
+`ToolResponse` objects, including AW-denied results, without repeating streaming
+chunks. The point covers tools executed inside the App; external execution tools
+and attempts denied before middleware are outside its coverage. Event budgets
+must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
+before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
+Callback failures are reported and follow the step's `on_error`; `report` preserves
+execution and after results, while before `block` denies. Cancellation still propagates.
+
+The native startup hook confirms plugin registration after loading completes.
+It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
+reload and multi-worker launch remain rejected because this integration does not
+verify their plugin lifecycle. Use the App's normal API or interface after the
+native Hooks ready message.
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+The [neutral QwenPaw example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
 ## Connect your programs
 
 Each named object in `spec.providers` describes a program. An event step refers
@@ -79,7 +114,7 @@ to its name through `provider`. Choose the protocol for the program you have:
 | Protocol | Input and result | Step fields |
 | --- | --- | --- |
 | `aw-provider/v1alpha1` | AW performs `describe`, `validate_config` and `invoke`; responses contain checked candidate effects | `operation`, `effects`, `on_error` |
-| `native-hook/v1alpha1` | The command receives Qoder's original callback stdin; its stdout, stderr and exit status return to Qoder | `native: {}`, `on_error`; omit `operation` and `effects` |
+| `native-hook/v1alpha1` | The command receives the selected adapter's native callback bytes; the adapter handles stdout, stderr and exit status | `native: {}`, `on_error`; omit `operation` and `effects` |
 
 For a native Hook, replace the example's `transport.argv` with the executable
 and literal arguments for your script. AW does not insert a shell; shell syntax
@@ -94,6 +129,10 @@ with `cargo build --locked -p aw-provider --example policy` and run from `src/aw
 because its command path is relative. Its blocked tool name is illustrative;
 replace it with a tool actually used by your Agent when testing a block. The
 sample Provider is not sec-core.
+
+Raw commands use the actual callback environment, including profile-loaded
+variables. Structured Providers keep the environment pinned at binding.
+Environment contents are excluded from events and audit.
 
 `timeout_ms` limits one command; `default_event_budget_ms` limits the whole event.
 The Qoder launcher accepts event budgets from 1 to 55,000 milliseconds.
@@ -158,7 +197,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | Command | Purpose |
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
-| `aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- ARGS` | Start the configured Agent and connect supported Hooks |
+| `aw run --config FILE --agent TARGET [ADAPTER_OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |

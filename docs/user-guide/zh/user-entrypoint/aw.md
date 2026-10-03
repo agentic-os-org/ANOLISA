@@ -6,9 +6,9 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
 会话结束后继续保存执行记录。
 
-当前 Linux 源码版本支持 Qoder CLI 1.1.64。QwenPaw、OpenClaw 和 Hermes 也是首批
-目标，但它们的启动 Adapter 尚未交付。AW 不安装 Agent，也不配置模型账号；继续
-使用 Qoder 已有的登录状态和模型设置。
+当前 Linux 源码版本支持 Qoder CLI 1.1.64 和 QwenPaw 2.2.2b4 / AgentScope 2.0.8。
+其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
+原有的模型与认证配置。
 
 ## 当前支持范围
 
@@ -17,15 +17,16 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 | 校验一份包含全部 16 个事件名的配置 | ✅ 识别事件不代表安装 Hook |
 | 通过 AW 启动 Qoder CLI 1.1.64 | ✅ 交互和 print 入口 |
 | 工具前运行结构化 Provider | ✅ `observe`、`block` |
-| 工具成功后运行结构化 Provider | ✅ 通过 `PostToolUse` 执行 `observe` |
+| 工具后运行结构化 Provider | ✅ `observe`；成功、失败及阻断尝试的覆盖随框架而异 |
 | 工具前后执行原生脚本和命令 | ✅ 回调输入保持不变，转交字节输出与退出状态 |
 | 保留 Qoder 已有 Hook 及其调度 | ✅ 默认配置和显式传入的附加配置文件 |
 | 复用共享服务并持久保存执行元数据 | ✅ 按需启动或外部启动服务 |
-| 启动 QwenPaw、OpenClaw 或 Hermes | ❌ Adapter 待交付；QwenPaw 与 Qwen Code 分别识别 |
+| 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
+| 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、结果替换或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
 | 安装已发布的 AW 包或生成默认配置 | ❌ 当前手动复制示例 |
 
-`tool.after` 当前映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
+对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
 是独立事件，本 Adapter 尚未接入。原生 Hook 命令仍按 Qoder 的响应语义处理。
 透传原生审批响应不代表 AW 已提供跨框架审批支持；交互式审批不在本期验收范围内。
 
@@ -63,6 +64,34 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## 启动 QwenPaw
+
+安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.8，通过 QwenPaw 初始化模型配置。示例
+使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
+AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
+
+原生 middleware 保持嵌套顺序：before 正序、after 逆序展开，工具并发由宿主决定。
+after 观察终结的 `ToolResponse`，包括 AW 拒绝结果，不对流式 chunk 重复调用。
+当前点位覆盖 App 内实际执行的工具；外部执行工具以及进入 middleware 前已被拒绝
+的尝试不在覆盖范围。事件预算为 1..55,000 ms。原生命令使用 AW 插件明确约定：
+before 退出 2 表示拒绝，退出 0 表示继续，显式 ask/approve 尚不支持。
+回调故障记录错误并按步骤的 `on_error` 处理：`report` 保留工具执行和 after 结果，
+工具前的 `block` 返回拒绝；宿主取消继续传播。
+
+原生 startup hook 在插件加载完成后确认注册；它不承诺 App 对外端口开放之前已经
+防护。ACP/TUI、reload 和多 worker 启动仍被拒绝，这些入口的插件生命周期尚未验收。
+看到原生 Hook 就绪提示后，通过 App 原有 API 或界面使用。
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+[QwenPaw 中性示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
+`aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
+
 ## 接入自己的程序
 
 `spec.providers` 中的每个命名对象描述一个程序，事件步骤通过 `provider` 引用
@@ -71,12 +100,15 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 | 协议 | 输入与结果 | 步骤字段 |
 | --- | --- | --- |
 | `aw-provider/v1alpha1` | AW 执行 `describe`、`validate_config`、`invoke`，响应包含经校验的候选效果 | `operation`、`effects`、`on_error` |
-| `native-hook/v1alpha1` | 命令收到 Qoder 原始回调 stdin，stdout、stderr 和退出状态交回 Qoder | `native: {}`、`on_error`；不填 `operation`、`effects` |
+| `native-hook/v1alpha1` | 命令收到所选框架的原始回调 stdin，stdout、stderr 和退出状态按该 Adapter 合同处理 | `native: {}`、`on_error`；不填 `operation`、`effects` |
 
 接入原生 Hook 时，将示例的 `transport.argv` 换成脚本的可执行文件及字面量参数。
 AW 不插入 shell；使用 shell 语法时明确指定 `/bin/sh -c ...`。这种协议保留
 `config: {}`，不执行 Provider 配置交互。Qoder 专用的原生输出不会自动转换成其他
 框架的响应。
+
+原生命令使用回调进程的实际环境，包括框架加载的 profile 变量；结构化 Provider
+使用绑定时固定的启动环境。环境内容不写入事件或审计。
 
 统一策略使用 `aw-provider/v1alpha1`，Provider 自己的设置写在 `config` 中。
 可运行的[策略示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.yaml)展示工具前
@@ -135,7 +167,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | 命令 | 用途 |
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
-| `aw run --config FILE --agent TARGET [--native-settings JSON_FILE] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
+| `aw run --config FILE --agent TARGET [ADAPTER_OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
