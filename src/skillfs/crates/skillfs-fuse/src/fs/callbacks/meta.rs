@@ -48,13 +48,11 @@ impl SkillFs {
             }
             PathType::SkillsDir => {
                 // In-place mode: root acts as skills dir — return root attrs.
-                let ino = if self.in_place {
-                    FUSE_ROOT_ID
-                } else {
-                    self.inodes
-                        .lookup_by_path(&path_str)
-                        .unwrap_or(FUSE_ROOT_ID)
-                };
+                // Single resolution point for the /skills inode (shared with
+                // root readdir and parent lookups): reallocates after a
+                // kernel FORGET instead of collapsing the view onto the root
+                // inode.
+                let ino = self.skills_dir_ino();
                 let mut attr = self.dir_attr();
                 attr.ino = ino;
                 self.inodes.remember(ino);

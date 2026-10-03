@@ -238,6 +238,30 @@ mod tests {
     }
 
     #[test]
+    fn forgotten_paths_reallocate_without_aliasing() {
+        // Kernel dentry reclaim sends FORGET, releasing the path mapping;
+        // call sites must reallocate rather than fall back to a constant —
+        // allocation rebinds the path and monotonic inos guarantee the
+        // fresh id aliases neither the forgotten one nor the root.
+        let mgr = InodeManager::new();
+        let ino = mgr.allocate("/skills", FileType::Directory, FUSE_ROOT_ID);
+        mgr.remember(ino);
+        mgr.forget(ino, 1);
+        assert_eq!(mgr.lookup_by_path("/skills"), None);
+
+        let fresh = mgr.allocate("/skills", FileType::Directory, FUSE_ROOT_ID);
+        assert_ne!(
+            fresh, ino,
+            "reallocated ino must not alias the forgotten one"
+        );
+        assert_ne!(
+            fresh, FUSE_ROOT_ID,
+            "reallocated ino must not be the root id"
+        );
+        assert_eq!(mgr.lookup_by_path("/skills"), Some(fresh));
+    }
+
+    #[test]
     fn forget_decrements_and_releases_at_zero() {
         let mgr = InodeManager::new();
         let ino = mgr.allocate("/skills/bar", FileType::RegularFile, FUSE_ROOT_ID);

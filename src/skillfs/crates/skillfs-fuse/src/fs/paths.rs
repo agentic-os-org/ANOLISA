@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use fuser::FUSE_ROOT_ID;
+use fuser::{FUSE_ROOT_ID, FileType};
 
 use super::SkillFs;
 use crate::path::{PathType, is_skill_discover_path};
@@ -55,11 +55,22 @@ impl SkillFs {
     }
 
     /// Inode for the skills directory (the parent of individual skill dirs).
+    ///
+    /// Single resolution point for every `/skills` inode lookup (metadata
+    /// callbacks, root readdir, parent references): reallocates when the
+    /// kernel has FORGETten the dentry, so callers never receive the root
+    /// id or a dangling constant for a live directory.
     pub(super) fn skills_dir_ino(&self) -> u64 {
         if self.in_place {
             FUSE_ROOT_ID
         } else {
-            self.inodes.lookup_by_path("/skills").unwrap_or(2)
+            // `2` (the pre-fix fallback) is a dangling constant: ino
+            // allocation is monotonic and never reused, so it maps to
+            // nothing or to an unrelated inode.
+            self.inodes.lookup_by_path("/skills").unwrap_or_else(|| {
+                self.inodes
+                    .allocate("/skills", FileType::Directory, FUSE_ROOT_ID)
+            })
         }
     }
 
@@ -466,6 +477,44 @@ mod tests {
     use skillfs_core::{ParseConfig, store::SkillStore};
 
     use super::*;
+
+    #[test]
+    fn skills_dir_ino_survives_kernel_forget() {
+        // Kernel dentry reclaim sends FORGET, which releases the /skills
+        // path mapping. Resolution must reallocate — reverting this single
+        // point (or any former caller) to the old unwrap_or(FUSE_ROOT_ID/2)
+        // fallbacks makes this test fail: the view would collapse onto the
+        // root inode or a dangling constant.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let store = SkillStore::new();
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            Arc::new(RwLock::new(store)),
+            false,
+        );
+
+        let first = fs.skills_dir_ino();
+        assert_ne!(first, FUSE_ROOT_ID);
+
+        // Simulate the kernel lifecycle: entry remembered, then forgotten.
+        fs.inodes.remember(first);
+        fs.inodes.forget(first, 1);
+        assert_eq!(fs.inodes.lookup_by_path("/skills"), None);
+
+        let second = fs.skills_dir_ino();
+        assert_ne!(second, first, "forgotten ino must not be handed back");
+        assert_ne!(
+            second, FUSE_ROOT_ID,
+            "skills view must not collapse to root"
+        );
+        assert_ne!(second, 2, "the old dangling constant must not come back");
+        assert_eq!(
+            fs.inodes.lookup_by_path("/skills"),
+            Some(second),
+            "reallocated inode must rebind the path"
+        );
+    }
 
     #[test]
     fn flat_paths_and_grace_use_the_stored_categorized_source_dir() {

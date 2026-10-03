@@ -43,7 +43,10 @@ impl SkillFs {
                     (FUSE_ROOT_ID, FileType::Directory, ".".to_string()),
                     (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
                     (
-                        self.inodes.lookup_by_path("/skills").unwrap_or(2),
+                        // Single resolution point (paths::skills_dir_ino):
+                        // reallocates after FORGET; a dangling constant would
+                        // bind the "skills" dentry to a dead inode.
+                        self.skills_dir_ino(),
                         FileType::Directory,
                         "skills".to_string(),
                     ),
