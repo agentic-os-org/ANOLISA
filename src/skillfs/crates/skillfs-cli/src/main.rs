@@ -2834,7 +2834,27 @@ async fn cmd_classify(
 
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let _errors = store.load_from_directory(&source, &config);
+    let load_errors = store.load_from_directory(&source, &config);
+
+    // A skill whose SKILL.md cannot be loaded (unreadable, oversized, ...) is
+    // absent from the store, so it silently drops out of the generated
+    // skillfs-views.toml — and the views config then hides it from every
+    // mount. Surface every load error instead, mirroring cmd_mount. Warnings,
+    // not failure: classify still produces a valid config for the skills that
+    // did load (exit 0), matching mount's precedent.
+    if !load_errors.is_empty() {
+        warn!(count = load_errors.len(), "some skills failed to load");
+        for err in &load_errors {
+            warn!(path = %err.path.display(), error = %err.error, "load error");
+        }
+        eprintln!(
+            "warning: skipped {} unloadable skill(s); they will NOT be listed in skillfs-views.toml:",
+            load_errors.len()
+        );
+        for err in &load_errors {
+            eprintln!("  - {}: {}", err.path.display(), err.error);
+        }
+    }
 
     let mut all_names: Vec<String> = store.list().iter().map(|s| s.to_string()).collect();
     all_names.sort();
