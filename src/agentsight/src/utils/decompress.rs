@@ -50,7 +50,7 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 /// Decompress an HTTP body based on its `Content-Encoding` header value.
 ///
 /// - `None` or `"identity"` → return body unchanged
-/// - `"gzip"` or `"x-gzip"` → decompress with GzDecoder
+/// - `"gzip"` or `"x-gzip"` → every member, falling back to the first
 /// - `"deflate"` → decompress with DeflateDecoder
 /// - `"zstd"` → decompress with the zstd decoder
 /// - `"br"` → decompress with the brotli decoder
@@ -91,9 +91,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
     };
 
     match effective_encoding.as_deref() {
-        Some("gzip") | Some("x-gzip") => {
-            read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
-        }
+        Some("gzip") | Some("x-gzip") => decompress_gzip(body),
         Some("deflate") => read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate"),
         Some("zstd") => {
             // A streaming decoder (capped via `read_capped`) replaces
@@ -114,6 +112,23 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
         Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
     }
+}
+
+/// Decompress a `Content-Encoding: gzip` body.
+///
+/// A gzip body is a series of members (RFC 1952 §2.2), and a server that
+/// flushes one member per SSE event produces several — the same shape the
+/// zstd branch handles for concatenated frames. Decode all of them, but keep
+/// the first member when a truncated capture leaves the tail incomplete:
+/// `read_capped` returns `raw` unchanged when a decoder rejects the body, so
+/// an incomplete multi-member stream falls through to the single-member
+/// decoder instead of degrading to the still-compressed bytes.
+fn decompress_gzip(body: &[u8]) -> Vec<u8> {
+    let all = read_capped(flate2::read::MultiGzDecoder::new(body), body, "gzip");
+    if all != body {
+        return all;
+    }
+    read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
 }
 
 /// Growable output sink for the incremental zstd decoder with the same hard
@@ -475,6 +490,46 @@ mod tests {
 
         let bad = b"not deflate";
         assert_eq!(decompress_body(bad, Some("deflate")), bad);
+    }
+
+    #[test]
+    fn gzip_decodes_every_member() {
+        // RFC 1952: a gzip body is a series of members. A server that flushes
+        // one member per SSE chunk produced a body whose later members were
+        // dropped by the single-member decoder, truncating the stream.
+        let mut first = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        first.write_all(b"data: one\n\n").unwrap();
+        let first = first.finish().unwrap();
+        let mut second = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        second.write_all(b"data: two\n\n").unwrap();
+        let second = second.finish().unwrap();
+
+        let mut both = first;
+        both.extend_from_slice(&second);
+        assert_eq!(
+            decompress_body(&both, Some("gzip")),
+            b"data: one\n\ndata: two\n\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn gzip_truncated_tail_keeps_the_first_member() {
+        // A truncated capture of a multi-member stream is routine here, so the
+        // multi-member attempt must fall back to the first member rather than
+        // to the still-compressed bytes.
+        let mut first = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        first.write_all(b"first member").unwrap();
+        let first = first.finish().unwrap();
+        let mut second = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        second.write_all(b"second member").unwrap();
+        let second = second.finish().unwrap();
+
+        let mut truncated = first;
+        truncated.extend_from_slice(&second[..6]);
+        assert_eq!(
+            decompress_body(&truncated, Some("gzip")),
+            b"first member".to_vec()
+        );
     }
 
     #[test]
