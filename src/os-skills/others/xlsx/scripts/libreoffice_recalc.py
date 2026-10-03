@@ -95,10 +95,17 @@ def recalculate(
     version = get_libreoffice_version(soffice)
 
     # Work on a copy in a temp directory to avoid side effects on the source file.
-    # LibreOffice writes the output using the same filename stem in --outdir.
+    # LibreOffice writes the output using the same filename stem in --outdir,
+    # so keep the input copy and the output in separate subdirectories —
+    # otherwise the expected output path IS the input copy and the existence
+    # check below is vacuously true.
     with tempfile.TemporaryDirectory(prefix="xlsx_recalc_") as tmpdir:
-        tmp_input = os.path.join(tmpdir, os.path.basename(input_path))
+        tmp_input = os.path.join(tmpdir, "in", os.path.basename(input_path))
+        os.makedirs(os.path.dirname(tmp_input), exist_ok=True)
         shutil.copy(input_path, tmp_input)
+
+        outdir = os.path.join(tmpdir, "out")
+        os.makedirs(outdir, exist_ok=True)
 
         cmd = [
             soffice,
@@ -106,7 +113,7 @@ def recalculate(
             "--norestore",           # do not attempt to restore crashed sessions
             "--infilter=Calc MS Excel 2007 XML",
             "--convert-to", "xlsx",
-            "--outdir", tmpdir,
+            "--outdir", outdir,
             tmp_input,
         ]
 
@@ -134,21 +141,24 @@ def recalculate(
                 f"stdout: {stdout}"
             )
 
-        # LibreOffice writes: <tmpdir>/<stem>.xlsx
+        # LibreOffice writes: <outdir>/<stem>.xlsx
         stem = os.path.splitext(os.path.basename(tmp_input))[0]
-        tmp_output = os.path.join(tmpdir, stem + ".xlsx")
+        tmp_output = os.path.join(outdir, stem + ".xlsx")
 
         if not os.path.isfile(tmp_output):
-            # Try to find any .xlsx file in tmpdir (LibreOffice may behave differently)
-            xlsx_files = [f for f in os.listdir(tmpdir) if f.endswith(".xlsx") and f != os.path.basename(tmp_input)]
+            # Try to find any .xlsx file in outdir (LibreOffice may behave differently)
+            xlsx_files = [f for f in os.listdir(outdir) if f.endswith(".xlsx")]
             if xlsx_files:
-                tmp_output = os.path.join(tmpdir, xlsx_files[0])
+                tmp_output = os.path.join(outdir, xlsx_files[0])
             else:
                 stdout = result.stdout.decode(errors="replace").strip()
+                # NB: this message must not contain "not found" — main()
+                # routes that wording to the exit-2 "Tier 2 unavailable" skip.
                 return False, (
-                    f"LibreOffice succeeded (exit 0) but output file not found in {tmpdir}.\n"
+                    f"LibreOffice exited 0 but recalculation failed: "
+                    f"no xlsx output was written.\n"
                     f"stdout: {stdout}\n"
-                    f"Files in tmpdir: {os.listdir(tmpdir)}"
+                    f"Files in outdir: {os.listdir(outdir)}"
                 )
 
         # Copy recalculated file to final destination
