@@ -242,6 +242,21 @@ class TestVerifySkillsDir(unittest.TestCase):
         self.assertEqual(results["passed"], [])
         self.assertEqual(len(results["failed"]), 1)
 
+    @patch(
+        "agent_sec_cli.asset_verify.verifier.verify_skill",
+        return_value=(None, "real-skill"),
+    )
+    def test_dangling_symlink_entry_is_skipped(self, _mock_verify_skill):
+        root = os.path.join(self.tmpdir, "skills")
+        os.makedirs(os.path.join(root, "real-skill"))
+        os.symlink("/nonexistent/target", os.path.join(root, "broken-link"))
+
+        results = verify_skills_dir(root, [])
+
+        self.assertEqual(results["checked"], 1)
+        self.assertEqual(results["passed"], ["real-skill"])
+        self.assertEqual(results["failed"], [])
+
 
 class TestLoadConfig(unittest.TestCase):
     def setUp(self):
