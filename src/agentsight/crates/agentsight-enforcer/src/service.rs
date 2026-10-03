@@ -403,10 +403,22 @@ fn handle_connection<B: EnforcementBackend>(
         }
         Command::SubscribeSecurityEvents => {
             let receiver = backend.subscribe_security_events();
-            write_frame(
+            if write_frame(
                 &mut stream,
                 &success_response(request.request_id, ResponseBody::Subscribed),
-            )?;
+            )
+            .is_err()
+            {
+                // A peer that disappears before its acknowledgement can be
+                // written already received queued frames (for example the
+                // evidence-loss recovery frame); count them as lost like the
+                // per-event write failure below does.
+                let queued_events = receiver
+                    .try_iter()
+                    .fold(0_u64, |count, _| count.saturating_add(1));
+                backend.record_security_delivery_loss(queued_events);
+                return Ok(());
+            }
             while let Ok(event) = receiver.recv() {
                 if write_frame(
                     &mut stream,
@@ -1098,5 +1110,49 @@ mod tests {
             .expect("source policy should be restored");
         assert_eq!(restored.request.root_pid, 77);
         assert_eq!(restored.request.process_start_time, 123);
+    }
+
+    #[test]
+    fn security_subscription_counts_events_lost_behind_a_failed_ack() {
+        let backend = Arc::new(MockBackend::new());
+        let request = credential_policy();
+        let binding = backend
+            .apply_credential_policy(request)
+            .expect("fixture credential policy should apply");
+        // Emit the normalized chain while no subscriber is connected: the hub
+        // records four lost events and queues one recovery frame for the next
+        // subscriber.
+        backend
+            .emit_credential_exfiltration(
+                binding.request.binding_id,
+                "/tmp/fixture-credential",
+                "8.8.8.8",
+            )
+            .expect("fixture chain should emit");
+
+        let (service_stream, client_stream) =
+            UnixStream::pair().expect("fixture socket pair should open");
+        write_frame(
+            &mut &client_stream,
+            &Request::new(Command::SubscribeSecurityEvents),
+        )
+        .expect("fixture request should encode");
+        drop(client_stream);
+
+        let subscriptions = Arc::new(RequiredSubscriptions::default());
+        let result = handle_connection(service_stream, Arc::clone(&backend), subscriptions, None);
+
+        // A peer that disappears before its acknowledgement can be written is
+        // a normal subscription termination, and the queued recovery frame it
+        // never received must still count as delivery loss.
+        assert!(result.is_ok());
+        let health = backend.health().expect("mock health should load");
+        assert!(!health.ready);
+        assert_eq!(
+            health.message.as_deref(),
+            Some(
+                "mock backend does not enforce kernel operations; security event delivery loss: dropped_events=5"
+            )
+        );
     }
 }
