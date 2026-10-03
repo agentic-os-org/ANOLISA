@@ -124,7 +124,7 @@ impl ProcTraceParser {
             ProcEventType::Stdout => {
                 let data = parsed.stdout_data?;
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", crate::parser::truncate_for_preview(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -202,7 +202,11 @@ impl TraceArgs for ParsedProcEvent {
 
                     // Add data preview (truncated)
                     let preview = if data.len() > 200 {
-                        format!("{}... ({} bytes total)", &data[..200], data.len())
+                        format!(
+                            "{}... ({} bytes total)",
+                            crate::parser::truncate_for_preview(data, 200),
+                            data.len()
+                        )
                     } else {
                         data.clone()
                     };
@@ -227,7 +231,7 @@ impl ParsedProcEvent {
             ProcEventType::Stdout => {
                 let data = self.stdout_data.as_ref().cloned().unwrap_or_default();
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", crate::parser::truncate_for_preview(&data, 100))
                 } else {
                     data.clone()
                 };

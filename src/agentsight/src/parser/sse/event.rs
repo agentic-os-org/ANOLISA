@@ -440,7 +440,11 @@ impl SSEEvent {
 
         // Add data (truncated for display if very long)
         let data_preview = if self.data.len() > 500 {
-            format!("{}... ({} bytes total)", &self.data[..500], self.data.len())
+            format!(
+                "{}... ({} bytes total)",
+                crate::parser::truncate_for_preview(&self.data, 500),
+                self.data.len()
+            )
         } else {
             self.data.clone()
         };
