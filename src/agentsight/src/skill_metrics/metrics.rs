@@ -284,7 +284,10 @@ fn compute_hotness(data: &ExtractedData, granularity: &HotnessGranularity) -> Sk
     for bucket in &buckets {
         let counts = &bucket_counts[bucket];
         let mut sorted: Vec<(&String, &u64)> = counts.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        // Ties are ordered by name so the rank a skill gets no longer
+        // depends on HashMap iteration order (which is randomized per
+        // process): an 8-way tie produced arbitrary weekly ranks before.
+        sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
         for (rank, &(skill, &count)) in sorted.iter().enumerate() {
             weekly_rankings
@@ -320,7 +323,13 @@ fn compute_hotness(data: &ExtractedData, granularity: &HotnessGranularity) -> Sk
         })
         .collect();
 
-    rankings.sort_by_key(|entry| std::cmp::Reverse(entry.total_loads));
+    // Same tiebreak as the per-bucket ranking: total_rank must be a function
+    // of the event set, not of map iteration order.
+    rankings.sort_by(|a, b| {
+        b.total_loads
+            .cmp(&a.total_loads)
+            .then_with(|| a.skill_name.cmp(&b.skill_name))
+    });
     for (i, entry) in rankings.iter_mut().enumerate() {
         entry.total_rank = (i + 1) as u32;
     }
@@ -432,6 +441,172 @@ mod tests {
             status: Some("complete".into()),
             interruption_type: None,
         }
+    }
+
+    /// Minimal event carrying one tool call that loads a skill's SKILL.md —
+    /// the load-carrying counterpart of `skill_event`, built the way
+    /// `extract_skill_loads` expects (an assistant ToolCall whose arguments
+    /// reference the skill's file).
+    fn load_event(id: i64, start_ns: i64, session: &str, skill: &str) -> TraceEventDetail {
+        use crate::genai::semantic::{MessagePart, OutputMessage};
+        TraceEventDetail {
+            id,
+            call_id: Some(format!("l{id}")),
+            start_timestamp_ns: start_ns,
+            end_timestamp_ns: Some(start_ns + 1000),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_messages: None,
+            output_messages: Some(
+                serde_json::to_string(&vec![OutputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::ToolCall {
+                        id: Some(format!("tc{id}")),
+                        name: "read_file".to_string(),
+                        arguments: Some(serde_json::json!({
+                            "file_path": format!("/skills/{skill}/SKILL.md")
+                        })),
+                    }],
+                    name: None,
+                    finish_reason: None,
+                }])
+                .unwrap(),
+            ),
+            system_instructions: None,
+            agent_name: Some("TestAgent".into()),
+            process_name: None,
+            pid: Some(100),
+            user_query: None,
+            event_json: None,
+            trace_id: Some(session.into()),
+            conversation_id: Some("conv-1".into()),
+            cache_read_tokens: None,
+            status: Some("complete".into()),
+            interruption_type: None,
+        }
+    }
+
+    #[test]
+    fn tied_skills_get_name_ordered_ranks_per_bucket() {
+        // Eight skills, one load each in the same week: every rank used to
+        // depend on HashMap iteration order (randomized per process); after
+        // the name tiebreak the weekly ranks are exactly the name-sorted
+        // positions.
+        let skills = [
+            "zeta", "alpha", "delta", "echo", "bravo", "golf", "charlie", "foxtrot",
+        ];
+        let events: Vec<TraceEventDetail> = skills
+            .iter()
+            .enumerate()
+            .map(|(i, s)| load_event(i as i64, 1_000_000_000, "s1", s))
+            .collect();
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        let mut names: Vec<&str> = skills.to_vec();
+        names.sort();
+        for entry in &report.hotness.as_ref().unwrap().rankings {
+            let expected = names.iter().position(|n| *n == entry.skill_name).unwrap() + 1;
+            let weekly = &entry.weekly_ranks[0];
+            assert_eq!(
+                weekly.rank as usize, expected,
+                "skill {} weekly rank must be its name-sorted position",
+                entry.skill_name
+            );
+        }
+    }
+
+    #[test]
+    fn tied_totals_get_name_ordered_total_rank() {
+        let skills = ["zeta", "alpha", "delta", "echo"];
+        let events: Vec<TraceEventDetail> = skills
+            .iter()
+            .enumerate()
+            .map(|(i, s)| load_event(i as i64, 1_000_000_000, "s1", s))
+            .collect();
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        // rankings[] is (total_loads DESC, skill_name ASC) and total_rank is
+        // 1..=4 in that order.
+        let got: Vec<(&str, u32)> = report
+            .hotness
+            .as_ref()
+            .unwrap()
+            .rankings
+            .iter()
+            .map(|e| (e.skill_name.as_str(), e.total_rank))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("alpha", 1), ("delta", 2), ("echo", 3), ("zeta", 4)]
+        );
+    }
+
+    #[test]
+    fn rank_delta_is_stable_under_ties() {
+        // Same tied multiset in two weeks: with arbitrary tie ranks the
+        // delta flipped between runs; with the name tiebreak every skill's
+        // rank is identical across weeks, so every delta is Some(0).
+        let skills = ["zeta", "alpha", "delta"];
+        let mut events = Vec::new();
+        let week1 = 1_700_000_000_000_000_000i64;
+        let week2 = 1_710_000_000_000_000_000i64;
+        for (i, s) in skills.iter().enumerate() {
+            events.push(load_event(i as i64, week1, "s1", s));
+            events.push(load_event(100 + i as i64, week2, "s2", s));
+        }
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        for entry in &report.hotness.as_ref().unwrap().rankings {
+            assert_eq!(
+                entry.rank_delta,
+                Some(0),
+                "skill {} delta must be 0 under identical ties",
+                entry.skill_name
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_counts_keep_count_order() {
+        // The tiebreak must not disturb the primary key: alpha loads 3
+        // times, zeta once — alpha ranks first regardless of names.
+        let events = vec![
+            load_event(1, 1_000_000_000, "s1", "zeta"),
+            load_event(2, 1_000_000_001, "s1", "alpha"),
+            load_event(3, 1_000_000_002, "s1", "alpha"),
+            load_event(4, 1_000_000_003, "s1", "alpha"),
+        ];
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        assert_eq!(
+            report.hotness.as_ref().unwrap().rankings[0].skill_name,
+            "alpha"
+        );
+        assert_eq!(report.hotness.as_ref().unwrap().rankings[0].total_rank, 1);
+        assert_eq!(
+            report.hotness.as_ref().unwrap().rankings[1].skill_name,
+            "zeta"
+        );
+        assert_eq!(report.hotness.as_ref().unwrap().rankings[1].total_rank, 2);
+    }
+
+    #[test]
+    fn compute_is_repeatable_for_same_input() {
+        // The hotness contract: same event set -> same serialized ranking.
+        let skills = ["b", "a", "d", "c"];
+        let events: Vec<TraceEventDetail> = skills
+            .iter()
+            .enumerate()
+            .map(|(i, s)| load_event(i as i64, 1_000_000_000, "s1", s))
+            .collect();
+        let r1 = compute_skill_metrics(&events, &MetricOptions::all());
+        let r2 = compute_skill_metrics(&events, &MetricOptions::all());
+        // Compare the hotness ranking only: computed_at is a wall-clock
+        // timestamp and loads.downloads is a HashMap whose serialization
+        // order is intentionally unspecified — the contract under test is
+        // that the RANKING is a function of the event set.
+        assert_eq!(
+            serde_json::to_string(r1.hotness.as_ref().unwrap()).unwrap(),
+            serde_json::to_string(r2.hotness.as_ref().unwrap()).unwrap()
+        );
     }
 
     #[test]
