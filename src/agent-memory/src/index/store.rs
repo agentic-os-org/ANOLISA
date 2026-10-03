@@ -849,14 +849,45 @@ impl BM25Store {
 
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
+    ///
+    /// Respects the store's `exclude_cold_on_search` policy: `compact()`
+    /// retires a file by flipping `files.is_cold` but leaves its
+    /// `files_vec` row in place, so the embedding scan must apply the same
+    /// cold filter the BM25 legs do — otherwise every vector search (and
+    /// the vector leg of every hybrid search) would resurface files the
+    /// policy says normal search must not return.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+    }
+
+    /// Vector-only search with explicit cold control (`false` keeps the
+    /// deep-search semantics of [`Self::search_deep`]).
+    pub fn search_vec_with_cold(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_cold: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
-        let mut stmt = self.conn.prepare(
-            "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
-        )?;
+        // Cold-excluding scans switch to an INNER JOIN restricted to warm
+        // rows: retired files keep their embeddings (compaction only marks
+        // `files.is_cold`), and orphaned vectors whose `files` row vanished
+        // must not surface either. The deep path keeps the LEFT JOIN so
+        // cold files remain reachable.
+        let mut stmt = if exclude_cold {
+            self.conn.prepare(
+                "SELECT v.path, v.embedding, f.mtime_ms \
+                 FROM files_vec v JOIN files f ON f.path = v.path \
+                 WHERE f.is_cold = 0",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT v.path, v.embedding, f.mtime_ms \
+                 FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+            )?
+        };
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -925,9 +956,11 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        // Run both search strategies.
+        // Run both search strategies. Both legs receive the same
+        // `exclude_cold` decision: a cold file that the BM25 leg filters
+        // out must not slip back in through the embedding leg.
         let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
@@ -1836,6 +1869,64 @@ mod tests {
         let hits = s.search("unique", 5, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "old.md");
+    }
+
+    #[test]
+    fn vector_and_hybrid_search_exclude_cold_files() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("warm.md", now_ms, 20, "warm topic zeta", None)
+            .unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 50 * 86_400_000,
+            20,
+            "old topic zeta",
+            None,
+        )
+        .unwrap();
+        // Embeddings point in opposite directions; the query below is
+        // colinear with the cold file's embedding, so the vector leg alone
+        // would rank the cold file first.
+        s.upsert_vec("warm.md", &[0.0, 1.0]).unwrap();
+        s.upsert_vec("old.md", &[1.0, 0.0]).unwrap();
+
+        let compacted = s.compact(30).unwrap();
+        assert_eq!(compacted, 1);
+        let (warm, cold) = s.warm_cold_counts().unwrap();
+        assert_eq!((warm, cold), (1, 1));
+
+        // Vector search must respect the exclude_cold_on_search policy:
+        // the colinear-but-cold file must not be returned.
+        let hits = s.search_vec(&[1.0, 0.0], 5).unwrap();
+        assert!(
+            hits.iter().all(|(path, _)| path != "old.md"),
+            "cold file resurfaced via vector search: {hits:?}"
+        );
+
+        // Hybrid search: the BM25 leg matches both files on "zeta" but
+        // filters the cold one, and the vector leg must agree — the cold
+        // file may not re-enter the fused result set.
+        let hits = s.search_hybrid("zeta", &[1.0, 0.0], 5).unwrap();
+        assert!(
+            hits.iter().all(|h| h.path != "old.md"),
+            "cold file resurfaced via hybrid search: {hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.path == "warm.md"),
+            "warm file should still rank: {hits:?}"
+        );
+
+        // Explicit cold-including hybrid (deep semantics) still finds it.
+        let hits = s.search_hybrid_with_cold("zeta", &[1.0, 0.0], 5, false).unwrap();
+        assert!(
+            hits.iter().any(|h| h.path == "old.md"),
+            "deep hybrid should still surface the cold file: {hits:?}"
+        );
     }
 
     #[test]
