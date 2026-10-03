@@ -7,16 +7,18 @@ import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from agent_sec_cli.security_events.orm_base import Base
-from agent_sec_cli.security_events.schema_version import (
-    SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
-)
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import URL, Connection, Engine
 from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateTable
+
+from agent_sec_cli.security_events.orm_base import Base
+from agent_sec_cli.security_events.schema_version import (
+    SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
+)
 
 _SCHEMA_VERSION = SECURITY_EVENTS_SQLITE_SCHEMA_VERSION
 _SQLITE_PRIMARY_CODE_MASK = 0xFF
@@ -49,9 +51,10 @@ def normalize_sqlite_path(path: str | Path) -> Path:
 def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
     """Create a pooled SQLAlchemy engine for a SQLite DB."""
     if read_only:
+        # SQLite parses the database name as a URI, including its path component.
         url = URL.create(
             "sqlite+pysqlite",
-            database=f"file:{path.as_posix()}",
+            database=f"file:{quote(path.as_posix())}",
             query={"mode": "ro", "uri": "true"},
         )
     else:
