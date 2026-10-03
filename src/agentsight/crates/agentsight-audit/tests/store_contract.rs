@@ -736,6 +736,39 @@ fn count_by_rejects_unknown_columns() {
 }
 
 #[test]
+fn count_by_returns_one_row_per_key_when_null_and_unknown_coexist() {
+    // `AuditCountBy.key` documents that absent values are returned as
+    // `unknown`. Grouping by the raw column while projecting the coalesced
+    // value split a NULL destination (file events) and the literal `unknown`
+    // that `DestinationClass::Unknown` writes into two rows with the same key,
+    // so a caller keyed by `key` silently lost one of the two counts.
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    store
+        .insert_event(&fixture_file_action("~/.ssh/id_rsa", 100))
+        .expect("file event should insert");
+
+    let mut unknown_sink = fixture_network_action(200, true);
+    let SecurityEventKind::NetworkAction(action) = &mut unknown_sink.kind else {
+        panic!("fixture must be a network action");
+    };
+    action.destination_class = DestinationClass::Unknown;
+    store
+        .insert_event(&unknown_sink)
+        .expect("network event should insert");
+
+    let counts = store
+        .count_by("destination_class")
+        .expect("grouping should work");
+    let unknown: Vec<_> = counts.iter().filter(|item| item.key == "unknown").collect();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "one key must appear once, got {counts:?}"
+    );
+    assert_eq!(unknown[0].count, 2);
+}
+
+#[test]
 fn summary_and_grouping_use_normalized_event_metadata() {
     let store = SecurityStore::open_in_memory().expect("fixture store should open");
     store
