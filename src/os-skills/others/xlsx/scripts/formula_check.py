@@ -98,6 +98,16 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
     return mapping
 
 
+def _strip_string_literals(formula: str) -> str:
+    """Remove double-quoted string literals so their text is not parsed.
+
+    Excel treats everything between double quotes as literal text, so a
+    sheet or name reference inside a string is not a real reference. A quote
+    inside a literal is escaped by doubling it ("").
+    """
+    return re.sub(r'"(?:[^"]|"")*"', '""', formula)
+
+
 def extract_sheet_refs(formula: str) -> list[str]:
     """
     Extract all sheet names referenced in a formula string.
@@ -109,6 +119,7 @@ def extract_sheet_refs(formula: str) -> list[str]:
     Returns a list of sheet name strings (may contain duplicates if the same
     sheet is referenced multiple times in one formula).
     """
+    formula = _strip_string_literals(formula)
     refs = []
     # Quoted sheet names: 'Sheet Name'!
     for m in re.finditer(r"'([^']+)'!", formula):
@@ -132,8 +143,10 @@ def extract_name_refs(formula: str) -> list[str]:
     This is approximate. False positives are possible; false negatives are rare.
     """
     names = []
-    # Remove quoted sheet references first to avoid false matches
-    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula)
+    # Remove string literals and quoted sheet references first to avoid
+    # treating literal text or sheet names as named ranges.
+    formula_clean = _strip_string_literals(formula)
+    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula_clean)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
