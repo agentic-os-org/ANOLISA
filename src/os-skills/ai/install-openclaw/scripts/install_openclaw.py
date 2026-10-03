@@ -838,7 +838,7 @@ def gateway_port_listeners(args):
             if fuser_cmd
             else None
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         result = None
 
     output = ""
