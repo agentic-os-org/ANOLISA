@@ -1,12 +1,10 @@
 //! Operation-specific lifecycle services and protocol transport dispatch.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokenless_ccr::{RecoveryMethod, StashStore, extract_hash, is_valid_hash, recovery_hashes};
@@ -28,6 +26,8 @@ use crate::{
 
 const MIN_RESPONSE_CHARS: usize = 200;
 const RTK_TIMEOUT: Duration = Duration::from_secs(5);
+
+mod rtk;
 
 /// Per-call behavior resolved by a transport frontend.
 #[derive(Debug, Clone)]
@@ -362,37 +362,7 @@ fn pre_tool_with_optional_rtk(
     if let Some(tool_use_id) = &attribution.tool_use_id {
         child.env("TOKENLESS_TOOL_USE_ID", tool_use_id);
     }
-    let mut child = child.spawn().map_err(|source| RuntimeError::RtkSpawn {
-        path: rtk_path.to_path_buf(),
-        source,
-    })?;
-    let mut stdout_pipe = child.stdout.take().ok_or_else(|| {
-        RuntimeError::RtkOutput(std::io::Error::other("RTK stdout pipe was not created"))
-    })?;
-    let stdout_reader = thread::spawn(move || {
-        let mut stdout = String::new();
-        stdout_pipe.read_to_string(&mut stdout)?;
-        Ok::<_, std::io::Error>(stdout)
-    });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(RuntimeError::RtkWait)? {
-            break status;
-        }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            return Err(RuntimeError::RtkTimeout);
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| {
-            RuntimeError::RtkOutput(std::io::Error::other("RTK stdout reader terminated"))
-        })?
-        .map_err(RuntimeError::RtkOutput)?;
+    let (status, stdout) = rtk::run(child, rtk_path, timeout)?;
     let code = status.code().ok_or(RuntimeError::RtkTerminated)?;
     if matches!(code, 1 | 2) {
         return Ok(pre_tool_passthrough(request));
@@ -978,6 +948,7 @@ pub fn response_operation(outcome: &EntryOutcome) -> Operation {
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1620,6 +1591,7 @@ mod tests {
                 block_and_suggest: false,
             },
         };
+        let started = Instant::now();
         assert!(matches!(
             pre_tool_with_optional_rtk(
                 &request,
@@ -1629,6 +1601,110 @@ mod tests {
                 Duration::from_millis(20)
             ),
             Err(RuntimeError::RtkTimeout)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn pre_tool_deadline_includes_stdout_held_by_a_descendant() {
+        for parent in ["exit 0", "wait"] {
+            let directory = tempdir().unwrap();
+            let rtk = directory.path().join("rtk-inherited-stdout");
+            let pid_file = directory.path().join("descendant.pid");
+            write_executable(
+                &rtk,
+                &format!(
+                    "#!/bin/sh\nsleep 2 &\nprintf '%s' \"$!\" > '{}'\nprintf 'rtk git status'\n{parent}\n",
+                    pid_file.display()
+                ),
+            );
+            let request = PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "git status"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            };
+            let started = Instant::now();
+            let result = pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                Some(&rtk),
+                Some(directory.path()),
+                Duration::from_millis(100),
+            );
+            assert!(
+                matches!(result, Err(RuntimeError::RtkTimeout)),
+                "{parent}: {result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(1), "{parent}");
+
+            #[cfg(target_os = "linux")]
+            {
+                let pid = fs::read_to_string(pid_file).unwrap();
+                let stat_path = format!("/proc/{pid}/stat");
+                let cleanup_started = Instant::now();
+                while let Ok(stat) = fs::read_to_string(&stat_path) {
+                    // An orphan zombie is already stopped and cannot hold a pipe.
+                    let state = stat.rsplit_once(')').unwrap().1.trim_start();
+                    if state.starts_with(['Z', 'X']) {
+                        break;
+                    }
+                    assert!(cleanup_started.elapsed() < Duration::from_secs(1));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pre_tool_collects_descendant_output_before_the_deadline() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("rtk-delayed-output");
+        write_executable(
+            &rtk,
+            "#!/bin/sh\nprintf 'optimized '\n(sleep 0.05; printf 'command') &\nexit 0\n",
+        );
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "original"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        let response = pre_tool_with_optional_rtk(
+            &request,
+            &Attribution::new("test"),
+            Some(&rtk),
+            Some(directory.path()),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(response.arguments["command"], "optimized command");
+    }
+
+    #[test]
+    fn pre_tool_preserves_invalid_utf8_output_errors() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("rtk-invalid-utf8");
+        write_executable(&rtk, "#!/bin/sh\nprintf '\\377'\n");
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "original"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        let result = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RtkOutput(error)) if error.kind() == std::io::ErrorKind::InvalidData
         ));
     }
 
