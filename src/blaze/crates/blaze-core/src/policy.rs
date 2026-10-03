@@ -189,6 +189,25 @@ impl PolicyFile {
             });
         }
 
+        // Validate [quota] memory sizes so malformed, sub-MiB, or overflowing
+        // values fail at policy load time like [vm].memory instead of
+        // surfacing when the cgroup limit is written at sandbox-create time.
+        if let Some(quota) = self.quota.as_ref() {
+            for (field, value) in [
+                ("memory_high", quota.memory_high.as_deref()),
+                ("memory_max", quota.memory_max.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    validate_memory_size(value).map_err(|reason| BlazeError::PolicyEvalError {
+                        reason: format!(
+                            "policy \"{policy_name}\": [quota].{field}: {reason}",
+                            policy_name = self.policy_name
+                        ),
+                    })?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1063,6 +1082,58 @@ cpu_shares = 0
 "#;
         let pf: PolicyFile = toml::from_str(raw).expect("parse");
         assert!(pf.validate().is_err());
+    }
+
+    #[test]
+    fn quota_memory_sizes_are_validated_like_vm_memory() {
+        for (field, value) in [
+            ("memory_high", "banana"),
+            ("memory_max", "banana"),
+            ("memory_high", "512K"),
+            ("memory_max", "18446744073709551616G"),
+        ] {
+            let raw = format!(
+                r#"
+manifest_version = 1
+policy_name = "quota-garbage"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[quota]
+{field} = "{value}"
+"#
+            );
+            let policy: PolicyFile = toml::from_str(&raw).expect("parses");
+            let error = policy
+                .validate()
+                .expect_err("quota memory sizes must be rejected at load like [vm].memory");
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_quota_memory_sizes() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "quota-ok"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[quota]
+cpu_shares = 1024
+memory_high = "2G"
+memory_max = "4G"
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parses");
+        pf.validate().expect("valid quota memory sizes");
     }
 
     #[test]
