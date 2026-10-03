@@ -413,6 +413,61 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+#[test]
+fn search_category_filter_applies_before_limit() {
+    // Regression: the category filter ran client-side AFTER the SQL
+    // `LIMIT top_k`, so when the unfiltered top-k window was filled by one
+    // category (bm25 length/term-frequency normalization routinely does
+    // this), a category filter for the other category returned ZERO hits.
+    // The filter must run in SQL before LIMIT.
+    let (_tmp, svc) = setup();
+    svc.mkdir("facts/lesson").unwrap();
+    svc.mkdir("facts/interest").unwrap();
+    // 12 fact files, 6 per category: lesson files repeat the query terms
+    // (ranked high), interest files mention them once (ranked below).
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/lesson/l{i}.md"),
+            &format!("{}\n", "quantum lattice dynamics ".repeat(8)),
+            false,
+        )
+        .unwrap();
+        svc.write(
+            &format!("facts/interest/i{i}.md"),
+            &format!("quantum lattice dynamics note {i}\nfiller prose on unrelated topics\n"),
+            false,
+        )
+        .unwrap();
+    }
+    assert!(wait_for_index(&svc, 13));
+
+    // Premise: the unfiltered top-5 window is entirely lesson files.
+    let unfiltered = svc
+        .memory_search("quantum lattice dynamics", 5, None, None, None)
+        .unwrap();
+    assert!(
+        unfiltered
+            .iter()
+            .all(|h| h.path.starts_with("facts/lesson/")),
+        "premise violated: unfiltered top-5 = {:?}",
+        unfiltered
+            .iter()
+            .map(|h| h.path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // category=interest must return interest hits filling top_k, not zero.
+    let hits = svc
+        .memory_search("quantum lattice dynamics", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "no non-interest hits allowed, got {:?}",
+        hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+    );
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic

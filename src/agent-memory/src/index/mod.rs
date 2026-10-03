@@ -88,15 +88,17 @@ impl IndexHandle {
         store.search(query, top_k, self.exclude_cold)
     }
 
-    /// Search with agent scope filter.
+    /// Search with agent scope filter and optional fact-category filter
+    /// (applied in SQL before the LIMIT; see `BM25Store::search_scoped`).
     pub fn search_scoped(
         &self,
         query: &str,
         top_k: usize,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
+        store.search_scoped(query, top_k, self.exclude_cold, agent_scope, category)
     }
 
     /// Deep search: include cold files too.

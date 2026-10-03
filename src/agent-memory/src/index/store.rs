@@ -293,7 +293,7 @@ impl BM25Store {
     }
 
     pub fn search(&self, query: &str, top_k: usize, exclude_cold: bool) -> Result<Vec<SearchHit>> {
-        self.search_scoped(query, top_k, exclude_cold, None)
+        self.search_scoped(query, top_k, exclude_cold, None, None)
     }
 
     /// Search with optional agent scope filter.
@@ -302,6 +302,12 @@ impl BM25Store {
     /// - Some("isolated:<agent_id>"): only results tagged with this agent_id
     /// - Some("filter:<agent_id>"): results tagged with this agent_id plus
     ///   any unscoped (agent_id IS NULL) memories
+    ///
+    /// `category`, when set, restricts results to facts filed under
+    /// `facts/<category>/…`. The filter is applied **in SQL before the
+    /// `LIMIT top_k`** on every path below (MATCH, OR retry, LIKE fallback):
+    /// a client-side filter after LIMIT would silently drop the wanted
+    /// category's rows whenever other categories fill the top-k window.
     ///
     /// Returns `InvalidArgument` when the scope prefix is recognised but the
     /// agent_id contains characters that would let it escape the parameterised
@@ -315,6 +321,7 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() {
             return Err(MemoryError::InvalidArgument("empty search query".into()));
@@ -332,6 +339,7 @@ impl BM25Store {
         let superseded_filter = "AND f.is_superseded = 0";
 
         let scope = resolve_agent_scope(agent_scope)?;
+        let category_param = category.map(category_like_pattern);
 
         // The FTS5 `trigram` tokenizer emits one token per 3-character
         // window. A query term shorter than 3 chars (common for CJK words
@@ -343,7 +351,14 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+            return self.search_like(
+                &tokens,
+                top_k,
+                cold_filter,
+                superseded_filter,
+                &scope,
+                category_param.as_deref(),
+            );
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
@@ -353,6 +368,14 @@ impl BM25Store {
         // `/` and `\` are rejected so a client name like `org/team/agent`
         // cannot be confused with a path component elsewhere in the query.
         let (agent_filter, agent_param) = agent_scope_sql_match(&scope);
+        // Category filter binds after the agent param (?4 when the agent
+        // filter is present, else ?3) so the numbered placeholders stay in
+        // binding order.
+        let category_filter = match (&category_param, agent_param.is_some()) {
+            (Some(_), true) => "AND f.path LIKE ?4 ESCAPE '\\'",
+            (Some(_), false) => "AND f.path LIKE ?3 ESCAPE '\\'",
+            (None, _) => "",
+        };
 
         // Join with files to get mtime for time decay.
         let sql = format!(
@@ -364,15 +387,27 @@ impl BM25Store {
                    f.mtime_ms
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
-            WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+            WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter} {category_filter}
             ORDER BY rank
             LIMIT ?2
         "#
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows: Vec<(String, String, f64, String, i64)> = if let Some(ref agent_id) = agent_param
-        {
-            stmt.query_map(params![fts_q, top_k as i64, agent_id], |row| {
+        // Positional bind in placeholder order: ?1 query, ?2 limit, then
+        // the agent (?3) and category (?3/?4) optionals, present only when
+        // their filters are in the SQL text.
+        let mut bind: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(fts_q.clone()),
+            rusqlite::types::Value::Integer(top_k as i64),
+        ];
+        if let Some(ref agent_id) = agent_param {
+            bind.push(rusqlite::types::Value::Text(agent_id.clone()));
+        }
+        if let Some(ref category_pattern) = category_param {
+            bind.push(rusqlite::types::Value::Text(category_pattern.clone()));
+        }
+        let rows: Vec<(String, String, f64, String, i64)> = stmt
+            .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
                 let body: String = row.get(3)?;
                 let mtime_ms: i64 = row.get(4)?;
                 Ok((
@@ -384,22 +419,7 @@ impl BM25Store {
                 ))
             })?
             .flatten()
-            .collect()
-        } else {
-            stmt.query_map(params![fts_q, top_k as i64], |row| {
-                let body: String = row.get(3)?;
-                let mtime_ms: i64 = row.get(4)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    body,
-                    mtime_ms,
-                ))
-            })?
-            .flatten()
-            .collect()
-        };
+            .collect();
 
         // OR fallback: FTS5 implicit-AND semantics return 0 results
         // when any single query term is absent from the corpus.
@@ -424,42 +444,38 @@ impl BM25Store {
                        f.mtime_ms
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter} {category_filter}
                 ORDER BY rank
                 LIMIT ?2
                 "#,
                 cold_filter = cold_filter,
                 superseded_filter = superseded_filter,
                 agent_filter = agent_filter,
+                category_filter = category_filter,
             );
             let mut or_stmt = self.conn.prepare(&or_sql)?;
+            let mut or_bind: Vec<rusqlite::types::Value> = vec![
+                rusqlite::types::Value::Text(or_q),
+                rusqlite::types::Value::Integer(top_k as i64),
+            ];
             if let Some(ref agent_id) = agent_param {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64, agent_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
-            } else {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
+                or_bind.push(rusqlite::types::Value::Text(agent_id.clone()));
             }
+            if let Some(ref category_pattern) = category_param {
+                or_bind.push(rusqlite::types::Value::Text(category_pattern.clone()));
+            }
+            or_stmt
+                .query_map(rusqlite::params_from_iter(or_bind.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .flatten()
+                .collect()
         } else {
             rows
         };
@@ -514,82 +530,96 @@ impl BM25Store {
         cold_filter: &str,
         superseded_filter: &str,
         scope: &AgentScope,
+        category_pattern: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
         let (agent_filter, agent_param) = agent_scope_sql_like(scope);
+        // Category filter before LIMIT on this path too, same as the MATCH
+        // path above: a client-side filter after the pool cap would drop
+        // the wanted category's rows when other categories fill the pool.
+        let category_filter = if category_pattern.is_some() {
+            "AND f.path LIKE ? ESCAPE '\\'"
+        } else {
+            ""
+        };
 
-        let run_query =
-            |joiner: &str, pool: usize, rank_matches: bool| -> Result<Vec<(String, String, i64)>> {
-                let like_clause = tokens
+        let run_query = |joiner: &str,
+                         pool: usize,
+                         rank_matches: bool|
+         -> Result<Vec<(String, String, i64)>> {
+            let like_clause = tokens
+                .iter()
+                .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+                .collect::<Vec<_>>()
+                .join(joiner);
+
+            // OR-joined queries match a superset of rows, so the pool cap
+            // would otherwise truncate arbitrarily (SQLite returns rows in
+            // unspecified order without ORDER BY) and could drop a strong
+            // multi-token match past the LIMIT. Rank by matched-token
+            // count (LIKE evaluates to 0/1 in SQLite) so LIMIT keeps the
+            // strongest rows; exact frequency scoring still happens in
+            // Rust below. The AND path skips this: every row already
+            // matches all tokens, so the count is a constant.
+            let order_clause = if rank_matches {
+                let match_sum = tokens
                     .iter()
-                    .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+                    .map(|_| "(files_fts.body LIKE ? ESCAPE '\\')")
                     .collect::<Vec<_>>()
-                    .join(joiner);
+                    .join(" + ");
+                format!("ORDER BY ({match_sum}) DESC")
+            } else {
+                // No SQL ORDER BY on the AND path: the LIKE path has no
+                // rank, and ordering by mtime would discard high-frequency
+                // old documents before Rust scoring.
+                String::new()
+            };
 
-                // OR-joined queries match a superset of rows, so the pool cap
-                // would otherwise truncate arbitrarily (SQLite returns rows in
-                // unspecified order without ORDER BY) and could drop a strong
-                // multi-token match past the LIMIT. Rank by matched-token
-                // count (LIKE evaluates to 0/1 in SQLite) so LIMIT keeps the
-                // strongest rows; exact frequency scoring still happens in
-                // Rust below. The AND path skips this: every row already
-                // matches all tokens, so the count is a constant.
-                let order_clause = if rank_matches {
-                    let match_sum = tokens
-                        .iter()
-                        .map(|_| "(files_fts.body LIKE ? ESCAPE '\\')")
-                        .collect::<Vec<_>>()
-                        .join(" + ");
-                    format!("ORDER BY ({match_sum}) DESC")
-                } else {
-                    // No SQL ORDER BY on the AND path: the LIKE path has no
-                    // rank, and ordering by mtime would discard high-frequency
-                    // old documents before Rust scoring.
-                    String::new()
-                };
-
-                // Parenthesise the LIKE clause so OR-joined terms don't bind
-                // looser than the trailing AND filters.
-                let sql = format!(
-                    r#"
+            // Parenthesise the LIKE clause so OR-joined terms don't bind
+            // looser than the trailing AND filters.
+            let sql = format!(
+                r#"
                 SELECT f.path, files_fts.body, f.mtime_ms
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
-                WHERE ({like_clause}) {cold_filter} {superseded_filter} {agent_filter}
+                WHERE ({like_clause}) {cold_filter} {superseded_filter} {agent_filter} {category_filter}
                 {order_clause}
                 LIMIT ?
                 "#
-                );
+            );
 
-                let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
-                let mut bind: Vec<rusqlite::types::Value> = like_patterns
-                    .iter()
-                    .map(|s| rusqlite::types::Value::Text(s.clone()))
-                    .collect();
-                if let Some(ref agent_id) = agent_param {
-                    bind.push(rusqlite::types::Value::Text(agent_id.clone()));
+            let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
+            let mut bind: Vec<rusqlite::types::Value> = like_patterns
+                .iter()
+                .map(|s| rusqlite::types::Value::Text(s.clone()))
+                .collect();
+            if let Some(ref agent_id) = agent_param {
+                bind.push(rusqlite::types::Value::Text(agent_id.clone()));
+            }
+            if let Some(pattern) = category_pattern {
+                bind.push(rusqlite::types::Value::Text(pattern.to_string()));
+            }
+            // ORDER BY comes after WHERE in the SQL text, so its pattern
+            // params bind after the WHERE + agent/category params.
+            if rank_matches {
+                for s in &like_patterns {
+                    bind.push(rusqlite::types::Value::Text(s.clone()));
                 }
-                // ORDER BY comes after WHERE in the SQL text, so its pattern
-                // params bind after the WHERE + agent params.
-                if rank_matches {
-                    for s in &like_patterns {
-                        bind.push(rusqlite::types::Value::Text(s.clone()));
-                    }
-                }
-                bind.push(rusqlite::types::Value::Integer(pool.max(1) as i64));
+            }
+            bind.push(rusqlite::types::Value::Integer(pool.max(1) as i64));
 
-                let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })?;
-                Ok(rows.flatten().collect())
-            };
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            Ok(rows.flatten().collect())
+        };
 
         let rows = run_query(" AND ", top_k * 4, false)?;
         // OR fallback mirroring the BM25 MATCH path: AND semantics return
@@ -1170,6 +1200,27 @@ fn like_pattern(token: &str) -> String {
     s
 }
 
+/// Build a `LIKE` pattern matching the fact-category directory
+/// `facts/<category>/…`, backslash-escaping the `%` / `_` / `\` wildcards
+/// (the same escape set as `like_pattern`) so a category name containing
+/// them matches literally. Facts live under `facts/<category>/<ulid>.md`
+/// (the documented consolidation layout), so the pattern is exact.
+fn category_like_pattern(category: &str) -> String {
+    let mut s = String::with_capacity(category.len() + 10);
+    s.push_str("facts/");
+    for c in category.chars() {
+        match c {
+            '_' | '%' | '\\' => {
+                s.push('\\');
+                s.push(c);
+            }
+            other => s.push(other),
+        }
+    }
+    s.push_str("/%");
+    s
+}
+
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
 /// LIKE semantics (ASCII case-insensitive, exact bytes otherwise).
 /// Returned offsets are always char boundaries: a valid UTF-8 needle
@@ -1397,14 +1448,14 @@ mod tests {
 
         // isolated:alpha sees only its own — not beta, not the unscoped row.
         let hits = s
-            .search_scoped("花名", 10, true, Some("isolated:alpha"))
+            .search_scoped("花名", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, vec!["own.md"]);
 
         // filter:alpha sees its own + unscoped, never beta.
         let hits = s
-            .search_scoped("花名", 10, true, Some("filter:alpha"))
+            .search_scoped("花名", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"own.md"));
@@ -2049,7 +2100,7 @@ mod tests {
 
         // isolated:alpha sees ONLY alpha's own — not beta, not legacy.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths.len(), 2, "isolated:alpha should see 2 own memories");
@@ -2058,7 +2109,7 @@ mod tests {
         // filter:alpha sees alpha's own + unscoped (NULL) — legacy included,
         // but never beta's.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("filter:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"u/legacy.md"));
@@ -2072,12 +2123,97 @@ mod tests {
         // widened to shared mode.
         for bad in ["isolated:foo'bar", "filter:a;b", "isolated:with/slash"] {
             let err = s
-                .search_scoped("agent alpha", 10, true, Some(bad))
+                .search_scoped("agent alpha", 10, true, Some(bad), None)
                 .unwrap_err();
             assert!(
                 matches!(err, MemoryError::InvalidArgument(_)),
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn search_scoped_category_filters_before_limit() {
+        // Regression: the category filter ran client-side AFTER the SQL
+        // LIMIT, so a category whose rows ranked below the window (bm25
+        // term-frequency normalization routinely does this) returned zero
+        // hits. The filter must run in SQL before LIMIT.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/lesson/l{i}.md"),
+                100,
+                50,
+                &"quantum lattice dynamics ".repeat(8),
+                None,
+            )
+            .unwrap();
+            s.upsert(
+                &format!("facts/interest/i{i}.md"),
+                100,
+                50,
+                &format!("quantum lattice dynamics note {i}\nfiller prose on unrelated topics"),
+                None,
+            )
+            .unwrap();
+        }
+
+        // Premise: the unfiltered top-5 window is entirely lesson files.
+        let unfiltered = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, None)
+            .unwrap();
+        assert!(
+            unfiltered
+                .iter()
+                .all(|h| h.path.starts_with("facts/lesson/")),
+            "premise violated: {:?}",
+            unfiltered
+                .iter()
+                .map(|h| h.path.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // category=interest fills top_k with interest rows, none other.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+            "no non-interest hits allowed, got {:?}",
+            hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+        );
+
+        // Unknown category: zero rows, straight from SQL.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("nope"))
+            .unwrap();
+        assert!(hits.is_empty());
+
+        // The short-CJK LIKE fallback path filters before its pool cap too.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/lesson/l{i}.md"),
+                100,
+                50,
+                &format!("花名小云{}\n{}", i, "花名小云 ".repeat(8)),
+                None,
+            )
+            .unwrap();
+            s.upsert(
+                &format!("facts/interest/i{i}.md"),
+                100,
+                50,
+                &format!("花名小云{i} 备注"),
+                None,
+            )
+            .unwrap();
+        }
+        let hits = s
+            .search_scoped("花名 小云", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(hits.len(), 5);
+        assert!(hits.iter().all(|h| h.path.starts_with("facts/interest/")));
     }
 }

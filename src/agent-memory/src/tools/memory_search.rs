@@ -73,8 +73,11 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
-            let hits = filter_by_category(hits, category);
+            // The category filter is applied in SQL before the LIMIT so a
+            // category whose rows rank below the top-k window (bm25
+            // term-frequency normalization routinely does this) still gets
+            // a full page of its own hits instead of zero.
+            let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -116,7 +119,7 @@ pub fn memory_search(
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(format!("bm25(fallback from {mode}):len={}", query.len()))
@@ -180,6 +183,9 @@ pub fn memory_search(
 
 /// Filter search hits by category, based on the path prefix.
 /// Facts are stored under facts/<category>/<ulid>.md.
+/// Only the vector/hybrid paths use this: they have no SQL query to push
+/// the filter into, so they filter client-side after the fact. The bm25
+/// paths filter in SQL before the LIMIT (see `search_scoped`).
 fn filter_by_category(
     hits: Vec<crate::index::SearchHit>,
     category: Option<&str>,
