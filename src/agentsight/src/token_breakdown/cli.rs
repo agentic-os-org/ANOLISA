@@ -227,6 +227,13 @@ impl AnalyzeChatmlCommand {
     }
 
     /// Extract response data from SSE events array
+    ///
+    /// The chrome trace stores the raw `data` payload of every SSE event
+    /// verbatim, so the shape depends on the provider the captured call
+    /// spoke to: OpenAI-compatible `choices[].delta`, the Anthropic
+    /// `content_block_*` events, or the OpenAI Responses `response.*`
+    /// events. All three shapes are aggregated; a stream answers in exactly
+    /// one of them, so the accumulators never mix in practice.
     fn extract_response_from_sse(sse_events: &[serde_json::Value]) -> ResponseData {
         let mut content_parts = Vec::new();
         let mut reasoning_parts = Vec::new();
@@ -235,6 +242,16 @@ impl AnalyzeChatmlCommand {
         // first fragment) and the arguments stream as string fragments that
         // must be concatenated per index before rendering "name: arguments".
         let mut tool_calls: Vec<(usize, String, String)> = Vec::new();
+        // Anthropic tool_use blocks, keyed by content-block index: the id and
+        // name arrive in `content_block_start`, the arguments stream as
+        // `input_json_delta` fragments.
+        let mut anthropic_calls: std::collections::BTreeMap<u64, (String, String, String)> =
+            std::collections::BTreeMap::new();
+        // Responses API: one function call in flight at a time (parallel calls
+        // are flushed when the next one starts, matching the analyzer's
+        // aggregator).
+        let mut responses_call: Option<(String, String, String)> = None;
+        let mut responses_calls: Vec<String> = Vec::new();
 
         for event in sse_events {
             // Parse the data field which contains JSON string
@@ -246,6 +263,123 @@ impl AnalyzeChatmlCommand {
 
                 // Parse the JSON data
                 if let Ok(data_json) = serde_json::from_str::<serde_json::Value>(data_str) {
+                    let event_type = data_json.get("type").and_then(|v| v.as_str());
+                    match event_type {
+                        // ── Anthropic streaming shapes ────────────────────
+                        Some("content_block_start") => {
+                            if let Some(block) = data_json.get("content_block") {
+                                if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                                    let index = data_json
+                                        .get("index")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    anthropic_calls.entry(index).or_insert_with(|| {
+                                        (
+                                            block
+                                                .get("id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                            block
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                            String::new(),
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                        Some("content_block_delta") => {
+                            let index =
+                                data_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if let Some(delta) = data_json.get("delta") {
+                                match delta.get("type").and_then(|v| v.as_str()) {
+                                    Some("text_delta") => {
+                                        if let Some(text) =
+                                            delta.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("thinking_delta") => {
+                                        if let Some(text) =
+                                            delta.get("thinking").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                reasoning_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("input_json_delta") => {
+                                        if let Some(fragment) =
+                                            delta.get("partial_json").and_then(|v| v.as_str())
+                                        {
+                                            if let Some((_, _, args)) =
+                                                anthropic_calls.get_mut(&index)
+                                            {
+                                                args.push_str(fragment);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // ── OpenAI Responses shapes ───────────────────────
+                        Some("response.output_text.delta") => {
+                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
+                                if !delta.is_empty() {
+                                    content_parts.push(delta.to_string());
+                                }
+                            }
+                        }
+                        Some("response.output_item.added") => {
+                            if let Some(item) = data_json.get("item") {
+                                if item.get("type").and_then(|v| v.as_str())
+                                    == Some("function_call")
+                                {
+                                    // Parallel tool use: flush the in-flight call
+                                    // before starting the next.
+                                    if let Some((_, name, args)) = responses_call.take() {
+                                        if !name.is_empty() || !args.is_empty() {
+                                            responses_calls.push(format!("{name}: {args}"));
+                                        }
+                                    }
+                                    responses_call = Some((
+                                        item.get("call_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        item.get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        String::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some("response.function_call_arguments.delta") => {
+                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
+                                if let Some((_, _, args)) = responses_call.as_mut() {
+                                    args.push_str(delta);
+                                }
+                            }
+                        }
+                        Some("response.function_call_arguments.done") => {
+                            if let Some((_, name, args)) = responses_call.take() {
+                                if !name.is_empty() || !args.is_empty() {
+                                    responses_calls.push(format!("{name}: {args}"));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
                     // Extract content and reasoning_content from choices[].delta
                     if let Some(choices) = data_json.get("choices").and_then(|v| v.as_array()) {
                         for choice in choices {
@@ -307,7 +441,7 @@ impl AnalyzeChatmlCommand {
             }
         }
 
-        let tool_calls: Vec<String> = {
+        let mut tool_calls: Vec<String> = {
             let mut calls = tool_calls;
             calls.sort_by_key(|(index, _, _)| *index);
             calls
@@ -316,6 +450,22 @@ impl AnalyzeChatmlCommand {
                 .map(|(_, name, arguments)| format!("{name}: {arguments}"))
                 .collect()
         };
+
+        // Anthropic tool_use blocks, in content-block order.
+        for (_, (_, name, args)) in anthropic_calls {
+            if !name.is_empty() || !args.is_empty() {
+                tool_calls.push(format!("{name}: {args}"));
+            }
+        }
+
+        // Responses calls in stream order, then a still-in-flight call
+        // (truncated stream without the done event).
+        tool_calls.extend(responses_calls);
+        if let Some((_, name, args)) = responses_call {
+            if !name.is_empty() || !args.is_empty() {
+                tool_calls.push(format!("{name}: {args}"));
+            }
+        }
 
         ResponseData {
             content: content_parts,
@@ -405,5 +555,106 @@ mod tests {
         assert_eq!(resp.content, vec!["hi ".to_string(), "there".to_string()]);
         assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
         assert_eq!(resp.tool_calls, vec!["noop: ".to_string()]);
+    }
+
+    /// The chrome trace stores the raw SSE `data` payloads verbatim, so an
+    /// Anthropic trace carries `content_block_*` events. Before the protocol
+    /// shapes were aggregated, such a response broke down as completely
+    /// empty: zero content, zero reasoning, zero tool calls — silently.
+    #[test]
+    fn sse_anthropic_stream_is_extracted() {
+        let events = vec![
+            sse(
+                r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"lo"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"Beijing\"}"}}"#,
+            ),
+            sse(
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":42}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.content,
+            vec!["Hel".to_string(), "lo".to_string()],
+            "text deltas must be extracted"
+        );
+        assert_eq!(resp.reasoning_content.as_deref(), Some("pondering"));
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()],
+            "input_json_delta fragments must concatenate into the arguments"
+        );
+    }
+
+    /// Same story for the OpenAI Responses protocol (codex 0.137+ via
+    /// /v1/responses): its `response.*` events previously produced an empty
+    /// breakdown.
+    #[test]
+    fn sse_responses_stream_is_extracted() {
+        let events = vec![
+            sse(r#"{"type":"response.created","response":{"id":"resp_1"}}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"Hel"}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"lo"}"#),
+            sse(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}}"#,
+            ),
+            sse(r#"{"type":"response.function_call_arguments.delta","delta":"{\"path\":"}"#),
+            sse(r#"{"type":"response.function_call_arguments.delta","delta":"\"/tmp/a.md\"}"}"#),
+            sse(
+                r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(resp.reasoning_content, None);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()]
+        );
+    }
+
+    /// Parallel Responses calls without per-call done events must all
+    /// survive, in stream order.
+    #[test]
+    fn sse_responses_parallel_tool_calls_survive_without_done() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"first_tool"}}"#,
+            ),
+            sse(r#"{"type":"response.function_call_arguments.delta","delta":"{}"}"#),
+            sse(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_2","name":"second_tool"}}"#,
+            ),
+            sse(r#"{"type":"response.function_call_arguments.delta","delta":"{}"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
     }
 }
