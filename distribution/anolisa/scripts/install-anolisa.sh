@@ -850,7 +850,19 @@ fi
 # can inspect and clean up.
 promote_to_prefix() {
   log "promoting staging → $ANOLISA_PREFIX"
+  # The prefix may not exist yet. Create the missing levels under a 022 umask
+  # so they come out 0755 instead of at the caller's umask: a freshly created
+  # prefix under a restrictive umask (e.g. 077) would be 0700 and the staged
+  # 0755 paths below it would stay unreachable for other users. `mkdir -p`
+  # never changes an existing directory's mode, so a pre-existing ancestor
+  # keeps its own mode — and unlike a chmod walk over the raw path string,
+  # this cannot follow `.`/`..` components (`fresh/../target`) and normalize a
+  # directory outside the prefix.
+  local previous_umask
+  previous_umask="$(umask)"
+  umask 022
   mkdir -p "$ANOLISA_PREFIX"
+  umask "$previous_umask"
   # Copy the entire staged layout (bin/, share/) into the final prefix.
   # `cp -a` preserves mode/timestamps. We exclude the .download workspace
   # by copying only the top-level entries we care about.
