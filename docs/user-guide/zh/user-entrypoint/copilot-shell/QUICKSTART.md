@@ -15,6 +15,12 @@
 
 ## 第 1 步：安装
 
+### RPM 安装（推荐）
+
+```bash
+sudo yum install copilot-shell
+```
+
 ### 从源码构建
 
 需要 [Node.js 20+](https://nodejs.org/download)，可通过 `node -v` 检查版本。
@@ -65,6 +71,33 @@ cosh
 > [!NOTE]
 >
 > 也可以使用别名 `co` 或 `copilot` 来代替 `cosh`。
+
+## 第 4 步：启用沙箱 hooks（推荐）
+
+Copilot Shell 内置了 sandbox-guard hooks，会拦截工具调用并执行安全策略——
+防止未经授权的文件系统访问或危险操作。在安装之前，这些 hooks 不会生效。
+
+在 Copilot Shell 内运行：
+
+```
+/hooks install
+```
+
+该命令会将内置的 `sandbox-guard.py` 脚本复制到 `~/.copilot-shell/hooks/`，
+并注册到你的用户设置中。只需运行一次——配置会被保存，并在会话之间持久保留。
+
+> [!NOTE]
+>
+> 此步骤需要 `agent-sec-core`（linux-sandbox）安装在
+> `/usr/local/bin/linux-sandbox`。检测到危险命令时，`sandbox-guard.py`
+> 会将其包装进 `linux-sandbox` 二进制中执行。如果你使用默认的
+> `./scripts/build-all.sh` 构建 ANOLISA，`agent-sec-core` 已包含在内并会
+> 自动安装。
+
+> [!TIP]
+>
+> 要验证 hooks 是否已启用，可在 Copilot Shell 内运行 `/hooks list`，
+> 应看到 `sandbox-guard` 和 `sandbox-failure-handler` 显示为已启用。
 
 ## 与 Copilot Shell 对话
 
@@ -174,12 +207,44 @@ Copilot Shell 会：
 
 输入 `exit` 返回 Copilot Shell 会话。
 
+### 其他常见工作流
+
+**重构代码**
+
+```
+把认证模块从回调重构为 async/await
+```
+
+**编写测试**
+
+```
+为计算器函数编写单元测试
+```
+
+**更新文档**
+
+```
+更新 README 的安装说明
+```
+
+**代码审查**
+
+```
+审查我的更改并提出改进建议
+```
+
+> [!TIP]
+>
+> **记住**：Copilot Shell 是你的 AI 结对程序员和运维助手。像与一位
+> 乐于助人的同事交谈一样与它对话——描述你想达成的目标，它会帮你实现。
+
 ## 常用命令
 
 | 命令 | 功能 | 示例 |
 |------|------|------|
 | `cosh` | 启动 Copilot Shell | `cosh` |
 | `/auth` | 切换认证方式 | `/auth` |
+| `/hooks install` | 安装 sandbox-guard hooks（安装后运行一次） | `/hooks install` |
 | `/hooks list` | 查看所有已注册 hooks 及状态 | `/hooks list` |
 | `/help` | 显示帮助 | `/help` 或 `/?` |
 | `/bash` | 进入交互式 shell | `/bash` |
@@ -199,7 +264,33 @@ Copilot Shell 会：
 - 按 ↑ 查看历史命令
 - 输入 `/` 查看所有 slash 命令
 
+## 新手技巧
+
+**描述要具体**
+
+- 不要说：“修复这个 bug”
+- 试试：“修复用户输错凭据后看到白屏的登录 bug”
+
+**使用分步指令**
+
+- 把复杂任务拆成步骤：
+
+```
+1. 为用户资料创建一张新的数据库表
+2. 创建用于获取和更新用户资料的 API 端点
+3. 构建一个允许用户查看和编辑信息的网页
+```
+
+**先让 Copilot Shell 探索**
+
+- 在修改之前，先让它了解你的代码：
+
+```
+分析数据库 schema
+```
+
 ## 获取帮助
 
 - **在 Copilot Shell 内**：输入 `/help` 或直接问"怎么做……"
+- **文档**：浏览[用户指南](../../README.md)
 - **问题反馈**：在项目仓库提交 Issue
