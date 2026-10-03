@@ -18,6 +18,20 @@ pub(crate) const SKIP: &[&str] = &[
     "dist",
     "node_modules",
 ];
+/// Directories excluded from scanner coverage but still included in signed
+/// content capture (content only excludes `.git`/`.skill-meta`): their bytes
+/// are hashed, signed and published while no scanner examines them. Must stay
+/// a subset of SKIP; recording them lets the static scanner surface the gap.
+pub(crate) const SCAN_ONLY_SKIP: &[&str] = &[
+    ".pytest_cache",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+];
+/// Cap on recorded scan-only skips; the coverage finding reports the overflow
+/// as a count instead of listing unboundedly many paths.
+pub(crate) const MAX_SKIPPED_DIRS: usize = 64;
 pub(crate) const MAX_FILES: usize = 2000;
 pub(crate) const MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_DEPTH: usize = 32;
@@ -44,6 +58,9 @@ pub(crate) struct ScanTree {
     directory: File,
     pub entries: Vec<Entry>,
     pub errors: Vec<serde_json::Value>,
+    /// Relative paths of scan-only skipped directories (bounded by
+    /// [`MAX_SKIPPED_DIRS`]); empty when coverage and content agree.
+    pub skipped: Vec<String>,
     pub root: PathBuf,
     visited: usize,
     file_count: usize,
@@ -73,6 +90,7 @@ impl ScanTree {
             directory,
             entries: Vec::new(),
             errors: Vec::new(),
+            skipped: Vec::new(),
             root: root.into(),
             visited: 0,
             file_count: 0,
@@ -132,6 +150,14 @@ impl ScanTree {
             let kind = match FileType::from_raw_mode(stat.st_mode) {
                 FileType::Directory => {
                     if SKIP.contains(&name.as_str()) {
+                        // Record only scan-only skips: content capture also
+                        // excludes `.git`/`.skill-meta`, so those directories
+                        // hide nothing that ends up signed and published.
+                        if SCAN_ONLY_SKIP.contains(&name.as_str())
+                            && self.skipped.len() < MAX_SKIPPED_DIRS
+                        {
+                            self.skipped.push(path.clone());
+                        }
                         continue;
                     }
                     subdirectories.push((name, path));
