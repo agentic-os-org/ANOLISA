@@ -270,7 +270,10 @@ impl SkillStore {
     ///
     /// - `primary_list = None` -> (all_skills, empty), no filtering.
     /// - `primary_list = Some(list)` -> skills in list become primary (filtered
-    ///   to those present in store); all others become secondary.
+    ///   to those present in store); all others become secondary. Duplicate
+    ///   names in the list collapse to the first occurrence, matching the set
+    ///   semantics the secondary computation already applies — a view listing
+    ///   the same skill twice must not list it twice in `/skills`.
     pub fn split_primary(&self, primary_list: Option<&[String]>) -> (Vec<String>, Vec<String>) {
         match primary_list {
             None => {
@@ -278,9 +281,11 @@ impl SkillStore {
                 (all, Vec::new())
             }
             Some(list) => {
+                let mut seen = std::collections::HashSet::new();
                 let primary: Vec<String> = list
                     .iter()
                     .filter(|name| self.skills.contains_key(name.as_str()))
+                    .filter(|name| seen.insert(name.as_str()))
                     .cloned()
                     .collect();
                 let primary_set: std::collections::HashSet<&str> =
@@ -777,5 +782,27 @@ mod tests {
             store.get("linknested").is_none(),
             "symlinked nested skill must not load"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // split_primary duplicate-list tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_primary_dedups_primary_list_preserving_order() {
+        let mut store = SkillStore::new();
+        for name in ["github", "notion", "other"] {
+            store.upsert(create_test_entry(name, "skill", vec![]));
+        }
+
+        let list = vec![
+            "github".to_string(),
+            "github".to_string(),
+            "other".to_string(),
+        ];
+        let (primary, secondary) = store.split_primary(Some(&list));
+
+        assert_eq!(primary, vec!["github".to_string(), "other".to_string()]);
+        assert_eq!(secondary, vec!["notion".to_string()]);
     }
 }

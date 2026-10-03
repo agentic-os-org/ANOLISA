@@ -259,4 +259,27 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert!(ViewsConfig::load(dir.path()).is_none());
     }
+
+    #[test]
+    fn effective_default_skills_lists_duplicate_view_entries_once() {
+        let mut cfg = make_config();
+        cfg.views[0].skills = vec![
+            "github".to_string(),
+            "github".to_string(),
+            "notion".to_string(),
+        ];
+        let mut store = crate::store::SkillStore::new();
+        for name in ["github", "notion", "new-skill"] {
+            store.upsert(crate::parser::parse_skill_md("# Fixture", name));
+        }
+
+        assert_eq!(
+            cfg.effective_default_skills(&store),
+            vec![
+                "github".to_string(),
+                "notion".to_string(),
+                "new-skill".to_string()
+            ]
+        );
+    }
 }
