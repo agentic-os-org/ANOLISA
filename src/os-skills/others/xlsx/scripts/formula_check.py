@@ -178,10 +178,35 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
         return results
 
     with z:
-        sheet_names = get_sheet_names(z)
-        sheet_files = get_sheet_files(z)
+        try:
+            sheet_names = get_sheet_names(z)
+            sheet_files = get_sheet_files(z)
+            defined_names = get_defined_names(z)
+        except (KeyError, ET.ParseError) as e:
+            # Not an OOXML package (missing/corrupt workbook parts) — the zip
+            # opened but there is nothing checkable inside.
+            results["errors"].append({"type": "file_error", "message": str(e)})
+            results["error_count"] = 1
+            return results
         valid_sheet_names = set(sheet_names.values())
-        defined_names = get_defined_names(z)
+
+        # A sheet filter that matches nothing means zero sheets would be
+        # checked — that is an operator error (typo'd name), never a clean PASS.
+        if sheet_filter and sheet_filter not in valid_sheet_names:
+            available = sorted(valid_sheet_names)
+            results["errors"].append(
+                {
+                    "type": "sheet_not_found",
+                    "sheet_filter": sheet_filter,
+                    "available_sheets": available,
+                    "message": (
+                        f"Sheet filter '{sheet_filter}' matched no sheet in the "
+                        f"workbook; available sheets: {available}"
+                    ),
+                }
+            )
+            results["error_count"] += 1
+            return results
 
         for rid, sheet_name in sheet_names.items():
             # Apply sheet filter if requested
@@ -398,6 +423,8 @@ def main() -> None:
                 print(f"  [FAIL] [{e['sheet']}!{e['cell']}] malformed error cell: {e['detail']}")
             elif e["type"] == "file_error":
                 print(f"  [FAIL] File error: {e['message']}")
+            elif e["type"] == "sheet_not_found":
+                print(f"  [FAIL] {e['message']}")
         print()
 
     if results["error_count"] == 0:
