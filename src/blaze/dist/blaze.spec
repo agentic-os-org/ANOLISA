@@ -12,6 +12,9 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
+# %systemd_post/%systemd_preun/%systemd_postun scriptlet macros expand at
+# rpmbuild time
+BuildRequires:  systemd-rpm-macros
 
 Provides:       anolisa-component(blaze)
 
@@ -34,11 +37,14 @@ install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}%{_sysconfdir}/anolisa/blaze/policies
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/blaze
 install -d -m 0755 %{buildroot}%{_docdir}/blaze
-install -d -m 0755 %{buildroot}/run/blaze
+install -d -m 0755 %{buildroot}%{_tmpfilesdir}
 install -d -m 0755 %{buildroot}/var/lib/blaze
 
 install -Dm755 target/release/blazed %{buildroot}%{_libexecdir}/anolisa/blazed
 install -p -m 0644 dist/blazed.service %{buildroot}%{_unitdir}/
+# Recreate /run/blaze (tmpfs) at boot; the shipped conf's own header names
+# /usr/lib/tmpfiles.d/blaze.conf as its destination.
+install -Dm0644 dist/tmpfiles-blaze.conf %{buildroot}%{_tmpfilesdir}/blaze.conf
 install -Dm644 .anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/blaze/component.toml
 install -p -m 0644 examples/config.toml %{buildroot}%{_sysconfdir}/anolisa/blaze/config.toml
 install -p -m 0644 examples/policies/agent-rl.toml %{buildroot}%{_sysconfdir}/anolisa/blaze/policies/
@@ -64,8 +70,8 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/blaze/
 %config(noreplace) %{_sysconfdir}/anolisa/blaze/policies/agent-rl.toml
 %config(noreplace) %{_sysconfdir}/anolisa/blaze/policies/agent-tool.toml
 %{_unitdir}/blazed.service
+%{_tmpfilesdir}/blaze.conf
 %{_datadir}/anolisa/components/blaze/component.toml
-%dir /run/blaze
 %dir /var/lib/blaze
 %doc %{_docdir}/blaze/README.md
 %doc %{_docdir}/blaze/README_zh.md
