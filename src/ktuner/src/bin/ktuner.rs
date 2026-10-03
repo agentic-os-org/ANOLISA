@@ -171,17 +171,32 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
         return Ok(0);
     }
 
-    let applied = tuner::apply_quiet(&recs)?;
+    let outcome = tuner::apply_quiet(&recs)?;
     let (_, eval_after) = gather()?;
     let score_after = eval_after.score();
 
+    let failed: Vec<serde_json::Value> = outcome
+        .failed
+        .iter()
+        .map(|f| json!({ "param": f.param, "error": f.error }))
+        .collect();
+    // Disjoint from `failed`: parameters the kernel accepted but adjusted.
+    // They ARE applied (with the kernel's value) and are recorded in the
+    // rollback ledger / sysctl.d; the note makes the delta visible (#4160).
+    let clamped = serde_json::to_value(&outcome.clamped)?;
     let output = json!({
-        "applied": applied,
+        "applied": outcome.applied,
+        "failed": failed,
+        "clamped": clamped,
         "score_before": score_before,
         "score_after": score_after,
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(0)
+    // Mirror `check`'s exit convention (1 = attention needed): a tune that
+    // failed some or all writes must not report success — the old code exited
+    // 0 even when every write failed (e.g. read-only /proc/sys in a container).
+    // A clamped write is NOT a failure: the change took effect.
+    Ok(if outcome.failed.is_empty() { 0 } else { 1 })
 }
 
 fn cmd_fix(param: &str) -> Result<i32> {
@@ -203,15 +218,21 @@ fn cmd_fix(param: &str) -> Result<i32> {
             "parameter {param} is dangerous to write at runtime, persist to /etc/sysctl.d instead"
         );
     }
-    tuner::apply_one(rec)?;
+    let fix_outcome = tuner::apply_one(rec)?;
     let (_, eval_after) = gather()?;
-    let output = json!({
+    let mut output = json!({
         "fixed": param,
         "previous": rec.current_value,
-        "applied": rec.recommended_value,
+        // What the kernel actually took — equals the recommendation unless
+        // the kernel clamped/normalized the write (#4160).
+        "applied": fix_outcome.effective,
         "score_after": eval_after.score(),
         "remaining": eval_after.recommendations.len(),
     });
+    if fix_outcome.clamped {
+        output["requested"] = json!(rec.recommended_value);
+        output["note"] = json!("内核实际生效值与推荐值不同（已按实际生效值记录并持久化，可回滚）");
+    }
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(0)
 }

@@ -26,20 +26,56 @@ struct RollbackData {
     entries: BTreeMap<String, RollbackEntry>,
 }
 
-pub fn apply(recommendations: &[Recommendation]) -> Result<usize> {
+/// One parameter that failed to apply, with the write/verify error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyFailure {
+    pub param: String,
+    pub error: String,
+}
+
+/// One parameter the kernel accepted but with a value different from the
+/// request. The parameter IS applied — with the kernel's value — so the
+/// delta is surfaced as a note rather than a failure (#4160).
+///
+/// Boundary case, deliberate: a write the kernel silently IGNORES (accepts,
+/// value unchanged) records `applied = old` — strictly better than the old
+/// invisibility, and sysctl.d only gains a no-op line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClampNote {
+    pub param: String,
+    pub requested: String,
+    pub effective: String,
+}
+
+/// Outcome of applying a batch: how many params were applied, which failed
+/// with why, and which the kernel accepted with an adjusted value. Mirrors
+/// `RollbackOutcome` so `tune` can report partial failure the way `rollback`
+/// already does — the previous return type (a bare count) could not represent
+/// failures at all, so quiet mode dropped them entirely. `clamped` is disjoint
+/// from `failed`: a rejected write is a failure, an accepted-but-adjusted
+/// write is applied with a note.
+pub struct ApplyOutcome {
+    pub applied: usize,
+    pub failed: Vec<ApplyFailure>,
+    pub clamped: Vec<ClampNote>,
+}
+
+pub fn apply(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, false)
 }
 
-pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<usize> {
+pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, true)
 }
 
-fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize> {
+fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyOutcome> {
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
+    let mut failed: Vec<ApplyFailure> = Vec::new();
+    let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
         match apply_single(rec) {
-            Ok(()) => {
+            Ok(outcome) => {
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} → {}",
@@ -47,12 +83,36 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
                         i + 1,
                         total,
                         rec.param,
-                        rec.recommended_value
+                        outcome.effective
                     );
+                    if outcome.clamped {
+                        // The write landed but the kernel adjusted it; the
+                        // effective value is what gets recorded, so the
+                        // operator sees the delta here (#4160).
+                        println!(
+                            "      {} 内核实际生效 {}（期望 {}，已被内核调整并按实际值记录）",
+                            "⚠".yellow(),
+                            outcome.effective,
+                            rec.recommended_value
+                        );
+                    }
                 }
-                applied_recs.push(rec.clone());
+                if outcome.clamped {
+                    clamped.push(ClampNote {
+                        param: rec.param.clone(),
+                        requested: rec.recommended_value.clone(),
+                        effective: outcome.effective.clone(),
+                    });
+                }
+                // The ledger and sysctl.d must describe live reality: record
+                // the value the kernel actually took, not the request (#4160).
+                applied_recs.push(rec_with_effective(rec, &outcome));
             }
             Err(e) => {
+                failed.push(ApplyFailure {
+                    param: rec.param.clone(),
+                    error: e.to_string(),
+                });
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} : {}",
@@ -81,28 +141,49 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
         println!();
         println!("  没有配置被成功应用");
     }
-    Ok(applied_recs.len())
+    Ok(ApplyOutcome {
+        applied: applied_recs.len(),
+        failed,
+        clamped,
+    })
 }
 
 /// Apply a single recommendation with rollback recording and persistence, but
 /// without apply()'s progress output — used by `ktuner fix` so a single fix is
-/// just as reversible (and survives reboot) as `tune`.
-pub fn apply_one(rec: &Recommendation) -> Result<()> {
-    apply_single(rec)?;
-    save_rollback(std::slice::from_ref(rec))?;
+/// just as reversible (and survives reboot) as `tune`. Returns the write
+/// outcome so `fix` can report the value the kernel actually took.
+pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
+    let outcome = apply_single(rec)?;
+    // Same recording rule as the batch path: the ledger and sysctl.d carry
+    // the value that is actually live, not the requested one (#4160).
+    let applied = rec_with_effective(rec, &outcome);
+    save_rollback(std::slice::from_ref(&applied))?;
     persist_from_rollback()?;
-    Ok(())
+    Ok(outcome)
 }
 
-fn apply_single(rec: &Recommendation) -> Result<()> {
+fn apply_single(rec: &Recommendation) -> Result<WriteOutcome> {
     write_and_verify(&rec.param, &rec.recommended_value)
+}
+
+/// The result of a verified write: the value now live in the kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteOutcome {
+    /// What the kernel actually took: the read-back value when it is
+    /// observable (whether it matches the request or was clamped), the
+    /// request itself for write-only tunables where no read-back exists.
+    pub effective: String,
+    /// True when the write was accepted but the live value differs from the
+    /// request. Callers must still record `effective` — the change is real —
+    /// and surface the divergence (#4160).
+    pub clamped: bool,
 }
 
 /// Write `value` to the kernel path for `param` and verify it took effect by
 /// reading it back. This is the single choke point for every live parameter
 /// write (tune / fix / import all route through here), so the code-execution
 /// deny-list is enforced here too as defense-in-depth — see is_forbidden_param.
-pub fn write_and_verify(param: &str, value: &str) -> Result<()> {
+pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
     if is_forbidden_param(param) {
         anyhow::bail!("拒绝写入可执行代码的内核参数 {param}（core_pattern / modprobe 等）");
     }
@@ -124,41 +205,105 @@ pub fn write_and_verify(param: &str, value: &str) -> Result<()> {
 
     // Verify by reading back. Some tunables are write-only (mode 0200, e.g.
     // vm.drop_caches / vm.compact_memory): the write is accepted but the read
-    // fails — treat that as success, not a spurious verify failure, since the
-    // kernel took the write.
+    // fails — treat that as success with the request as the record, since the
+    // kernel took the write and no read-back exists to diverge from.
     let readback = match fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            return Ok(WriteOutcome {
+                effective: value.to_string(),
+                clamped: false,
+            })
+        }
     };
 
-    let readback_trimmed = readback.trim();
-    if !readback_matches(value, readback_trimmed) {
-        anyhow::bail!("验证失败: 期望 '{value}', 实际 '{readback_trimmed}'");
+    // A mismatch is NOT a failure (#4160): fs::write already succeeded, so
+    // the live value changed. Return what the kernel actually took so every
+    // caller records it instead of leaving an untracked live change that the
+    // rollback ledger cannot undo and sysctl.d does not persist.
+    match classify_readback(value, readback.trim()) {
+        ReadbackVerdict::Verified { effective } => Ok(WriteOutcome {
+            effective,
+            clamped: false,
+        }),
+        ReadbackVerdict::Clamped { effective } => Ok(WriteOutcome {
+            effective,
+            clamped: true,
+        }),
     }
-
-    Ok(())
 }
 
-/// Whether a sysfs/sysctl read-back indicates `value` took effect. sysfs "list"
-/// files (block scheduler, transparent_hugepage/enabled|defrag, ...) echo every
-/// option and mark the ACTIVE one in brackets, e.g. "always madvise [never]" —
-/// the selected value is inside `[ ]`, not necessarily first. So whenever the
-/// read-back contains a bracketed token we look for `[value]`; otherwise we
-/// compare tokens (tolerating a single written value against a multi-token
-/// read-back that leads with it). Previously only params literally named
-/// "scheduler" got the bracket-aware path, so THP writes were mis-reported as
-/// verify failures.
-fn readback_matches(value: &str, readback_trimmed: &str) -> bool {
+/// Classification of a read-back against the value that was written. Pure
+/// (strings in, verdict out) so every verify decision — including the
+/// kernel's clamping behaviour — is unit-testable without a writable
+/// /proc/sys.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadbackVerdict {
+    /// The read-back confirms the write took effect as requested. `effective`
+    /// is what to record: the request for bracket-list and leading-token
+    /// files, the kernel's own rendering for an exact scalar match.
+    Verified { effective: String },
+    /// The write was ACCEPTED but the live value differs from the request:
+    /// the kernel clamped or normalized it (e.g. an out-of-range
+    /// net.core.rmem_max settles at a bound). The change did happen, so
+    /// `effective` must reach the rollback ledger and sysctl.d; only the
+    /// requested-vs-actual delta is surfaced as a note (#4160).
+    Clamped { effective: String },
+}
+
+/// Whether a sysfs/sysctl read-back confirms `value`, and if not, what the
+/// kernel actually took. sysfs "list" files (block scheduler,
+/// transparent_hugepage/enabled|defrag, ...) echo every option and mark the
+/// ACTIVE one in brackets, e.g. "always madvise [never]" — the selected value
+/// is inside `[ ]`, not necessarily first, so a token that merely appears
+/// unbracketed does NOT count. Otherwise we compare tokens (tolerating a
+/// single written value against a multi-token read-back that leads with it —
+/// a confirmed write, not a clamp).
+fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
     if readback_trimmed.contains('[') {
-        return readback_trimmed.contains(&format!("[{value}]"));
+        if readback_trimmed.contains(&format!("[{value}]")) {
+            return ReadbackVerdict::Verified {
+                effective: value.to_string(),
+            };
+        }
+        // The active option differs from the request: the write landed on the
+        // bracketed option, which is the value to record.
+        let active = readback_trimmed
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+            .unwrap_or_default()
+            .to_string();
+        return ReadbackVerdict::Clamped { effective: active };
     }
     let rec_tokens: Vec<&str> = value.split_whitespace().collect();
     let read_tokens: Vec<&str> = readback_trimmed.split_whitespace().collect();
-    if rec_tokens.len() == 1 && read_tokens.len() > 1 {
-        read_tokens.first() == rec_tokens.first()
-    } else {
-        rec_tokens == read_tokens
+    if rec_tokens == read_tokens {
+        return ReadbackVerdict::Verified {
+            effective: readback_trimmed.to_string(),
+        };
     }
+    if rec_tokens.len() == 1 && read_tokens.len() > 1 && read_tokens.first() == rec_tokens.first() {
+        // Leading-token match (e.g. write "bbr", read back "bbr cubic"):
+        // a confirmed write of the REQUEST — the kernel only echoed extra
+        // tokens it appends to its rendering. Record the request: the full
+        // multi-token read-back is not a value the kernel can take back on
+        // rollback or that sysctl.d can persist for a scalar param.
+        return ReadbackVerdict::Verified {
+            effective: value.to_string(),
+        };
+    }
+    ReadbackVerdict::Clamped {
+        effective: readback_trimmed.to_string(),
+    }
+}
+
+/// The ledger/persistence view of `rec` after a write: `recommended_value`
+/// becomes the value the kernel actually took, so the rollback ledger and
+/// sysctl.d describe reality (#4160). Every other field is preserved verbatim.
+fn rec_with_effective(rec: &Recommendation, outcome: &WriteOutcome) -> Recommendation {
+    let mut applied = rec.clone();
+    applied.recommended_value = outcome.effective.clone();
+    applied
 }
 
 /// Drop `..`, `.` and empty path components so a parameter name can never
@@ -406,12 +551,15 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
     }
     validate_import_value(param, value)?;
-    write_and_verify(param, value)?;
+    let outcome = write_and_verify(param, value)?;
     if let Some(prev) = current {
         merge_rollback(std::iter::once((
             param.to_string(),
             prev.to_string(),
-            value.to_string(),
+            // Record what the kernel actually took, matching the batch and
+            // fix paths: if the kernel clamped the imported value, the ledger
+            // must describe live reality or rollback restores a lie (#4160).
+            outcome.effective,
         )))?;
     }
     Ok(())
@@ -780,6 +928,33 @@ mod tests {
         assert_eq!(
             param_to_path("net.core.rmem_max"),
             "/proc/sys/net/core/rmem_max"
+        );
+    }
+
+    #[test]
+    fn apply_reports_missing_params_as_failures() {
+        // Nonexistent paths fail inside write_and_verify before any write, so
+        // this is safe for non-root CI: every param must come back as a
+        // recorded failure with its reason, not vanish — the old quiet-mode
+        // contract dropped the error text entirely, so `ktuner tune` printed
+        // {"applied": 0} and exited 0 even when every write failed.
+        let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
+            .iter()
+            .map(|p| Recommendation {
+                param: p.to_string(),
+                current_value: "0".to_string(),
+                recommended_value: "1".to_string(),
+                writable: true,
+                ..Default::default()
+            })
+            .collect();
+        let outcome = apply_quiet(&recs).expect("apply_quiet must not fail on per-param errors");
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.failed.len(), 2, "both failures must be reported");
+        assert_eq!(outcome.failed[0].param, "vm.ktuner_no_such_a");
+        assert!(
+            !outcome.failed[0].error.is_empty(),
+            "error text must survive quiet mode"
         );
     }
 
@@ -1230,19 +1405,168 @@ mod tests {
     }
 
     #[test]
-    fn test_readback_matches() {
-        // Bracketed sysfs list files: the active option is inside [ ], not first.
-        assert!(readback_matches("never", "always madvise [never]"));
-        assert!(readback_matches("mq-deadline", "[mq-deadline] none"));
-        assert!(!readback_matches("never", "[always] madvise never"));
-        // Plain scalar sysctls.
-        assert!(readback_matches("1", "1"));
-        assert!(!readback_matches("1", "0"));
-        // Single written value leading a multi-token read-back matches on first.
-        assert!(readback_matches("bbr", "bbr cubic"));
-        // Multi-token exact match, and its negation.
-        assert!(readback_matches("250 32000 100 128", "250 32000 100 128"));
-        assert!(!readback_matches("250 32000 100 128", "250 32000 100 999"));
+    fn test_classify_readback_scalar_exact() {
+        // Plain scalar sysctls confirm with the kernel's rendering.
+        assert_eq!(
+            classify_readback("1", "1"),
+            ReadbackVerdict::Verified {
+                effective: "1".to_string()
+            }
+        );
+        // Multi-token exact match (kernel.sem-style quadruples).
+        assert_eq!(
+            classify_readback("250 32000 100 128", "250 32000 100 128"),
+            ReadbackVerdict::Verified {
+                effective: "250 32000 100 128".to_string()
+            }
+        );
+        // Whitespace differences are token-level, not byte-level.
+        assert_eq!(
+            classify_readback("10  20", "10 20"),
+            ReadbackVerdict::Verified {
+                effective: "10 20".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_scalar_clamped() {
+        // The kernel rejected the requested magnitude and settled at a bound:
+        // the write DID land, so this is applied-with-note, not an error (#4160).
+        assert_eq!(
+            classify_readback("999999999", "4194304"),
+            ReadbackVerdict::Clamped {
+                effective: "4194304".to_string()
+            }
+        );
+        // A single-value write that read back different.
+        assert_eq!(
+            classify_readback("1", "0"),
+            ReadbackVerdict::Clamped {
+                effective: "0".to_string()
+            }
+        );
+        // Multi-token mismatch records the kernel's full read-back.
+        assert_eq!(
+            classify_readback("250 32000 100 128", "250 32000 100 999"),
+            ReadbackVerdict::Clamped {
+                effective: "250 32000 100 999".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_bracket_list() {
+        // Bracketed sysfs list files: the active option is inside [ ], not
+        // necessarily first; an unbracketed token does NOT count.
+        assert_eq!(
+            classify_readback("never", "always madvise [never]"),
+            ReadbackVerdict::Verified {
+                effective: "never".to_string()
+            }
+        );
+        assert_eq!(
+            classify_readback("mq-deadline", "[mq-deadline] none"),
+            ReadbackVerdict::Verified {
+                effective: "mq-deadline".to_string()
+            }
+        );
+        // The write landed on a DIFFERENT active option: clamped to it, and
+        // the bracketed option is what must be recorded.
+        assert_eq!(
+            classify_readback("never", "[always] madvise never"),
+            ReadbackVerdict::Clamped {
+                effective: "always".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_leading_token_is_verified() {
+        // A single written value leading a multi-token read-back is a
+        // confirmed write of the REQUEST (e.g. congestion-control listings):
+        // the effective value is the request itself, because the kernel's
+        // multi-token rendering is not a value a writable scalar param can
+        // take back on rollback or that sysctl.d can persist.
+        assert_eq!(
+            classify_readback("bbr", "bbr cubic"),
+            ReadbackVerdict::Verified {
+                effective: "bbr".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_rec_with_effective_swaps_only_recommended_value() {
+        let rec = Recommendation {
+            param: "net.core.rmem_max".to_string(),
+            current_value: "212992".to_string(),
+            recommended_value: "999999999".to_string(),
+            reason: "万兆场景".to_string(),
+            confidence: crate::rules::Confidence::High,
+            category: crate::rules::Category::Performance,
+            writable: true,
+        };
+        let outcome = WriteOutcome {
+            effective: "4194304".to_string(),
+            clamped: true,
+        };
+        let applied = rec_with_effective(&rec, &outcome);
+        // The ledger view carries the kernel's value; everything else is
+        // preserved verbatim so rollback restores the true original.
+        assert_eq!(applied.recommended_value, "4194304");
+        assert_eq!(applied.param, rec.param);
+        assert_eq!(applied.current_value, "212992");
+        assert_eq!(applied.reason, rec.reason);
+        assert_eq!(applied.confidence, rec.confidence);
+        assert_eq!(applied.category, rec.category);
+        assert_eq!(applied.writable, rec.writable);
+        // When nothing was clamped the rec passes through unchanged.
+        let ok_outcome = WriteOutcome {
+            effective: "999999999".to_string(),
+            clamped: false,
+        };
+        assert_eq!(
+            rec_with_effective(&rec, &ok_outcome).recommended_value,
+            "999999999"
+        );
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_nonexistent_path() {
+        // Nonexistent-path pattern: fails at the path check before any write,
+        // so this is side-effect-free even as root in a container.
+        let err = write_and_verify("vm.ktuner_no_such_param_for_clamp_test", "1").unwrap_err();
+        assert!(err.to_string().contains("参数路径不存在"));
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_forbidden_param_first() {
+        // Defense-in-depth ordering: the deny-list fires before any path or
+        // write attempt, even for a param whose path does not exist.
+        let err = write_and_verify("kernel.core_pattern", "x").unwrap_err();
+        assert!(err.to_string().contains("拒绝写入"));
+    }
+
+    #[test]
+    fn test_apply_quiet_reports_no_clamps_when_nothing_lands() {
+        // Two nonexistent params: nothing is written, so nothing can be
+        // clamped, and the outcome must report zero applied with an empty
+        // clamped list (no ledger/persist side effects even as root).
+        let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
+            .iter()
+            .map(|p| Recommendation {
+                param: p.to_string(),
+                current_value: "0".to_string(),
+                recommended_value: "1".to_string(),
+                writable: true,
+                ..Default::default()
+            })
+            .collect();
+        let outcome = apply_quiet(&recs).expect("apply must not fail on per-param errors");
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.failed.len(), 2);
+        assert!(outcome.clamped.is_empty());
     }
 
     #[test]
