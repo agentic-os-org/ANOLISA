@@ -76,6 +76,23 @@ def col_letter(n: int) -> str:
     return r
 
 
+def insert_row_sorted(sheet_data: ET.Element, row_el: ET.Element) -> None:
+    """Insert a row at its position in the ascending-r order of sheetData.
+
+    SpreadsheetML requires sheetData rows in ascending r order; a row
+    appended past a higher-numbered one makes Excel repair (or drop) the
+    sheet.
+    """
+    r = int(row_el.get("r"))
+    insert_idx = len(sheet_data)
+    for i, existing in enumerate(sheet_data):
+        existing_r = existing.get("r")
+        if existing_r and int(existing_r) > r:
+            insert_idx = i
+            break
+    sheet_data.insert(insert_idx, row_el)
+
+
 def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     wb_tree = ET.parse(os.path.join(work_dir, "xl", "workbook.xml"))
     rid = None
@@ -320,8 +337,9 @@ def main() -> None:
         start, end = map(int, args.formula_rows.split(":"))
         for row_num in range(start, end + 1):
             if row_num not in row_map:
-                row_el = ET.SubElement(sheet_data, _tag("row"))
+                row_el = ET.Element(_tag("row"))
                 row_el.set("r", str(row_num))
+                insert_row_sorted(sheet_data, row_el)
                 row_map[row_num] = row_el
 
             formula_text = args.formula.replace("{row}", str(row_num))
@@ -339,8 +357,9 @@ def main() -> None:
     # Add total formula
     if args.total_row and args.total_formula:
         if args.total_row not in row_map:
-            row_el = ET.SubElement(sheet_data, _tag("row"))
+            row_el = ET.Element(_tag("row"))
             row_el.set("r", str(args.total_row))
+            insert_row_sorted(sheet_data, row_el)
             row_map[args.total_row] = row_el
 
         total_f = args.total_formula.lstrip("=")
