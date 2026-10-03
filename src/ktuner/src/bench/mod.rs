@@ -229,12 +229,24 @@ fn bench_mem_latency() -> Result<BenchResult> {
     })
 }
 
+/// Scratch file path for an IO benchmark, unique to this process.
+///
+/// The cleanup guard is already in place; what the name has to add is that two
+/// concurrent `ktuner bench` runs do not share a path. With a fixed name they
+/// open the same file with `truncate(true)` and both report throughput numbers
+/// measured while the other process was rewriting the file underneath them.
+/// `bench_io_dir` prefers the current working directory, so the collision is
+/// between two shells in the same project rather than an exotic setup.
+fn bench_io_path(dir: &str, name: &str) -> String {
+    format!("{dir}/.{name}.{}", std::process::id())
+}
+
 fn bench_io_latency() -> Result<BenchResult> {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
-    let path = format!("{}/.ktuner_io_bench", bench_io_dir());
+    let path = bench_io_path(&bench_io_dir(), "ktuner_io_bench");
     let path = path.as_str();
     let iterations = 1000u64;
 
@@ -273,7 +285,7 @@ fn bench_io_throughput() -> Result<BenchResult> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let path = format!("{}/.ktuner_io_tput_bench", bench_io_dir());
+    let path = bench_io_path(&bench_io_dir(), "ktuner_io_tput_bench");
     let path = path.as_str();
     let block_size = 1024 * 1024; // 1MB blocks
     let total_size = 128 * 1024 * 1024; // 128MB total
@@ -394,5 +406,22 @@ mod tests {
         assert_eq!(r.unit, "μs/RTT");
         assert_eq!(r.name, "context switch");
         assert!((r.value - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn io_benchmark_paths_are_unique_per_process() {
+        let dir = std::env::temp_dir();
+        let dir = dir.to_string_lossy().to_string();
+
+        let latency = bench_io_path(&dir, "ktuner_io_bench");
+        let throughput = bench_io_path(&dir, "ktuner_io_tput_bench");
+        assert_ne!(latency, throughput);
+
+        // The process id is what keeps two concurrent runs apart, and a second
+        // call from this process must still produce the same path so the guard
+        // removes the file the benchmark actually wrote.
+        assert!(latency.contains(&std::process::id().to_string()));
+        assert_eq!(latency, bench_io_path(&dir, "ktuner_io_bench"));
+        assert!(std::path::Path::new(&latency).parent() == Some(std::path::Path::new(&dir)));
     }
 }
