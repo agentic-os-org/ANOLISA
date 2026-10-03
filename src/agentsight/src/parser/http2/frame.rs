@@ -454,11 +454,7 @@ impl TraceArgs for ParsedHttp2Frame {
             } else {
                 let preview = self.body_str();
                 if !preview.is_empty() {
-                    let truncated = if preview.len() > 200 {
-                        &preview[..200]
-                    } else {
-                        preview
-                    };
+                    let truncated = truncate_on_char_boundary(preview, 200);
                     args.insert("body_preview".to_string(), json!(truncated));
                 }
             }
@@ -505,6 +501,19 @@ impl ToChromeTraceEvent for ParsedHttp2Frame {
     }
 }
 
+/// Shorten a body preview to at most `max_bytes`, cutting on a character
+/// boundary so multi-byte text is never split mid-character.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl fmt::Debug for ParsedHttp2Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("ParsedHttp2Frame");
@@ -525,9 +534,10 @@ impl fmt::Debug for ParsedHttp2Frame {
             } else if let Ok(text) = std::str::from_utf8(body) {
                 let text = text.trim();
                 if text.len() > 200 {
+                    let truncated = truncate_on_char_boundary(text, 200);
                     debug.field(
                         "body",
-                        &format!("(text, {} bytes)\n{}...", body.len(), &text[..200]),
+                        &format!("(text, {} bytes)\n{}...", body.len(), truncated),
                     );
                 } else {
                     debug.field("body", &format!("(text, {} bytes)\n{}", body.len(), text));
@@ -588,5 +598,51 @@ mod tests {
         // return the old "<huffman:N bytes>" placeholder.
         let out = ParsedHttp2Frame::huffman_decode(&[0x00]);
         assert!(!out.starts_with("<huffman:"));
+    }
+
+    fn data_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
+        let len = payload.len();
+        ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: len,
+            source_event: Rc::new(SslEvent {
+                source: 0,
+                timestamp_ns: 0,
+                delta_ns: 0,
+                pid: 1,
+                tid: 1,
+                uid: 0,
+                len: len as u32,
+                rw: 0,
+                comm: "curl".to_string(),
+                buf: payload,
+                is_handshake: false,
+                ssl_ptr: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn trace_args_cuts_multibyte_body_preview_on_char_boundary() {
+        // A non-JSON body of dense CJK text over 200 bytes: byte 200 falls
+        // inside a multi-byte character, so a raw &preview[..200] panicked
+        // and took the eBPF event-handling thread down with it.
+        let payload = "你".repeat(70); // 210 bytes of valid UTF-8, not JSON
+        let frame = data_frame(payload.into_bytes());
+
+        let args = frame.to_trace_args();
+        let preview = args["body_preview"].as_str().unwrap();
+        assert_eq!(preview, "你".repeat(66)); // 198 bytes = nearest boundary ≤ 200
+    }
+
+    #[test]
+    fn debug_fmt_survives_multibyte_body() {
+        let payload = "你".repeat(70);
+        let frame = data_frame(payload.into_bytes());
+        let rendered = format!("{frame:?}");
+        assert!(rendered.contains("你"));
     }
 }
