@@ -66,8 +66,8 @@ Aliases: `co`, `copilot`
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--input-format <fmt>` | `-I` | Input format (text/stream-json) |
-| `--output-format <fmt>` | `-O` | Output format (text/json/stream-json) |
+| `--input-format <fmt>` | — | Input format (text/stream-json) |
+| `--output-format <fmt>` | `-o` | Output format (text/json/stream-json) |
 | `--include-partial-messages` | — | Include partial messages (stream-json only) |
 
 ## Advanced Options
@@ -78,8 +78,10 @@ Aliases: `co`, `copilot`
 | `--acp` | ACP mode (Zed integration) |
 | `--proxy <url>` | Network proxy (format: schema://user:password@host:port) |
 | `--screen-reader` | Screen reader accessibility mode |
-| `--skip-startup-context` | Skip workspace startup context |
-| `--skip-loop-detection` | Skip loop detection |
+
+> [!note]
+>
+> `skip-startup-context` and `skip-loop-detection` are not CLI flags — set them in `settings.json` as `model.skipStartupContext` and `model.skipLoopDetection`.
 
 ## Usage Examples
 
@@ -114,7 +116,7 @@ cosh -y -p "Fix all lint errors"
 
 ```bash
 # Output results in JSON format
-cosh -O json -p "Analyze project dependencies"
+cosh -o json -p "Analyze project dependencies"
 ```
 
 ### Proxy Settings

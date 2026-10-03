@@ -66,8 +66,8 @@ cosh [options] [query]
 
 | 选项 | 简写 | 说明 |
 |------|------|------|
-| `--input-format <fmt>` | `-I` | 输入格式（text/stream-json） |
-| `--output-format <fmt>` | `-O` | 输出格式（text/json/stream-json） |
+| `--input-format <fmt>` | — | 输入格式（text/stream-json） |
+| `--output-format <fmt>` | `-o` | 输出格式（text/json/stream-json） |
 | `--include-partial-messages` | — | 包含部分消息（仅 stream-json） |
 
 ## 高级选项
@@ -78,8 +78,10 @@ cosh [options] [query]
 | `--acp` | ACP 模式（Zed 集成） |
 | `--proxy <url>` | 网络代理（格式：schema://user:password@host:port） |
 | `--screen-reader` | 屏幕阅读器无障碍模式 |
-| `--skip-startup-context` | 跳过工作区启动上下文 |
-| `--skip-loop-detection` | 跳过循环检测 |
+
+> [!note]
+>
+> `skip-startup-context` 与 `skip-loop-detection` 不是 CLI 标志 —— 请在 `settings.json` 中通过 `model.skipStartupContext` 和 `model.skipLoopDetection` 设置。
 
 ## 使用示例
 
@@ -114,7 +116,7 @@ cosh -y -p "修复所有 lint 错误"
 
 ```bash
 # 以 JSON 格式输出结果
-cosh -O json -p "分析项目依赖"
+cosh -o json -p "分析项目依赖"
 ```
 
 ### 代理设置
