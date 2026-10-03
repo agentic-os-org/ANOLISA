@@ -70,23 +70,7 @@ impl AnalyzeChatmlCommand {
                     // Extract messages and tools from request body and process directly
                     if let Some(ref args) = event.args {
                         if let Some(body) = args.get("body") {
-                            let (messages, tools) = if let Some(body_str) = body.as_str() {
-                                serde_json::from_str::<serde_json::Value>(body_str)
-                                    .ok()
-                                    .map(|v| {
-                                        let msgs = v.get("messages").cloned();
-                                        let tools =
-                                            v.get("tools").and_then(|t| t.as_array().cloned());
-                                        (msgs, tools)
-                                    })
-                                    .unwrap_or((None, None))
-                            } else {
-                                let msgs = body.get("messages").cloned();
-                                let tools = body.get("tools").and_then(|t| t.as_array().cloned());
-                                (msgs, tools)
-                            };
-
-                            if let Some(mut msgs) = messages.and_then(|v| v.as_array().cloned()) {
+                            if let Some((mut msgs, tools)) = Self::request_body_messages(body) {
                                 // Process tool_calls arguments: parse JSON string to object in place
                                 for msg in msgs.iter_mut() {
                                     if let Some(tool_calls) =
@@ -224,6 +208,41 @@ impl AnalyzeChatmlCommand {
         }
 
         Ok(events)
+    }
+
+    /// Normalize a captured request body into the message list the chat
+    /// template consumes, plus the tools array.
+    ///
+    /// The body is stored either as a JSON string (the trace writer's
+    /// fallback for non-JSON bodies) or as the parsed object. The message
+    /// list itself comes from the same protocol shapes the genai request
+    /// parser understands (`GenAIBuilder::extract_messages_view`): a plain
+    /// `messages` array, the OpenAI Responses `input` array with its
+    /// `instructions`, or an Anthropic `messages` array with the system
+    /// prompt in the top-level `system` field. Without this, a Responses
+    /// request event was silently skipped (no request breakdown at all) and
+    /// an Anthropic request's system prompt vanished from the breakdown.
+    /// The out-of-band system text is prepended as a system message so the
+    /// template renders it.
+    fn request_body_messages(
+        body: &serde_json::Value,
+    ) -> Option<(Vec<serde_json::Value>, Option<Vec<serde_json::Value>>)> {
+        let parsed: Option<serde_json::Value> = match body {
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            obj @ serde_json::Value::Object(_) => Some(obj.clone()),
+            _ => None,
+        };
+        let body = parsed.as_ref()?;
+
+        let tools = body.get("tools").and_then(|t| t.as_array().cloned());
+
+        let (mut msgs, system_text) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+        if let Some(system) = system_text {
+            if !system.is_empty() {
+                msgs.insert(0, serde_json::json!({"role": "system", "content": system}));
+            }
+        }
+        Some((msgs, tools))
     }
 
     /// Extract response data from SSE events array
@@ -405,5 +424,105 @@ mod tests {
         assert_eq!(resp.content, vec!["hi ".to_string(), "there".to_string()]);
         assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
         assert_eq!(resp.tool_calls, vec!["noop: ".to_string()]);
+    }
+
+    /// The chrome trace stores the request body either as the parsed JSON
+    /// object or as its string form; both must yield the same messages.
+    #[test]
+    fn request_messages_accepts_string_and_object_bodies() {
+        let object = json!({
+            "model": "qwen3.5-plus",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "noop"}}],
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&object).expect("object body parses");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(
+            tools.as_ref().expect("tools survive").len(),
+            1,
+            "tools survive"
+        );
+
+        let string = serde_json::Value::String(object.to_string());
+        let (msgs2, tools2) =
+            AnalyzeChatmlCommand::request_body_messages(&string).expect("string body parses");
+        assert_eq!(msgs2, msgs);
+        assert_eq!(tools2, tools);
+    }
+
+    /// An OpenAI Responses request (codex 0.137+ via /v1/responses) carries
+    /// `input` + `instructions` instead of `messages`. The old arm read only
+    /// `messages`, so such request events were silently skipped — no request
+    /// breakdown at all for a codex trace.
+    #[test]
+    fn request_messages_reads_responses_api_input() {
+        let body = json!({
+            "model": "qwen3-coder-plus",
+            "instructions": "Be terse.",
+            "input": [
+                {"type": "message", "role": "user", "content": "list the files"},
+            ],
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("responses body parses");
+        assert_eq!(tools, None);
+        assert_eq!(msgs.len(), 2, "instructions prepend a system message");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "Be terse.");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "list the files");
+    }
+
+    /// An Anthropic request carries the system prompt in the top-level
+    /// `system` field, outside the messages array. The old arm read only the
+    /// `messages` array, so the system prompt vanished from the request
+    /// breakdown.
+    #[test]
+    fn request_messages_keeps_anthropic_system_prompt() {
+        let body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "system": "You are a helpful assistant.",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (msgs, _) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("anthropic body parses");
+        assert_eq!(msgs.len(), 2, "the system prompt is prepended");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are a helpful assistant.");
+        assert_eq!(msgs[1]["role"], "user");
+
+        // Anthropic's system field may also be an array of text blocks.
+        let body = json!({
+            "system": [{"type": "text", "text": "First."}, {"type": "text", "text": "Second."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (msgs, _) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("block system parses");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "First.\nSecond.");
+    }
+
+    /// Bodies without any known message shape (e.g. a GET with no body, or a
+    /// non-LLM JSON body) stay skipped, and an OpenAI body with no top-level
+    /// system field gets no synthetic system message.
+    #[test]
+    fn request_messages_skips_unknown_shapes_and_adds_no_system() {
+        assert!(AnalyzeChatmlCommand::request_body_messages(&json!({"foo": 1})).is_none());
+        assert!(
+            AnalyzeChatmlCommand::request_body_messages(&serde_json::Value::String(
+                "not json at all".to_string()
+            ))
+            .is_none()
+        );
+
+        let plain = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&plain).expect("plain body parses");
+        assert_eq!(msgs.len(), 1, "no synthetic system message");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(tools, None);
     }
 }
