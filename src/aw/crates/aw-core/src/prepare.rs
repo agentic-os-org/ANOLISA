@@ -107,6 +107,11 @@ impl Core {
         {
             return Err(Error::Preparation("runtime binding is not current"));
         }
+        if runtime.get("session_id").is_none() && plan["scope"].get("session_id").is_some() {
+            return Err(Error::Preparation(
+                "scope session is not confirmed by the runtime binding",
+            ));
+        }
         let digest = canonical::document_digest(&plan)?;
         let event_key = canonical::document_digest(&json!({
             "scope": plan["scope"], "event_id": plan["event_id"]
