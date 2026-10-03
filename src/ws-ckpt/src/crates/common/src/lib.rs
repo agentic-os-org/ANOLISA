@@ -1263,9 +1263,19 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, WsCkptError> {
 
 /// Validate numeric ranges in a loaded `FileConfig` so downstream consumers
 /// (e.g. bootstrap's `f64 -> u64` cast on `avail * img_max_percent / 100.0`)
-/// never see NaN/Infinity/out-of-range values.
+/// never see NaN/Infinity/out-of-range values, and the btrfs-loop bootstrap
+/// never reconciles toward a zero-byte image.
 fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError> {
     if let Some(loop_cfg) = &fc.backend.btrfs_loop {
+        if let Some(size) = loop_cfg.img_size {
+            if size < 1 {
+                return Err(WsCkptError::Config(format!(
+                    "backend.btrfs-loop.img_size in {}: expected a value >= 1 (GiB) (got {})",
+                    path.display(),
+                    size
+                )));
+            }
+        }
         if let Some(pct) = loop_cfg.img_max_percent {
             if !pct.is_finite() || !(0.0..=100.0).contains(&pct) {
                 return Err(WsCkptError::Config(format!(
@@ -2861,6 +2871,36 @@ mod tests {
             std::fs::write(&path, toml).unwrap();
             let result = load_config_file(&path);
             assert!(result.is_err(), "{} should be rejected", bad);
+        }
+    }
+
+    #[test]
+    fn load_config_file_rejects_zero_btrfs_loop_img_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero_img_size.toml");
+        std::fs::write(&path, "[backend.btrfs-loop]\nimg_size = 0\n").unwrap();
+        let result = load_config_file(&path);
+        assert!(
+            result.is_err(),
+            "img_size = 0 should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn load_config_file_accepts_positive_btrfs_loop_img_size() {
+        let dir = tempfile::tempdir().unwrap();
+        for good in ["1", "30"] {
+            let path = dir.path().join(format!("good_img_size_{}.toml", good));
+            let toml = format!("[backend.btrfs-loop]\nimg_size = {}\n", good);
+            std::fs::write(&path, toml).unwrap();
+            let result = load_config_file(&path);
+            assert!(
+                result.is_ok(),
+                "{} should be accepted, got {:?}",
+                good,
+                result
+            );
         }
     }
 
