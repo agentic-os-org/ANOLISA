@@ -33,6 +33,99 @@ fn audit_index_error(
     error
 }
 
+/// Resolve the effective agent scope for a search-driven tool call:
+/// an explicit per-call scope wins; otherwise `[memory].agent_scope`
+/// ("shared" → None) combined with `MCP_CLIENT_NAME`.
+///
+/// We never silently widen the visibility domain. A *genuinely unset*
+/// `MCP_CLIENT_NAME` under `isolated`/`filter` degrades to shared with an
+/// operator-facing warn — the pre-existing tradeoff that keeps a
+/// shared-memory reader working. A *set but empty/whitespace* value is a
+/// misconfiguration, not an absence (the strict helper spells out why:
+/// `MCP_CLIENT_NAME=` is a realistic container/systemd mistake), and
+/// errors instead: degrading here would let the misconfigured agent read
+/// every isolated agent's memories. Invalid configured values warn and
+/// degrade to shared the same way as unset.
+///
+/// Note the returned scope can still error downstream:
+/// `search_scoped` → `resolve_agent_scope` rejects an agent id containing
+/// `' " ; \ /` or control bytes, so callers propagate `Err` for e.g.
+/// `MCP_CLIENT_NAME=org/team/agent`.
+///
+/// Every tool that drives the index from an agent-visible tool call
+/// (memory_search, memory_about, memory_forget) must resolve its scope
+/// through this helper; searching unscoped would silently widen the
+/// visibility domain the config promises.
+pub fn resolve_effective_scope(
+    svc: &MemoryService,
+    explicit: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(s) = explicit {
+        return Ok(Some(s.to_string()));
+    }
+    let config_scope = &svc.config.memory.agent_scope;
+    if config_scope.is_empty() || config_scope == "shared" {
+        return Ok(None);
+    }
+    if !matches!(config_scope.as_str(), "isolated" | "filter") {
+        tracing::warn!(
+            "memory.agent_scope={config_scope:?} is not a recognised value (expected \"shared\", \"isolated\", or \"filter\"); falling back to shared (unscoped) search."
+        );
+        return Ok(None);
+    }
+    match std::env::var("MCP_CLIENT_NAME") {
+        Ok(v) if !v.trim().is_empty() => {
+            // The emptiness check trims but the value used does not: the raw
+            // value is deliberate, because the indexer tags rows with the same
+            // raw value — normalising here would make read and index disagree.
+            Ok(Some(format!("{config_scope}:{v}")))
+        }
+        // Set but empty is a misconfiguration, not an absence: degrading to
+        // shared would let the misconfigured agent read every isolated
+        // agent's memories — the exact leak this helper exists to close.
+        // Fail closed like the strict helper does for the same condition.
+        Ok(_) => Err(MemoryError::InvalidArgument(
+            "memory.agent_scope requires a non-empty MCP_CLIENT_NAME but it is set to an empty/whitespace value; refusing to search while the scope is unresolvable — set MCP_CLIENT_NAME or switch agent_scope to \"shared\""
+                .to_string(),
+        )),
+        Err(_) => {
+            tracing::warn!(
+                "memory.agent_scope={config_scope:?} requires MCP_CLIENT_NAME but it is unset; falling back to shared (unscoped) search. Set MCP_CLIENT_NAME or switch agent_scope to \"shared\" to silence this warning."
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Like `resolve_effective_scope`, but for destructive tools: a configured
+/// `isolated`/`filter` scope that cannot be resolved is a hard error rather
+/// than a degrade-to-shared. Forgetting deletes files, so the misconfigured
+/// case must fail closed — the read-side helper's read-anyway tradeoff would
+/// let a broken deployment forget every agent's memories.
+pub fn resolve_effective_scope_strict(svc: &MemoryService) -> Result<Option<String>> {
+    let config_scope = &svc.config.memory.agent_scope;
+    if config_scope.is_empty() || config_scope == "shared" {
+        return Ok(None);
+    }
+    if !matches!(config_scope.as_str(), "isolated" | "filter") {
+        return Err(MemoryError::InvalidArgument(format!(
+            "memory.agent_scope={config_scope:?} is not a recognised value (expected \"shared\", \"isolated\", or \"filter\"); refusing to forget while the scope is unresolvable"
+        )));
+    }
+    // An empty (or whitespace-only) value is set-but-unresolvable, exactly
+    // like unset: the indexer would tag every agent's rows with "", so all
+    // agents would collapse into the same `isolated:` bucket and forget
+    // would delete across agents. `MCP_CLIENT_NAME=` is a realistic
+    // container/systemd misconfiguration.
+    match std::env::var("MCP_CLIENT_NAME").ok().filter(|v| !v.trim().is_empty()) {
+        Some(agent_id) => Ok(Some(format!("{config_scope}:{agent_id}"))),
+        None => Err(MemoryError::InvalidArgument(
+            "memory.agent_scope requires MCP_CLIENT_NAME but it is unset or empty; refusing to forget while the scope is unresolvable — set MCP_CLIENT_NAME or switch agent_scope to \"shared\""
+                .to_string(),
+        )),
+    }
+}
+
 /// Tier B: search the memory store.
 ///
 /// `mode` controls the search algorithm:
@@ -73,38 +166,8 @@ pub fn memory_search(
         }
     };
 
-    // Determine effective agent scope from parameter or config.
-    // We never silently widen the visibility domain: an explicitly configured
-    // `isolated`/`filter` scope with no `MCP_CLIENT_NAME` is a misconfiguration,
-    // so we warn and run the search *unscoped* (shared semantics) rather than
-    // erroring on every request — the operator-facing warn surfaces the
-    // misconfiguration, while still letting the agent read its shared memory.
-    let config_scope_owned;
-    let scope_ref = if let Some(s) = agent_scope {
-        Some(s)
-    } else {
-        let config_scope = &svc.config.memory.agent_scope;
-        if config_scope.is_empty() || config_scope == "shared" {
-            None
-        } else if !matches!(config_scope.as_str(), "isolated" | "filter") {
-            tracing::warn!(
-                "memory.agent_scope={config_scope:?} is not a recognised value \
-                 (expected \"shared\", \"isolated\", or \"filter\"); \
-                 falling back to shared (unscoped) search."
-            );
-            None
-        } else if let Ok(agent_id) = std::env::var("MCP_CLIENT_NAME") {
-            config_scope_owned = format!("{config_scope}:{agent_id}");
-            Some(config_scope_owned.as_str())
-        } else {
-            tracing::warn!(
-                "memory.agent_scope={config_scope:?} requires MCP_CLIENT_NAME but it is unset; \
-                 falling back to shared (unscoped) search. Set MCP_CLIENT_NAME or switch \
-                 agent_scope to \"shared\" to silence this warning."
-            );
-            None
-        }
-    };
+    let effective_scope = resolve_effective_scope(svc, agent_scope)?;
+    let scope_ref = effective_scope.as_deref();
 
     match mode {
         "bm25" => {

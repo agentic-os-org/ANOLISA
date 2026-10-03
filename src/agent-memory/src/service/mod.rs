@@ -839,7 +839,9 @@ fn start_session(config: &AppConfig, ns: &Namespace) -> Result<SessionLogService
         },
         _ => SessionId::generate(),
     };
-    let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+    let agent_id = std::env::var("MCP_CLIENT_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
 
     // Persistent mirror directory: <mount>/.anolisa/session-logs/
     // Session logs are mirrored here so they survive SIGKILL and tmpfs loss.
