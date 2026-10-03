@@ -23,6 +23,8 @@ use crate::InputError;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Serve one AW Provider request on stdin/stdout; scans use the existing daemon.
+    AwProvider,
     /// Manage authored Policy templates.
     #[command(subcommand)]
     Policy(PolicyCommand),
@@ -51,7 +53,7 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::ScanPii(command) => command.request(),
-            Self::Capabilities(_) => Err(InputError::LocalCommand),
+            Self::Capabilities(_) | Self::AwProvider => Err(InputError::LocalCommand),
             Self::SkillLedger(command) => command.request(),
         }
     }
@@ -64,6 +66,10 @@ impl Command {
         if let Self::SkillLedger(command) = self {
             command.after_success(request, output);
         }
+    }
+
+    pub(crate) const fn is_aw_provider(&self) -> bool {
+        matches!(self, Self::AwProvider)
     }
 
     pub(crate) const fn is_scan_code(&self) -> bool {
