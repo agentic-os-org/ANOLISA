@@ -4,7 +4,7 @@
 //! Rust engines do not. Loading the YAML only proves it parses, so each pattern
 //! is compiled here: a rule the engine rejects cannot reach a release quietly.
 
-use asc_capability_code_scan::{Language, load_rules};
+use asc_capability_code_scan::{Language, load_rules, scan};
 use fancy_regex::Regex;
 
 /// Rule ids the loader returns for `language`.
@@ -173,4 +173,57 @@ fn disk_wipe_matches_v1_behaviour() {
             .expect("match does not exhaust backtracking");
         assert_eq!(matched, *expected, "diverged from V1 on: {case}");
     }
+}
+
+/// One ordinary setup script, repeated until the input reaches the size class
+/// where the engine ceiling used to bind.
+///
+/// Only the last line carries an intent; everything before it is benign shell
+/// of the kind a multi-megabyte script is made of.
+fn large_benign_script(steps: usize) -> String {
+    let step = concat!(
+        "# setup step\n",
+        "set -euo pipefail\n",
+        "mkdir -p \"$HOME/work\" || true\n",
+        "echo \"preparing\" >> \"$HOME/log.txt\"\n",
+        "for f in *.txt; do\n",
+        "    [ -f \"$f\" ] && cp \"$f\" \"$HOME/work/\" || echo \"skip $f\"\n",
+        "done\n",
+    );
+    let mut script = step.repeat(steps);
+    script.push_str("systemctl enable evil.service\n");
+    script
+}
+
+#[test]
+fn a_multi_megabyte_script_is_scanned_instead_of_exhausting_the_engine() {
+    // V1's engine has no step ceiling and the daemon accepts a 4 MiB business
+    // frame, so a script of this size is a scan, not an error. A ceiling that
+    // binds below the maximum frame reports `scan error: engine resource
+    // exhausted` with no findings at all, which is a false negative V1 does not
+    // have. The script is deliberately near the point where the old ceiling
+    // bound, to keep the regression case as small as it can be.
+    let script = large_benign_script(7_000);
+    assert!(script.len() > 1_200_000, "{}", script.len());
+
+    let report = scan(
+        &script,
+        Language::Bash,
+        Some(&["shell-persistence".to_owned()]),
+        "regex",
+    );
+
+    assert!(
+        report.ok,
+        "large benign input was rejected: {}",
+        report.summary
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "shell-persistence"),
+        "the persistence intent was not reported: {}",
+        report.summary
+    );
 }

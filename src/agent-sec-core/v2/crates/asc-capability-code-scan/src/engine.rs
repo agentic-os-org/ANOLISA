@@ -21,8 +21,15 @@ use crate::rules::{Language, RuleDefinition};
 const MIN_BACKTRACK_LIMIT: usize = 8_000_000;
 /// Backtracking work allowed per input byte before the absolute safety cap.
 const BACKTRACK_STEPS_PER_BYTE: usize = 128;
-/// Hard bound for an RPC frame, including a 4 MiB maximum request body.
-const MAX_BACKTRACK_LIMIT: usize = 32_000_000;
+/// Largest code input a single request can carry: the daemon's 4 MiB frame.
+const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// Ceiling for the per-request budget, which still bounds untrusted input.
+///
+/// It must not bind inside one maximum frame. The budget grows with the input
+/// so that a large benign script keeps scanning; a lower ceiling reports
+/// `engine resource exhausted` for input V1, which has no step ceiling at all,
+/// still scans — a false negative, not a safety limit.
+const MAX_BACKTRACK_LIMIT: usize = MAX_FRAME_BYTES * BACKTRACK_STEPS_PER_BYTE;
 
 /// Command separators used to split code into segments: `;`, newline, `|`, `&&`.
 ///
@@ -295,6 +302,9 @@ mod tests {
         assert_eq!(backtrack_limit(0), MIN_BACKTRACK_LIMIT);
         assert_eq!(backtrack_limit(100_000), 12_800_000);
         assert_eq!(backtrack_limit(usize::MAX), MAX_BACKTRACK_LIMIT);
+        // The ceiling must stay at or above one maximum frame at the per-byte
+        // rate: a lower one rejects a large benign script V1 scans.
+        assert_eq!(backtrack_limit(MAX_FRAME_BYTES), MAX_BACKTRACK_LIMIT);
     }
 
     #[test]
