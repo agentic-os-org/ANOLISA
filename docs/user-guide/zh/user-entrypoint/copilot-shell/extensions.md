@@ -16,10 +16,11 @@ agent-sec-core、tokenless）通过声明式配置集成到 Copilot Shell 中，
 
 Copilot Shell 按以下顺序搜索扩展：
 
-1. **系统级目录**：`/usr/share/copilot-shell/extensions/`
-2. **用户级目录**：`~/.copilot-shell/extensions/`
-3. **项目级目录**：`.copilot-shell/extensions/`
-4. **CLI 参数指定**：`--extensions` 标志
+1. **系统级目录**：`/usr/share/anolisa/extensions/` —— RPM/deb 安装包部署扩展的位置（优先级较低）
+2. **用户级目录**：`~/.copilot-shell/extensions/` —— 通过 `cosh extensions install` 安装；同名扩展会覆盖系统级
+3. **CLI 参数指定**：`--extensions` 标志
+
+项目级 `.copilot-shell/extensions/` 目录不会被扫描。
 
 每个扩展目录下应包含一个 `cosh-extension.json` 声明文件。
 

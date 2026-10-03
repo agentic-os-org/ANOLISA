@@ -16,10 +16,11 @@ This command lists all discovered and loaded extensions in the current session.
 
 Copilot Shell searches for extensions in the following order:
 
-1. **System-level directory**: `/usr/share/copilot-shell/extensions/`
-2. **User-level directory**: `~/.copilot-shell/extensions/`
-3. **Project-level directory**: `.copilot-shell/extensions/`
-4. **CLI argument**: `--extensions` flag
+1. **System-level directory**: `/usr/share/anolisa/extensions/` — where RPM/deb packages deploy extensions (lower priority)
+2. **User-level directory**: `~/.copilot-shell/extensions/` — populated via `cosh extensions install`; same-name entries override system-level ones
+3. **CLI argument**: `--extensions` flag
+
+Project-level `.copilot-shell/extensions/` directories are not scanned.
 
 Each extension directory should contain a `cosh-extension.json` declaration file.
 
