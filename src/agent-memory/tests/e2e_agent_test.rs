@@ -387,7 +387,14 @@ async fn promote_e2e_workflow() {
 #[tokio::test]
 async fn mem_consolidate_triggers_and_reports() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut agent = McpAgent::spawn(tmp.path(), &[]).await;
+    let mut agent = McpAgent::spawn(
+        tmp.path(),
+        &[
+            ("MEMORY_CONSOLIDATION_ENABLED", "true"),
+            ("MEMORY_CONSOLIDATION_MIN_CALLS", "3"),
+        ],
+    )
+    .await;
 
     // Write a couple of files so consolidation has something to analyse.
     agent
@@ -410,8 +417,17 @@ async fn mem_consolidate_triggers_and_reports() {
         text.contains("consolidation complete"),
         "consolidate result: {text}"
     );
-
+    let sessions = agent
+        .call_json("memory_sessions", json!({"limit": 10}))
+        .await;
     agent.cleanup().await;
+
+    let sessions = sessions
+        .as_array()
+        .expect("session history is a JSON array");
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["tool_calls"], 3);
+    assert_eq!(sessions[0]["tools_used"], json!(["mem_read", "mem_write"]));
 }
 
 #[tokio::test]

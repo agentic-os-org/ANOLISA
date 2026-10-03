@@ -210,20 +210,29 @@ fn extract_body(content: &str) -> String {
 }
 
 fn parse_count_from_body(body: &str, keyword: &str) -> usize {
-    // Look for patterns like "42 tool calls" or "42 次工具调用"
     for line in body.lines() {
-        if line.contains(keyword) || (keyword == "tool calls" && line.contains("次")) {
-            // Extract first number
-            let num: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num.parse::<usize>() {
-                return n;
+        let parts = line.split_once(keyword).or_else(|| {
+            if keyword == "tool calls" {
+                line.split_once("次工具调用")
+            } else {
+                None
             }
-            // Try to find number in the line
-            for word in line.split_whitespace() {
-                if let Ok(n) = word.parse::<usize>() {
-                    return n;
-                }
-            }
+        });
+        let Some((before, after)) = parts else {
+            continue;
+        };
+        // The producer includes duration and byte statistics on this line;
+        // only the number adjacent to the call-count marker is the count.
+        if let Some(n) = before
+            .split_whitespace()
+            .next_back()
+            .and_then(|s| s.parse().ok())
+        {
+            return n;
+        }
+        let after = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+        if let Some(n) = after.split_whitespace().next().and_then(|s| s.parse().ok()) {
+            return n;
         }
     }
     0
@@ -231,10 +240,17 @@ fn parse_count_from_body(body: &str, keyword: &str) -> usize {
 
 fn parse_list_from_body(body: &str, prefix: &str) -> Vec<String> {
     for line in body.lines() {
-        let lower = line.to_lowercase();
-        if lower.starts_with(prefix) || lower.contains(prefix.trim_end_matches(':')) {
-            // Extract comma-separated or backtick-quoted items
-            let rest = line.split_once(':').map(|(_, v)| v).unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        let rest = if prefix == "tools:" && line.contains("使用工具类型:") {
+            // The generated Chinese summary ends the tool list before its
+            // byte statistics; ASCII commas still separate individual tools.
+            line.split_once("使用工具类型:")
+                .map(|(_, rest)| rest.split('，').next().unwrap_or(rest))
+        } else {
+            // Match the list label, not prose such as "across 5 tools".
+            lower.find(prefix).map(|pos| &line[pos + prefix.len()..])
+        };
+        if let Some(rest) = rest {
             return rest
                 .split(',')
                 .map(|s| s.trim().trim_matches('`').trim_matches('\'').to_string())
@@ -248,6 +264,70 @@ fn parse_list_from_body(body: &str, prefix: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConsolidationConfig;
+    use crate::consolidation::{FactCategory, OwnedAuditEntry, run_consolidation_owned};
+
+    fn generated_summary(last_timestamp: &str) -> String {
+        let entries: Vec<_> = ["mem_write", "mem_read", "mem_edit"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, tool)| OwnedAuditEntry {
+                ts: if i == 0 {
+                    "2026-10-01T10:00:00Z".into()
+                } else {
+                    last_timestamp.into()
+                },
+                tool: tool.into(),
+                path: "notes/session.md".into(),
+                ok: true,
+                bytes: Some(10),
+                error: None,
+                trace_id: None,
+            })
+            .collect();
+        let config = ConsolidationConfig {
+            min_tool_calls: 3,
+            episodic_enabled: false,
+            ..Default::default()
+        };
+        run_consolidation_owned(&entries, "session-metadata-test", &config)
+            .into_iter()
+            .find(|fact| fact.category == FactCategory::Summary)
+            .expect("consolidation must produce a session summary")
+            .content
+    }
+
+    #[test]
+    fn generated_summary_reports_tool_count_not_duration() {
+        let body = generated_summary("2026-10-01T10:02:01Z");
+        assert!(body.contains("2 分钟"), "{body}");
+        assert_eq!(parse_count_from_body(&body, "tool calls"), 3, "{body}");
+    }
+
+    #[test]
+    fn generated_summary_lists_tools_without_statistics() {
+        let body = generated_summary("2026-10-01T10:00:01Z");
+        assert_eq!(
+            parse_list_from_body(&body, "tools:"),
+            ["mem_edit", "mem_read", "mem_write"],
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn historical_english_summary_reads_count_after_duration() {
+        let body = "Session lasted 2 minutes with 42 tool calls across 5 tools.\nTools: `mem_read`, `mem_write`\nFiles: `notes/session.md`";
+        assert_eq!(parse_count_from_body(body, "tool calls"), 42);
+        assert_eq!(
+            parse_list_from_body(body, "tools:"),
+            ["mem_read", "mem_write"]
+        );
+        assert_eq!(parse_list_from_body(body, "files:"), ["notes/session.md"]);
+        assert_eq!(
+            parse_count_from_body("total tool calls: 42", "tool calls"),
+            42
+        );
+    }
 
     #[test]
     fn parse_frontmatter_basic() {
