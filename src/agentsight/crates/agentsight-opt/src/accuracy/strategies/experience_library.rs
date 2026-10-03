@@ -205,8 +205,12 @@ impl Detector for ExperienceLibraryStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:experience_library"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[experience_library] LLM judgment failed: {e}");
                 return vec![];
             }

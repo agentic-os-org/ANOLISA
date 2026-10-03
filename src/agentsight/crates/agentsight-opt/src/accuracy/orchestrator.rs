@@ -11,7 +11,7 @@ use crate::llm::LlmClient;
 use crate::trace::TraceInventory;
 use crate::types::{AccIssue, AccRootCause, FixLocus, RootObject};
 
-use crate::accuracy::detector::{AnalysisCtx, Detector, RawIssue};
+use crate::accuracy::detector::{AnalysisCtx, Detector, JudgmentLog, RawIssue};
 use crate::accuracy::extract::SharedExtraction;
 use crate::accuracy::strategies::confirm_before_act::ConfirmBeforeActStrategy;
 use crate::accuracy::strategies::experience_library::ExperienceLibraryStrategy;
@@ -25,12 +25,14 @@ pub async fn run_strategies(
     inv: &TraceInventory,
     extraction: &SharedExtraction,
     repo_root: Option<&Path>,
+    judgments: &JudgmentLog,
 ) -> Vec<AccIssue> {
     let ctx = AnalysisCtx {
         inv,
         client,
         repo_root,
         extraction,
+        judgments,
     };
 
     // Build strategy list.

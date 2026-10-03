@@ -137,8 +137,12 @@ impl Detector for ConfirmBeforeActStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:confirm_before_act"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[confirm_before_act] LLM judgment failed: {e}");
                 return vec![];
             }
