@@ -47,7 +47,7 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 |------|------|------|
 | 0 | `Init { workspace }` | 初始化工作空间 |
 | 1 | `Checkpoint { workspace, id, message, metadata, pin }` | 创建快照 |
-| 2 | `Rollback { workspace, to }` | 回滚到指定快照 |
+| 2 | `Rollback { workspace, to, num_ancestors }` | 回滚到指定快照（或回退 N 个祖先） |
 | 3 | `Delete { workspace, snapshot, force }` | 删除快照 |
 | 4 | `List { workspace, format }` | 列出快照 |
 | 5 | `Diff { workspace, from, to }` | 两个快照间的差异 |
@@ -55,8 +55,22 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 | 7 | `Cleanup { workspace, keep }` | 清理旧快照 |
 | 8 | `Config` | 获取守护进程配置 |
 | 9 | `ReloadConfig` | 重新加载配置 |
-| 10 | `Recover { workspace }` | 恢复工作空间 |
-| 11 | `HealthAdvisory` | 健康检查 |
+| 10 | `ReloadGlobalConfig` | 重新加载全局配置 |
+| 11 | `ReloadWorkspacePolicy { workspace }` | 重新加载某个工作空间的策略覆盖 |
+| 12 | `ConfigOverview` | 查看配置与工作空间覆盖总览 |
+| 13 | `Recover { workspace }` | 恢复工作空间 |
+| 14 | `HealthAdvisory` | 健康检查 |
+| 15 | `GetWorkspacePolicy { workspace }` | 读取某个工作空间的策略 |
+| 16 | `ResetWorkspacePolicy { workspace }` | 重置某个工作空间的策略覆盖 |
+| 17 | `PatchWorkspacePolicy { workspace, auto_cleanup, auto_cleanup_keep }` | 修改某个工作空间的策略字段 |
+| 18 | `RollbackPreview { workspace, to, num_ancestors }` | 预览回滚目标及其变更 |
+| 19 | `WorkspaceIdentityV2 { registration_path }` | 解析已注册工作空间的稳定标识 |
+| 20 | `GuardedCheckpointV2 { ws_id, expected_generation, checkpoint_id, operation_digest, message, metadata, pin }` | 在工作空间 generation 围栏下创建快照 |
+| 21 | `CheckpointEvidenceV2 { ws_id, expected_generation, checkpoint_id, operation_digest }` | 查询一次受控操作的精确持久证据 |
+| 22 | `GuardedRollbackPreviewV2 { registered_path, ws_id, expected_generation, target_snapshot_id }` | 在工作空间与 generation 围栏下预览精确回滚目标 |
+| 23 | `GuardedRollbackV2 { registered_path, ws_id, expected_generation, target_snapshot_id, expected_diff_digest, operation_id, operation_digest }` | 原子地复验预览并切换到精确目标 |
+| 24 | `GuardedRollbackEvidenceV2 { ws_id, operation_id, operation_digest }` | 查询一次受控回滚操作的持久证据 |
+| 25 | `Unregister { workspace }` | 仅当注册工作空间的活跃子卷缺失时移除注册 |
 
 ## 响应类型（WsCkptResponse）
 
@@ -72,10 +86,24 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 | `StatusOk { report }` | Status | `StatusReport` |
 | `CleanupOk { removed }` | Cleanup | 被移除的快照 ID 列表 |
 | `ConfigOk { config }` | Config | `ConfigReport` |
-| `ReloadConfigOk` | ReloadConfig | 无载荷 |
+| `ReloadConfigOk { config }` | ReloadConfig | `ConfigReport` |
 | `CheckpointSkipped { reason }` | Checkpoint | 跳过原因（如无变更） |
 | `RecoverOk { workspace }` | Recover | 恢复的工作空间路径 |
-| `HealthAdvisoryOk { ... }` | HealthAdvisory | 超限工作空间数、磁盘用量 |
+| `HealthAdvisoryOk { over_limit_workspace_count, fs_total_bytes, fs_used_bytes }` | HealthAdvisory | 超限工作空间数、磁盘用量 |
+| `WorkspacePolicyOk { ws_id, effective, local, global }` | GetWorkspacePolicy / ResetWorkspacePolicy / PatchWorkspacePolicy / ReloadWorkspacePolicy | 生效策略及本地覆盖与全局快照 |
+| `ConfigOverviewOk { config, ws_total, ws_with_override }` | ConfigOverview | 配置及工作空间计数 |
+| `RollbackPreviewOk { to, changes }` | RollbackPreview | 目标快照及 `Vec<DiffEntry>` |
+| `WorkspaceIdentityV2Ok { protocol_version, ws_id, registered_path, generation }` | WorkspaceIdentityV2 | 稳定标识及当前工作空间 generation |
+| `GuardedCheckpointV2Ok { evidence }` | GuardedCheckpointV2 | `GuardedCheckpointEvidenceV2` |
+| `CheckpointEvidenceV2Ok { evidence }` | CheckpointEvidenceV2 | `Option<GuardedCheckpointEvidenceV2>` |
+| `GuardedCheckpointV2Rejected { code, message }` | GuardedCheckpointV2 | 拒绝码 + 描述（后端执行前被拒绝） |
+| `GuardedRollbackPreviewV2Ok { protocol_version, registered_path, ws_id, generation, target_snapshot_id, diff_digest, changes, caller_uid }` | GuardedRollbackPreviewV2 | 绑定到某个工作空间 generation 的精确预览 |
+| `GuardedRollbackV2Ok { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2`（回滚已完成） |
+| `GuardedRollbackV2Uncertain { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2`（回滚可能已开始，结果未证实） |
+| `GuardedRollbackEvidenceV2Ok { evidence }` | GuardedRollbackEvidenceV2 | `Option<GuardedRollbackEvidenceV2>` |
+| `GuardedRollbackV2Rejected { code, message }` | GuardedRollbackV2 | 拒绝码 + 描述（后端执行前被拒绝） |
+| `RecoverWithWarning { workspace, warning }` | Recover | 恢复成功但仍有额外用户数据待检查 |
+| `UnregisterOk { workspace, retained_paths }` | Unregister | 已移除的注册及有意保留的路径 |
 
 ## 错误码（WsCkptErrorCode）
 
@@ -92,6 +120,8 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 | 8 | `SnapshotAlreadyExists` | 快照 ID 冲突 |
 | 9 | `WriteLockConflict` | 写锁冲突 |
 | 10 | `DiskSpaceInsufficient` | 磁盘空间不足 |
+| 11 | `CwdOccupied` | 当前工作目录占用工作空间（阻止恢复） |
+| 12 | `CwdScanFailed` | 扫描当前工作目录失败 |
 
 ## 客户端使用
 

@@ -47,7 +47,7 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 |-------|---------|-------------|
 | 0 | `Init { workspace }` | Initialize a workspace |
 | 1 | `Checkpoint { workspace, id, message, metadata, pin }` | Create a snapshot |
-| 2 | `Rollback { workspace, to }` | Rollback to a specified snapshot |
+| 2 | `Rollback { workspace, to, num_ancestors }` | Rollback to a specified snapshot (or N ancestors) |
 | 3 | `Delete { workspace, snapshot, force }` | Delete a snapshot |
 | 4 | `List { workspace, format }` | List snapshots |
 | 5 | `Diff { workspace, from, to }` | Diff between two snapshots |
@@ -55,8 +55,22 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 | 7 | `Cleanup { workspace, keep }` | Clean up old snapshots |
 | 8 | `Config` | Get daemon configuration |
 | 9 | `ReloadConfig` | Reload configuration |
-| 10 | `Recover { workspace }` | Recover a workspace |
-| 11 | `HealthAdvisory` | Health check |
+| 10 | `ReloadGlobalConfig` | Reload the global configuration |
+| 11 | `ReloadWorkspacePolicy { workspace }` | Reload one workspace's policy override |
+| 12 | `ConfigOverview` | Overview of configuration and workspace overrides |
+| 13 | `Recover { workspace }` | Recover a workspace |
+| 14 | `HealthAdvisory` | Health check |
+| 15 | `GetWorkspacePolicy { workspace }` | Read one workspace's policy |
+| 16 | `ResetWorkspacePolicy { workspace }` | Reset one workspace's policy override |
+| 17 | `PatchWorkspacePolicy { workspace, auto_cleanup, auto_cleanup_keep }` | Patch policy fields of one workspace |
+| 18 | `RollbackPreview { workspace, to, num_ancestors }` | Preview a rollback target and its changes |
+| 19 | `WorkspaceIdentityV2 { registration_path }` | Resolves the stable identity of an already-registered workspace |
+| 20 | `GuardedCheckpointV2 { ws_id, expected_generation, checkpoint_id, operation_digest, message, metadata, pin }` | Creates a checkpoint under an atomic workspace-generation fence |
+| 21 | `CheckpointEvidenceV2 { ws_id, expected_generation, checkpoint_id, operation_digest }` | Queries exact durable evidence for one guarded operation |
+| 22 | `GuardedRollbackPreviewV2 { registered_path, ws_id, expected_generation, target_snapshot_id }` | Previews an exact rollback target under workspace and generation fences |
+| 23 | `GuardedRollbackV2 { registered_path, ws_id, expected_generation, target_snapshot_id, expected_diff_digest, operation_id, operation_digest }` | Atomically revalidates the preview and switches to its exact target |
+| 24 | `GuardedRollbackEvidenceV2 { ws_id, operation_id, operation_digest }` | Queries durable evidence for one guarded rollback operation |
+| 25 | `Unregister { workspace }` | Removes a registration only when its live subvolume is missing |
 
 ## Response Types (WsCkptResponse)
 
@@ -72,10 +86,24 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 | `StatusOk { report }` | Status | `StatusReport` |
 | `CleanupOk { removed }` | Cleanup | List of removed snapshot IDs |
 | `ConfigOk { config }` | Config | `ConfigReport` |
-| `ReloadConfigOk` | ReloadConfig | No payload |
+| `ReloadConfigOk { config }` | ReloadConfig | `ConfigReport` |
 | `CheckpointSkipped { reason }` | Checkpoint | Skip reason (e.g., no changes) |
 | `RecoverOk { workspace }` | Recover | Recovered workspace path |
-| `HealthAdvisoryOk { ... }` | HealthAdvisory | Over-limit workspace count, disk usage |
+| `HealthAdvisoryOk { over_limit_workspace_count, fs_total_bytes, fs_used_bytes }` | HealthAdvisory | Over-limit workspace count, disk usage |
+| `WorkspacePolicyOk { ws_id, effective, local, global }` | GetWorkspacePolicy / ResetWorkspacePolicy / PatchWorkspacePolicy / ReloadWorkspacePolicy | Effective policy plus local override and global snapshot |
+| `ConfigOverviewOk { config, ws_total, ws_with_override }` | ConfigOverview | Config plus workspace counts |
+| `RollbackPreviewOk { to, changes }` | RollbackPreview | Target snapshot and `Vec<DiffEntry>` |
+| `WorkspaceIdentityV2Ok { protocol_version, ws_id, registered_path, generation }` | WorkspaceIdentityV2 | Stable identity and current workspace generation |
+| `GuardedCheckpointV2Ok { evidence }` | GuardedCheckpointV2 | `GuardedCheckpointEvidenceV2` |
+| `CheckpointEvidenceV2Ok { evidence }` | CheckpointEvidenceV2 | `Option<GuardedCheckpointEvidenceV2>` |
+| `GuardedCheckpointV2Rejected { code, message }` | GuardedCheckpointV2 | Rejection code + message (rejected before backend execution) |
+| `GuardedRollbackPreviewV2Ok { protocol_version, registered_path, ws_id, generation, target_snapshot_id, diff_digest, changes, caller_uid }` | GuardedRollbackPreviewV2 | Exact preview bound to one workspace generation |
+| `GuardedRollbackV2Ok { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2` (rollback completed) |
+| `GuardedRollbackV2Uncertain { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2` (rollback may have started, outcome unproven) |
+| `GuardedRollbackEvidenceV2Ok { evidence }` | GuardedRollbackEvidenceV2 | `Option<GuardedRollbackEvidenceV2>` |
+| `GuardedRollbackV2Rejected { code, message }` | GuardedRollbackV2 | Rejection code + message (rejected before backend execution) |
+| `RecoverWithWarning { workspace, warning }` | Recover | Recovery succeeded while additional user data remains for inspection |
+| `UnregisterOk { workspace, retained_paths }` | Unregister | Removed registration plus intentionally retained paths |
 
 ## Error Codes (WsCkptErrorCode)
 
@@ -92,6 +120,8 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 | 8 | `SnapshotAlreadyExists` | Snapshot ID conflict |
 | 9 | `WriteLockConflict` | Write lock conflict |
 | 10 | `DiskSpaceInsufficient` | Insufficient disk space |
+| 11 | `CwdOccupied` | Current working directory occupies the workspace (blocks restore) |
+| 12 | `CwdScanFailed` | Scanning the current working directory failed |
 
 ## Client Usage
 
