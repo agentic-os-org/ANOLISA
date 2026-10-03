@@ -331,7 +331,9 @@ pub fn memory_task_save(
     svc: &MemoryService,
     title: &str,
     status: Option<&str>,
-    progress: Option<u8>,
+    // u32 so caller values above 100 reach the clamp below instead of
+    // wrapping in a narrowing u8 cast at the tool boundary.
+    progress: Option<u32>,
     next_steps: Option<Vec<String>>,
     blockers: Option<Vec<String>>,
     files_modified: Option<Vec<String>>,
@@ -410,7 +412,7 @@ pub fn memory_task_save(
         };
     }
     if let Some(p) = progress {
-        task.progress = p.min(100);
+        task.progress = p.min(100) as u8;
     }
     if let Some(ns) = next_steps {
         task.next_steps = ns;

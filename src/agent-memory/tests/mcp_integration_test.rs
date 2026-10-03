@@ -762,3 +762,35 @@ async fn mem_export_returns_ama_json() {
     drop(stdin);
     let _ = child.kill().await;
 }
+
+#[tokio::test]
+async fn task_save_progress_above_100_is_clamped_not_wrapped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+
+    // A u32 -> u8 cast wrapped 300 to 44 and 256 to 0 before the domain
+    // clamp could see them; the reported progress must be the clamped 100.
+    for (progress, bad) in [(300, 44), (256, 0)] {
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            progress,
+            "memory_task_save",
+            json!({"title": format!("wrap-probe-{progress}"), "progress": progress}),
+        )
+        .await;
+        let text = extract_text(&resp);
+        assert!(
+            text.contains("progress=100%"),
+            "progress {progress} should clamp to 100, got: {text}"
+        );
+        assert!(
+            !text.contains(&format!("progress={bad}%")),
+            "progress {progress} wrapped to {bad}: {text}"
+        );
+    }
+
+    drop(stdin);
+    let _ = child.kill().await;
+}
