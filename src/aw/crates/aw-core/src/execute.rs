@@ -181,7 +181,10 @@ impl Core {
             });
             if cancelled {
                 entry["reason"] = json!("cancellation_requested");
-                decision = "cancelled";
+                // A command gate's observed non-allow verdict is terminal: the
+                // denial must not be laundered into a cancellation just because
+                // cancellation overlapped the call.
+                decision = if rejected { "deny" } else { "cancelled" };
             } else {
                 if gap {
                     entry["reason"] = json!("provider_result_unavailable");
