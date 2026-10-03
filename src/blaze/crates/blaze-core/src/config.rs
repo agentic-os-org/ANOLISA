@@ -270,6 +270,21 @@ impl DaemonConfig {
             return Err(unsupported_pool_config("storage.prefork"));
         }
         validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
+        // The template/import boundaries are checked below; the storage roots
+        // own per-sandbox UUID subtrees too, so they must not sit inside the
+        // lifecycle state dir (or swallow it): `create_sandbox` writes
+        // state_dir/<uuid>/state.json and then creates instances_dir/<uuid>,
+        // which can never succeed when the two roots are the same.
+        validate_state_boundary(
+            &self.storage.images_dir,
+            "storage.images_dir",
+            &self.daemon.state_dir,
+        )?;
+        validate_state_boundary(
+            &self.storage.instances_dir,
+            "storage.instances_dir",
+            &self.daemon.state_dir,
+        )?;
         self.storage.sync_schedule()?;
         self.storage.sync_timeout_duration()?;
         let template_boundaries = [
@@ -875,5 +890,61 @@ mod tests {
         let mut total = DaemonConfig::default();
         total.template.max_total_bytes = 0;
         assert!(total.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_storage_roots_inside_the_lifecycle_state_dir() {
+        // `create_sandbox` persists state_dir/<uuid>/state.json and then
+        // creates instances_dir/<uuid>: with equal roots the mkdir always
+        // fails with "instance directory already exists", so validation must
+        // reject the configuration instead of starting a daemon that can
+        // never create a sandbox.
+        //
+        // template.dir is moved outside /var/lib/blaze in every case so the
+        // only overlap under test is the storage/state one — otherwise the
+        // pre-existing template boundary check rejects the config first and
+        // the storage rule would not be exercised.
+        let mut equal = DaemonConfig::default();
+        equal.template.dir = PathBuf::from("/srv/blaze/templates");
+        equal.storage.images_dir = PathBuf::from("/srv/blaze/images");
+        equal.storage.instances_dir = equal.daemon.state_dir.clone();
+        let error = equal
+            .validate()
+            .expect_err("storage.instances_dir must not equal daemon.state_dir");
+        assert!(
+            error.to_string().contains("storage.instances_dir"),
+            "{error}"
+        );
+
+        let mut nested = DaemonConfig::default();
+        nested.template.dir = PathBuf::from("/srv/blaze/templates");
+        nested.storage.images_dir = nested.daemon.state_dir.clone();
+        nested.storage.instances_dir = PathBuf::from("/srv/blaze/instances");
+        let error = nested
+            .validate()
+            .expect_err("storage.images_dir must not equal daemon.state_dir");
+        assert!(error.to_string().contains("storage.images_dir"), "{error}");
+
+        let mut owning = DaemonConfig::default();
+        owning.template.dir = PathBuf::from("/srv/blaze/templates");
+        owning.storage.images_dir = PathBuf::from("/srv/blaze/images");
+        owning.storage.instances_dir = owning
+            .daemon
+            .state_dir
+            .join("86b59faf-3b91-46e4-9db0-2468b8336eb6");
+        let error = owning
+            .validate()
+            .expect_err("storage.instances_dir must not own a sandbox UUID subtree");
+        assert!(
+            error.to_string().contains("storage.instances_dir"),
+            "{error}"
+        );
+
+        // A disjoint layout stays valid.
+        let mut ok = DaemonConfig::default();
+        ok.template.dir = PathBuf::from("/srv/blaze/templates");
+        ok.storage.images_dir = PathBuf::from("/srv/blaze/images");
+        ok.storage.instances_dir = PathBuf::from("/srv/blaze/instances");
+        ok.validate().expect("disjoint storage roots are valid");
     }
 }
