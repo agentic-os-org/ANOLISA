@@ -194,6 +194,12 @@ anolisa adapter enable tokenless openclaw
 anolisa adapter status tokenless
 ```
 
+随包提供的 OpenClaw `install.sh` 默认授予插件声明的能力。设置
+`ANOLISA_ACCEPT_CAPABILITIES=0` 可拒绝这份授予——该开关与 agent-memory 的
+OpenClaw 安装脚本共用——带同意门禁的宿主随后会拒绝本次安装（退出码 3），
+而不是收到一次隐式授予。详见
+[Agent 集成指南](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md)。
+
 DeepSeek Harness 必须指定至少一个 profile。需要启用多个 profile 时，应在同一条
 命令中列出全部名称，完整集合语义见下文。启动 DSH 时请使用已经启用的名称。
 
