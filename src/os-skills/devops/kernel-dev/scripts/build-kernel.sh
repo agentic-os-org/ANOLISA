@@ -108,7 +108,12 @@ get_latest_kernel() {
 build_srpm() {
     step "SRPM Method - Alinux4 Official Kernel"
     
-    local kernel_ver="${KERNEL_VERSION:-$(uname -r)}"
+    local kernel_ver
+    if [ "$KERNEL_VERSION" = "latest" ]; then
+        kernel_ver=$(uname -r)  # Auto-detect running kernel version
+    else
+        kernel_ver="$KERNEL_VERSION"
+    fi
     local spec_file="$OUTPUT_DIR/SPECS/kernel.spec"
     
     info "Building kernel: $kernel_ver"
