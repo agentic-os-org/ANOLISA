@@ -636,14 +636,18 @@ Examples:
     trace_name = os.path.basename(os.path.normpath(trace_dir))
     output_dir = os.path.join(output_base, trace_name)
 
-    # Step 1: Check for existing reports in output_base (from previous runs)
+    # Step 1: Check for existing reports for THIS trace (resume of the same
+    # trace dir). Only the trace's own <output_base>/<trace_name>/reports may
+    # be reused: reports are keyed by trace file name (trial hash), so
+    # scanning all of output_base would reuse an unrelated older run's
+    # reports, skip generation for the new trace, and yield null failure
+    # attribution with exit 0.
     skip_generation = False
-    existing_runs = [d for d in Path(output_base).iterdir() if d.is_dir()] if Path(output_base).is_dir() else []
-    if existing_runs:
-        latest_run = max(existing_runs, key=lambda d: d.stat().st_mtime)
-        existing_reports = list((latest_run / "reports").glob("*.json"))
+    trace_report_dir = Path(output_dir) / "reports"
+    if trace_report_dir.is_dir():
+        existing_reports = list(trace_report_dir.glob("*.json"))
         if len(existing_reports) > 0:
-            report_dir = str(latest_run / "reports")
+            report_dir = str(trace_report_dir)
             skip_generation = True
             print(f"Found {len(existing_reports)} existing reports, skipping generation.", file=sys.stderr)
 
