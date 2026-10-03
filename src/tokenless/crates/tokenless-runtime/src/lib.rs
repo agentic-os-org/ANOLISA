@@ -709,6 +709,10 @@ fn finish_schema_compression(
 /// still validated as JSON, so short invalid payloads fail instead of
 /// passing through.
 ///
+/// An encoding the TOON decoder cannot read back is never applied either: it
+/// reports [`Disposition::NoSavings`] and returns the input verbatim, because
+/// this path writes no Stash entry that could restore a replaced payload.
+///
 /// # Errors
 ///
 /// Returns [`RuntimeError`] for oversized or invalid JSON input, and for
@@ -744,6 +748,24 @@ pub fn compress_toon(
         .map_err(|error| RuntimeError::ToonEncode(error.to_string()))?
         .trim_end()
         .to_string();
+    // The encoder emits a tabular block its own decoder rejects for an array
+    // whose elements are all empty objects (`items[2]{}:`). Such a view would
+    // replace the payload with text nobody can turn back into the original
+    // JSON, and this path writes no Stash entry, so keep the input verbatim
+    // instead of applying it.
+    if !compressed_output.is_empty() && !tokenless_compressors::toon_decodes(&compressed_output) {
+        return Ok(CompressResult {
+            output: input.to_string(),
+            compressed_output: input.to_string(),
+            disposition: Disposition::NoSavings,
+            before_tokens,
+            after_tokens: before_tokens,
+            stash_writes: None,
+            stash_errors: None,
+            unrecoverable_truncations: None,
+            stash_size: None,
+        });
+    }
     let after_tokens = estimate_tokens(&compressed_output);
     let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
         Disposition::NoSavings
@@ -1934,6 +1956,31 @@ mod tests {
         // The same contract holds with the gate disabled.
         let error = compress_toon("not json", true, 0).unwrap_err();
         assert!(matches!(error, RuntimeError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn toon_never_applies_an_encoding_its_decoder_rejects() {
+        // toon-format renders an array whose elements are all empty objects as a
+        // tabular block with an empty field list (`items[2]{}:`), which
+        // `tokenless decompress-toon` refuses to read. The encoding is smaller
+        // than the JSON, so only the decodability guard can hold it back, and
+        // this path writes no Stash entry to fall back on.
+        let input = serde_json::to_string(&serde_json::json!({
+            "items": [{}, {}],
+            "meta": { "pad": "z".repeat(600) },
+        }))
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let encoded = toon_format::encode_default(&value).unwrap();
+        assert!(estimate_tokens(encoded.trim_end()) < estimate_tokens(&input));
+
+        for min_chars in [MIN_TOON_CHARS, 0] {
+            let result = compress_toon(&input, true, min_chars).unwrap();
+            assert_eq!(result.disposition, Disposition::NoSavings);
+            assert_eq!(result.output, input);
+            assert_eq!(result.compressed_output, input);
+            assert_eq!(result.before_tokens, result.after_tokens);
+        }
     }
 
     #[test]

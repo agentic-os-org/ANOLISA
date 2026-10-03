@@ -342,7 +342,9 @@ fn toon_candidate(value: &Value, min_chars: usize) -> Option<String> {
     }
     let encoded = toon_format::encode_default(value).ok()?;
     let candidate = encoded.trim_end().to_owned();
-    (!candidate.is_empty()).then_some(candidate)
+    // A view the TOON decoder rejects would leave the model with no way back
+    // to the original payload, so it is not a candidate at all.
+    (!candidate.is_empty() && crate::toon_decodes(&candidate)).then_some(candidate)
 }
 
 fn strictly_smaller(candidate: &str, baseline: &str) -> bool {

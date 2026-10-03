@@ -9,6 +9,7 @@ mod json;
 mod search_results;
 mod tabular;
 mod terminal_cleanup;
+mod toon;
 
 pub use build_log::{BuildLogCompressor, BuildLogMetrics, BuildLogOperation, BuildLogOutcome};
 pub use html::{HtmlExtractor, HtmlView};
@@ -19,3 +20,4 @@ pub use json::{
 pub use search_results::SearchResultsCompressor;
 pub use tabular::{TabularCompressor, TabularMetrics, TabularOperation, TabularOutcome};
 pub use tokenless_protocol::RecoveryMethod;
+pub use toon::toon_decodes;
