@@ -125,8 +125,21 @@ pub fn expand(value: &Value, objects: &Value, variables: &BTreeMap<String, Value
 }
 
 pub fn run(args: &[OsString]) -> Output {
+    run_process(args, None)
+}
+
+pub fn run_with_input(args: &[OsString], input: &[u8]) -> Output {
+    run_process(args, Some(input))
+}
+
+fn run_process(args: &[OsString], input: Option<&[u8]>) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
         .args(args)
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -143,6 +156,11 @@ pub fn run(args: &[OsString]) -> Output {
     };
     let stdout = read(Box::new(stdout));
     let stderr = read(Box::new(stderr));
+    if let Some(input) = input {
+        // AW request fixtures are small enough to fit the pipe in one write.
+        assert!(input.len() < 4096);
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), input).unwrap();
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {

@@ -2,159 +2,262 @@
 
 [中文版](../../zh/user-entrypoint/aw.md)
 
-AW is being built to let you use one policy configuration across different
-Agents. You keep using the Agent's own interface, while AW connects its tool
-Hooks to the rules and processing programs you choose. The first release targets
-QwenPaw, Qoder CLI, OpenClaw and Hermes.
+AW connects your tool policies and Hook commands to an Agent while preserving
+its normal interface. You describe the programs and events in `aw.yaml`; AW
+starts or reuses a local service, connects the supported native Hooks and keeps
+execution records after the Agent session ends.
 
-The goal is to distribute AW with an `aw.yaml` file, reuse that policy when
-switching Agents, and keep deployment status and audit records in one service.
-The current version lets you prepare and check the configuration. Agent startup
-and policy execution are still being built.
+The current Linux source build supports Qoder CLI 1.1.64 and QwenPaw 2.2.2b4 / AgentScope 2.0.8.
+Other first-release adapters are delivered separately. AW does not install an
+Agent or configure its model account; retain the framework's native configuration.
 
-## Available today
+## Current support
 
-✅ means available in this version. ❌ means planned and not yet available through
-this configuration. Earlier experiments do not establish support in this version.
+| Capability | Status |
+| --- | --- |
+| Validate one configuration with all 16 event names | ✅ Recognizing an event does not install a Hook |
+| Start Qoder CLI 1.1.64 through AW | ✅ Interactive and print entrypoints |
+| Run structured Providers before tools | ✅ `observe` and `block` |
+| Run structured Providers after tools | ✅ `observe`; success, error and blocked-attempt coverage depends on the framework |
+| Run native scripts and commands before/after tools | ✅ Unchanged callback input; byte output and exit status forwarded |
+| Preserve existing Qoder Hooks and their scheduling | ✅ Default settings and an explicit extra settings file |
+| Keep a shared service and persistent execution metadata | ✅ On-demand or externally started service |
+| Start QwenPaw through AW | ✅ the official App/API entrypoint |
+| Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
+| Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
+| Install a published AW package or generate a default configuration | ❌ Copy the example manually |
 
-| What you want to do | Status | What to expect |
-| --- | --- | --- |
-| Start from a configuration template | ✅ Available | Starter and full examples are included |
-| Check field names, types and Provider references | ✅ Available | The offline checker reports configuration errors |
-| Declare any of the 16 event names | ✅ Available | Recognizing a name does not connect its native Hook |
-| Start or attach an Agent through AW | ❌ Planned | The daemon and product CLI are not available yet |
-| Run Providers before and after native tools | ❌ Planned | Each framework needs its adapter and effect validation |
-| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires Provider execution and proof that the Agent uses the response |
-| View applied policy and persistent audit records | ❌ Planned | The service will maintain these records |
-| Install AW and generate a default configuration | ❌ Planned | The starter file is copied manually today |
-| Request user approval or enforce policy below native Hooks | ❌ Later work | Active `ask` steps are currently rejected; OS enforcement is not provided |
+For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
+`PostToolUseFailure` is a separate event and is not connected in this adapter.
+Native Hook commands remain subject to Qoder's own response semantics. Passing
+through a native approval response does not establish portable AW approval
+support; interactive approval is not part of this delivery's acceptance.
 
-All four first-release Agent IDs are accepted in configuration. Runtime
-integration remains ❌ for each in this version. QwenPaw is a separate target
-from Qwen Code. Runtime support will be documented by Agent version and operation
-as adapters are delivered.
+## Build and start Qoder
 
-## Start with a small configuration
-
-Copy the [starter file](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.minimal.yaml)
-to your chosen `aw.yaml` location. It declares Qoder and requests tool-before and
-tool-after events. It contains no policy program and enables no security rule.
-
-```yaml
-# Starter configuration for offline validation.
-# No policy program is configured; runtime integration is still being built.
-apiVersion: aw/v1alpha1
-kind: AWConfiguration
-metadata:
-  name: local-agent
-spec:
-  daemon:
-    startup: on_demand
-    endpoint: auto
-    state_dir: auto
-  execution:
-    guarantee: native_hook
-    default_event_budget_ms: 5000
-  audit:
-    enabled: true
-    payload: metadata_only
-  agents:
-    qoder:
-      adapter: qoder
-      argv: [qodercli]
-  providers: {}
-  events:
-    tool.before:
-      enabled: true
-      required: true
-      steps: []
-    tool.after:
-      enabled: true
-      required: true
-      steps: []
-```
-
-The outer fields should look familiar if you use Kubernetes. `apiVersion` selects
-the file format, `kind` identifies an AW configuration, and `metadata.name` names
-it. `spec` holds what you want AW to use. AW is designed to run independently of
-Kubernetes; no cluster or CRD is needed to check this file.
-
-Inside `agents`, `qoder` is a name you choose for this target. `adapter` selects
-the framework, and `argv` gives its executable and arguments. Add another named
-Agent to share the same Provider definitions and event routes. The full example
-includes Qoder and OpenClaw; QwenPaw and Hermes launch details will be verified
-with their adapters.
-
-The empty `providers` object leaves policy programs unconfigured. Empty `steps`
-lists make no Provider calls. Both events set `required: true`, declaring that
-future runtime admission must reject a target that cannot provide them.
-
-The remaining settings choose local service defaults and request metadata-only
-auditing. The event budget is 5,000 milliseconds. These are explicit values in
-the template; the checker does not start a service, write audits or enforce a
-timer. It does not search for a default file or fill missing fields into yours.
-
-## Check the file now
-
-The checker currently runs from a source checkout. With rustup installed, enter
-`src/aw` to select the pinned Rust toolchain and check the starter file. Run the
-commands below from the repository root. Replace the final path with your own
-`aw.yaml` when ready; relative paths are resolved from `src/aw`.
+AW is not yet available through `anolisa install` or an RPM. Developers can
+build it on Linux with rustup and the repository's pinned toolchain. Install
+Qoder CLI 1.1.64 separately and verify its version. From the repository root:
 
 ```bash
 cd src/aw
-cargo run --locked -p aw-config --example validate -- \
-  crates/aw-config/examples/aw.minimal.yaml
+cargo build --locked -p aw-service --bin aw
+qodercli --version
+target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-A successful check prints the following message.
+The [Qoder example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qoder.yaml)
+uses `argv: [qodercli]`. If another version is on `PATH`, replace that entry with
+the absolute path of the supported executable. `--agent qoder` selects the named
+entry under `spec.agents`; the name is yours to choose, while `adapter: qoder`
+selects the framework.
 
-```text
-Configuration is statically valid; runtime admission has not run.
-```
-
-This confirms the field structure and static relationships. The checker does
-not require Qoder to be installed and does not run any configured command.
-Before policies can take effect, the service must also verify the installed
-Agent and the Provider's actual capabilities.
-
-## Add your policy programs
-
-A Provider is a program that checks or processes an event, such as a security
-engine or your team's tool-result handler. In `spec.providers`, give each instance
-a name, specify its command and put its own settings in `config`.
-
-An event step refers to that name through `provider` and selects an `operation`.
-In the [full example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.yaml),
-`business-before` refers to the `business` Provider, while the final tool-before
-check refers to `security`. Steps run in their configured order once the execution
-service is available. Provider invocation remains ❌ in the current version.
-
-The full example shows all 16 event names and a disabled result-redaction step.
-Its business executable and sec-core command are illustrative. Replace them with
-real implementations when the Provider protocol and runtime are delivered.
-Changing `enabled` today changes the configuration being checked, without
-installing a Hook or activating protection.
-
-## Use the configuration with an Agent
-
-The planned workflow starts with AW reading your file and checking that the
-chosen Agent can carry out the requested actions. AW then installs its own native
-Hook or plugin entries and opens the Agent's normal interface. Provider rules run
-at those supported points; the AW service records deployment state and outcomes.
-
-For the Qoder and OpenClaw targets in the full example, the intended commands are
-shown below. They remain ❌ planned commands and cannot be run in this version.
+This example consumes Hook input and returns `{}` before and after tools. It
+adds no restriction and is not a security policy. Ask Qoder to run a harmless
+read-only tool to exercise both callbacks. A reply produced without a tool call
+does not exercise them. Arguments after `--` go to Qoder, for example:
 
 ```bash
-aw run qoder --config ./aw.yaml
-aw run openclaw --config ./aw.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder -- -p 'Read the current directory name with a tool.'
 ```
 
-A required safety action that the Agent cannot enforce must prevent binding.
-Optional observation gaps must be visible. The service is intended to stay
-running after an Agent session ends, so another session can reuse its
-configuration and records.
+AW opens Qoder's native terminal interface, then returns to the original shell
+when Qoder exits. It releases that session's binding and unfinished work. The
+shared daemon remains available to later sessions using the same configuration.
 
-For field limits, omitted-field behavior and the full event vocabulary, use the
-[configuration reference](../../../developer-guide/en/aw/configuration.md).
+```bash
+target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
+```
+
+## Start QwenPaw
+
+Install QwenPaw 2.2.2b4 with AgentScope 2.0.8 and initialize its model configuration
+through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
+`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
+its owned temporary plugin, preserves existing plugins and native configuration,
+and removes its plugin after the App exits.
+
+Native middleware retains onion ordering: before runs forward, after unwinds in
+reverse, and the host controls concurrent tools. After observes terminal
+`ToolResponse` objects, including AW-denied results, without repeating streaming
+chunks. The point covers tools executed inside the App; external execution tools
+and attempts denied before middleware are outside its coverage. Event budgets
+must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
+before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
+Callback failures are reported and follow the step's `on_error`; `report` preserves
+execution and after results, while before `block` denies. Cancellation still propagates.
+
+The native startup hook confirms plugin registration after loading completes.
+It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
+reload and multi-worker launch remain rejected because this integration does not
+verify their plugin lifecycle. Use the App's normal API or interface after the
+native Hooks ready message.
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+The [neutral QwenPaw example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
+## Connect your programs
+
+Each named object in `spec.providers` describes a program. An event step refers
+to its name through `provider`. Choose the protocol for the program you have:
+
+| Protocol | Input and result | Step fields |
+| --- | --- | --- |
+| `aw-provider/v1alpha1` | AW performs `describe`, `validate_config` and `invoke`; responses contain checked candidate effects | `operation`, `effects`, `on_error` |
+| `native-hook/v1alpha1` | The command receives the selected adapter's native callback bytes; the adapter handles stdout, stderr and exit status | `native: {}`, `on_error`; omit `operation` and `effects` |
+
+For a native Hook, replace the example's `transport.argv` with the executable
+and literal arguments for your script. AW does not insert a shell; shell syntax
+requires an explicit `/bin/sh -c ...`. Keep `config: {}` for this protocol:
+there is no Provider configuration exchange. Qoder-specific native output is
+not automatically portable to another framework.
+
+For structured policies, use `aw-provider/v1alpha1` and put Provider-owned
+settings in `config`. The runnable [policy example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.yaml)
+shows before-tool `observe`/`block` and after-tool `observe`. Build its executable
+with `cargo build --locked -p aw-provider --example policy` and run from `src/aw`
+because its command path is relative. Its blocked tool name is illustrative;
+replace it with a tool actually used by your Agent when testing a block. The
+sample Provider is not sec-core.
+
+Raw commands use the actual callback environment, including profile-loaded
+variables. Structured Providers keep the environment pinned at binding.
+Environment contents are excluded from events and audit.
+
+`timeout_ms` limits one command; `default_event_budget_ms` limits the whole event.
+The Qoder launcher accepts event budgets from 1 to 55,000 milliseconds.
+The output ceiling bounds the returned bytes. `on_error` controls execution
+failures, separately from a Provider's successful policy block. For native
+commands, an ordinary nonzero exit remains native output, not an AW transport
+failure. Qoder interprets exit 2 as a blocking response where supported and
+other nonzero exits as nonblocking errors. An observe result adds no permission
+and does not override Qoder's own tool permissions.
+
+## Keep existing Hooks and scheduling
+
+Qoder continues to load its normal user, project and local settings. AW creates
+session-specific callback entries without editing those files. To include an
+existing JSON file that you normally pass through Qoder's `--settings`, use:
+
+```bash
+target/debug/aw run --config ./aw.yaml --agent qoder --native-settings ./qoder.settings.json
+```
+
+AW preserves that file's other fields and Hook entries, adds its callbacks and
+passes the merged settings to Qoder. Each AW step becomes a separate synchronous
+native Hook. Qoder determines serial or parallel execution, including how the
+new callbacks coexist with other matching Hooks.
+
+Set `spec.agents.qoder.qoder.sequential: true` to mark the generated groups as
+sequential. If any matching synchronous Qoder group requests sequential
+execution, all matching synchronous Hooks run in sequence. Omitting this field
+or setting it to false does not override an existing group's true value.
+Steps in one native event share the AW budget; later callbacks do not reset it.
+
+This adapter supports scripts whose input remains unchanged across AW steps.
+Sequential input-rewrite chains are not supported: if a command returns
+`updatedInput`, a later callback with changed input is rejected and follows that
+step's `on_error`. Forwarding native bytes does not promise every native effect
+combination or approval flow.
+
+The launcher rejects settings and arguments that would disable or replace its
+Hooks rather than overriding a user's disabled-hook choice. This includes raw
+`--settings`, `--setting-sources`, `--headless-fast-hooks` and conflicting native
+settings. Custom configuration roots, alternate Qoder configuration-directory
+modes, resumed sessions, remote sessions and worktree launch are outside the current adapter's
+scope. Pass short options separately rather than combining them, and launch from
+the intended working directory. Existing native Hooks remain
+responsible for their own behavior and audit records.
+
+## Service lifetime and records
+
+`spec.daemon.startup: on_demand` starts a service if none exists at the selected
+endpoint; `external` requires one to be running already. An existing service is
+reused only when its protocol and exact configuration revision match. With
+`endpoint: auto` and `state_dir: auto`, AW selects a private configuration-specific
+directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
+unset. Explicit paths must be absolute and agree on the `aw.sock` location.
+
+The service retains a fixed configuration snapshot. Editing `aw.yaml` does not
+reload it. Stop a service using its original file or socket before retiring that
+configuration; auto paths for changed configuration may select a different
+service. Exiting an Agent does not stop other sessions or the shared daemon.
+The local endpoint is a same-user boundary, not a sandbox.
+
+| Command | Purpose |
+| --- | --- |
+| `aw validate --config FILE` | Check syntax and static references without executing programs |
+| `aw run --config FILE --agent TARGET [ADAPTER_OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
+| `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
+| `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
+| `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
+| `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
+
+In a source checkout, use `target/debug/aw` for `aw`. `aw hook` is an internal
+callback generated by the launcher; users do not need to construct it. Service
+records contain metadata without tool input/results, private Provider
+configuration or raw stdout/stderr. A running service or completed invocation
+does not prove native policy adoption. Killed or disabled native callbacks can
+miss checks; this version does not provide final/protected execution or an OS
+fallback.
+
+## Run the local service demo
+
+This demonstration needs no Agent account or model request. From `src/aw`:
+
+```bash
+cargo build --locked -p aw-provider --example policy
+AW_DEMO_ROOT="$(mktemp -d "$PWD/target/aw-demo.XXXXXX")"
+printf 'Socket: %s\n' "$AW_DEMO_ROOT/state/aw.sock"
+target/debug/aw serve --config crates/aw-service/examples/aw.yaml \
+  --state-dir "$AW_DEMO_ROOT/state"
+```
+
+In a second terminal in `src/aw`, use the printed absolute socket path:
+
+```bash
+AW_DEMO_SOCKET=/absolute/socket/path/printed/above
+target/debug/aw status --socket "$AW_DEMO_SOCKET"
+cargo run --locked -p aw-service --example local -- "$AW_DEMO_SOCKET"
+```
+
+The example supplies synthetic capabilities and events. It checks `read_demo`,
+blocks `delete_demo`, observes an after event and prints audit keys. No native
+Agent or tool is started. Replace `AUDIT_KEY` with a reported preparation key or
+event ID to inspect its records:
+
+```bash
+printf '%s\n' '{"method":"audit","key":"AUDIT_KEY"}' | \
+  target/debug/aw request --socket "$AW_DEMO_SOCKET"
+target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+```
+
+`terminal: false` means no terminal record is present; the operation may be
+active or interrupted. A timed-out call must not be retried as a new step.
+The stop response acknowledges the request; wait for the foreground service to
+exit before removing this demo directory in its original terminal:
+
+```bash
+rm -r -- "$AW_DEMO_ROOT"
+```
+
+Normal shutdown retains audit history and removes the owned socket. After a
+forced kill, AW reports a stale socket instead of deleting it automatically.
+Verify that the old service has stopped before removing its owned `aw.sock`;
+keep its lock and journal when retaining the service directory. Restarting
+creates a new service identity; historical records remain queryable without
+resuming or replaying old events.
+
+The [configuration reference](../../../developer-guide/en/aw/configuration.md)
+covers every field and event name. The [local service contract](../../../../src/aw/docs/design/local-service.md)
+describes operation JSON, deadlines and lifecycle for Adapter developers.

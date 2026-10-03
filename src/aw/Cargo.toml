@@ -4,13 +4,19 @@ members = [
     "crates/aw-config",
     "crates/aw-core",
     "crates/aw-exec",
+    "crates/aw-host",
     "crates/aw-provider",
+    "crates/aw-service",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 aw-config = { path = "crates/aw-config" }
+aw-core = { path = "crates/aw-core" }
 aw-contracts = { path = "." }
+aw-exec = { path = "crates/aw-exec" }
+aw-host = { path = "crates/aw-host" }
+aw-provider = { path = "crates/aw-provider" }
 jsonschema = { version = "0.53", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

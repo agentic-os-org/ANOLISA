@@ -70,6 +70,11 @@ Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
 bounded correlation records on stderr. See [context examples and logging limits](v2/README.md#native-opentelemetry-tracing).
 
+The source-built Rust `agent-sec-cli aw-provider` exposes code scanning to AW through
+`aw-provider/v1alpha1`. AW owns Agent adaptation and Provider-call auditing; scans use
+the existing sec daemon. See the [AW Provider guide](../../docs/user-guide/en/agent-security/agent-sec-core/aw-provider.md)
+for configuration, explicit blocking and current coverage.
+
 ## Security Architecture
 
 ```

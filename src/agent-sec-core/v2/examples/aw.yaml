@@ -1,0 +1,49 @@
+# Use the Rust V2 agent-sec-cli; action.code_scan needs an existing sec daemon.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: local-code-policy
+spec:
+  daemon: {startup: on_demand, endpoint: auto, state_dir: auto}
+  execution: {guarantee: native_hook, default_event_budget_ms: 5000}
+  audit: {enabled: true, payload: metadata_only}
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv: [agent-sec-cli, --socket, /run/agent-sec-core/daemon.sock, aw-provider]
+      timeout_ms: 2000
+      max_output_bytes: 4096
+      config:
+        version: 1
+        mode: observe
+        # Qoder preserves the native tool name; match Bash exactly.
+        tools:
+          Bash: {language: bash, input_pointer: /command}
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      match: {tools: ["*"]}
+      steps:
+        - id: scan-code
+          provider: security
+          operation: scan_code
+          effects: [observe, block]
+          on_error: report
+    tool.after:
+      enabled: true
+      required: true
+      match: {tools: ["*"]}
+      steps:
+        - id: observe-completion
+          provider: security
+          operation: observe_tool
+          effects: [observe]
+          on_error: report
