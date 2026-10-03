@@ -33,6 +33,10 @@ use crate::state::ServerState;
 
 const MAX_EXEC_TIMEOUT_SECS: u32 = 20;
 const MAX_GUEST_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
+/// Control-plane routes only ever carry small JSON (create body, template
+/// import reference, pool sizing). Without a daemon-wide cap, any other
+/// route buffers an unbounded request body in daemon memory.
+const MAX_CONTROL_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
 /// Top-level request handler. Always returns `Ok(Response)`; internal
 /// errors are turned into JSON error bodies so hyper never sees a panic.
@@ -64,7 +68,11 @@ where
         drop(req);
         dispatch(&method, &path, &query, Vec::new(), &state).await
     } else {
-        let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
+        let limit = if guest_body_route(&method, &path) {
+            Some(MAX_GUEST_HTTP_BODY_BYTES)
+        } else {
+            Some(MAX_CONTROL_HTTP_BODY_BYTES)
+        };
         match collect_body(req, limit).await {
             Ok(body) => dispatch(&method, &path, &query, body, &state).await,
             Err(e) => Err(e),
@@ -1087,6 +1095,44 @@ mod tests {
             .to_bytes();
         let value = serde_json::from_slice(&body).expect("response json");
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn non_guest_route_rejects_oversized_body() {
+        // Control-plane routes must not buffer unbounded request bodies in
+        // daemon memory; anything beyond the default cap is a 413.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = mock_state(&temp);
+        let oversized = vec![0u8; MAX_CONTROL_HTTP_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/sandboxes")
+            .header(hyper::header::CONTENT_LENGTH, oversized.len())
+            .body(Full::new(Bytes::from(oversized)))
+            .expect("request");
+        let response = handle_request(request, state.clone())
+            .await
+            .expect("infallible response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn guest_route_keeps_its_own_body_cap() {
+        // The guest write route keeps the tighter per-route cap (still a 413
+        // beyond it), so the daemon-wide default must not loosen it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = mock_state(&temp);
+        let oversized = vec![0u8; MAX_GUEST_HTTP_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/sandboxes/00000000-0000-0000-0000-000000000000/write")
+            .header(hyper::header::CONTENT_LENGTH, oversized.len())
+            .body(Full::new(Bytes::from(oversized)))
+            .expect("request");
+        let response = handle_request(request, state.clone())
+            .await
+            .expect("infallible response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     struct BodyThatMustNotBeRead;
