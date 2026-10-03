@@ -443,20 +443,49 @@ impl CentralLog {
         filter: &LogFilter,
         since: Option<&DateTime<FixedOffset>>,
     ) -> Result<Vec<LogRecord>, CentralLogError> {
-        let reader = BufReader::new(reader);
+        let mut reader = BufReader::new(reader);
         // Keep a sliding window so `--limit` is a tail cap. Stopping at the
         // first N matches would pin `anolisa logs` to genesis records once
         // the JSONL file grew past the default 50.
         let mut matches: VecDeque<LogRecord> = VecDeque::new();
-        for line in reader.lines() {
-            let line = line.map_err(|source| CentralLogError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
+        // Read lines at the byte level: `BufRead::lines()` fails the whole
+        // iteration with `InvalidData` when a torn append cut a multi-byte
+        // UTF-8 character in half, which would abort the query before the
+        // per-line tolerance below could ever run.
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            let read =
+                reader
+                    .read_until(b'\n', &mut raw)
+                    .map_err(|source| CentralLogError::Io {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            // A torn append (SIGKILL mid-write, ENOSPC) or an external edit
+            // leaves a truncated line — invalid JSON, or invalid UTF-8 when
+            // the cut landed inside a multi-byte character — in an otherwise
+            // healthy log. The durable unit is the line, so one damaged line
+            // must not make the whole log unreadable: skip it and keep the
+            // valid records around it, which are the reason `anolisa logs`
+            // exists. This crate has no logging framework, so the skip is
+            // silent — the alternative, failing every future query, is
+            // strictly worse. I/O errors above remain fatal; only per-line
+            // decoding degrades.
+            let Ok(line) = std::str::from_utf8(&raw) else {
+                continue;
+            };
+            let line = line.trim_end_matches(['\n', '\r']);
             if line.trim().is_empty() {
                 continue;
             }
-            let record: LogRecord = serde_json::from_str(&line)?;
+            let record: LogRecord = match serde_json::from_str(line) {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
             if record_matches(&record, filter, since) {
                 matches.push_back(record);
                 if let Some(limit) = filter.limit
@@ -1022,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn query_since_ignores_invalid_timestamps_but_keeps_json_errors() {
+    fn query_since_ignores_invalid_timestamps_and_damaged_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = CentralLog::open(dir.path().join("audit.jsonl"));
         log.append(&operation_record(
@@ -1052,12 +1081,13 @@ mod tests {
         assert_eq!(filtered[0].operation_id.as_deref(), Some("valid"));
         assert_eq!(fs::read(log.path()).expect("reread log"), original);
 
+        // A damaged line no longer fails the whole query (this PR's point:
+        // one torn append must not brick `anolisa logs`/`anolisa bug`);
+        // it is skipped and the scan keeps the valid records readable.
         fs::write(log.path(), "not json\n").expect("write malformed JSON");
         for filter in [LogFilter::default(), filter] {
-            assert!(matches!(
-                log.query(&filter),
-                Err(CentralLogError::Serialize(_))
-            ));
+            let survivors = log.query(&filter).expect("query survives damage");
+            assert!(survivors.is_empty(), "the damaged line yields no records");
         }
     }
 
@@ -1308,5 +1338,274 @@ mod tests {
         assert!(parsed.backup_ids.is_empty());
         assert!(parsed.warnings.is_empty());
         assert!(parsed.details.is_null());
+    }
+
+    // A torn line (SIGKILL mid-append, ENOSPC, or an external edit) cannot be
+    // produced through `append`; the tests below inject it directly, the same
+    // way the filesystem would leave it behind.
+    const TORN_LINE: &str = "{\"kind\": \"operation\", \"started_at\": \"2026-0";
+
+    /// Injects a torn line the way a killed writer would: appended bytes,
+    /// never truncating what earlier appends already wrote.
+    fn inject_torn_line(log: &CentralLog) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log.path())
+            .expect("open for torn append");
+        file.write_all(format!("{TORN_LINE}\n").as_bytes())
+            .expect("inject torn line");
+    }
+
+    #[test]
+    fn query_skips_a_torn_line_and_returns_the_valid_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+        inject_torn_line(&log);
+        log.append(&operation_record(
+            "2026-06-01T10:00:02Z",
+            "op-3",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 3");
+
+        let records = log
+            .query(&LogFilter::default())
+            .expect("query must survive");
+        let ids: Vec<_> = records
+            .iter()
+            .filter_map(|r| r.operation_id.as_deref())
+            .collect();
+        assert_eq!(ids, ["op-1", "op-3"], "the torn middle line is skipped");
+    }
+
+    #[test]
+    fn query_survives_a_torn_first_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        // The file is created by the torn write itself: no earlier records.
+        std::fs::write(log.path(), format!("{TORN_LINE}\n")).expect("torn first line");
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-2",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 2");
+
+        let records = log
+            .query(&LogFilter::default())
+            .expect("query must survive");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].operation_id.as_deref(), Some("op-1"));
+        assert_eq!(records[1].operation_id.as_deref(), Some("op-2"));
+    }
+
+    #[test]
+    fn query_survives_a_torn_trailing_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-2",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 2");
+        // No trailing newline: exactly what a killed writer leaves behind,
+        // and the snapshot length still covers these bytes.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .expect("open for append");
+        use std::io::Write as _;
+        file.write_all(TORN_LINE.as_bytes())
+            .expect("inject torn tail");
+
+        let records = log
+            .query(&LogFilter::default())
+            .expect("query must survive");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].operation_id.as_deref(), Some("op-2"));
+    }
+
+    #[test]
+    fn query_limit_tail_cap_ignores_skipped_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        for index in 0..3 {
+            log.append(&operation_record(
+                "2026-06-01T10:00:00Z",
+                &format!("op-{index}"),
+                &[],
+                Severity::Info,
+            ))
+            .expect("append");
+        }
+        inject_torn_line(&log);
+        log.append(&operation_record(
+            "2026-06-01T10:00:03Z",
+            "op-9",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append newest");
+
+        let filter = LogFilter {
+            limit: Some(2),
+            ..LogFilter::default()
+        };
+        let records = log.query(&filter).expect("query must survive");
+        let ids: Vec<_> = records
+            .iter()
+            .filter_map(|r| r.operation_id.as_deref())
+            .collect();
+        assert_eq!(
+            ids,
+            ["op-2", "op-9"],
+            "the window counts only valid matched records"
+        );
+    }
+
+    #[test]
+    fn query_still_fails_on_read_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory at the log path: opening it for reading fails, which
+        // must stay fatal — only line-level decoding degrades.
+        let log = CentralLog::open(dir.path().join("blocked"));
+        std::fs::create_dir(log.path()).expect("directory in the way");
+        assert!(log.query(&LogFilter::default()).is_err());
+    }
+
+    #[test]
+    fn appended_records_after_a_torn_line_still_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+        inject_torn_line(&log);
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-2",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 2");
+
+        // Both appends and queries keep working around the damage.
+        let records = log.query(&LogFilter::default()).expect("query");
+        assert_eq!(records.len(), 2);
+        log.append(&operation_record(
+            "2026-06-01T10:00:02Z",
+            "op-3",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 3");
+        assert_eq!(log.query(&LogFilter::default()).expect("query").len(), 3);
+    }
+
+    #[test]
+    fn query_survives_a_torn_multibyte_character() {
+        // Review regression: `BufRead::lines()` aborts the whole iteration
+        // with `InvalidData` when a torn append cut a multi-byte UTF-8
+        // character in half (a Chinese message is the realistic case), so
+        // the query failed before the per-line skip could run. Inject the
+        // exact shape: a valid prefix line, a line whose tail bytes are the
+        // first bytes of a multi-byte character, then more valid lines.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .expect("open for append");
+        // Valid JSON prefix, then the first bytes of a 3-byte CJK character
+        // (E4 B8 80 = 一) with the last byte missing, then the newline.
+        file.write_all(b"{\"kind\": \"operation\", \"message\": \"\xe4\xb8\n")
+            .expect("inject torn multibyte line");
+        drop(file);
+
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-2",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 2");
+
+        let records = log
+            .query(&LogFilter::default())
+            .expect("query must survive");
+        let ids: Vec<_> = records
+            .iter()
+            .filter_map(|r| r.operation_id.as_deref())
+            .collect();
+        assert_eq!(ids, ["op-1", "op-2"]);
+    }
+
+    #[test]
+    fn query_survives_a_torn_multibyte_line_without_newline() {
+        // The snapshot length covers the damaged tail bytes; the final line
+        // has no newline, exactly what a killed writer leaves behind.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-1",
+            &[],
+            Severity::Info,
+        ))
+        .expect("append 1");
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .expect("open for append");
+        file.write_all(b"{\"message\": \"\xe4\xb8")
+            .expect("torn multibyte tail");
+        drop(file);
+
+        let records = log
+            .query(&LogFilter::default())
+            .expect("query must survive");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation_id.as_deref(), Some("op-1"));
     }
 }
