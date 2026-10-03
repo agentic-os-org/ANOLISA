@@ -478,18 +478,47 @@ fn rewrite_command_invocations(line: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// Normalize bare pip invocations without changing interpreter module calls.
+/// The historical `Run: ` documentation label is transparent only at the
+/// beginning of a line; other prose and shell arguments stay untouched.
+fn rewrite_pip_install_invocations(line: &str) -> String {
+    let commands = line.trim_start().strip_prefix("Run: ").unwrap_or(line);
+    let label_len = line.len() - commands.len();
+    let mut output = String::with_capacity(line.len());
+    output.push_str(&line[..label_len]);
+    let mut copied = 0;
+    for (pos, _) in commands.match_indices("pip") {
+        let suffix = &commands[pos..];
+        let matched = if suffix.starts_with("pip3 install") {
+            "pip3 install"
+        } else if suffix.starts_with("pip install") {
+            "pip install"
+        } else {
+            continue;
+        };
+        let end = pos + matched.len();
+        // `install` must be the whole subcommand, not `installable`.
+        let token_ends = commands[end..].chars().next().is_none_or(|ch| {
+            ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | ')' | '`' | '<' | '>')
+        });
+        if token_ends && is_command_position(commands, pos) {
+            output.push_str(&commands[copied..pos]);
+            output.push_str("uv pip install");
+            copied = end;
+        }
+    }
+    output.push_str(&commands[copied..]);
+    output
+}
+
 /// Apply heuristic substitutions to a single line.
 fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
     let mut result = line.to_string();
 
     if has_uv {
-        // pip install / pip3 install → uv pip install
-        for pip_cmd in &["pip3 install", "pip install"] {
-            if result.contains(pip_cmd) && !result.contains("uv pip install") {
-                result = result.replace(pip_cmd, "uv pip install");
-                break; // only one replacement per line
-            }
-        }
+        // Preserve `python -m pip`: uv availability does not imply that
+        // the selected interpreter can import the uv Python module.
+        result = rewrite_pip_install_invocations(&result);
 
         // python -m venv / python3 -m venv → uv venv
         for venv_cmd in &["python3 -m venv", "python -m venv"] {
@@ -722,6 +751,76 @@ mod tests {
                 .contains("pip install"),
             "bare pip install should be gone after substitution"
         );
+    }
+
+    #[test]
+    fn test_heuristic_pip_keeps_modules_and_arguments() {
+        let env = env_darwin_uv();
+        let unchanged = concat!(
+            "python -m pip install requests\n",
+            "python3 -m pip install requests\n",
+            "/opt/venv/bin/python -m pip install requests\n",
+            "sudo python3 -m pip install requests\n",
+            "echo pip install requests\n",
+            "echo 'pip install requests'\n",
+            "echo \"pip3 install requests\"\n",
+            "env LABEL='example; pip install requests' python app.py\n",
+            "PIP_TOOL=pip install requests\n",
+            "my-pip install requests\n",
+            "pip installer requests\n",
+            "pip installable requests\n",
+            "Run: python3 -m pip install requests\n",
+            "Run: echo pip install requests\n",
+            "echo Run: pip install requests\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+    }
+
+    #[test]
+    fn test_heuristic_pip_mixed_invocations_are_independent() {
+        let env = env_darwin_uv();
+        let input = concat!(
+            "uv pip install a && pip install b\n",
+            "pip3 install a && pip install b && uv pip install c\n",
+            "python3 -m pip install a; pip3 install b\n",
+            "pip install pip install requests\n",
+            "  Run: pip3 install requests\n",
+        );
+        let expected = concat!(
+            "uv pip install a && uv pip install b\n",
+            "uv pip install a && uv pip install b && uv pip install c\n",
+            "python3 -m pip install a; uv pip install b\n",
+            "uv pip install pip install requests\n",
+            "  Run: uv pip install requests\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
+    }
+
+    #[test]
+    fn test_heuristic_pip_respects_prefix_options_and_quoting() {
+        let env = env_darwin_uv();
+        let input = concat!(
+            "sudo -u root pip install requests\n",
+            "env FOO=1 nohup pip3 install requests\n",
+            "sudo -u pip install requests\n",
+            "env -C pip install requests\n",
+            "sudo --unknown pip install requests\n",
+            "echo a\\; pip install requests\n",
+            "pip install requests; pip3 install pandas\n",
+        );
+        let expected = concat!(
+            "sudo -u root uv pip install requests\n",
+            "env FOO=1 nohup uv pip install requests\n",
+            "sudo -u pip install requests\n",
+            "env -C pip install requests\n",
+            "sudo --unknown pip install requests\n",
+            "echo a\\; pip install requests\n",
+            "uv pip install requests; uv pip install pandas\n",
+        );
+        assert_eq!(compile(input, &env), expected);
     }
 
     #[test]
