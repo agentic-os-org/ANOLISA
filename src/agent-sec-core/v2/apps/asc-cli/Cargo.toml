@@ -13,6 +13,7 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+aw-provider = { workspace = true }
 asc-action-types = { workspace = true }
 dirs = { workspace = true }
 rustix = { workspace = true }

@@ -270,6 +270,72 @@ async fn real_cli_processes_code_scan_through_the_daemon() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aw_provider_uses_real_daemon_rules_and_preserves_protocol_outcomes() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, requests) = start(&socket, PrincipalRole::LocalUser).await;
+    let protocol = aw_provider::Protocol::new().unwrap();
+    for (source, mode, effect, reason) in [
+        ("echo hello", "block", Some("observe"), "code_pass"),
+        ("rm -rf /", "block", Some("block"), "code_risk"),
+        ("rm -rf /", "observe", Some("observe"), "code_risk"),
+        ("  ", "block", None, "scan_error"),
+    ] {
+        let request = protocol
+            .bind_invocation(json!({
+                "api_version":aw_provider::VERSION,"method":"invoke","request_id":"real-provider",
+                "operation":"scan_code","config_revision":"a".repeat(64),"budget_ms":3000,
+                "allowed_effects":["observe","block"],
+                "config":{"version":1,"mode":mode,"tools":{
+                    "custom_shell":{"language":"bash","input_pointer":"/payload/source"}}},
+                "event":{"name":"tool.before","session_id":null,"native":{},
+                    "agent":{"adapter":"openclaw","binding_id":"demo","instance_id":"run"},
+                    "tool":{"name":"custom_shell","native_name":"exec","call_id":"call",
+                        "input":{"payload":{"source":source}},"result":null}}
+            }))
+            .unwrap();
+        let input = serde_json::to_vec(request.as_value()).unwrap();
+        let args = vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("aw-provider"),
+        ];
+        let output = tokio::task::spawn_blocking(move || common::run_with_input(&args, &input))
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if let Some(effect) = effect {
+            assert!(protocol.check_response(&request, &output.stdout).is_ok());
+            assert_eq!(
+                reply["effects"],
+                json!([{"type":effect,"reason_code":reason}])
+            );
+            assert_eq!(reply["input_digest"], request.as_value()["input_digest"]);
+        } else {
+            assert!(matches!(
+                protocol.check_response(&request, &output.stdout),
+                Err(aw_provider::Error::ProviderFailure { .. })
+            ));
+            assert_eq!(reply["error_code"], reason);
+            assert!(reply.get("effects").is_none());
+        }
+        if !source.trim().is_empty() {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(source.trim()));
+        }
+    }
+    assert_eq!(requests.lock().unwrap().len(), 4);
+    shutdown.request();
+    task.await.unwrap();
+    assert!(!socket.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unauthorized_cli_cannot_read_or_modify_any_pap_resource() {
     let directory = common::Directory::new();
     let socket = directory.0.join("daemon.sock");

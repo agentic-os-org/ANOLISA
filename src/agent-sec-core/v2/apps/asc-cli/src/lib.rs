@@ -4,6 +4,7 @@ pub mod capabilities;
 mod commands;
 mod context;
 pub mod output;
+pub mod provider;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
@@ -31,6 +32,11 @@ pub struct Cli {
 pub enum Plan<'a> {
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
+    /// One AW stdio request, using the existing daemon only when a scan is required.
+    Provider {
+        /// Resolved endpoint of the security backend.
+        socket: &'a Path,
+    },
     /// Sent to the daemon listening on `socket`.
     Daemon {
         /// Resolved absolute endpoint of the running daemon.
@@ -139,6 +145,7 @@ impl Cli {
     pub fn plan(&self) -> Plan<'_> {
         match (self.command.local(), self.socket.as_deref()) {
             (Some(command), _) => Plan::Local(command),
+            (None, Some(socket)) if self.command.is_aw_provider() => Plan::Provider { socket },
             (None, Some(socket)) => Plan::Daemon { socket },
             // Parsing rejects a daemon command without an endpoint, so the
             // remaining combination cannot be constructed.
