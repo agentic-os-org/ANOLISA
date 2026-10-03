@@ -429,7 +429,13 @@ def main():
         elif report["status"] == "fail":
             fail_count += 1
             fc = report.get("failure_classification", {})
-            if fc.get("category", "other") != "other" or "key_reason_zh" in fc:
+            # llm_classify_failure's exception path returns the sentinel
+            # {"category": "other", "key_reason_zh": "LLM error: ..."}.
+            # key_reason_zh is ALWAYS set (success path too), so its mere
+            # presence must not count as ok - check the sentinel prefix.
+            if str(fc.get("key_reason_zh", "")).startswith("LLM error"):
+                llm_err += 1
+            elif fc.get("category", "other") != "other" or "key_reason_zh" in fc:
                 llm_ok += 1
             else:
                 llm_err += 1
