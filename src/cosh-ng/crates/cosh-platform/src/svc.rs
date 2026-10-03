@@ -9,6 +9,7 @@ use crate::{run_command, SVC_TIMEOUT};
 
 /// Get structured status of a systemd service.
 pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
+    validate_unit_name(name)?;
     let props = load_service_properties(name)?;
 
     let active_state = props
@@ -52,6 +53,7 @@ pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
 
 /// Perform a service action (start/stop/restart).
 pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionResult, CoshError> {
+    validate_unit_name(name)?;
     let valid_actions = ["start", "stop", "restart", "enable", "disable"];
     if !valid_actions.contains(&action) {
         return Err(CoshError::new(
@@ -209,6 +211,20 @@ fn validate_state_filter(state: &str) -> Result<(), CoshError> {
 
 // --- Internal helpers ---
 
+/// Reject unit names that would be parsed by systemctl/journalctl as
+/// options instead of unit names (`systemctl show --no-pager ...` exits 0
+/// with manager-level properties, defeating the not-found guard).
+fn validate_unit_name(name: &str) -> Result<(), CoshError> {
+    if name.starts_with('-') {
+        return Err(CoshError::new(
+            ErrorCode::InvalidInput,
+            format!("Invalid unit name '{name}': must not start with '-'"),
+            "svc",
+        ));
+    }
+    Ok(())
+}
+
 fn svc_state(name: &str) -> Result<SvcState, CoshError> {
     Ok(state_from_properties(&load_service_properties(name)?))
 }
@@ -298,6 +314,11 @@ fn read_system_uptime_secs() -> Option<u64> {
 }
 
 fn fetch_journal_lines(unit: &str, count: usize) -> Vec<String> {
+    // Option-like units would leak into journalctl's flag parsing; callers
+    // validate already, this keeps the helper safe on its own.
+    if unit.starts_with('-') {
+        return vec![];
+    }
     let result = run_command(
         Command::new("journalctl").args(["-u", unit, "-n", &count.to_string(), "--no-pager", "-q"]),
         SVC_TIMEOUT,
@@ -599,6 +620,40 @@ mod tests {
         assert_eq!(svc.name, "apt-daily");
         assert!(svc.active);
         assert_eq!(svc.state, SvcState::Stopped);
+    }
+
+    // Option-like unit names are forwarded to systemctl as flags:
+    // `systemctl show --no-pager --no-pager` exits 0 printing manager-level
+    // properties with no LoadState, so the not-found guard never fires and a
+    // fabricated Unknown status is returned for a unit that does not exist.
+    #[test]
+    fn test_svc_status_option_like_unit_name_is_rejected() {
+        let fabricated = svc_status("--no-pager");
+        assert!(
+            matches!(&fabricated, Err(e) if e.code == ErrorCode::InvalidInput),
+            "option-like unit names must be rejected, not fabricated: {fabricated:?}"
+        );
+        // Control: a plain missing unit is reported as SvcNotFound.
+        let missing = svc_status("cosh-cn9-missing-unit");
+        assert!(
+            matches!(&missing, Err(e) if e.code == ErrorCode::SvcNotFound),
+            "plain missing unit must stay SvcNotFound: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn test_svc_action_option_like_unit_name_is_rejected() {
+        let result = svc_action("--no-pager", "start", false);
+        assert!(
+            matches!(&result, Err(e) if e.code == ErrorCode::InvalidInput),
+            "option-like unit names must be rejected before systemctl: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_journal_lines_option_like_unit_is_empty() {
+        // Never forwarded to journalctl: option-like units cannot leak flags.
+        assert!(fetch_journal_lines("--no-pager", 5).is_empty());
     }
 
     // --- validate_state_filter tests ---
