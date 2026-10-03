@@ -763,8 +763,14 @@ impl<'a> TokenQuery<'a> {
             })
             .collect();
 
-        // Sort by total tokens descending
-        breakdown.sort_by_key(|entry| std::cmp::Reverse(entry.total_tokens));
+        // Sort by total tokens descending. The rows come from a HashMap, whose
+        // iteration order is randomized per process, so ties are broken by
+        // name instead of following the map order.
+        breakdown.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         breakdown
     }
 }
@@ -1284,6 +1290,34 @@ mod tests {
         let comparison = result.comparison.expect("today compares against yesterday");
         assert_eq!(comparison.previous_total, 100);
         assert_eq!(comparison.trend, Trend::Down);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_breakdown_ties_are_ordered_by_name() {
+        let path = unique_db_path("breakdown_ties");
+        let store = TokenStore::new(&path).unwrap();
+        let (today_start, _) = TimePeriod::Today.time_range();
+
+        // Five agents with identical totals: the breakdown order used to
+        // follow the HashMap iteration order (randomized per process).
+        for agent in ["zeta", "alpha", "delta", "echo", "bravo"] {
+            store
+                .insert(&make_record(today_start, Some(agent), 100, 50))
+                .unwrap();
+        }
+
+        let result = TokenQuery::new(&store).by_period_with_breakdown(TimePeriod::Today);
+        let names: Vec<&str> = result
+            .breakdown
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["alpha", "bravo", "delta", "echo", "zeta"],
+            "count ties must be broken by name, not by map order"
+        );
         cleanup_db(&path);
     }
 }
