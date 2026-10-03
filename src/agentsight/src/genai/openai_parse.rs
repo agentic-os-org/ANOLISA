@@ -385,9 +385,24 @@ impl GenAIBuilder {
     /// enrichment (`GenAIBuilder::extract_sse_enrichment`) so both persist
     /// identical, deserializable `output_messages` — content, reasoning, and
     /// index-merged tool-call deltas alike.
+    ///
+    /// Anthropic streams carry no `choices` array at all, so when none of the
+    /// chunks is OpenAI-shaped the Anthropic aggregation below runs instead —
+    /// the live path reconstructs Anthropic content through the analyzer's
+    /// message parser, but the drain path has only this merger. The OpenAI
+    /// **Responses** protocol (`response.*` events) is the same story and gets
+    /// its own aggregation first.
     pub(super) fn merge_sse_chunks(
         chunks: &[serde_json::Value],
     ) -> (Vec<MessagePart>, Option<String>) {
+        if !chunks.iter().any(|c| c.get("choices").is_some()) {
+            if let Some(merged) = Self::merge_responses_sse_chunks(chunks) {
+                return merged;
+            }
+            if let Some(merged) = Self::merge_anthropic_sse_chunks(chunks) {
+                return merged;
+            }
+        }
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
         let mut finish_reason: Option<String> = None;
@@ -485,6 +500,279 @@ impl GenAIBuilder {
         }
 
         (parts, finish_reason)
+    }
+
+    /// Aggregate Anthropic-protocol SSE chunks into parts.
+    ///
+    /// Anthropic streams usage and content in separate events (`message_start`
+    /// carries input tokens, `message_delta` the output tokens and
+    /// `stop_reason`), and the content itself arrives as `content_block_start`
+    /// plus `content_block_delta` events addressed by a wire-supplied `index`.
+    /// The live path reconstructs this through the analyzer's message parser
+    /// (`ParsedApiMessage::AnthropicMessage`), but the dead-pid/flush drain
+    /// path persists through `extract_sse_enrichment` → `merge_sse_chunks`,
+    /// which understood only OpenAI `choices[].delta` — a drained Anthropic
+    /// stream therefore lost its entire output (`output_messages = None`)
+    /// while the same stream captured live kept it.
+    ///
+    /// Mirrors the analyzer's aggregation: text deltas → one Text part per
+    /// block, thinking deltas → Reasoning, tool_use blocks → ToolCall with the
+    /// concatenated `input_json_delta` fragments, all in block-index order.
+    /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
+    /// cannot turn one JSON field into an unbounded map. Returns `None` when
+    /// no Anthropic event shape is present (caller falls back).
+    pub(super) fn merge_anthropic_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        enum Block {
+            Text(String),
+            Thinking(String),
+            ToolUse {
+                id: String,
+                name: String,
+                args_json: String,
+            },
+        }
+
+        let mut blocks: std::collections::BTreeMap<u64, Block> = std::collections::BTreeMap::new();
+        let mut finish_reason: Option<String> = None;
+        let mut saw_anthropic_event = false;
+
+        for chunk in chunks {
+            let event_type = chunk.get("type").and_then(|v| v.as_str());
+            match event_type {
+                Some("content_block_start") => {
+                    saw_anthropic_event = true;
+                    let Some(index) = chunk.get("index").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    if index >= MAX_TOOL_CALL_SLOTS {
+                        continue;
+                    }
+                    let Some(content_block) = chunk.get("content_block") else {
+                        continue;
+                    };
+                    let block = match content_block.get("type").and_then(|v| v.as_str()) {
+                        Some("tool_use") => Block::ToolUse {
+                            id: content_block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: content_block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            args_json: String::new(),
+                        },
+                        Some("thinking") => Block::Thinking(String::new()),
+                        // Text and any future block kind default to a text
+                        // accumulator; unknown deltas are then ignored.
+                        _ => Block::Text(String::new()),
+                    };
+                    blocks.insert(index, block);
+                }
+                Some("content_block_delta") => {
+                    saw_anthropic_event = true;
+                    let Some(index) = chunk.get("index").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    let Some(delta) = chunk.get("delta") else {
+                        continue;
+                    };
+                    match delta.get("type").and_then(|v| v.as_str()) {
+                        Some("text_delta") => {
+                            if let (Some(text), Some(Block::Text(buf))) = (
+                                delta.get("text").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                buf.push_str(text);
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let (Some(text), Some(Block::Thinking(buf))) = (
+                                delta.get("thinking").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                buf.push_str(text);
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let (Some(fragment), Some(Block::ToolUse { args_json, .. })) = (
+                                delta.get("partial_json").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                args_json.push_str(fragment);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("message_delta") => {
+                    saw_anthropic_event = true;
+                    if let Some(stop) = chunk.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                    {
+                        finish_reason = Some(stop.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_anthropic_event {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for block in blocks.into_values() {
+            match block {
+                Block::Text(text) if !text.is_empty() => {
+                    parts.push(MessagePart::Text { content: text });
+                }
+                Block::Thinking(thinking) if !thinking.is_empty() => {
+                    parts.push(MessagePart::Reasoning { content: thinking });
+                }
+                Block::ToolUse {
+                    id,
+                    name,
+                    args_json,
+                } => {
+                    let arguments = if args_json.trim().is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str(&args_json).ok()
+                    };
+                    parts.push(MessagePart::ToolCall {
+                        id: if id.is_empty() { None } else { Some(id) },
+                        name,
+                        arguments,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Some((parts, finish_reason))
+    }
+
+    /// Aggregate OpenAI **Responses** API SSE chunks into parts.
+    ///
+    /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
+    /// `response.*` events: text arrives as `response.output_text.delta`,
+    /// function calls as `response.output_item.added` (type `function_call`)
+    /// plus `response.function_call_arguments.delta`, and the stream closes
+    /// with `response.completed`. The live path reconstructs this through the
+    /// analyzer's message parser (`aggregate_responses_sse_chunks`), but the
+    /// dead-pid/flush drain path persists through `extract_sse_enrichment` →
+    /// `merge_sse_chunks`, which understood none of it — a drained Responses
+    /// stream lost its entire output (`output_messages = None`) while the same
+    /// stream captured live kept it.
+    ///
+    /// Mirrors the analyzer's aggregation, including its parallel-tool-use
+    /// semantics: an in-flight call is flushed when the next call starts,
+    /// because the stream is not required to send
+    /// `response.function_call_arguments.done` for each call.
+    pub(super) fn merge_responses_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        fn push_tool_call(parts: &mut Vec<MessagePart>, id: &str, name: &str, arguments: &str) {
+            if name.is_empty() {
+                return;
+            }
+            let arguments = if arguments.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(arguments).ok()
+            };
+            parts.push(MessagePart::ToolCall {
+                id: if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                },
+                name: name.to_string(),
+                arguments,
+            });
+        }
+
+        let mut text_buf = String::new();
+        let mut tool_parts: Vec<MessagePart> = Vec::new();
+        let mut tc_id = String::new();
+        let mut tc_name = String::new();
+        let mut tc_args = String::new();
+        let mut saw_responses_event = false;
+
+        for chunk in chunks {
+            let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match event_type {
+                "response.output_text.delta" => {
+                    saw_responses_event = true;
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        text_buf.push_str(delta);
+                    }
+                }
+                "response.output_item.added" => {
+                    saw_responses_event = true;
+                    if let Some(item) = chunk.get("item") {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                            // Parallel tool use: a new call starting must not
+                            // discard the previous one (same invariant the
+                            // analyzer's aggregator holds).
+                            push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+                            tc_name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tc_id = item
+                                .get("call_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tc_args.clear();
+                        }
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        tc_args.push_str(delta);
+                    }
+                }
+                "response.function_call_arguments.done" => {
+                    push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+                    tc_name.clear();
+                    tc_id.clear();
+                    tc_args.clear();
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_responses_event {
+            return None;
+        }
+
+        // Flush any in-flight call (truncated stream without the done event).
+        push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+
+        let mut parts = Vec::new();
+        if !text_buf.is_empty() {
+            parts.push(MessagePart::Text { content: text_buf });
+        }
+        parts.extend(tool_parts);
+
+        // Same finish-reason convention as the analyzer's aggregator.
+        let finish_reason = if parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::ToolCall { .. }))
+        {
+            Some("tool_calls".to_string())
+        } else {
+            Some("stop".to_string())
+        };
+
+        Some((parts, finish_reason))
     }
 
     /// Reconstruct assistant output from the DashScope/Bailian **native**
@@ -840,6 +1128,96 @@ mod tests {
             matches!(&parts[0], MessagePart::Reasoning { content } if content == "thinking...")
         );
         assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+    }
+
+    /// Anthropic SSE bodies carry no `choices` array, so the merger must
+    /// aggregate `content_block_start`/`content_block_delta` events instead of
+    /// yielding no parts at all. This is the same merger the dead-pid drain
+    /// path persists through, so a captured Anthropic body reconstructs its
+    /// blocks on both paths.
+    #[test]
+    fn test_extract_parts_from_sse_body_anthropic_blocks() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}},
+            {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}},
+            {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments, &Some(serde_json::json!({"city": "Paris"})));
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert_eq!(finish.as_deref(), Some("tool_use"));
+    }
+
+    /// Mixed protocol bodies cannot happen (one stream is one protocol), but a
+    /// body whose chunks have `choices` must keep taking the OpenAI walk even
+    /// when an Anthropic-shaped event sneaks in, and an Anthropic stream with
+    /// no content blocks must degrade to today's behavior (no parts) rather
+    /// than inventing any.
+    #[test]
+    fn test_merge_sse_chunks_anthropic_without_blocks_stays_empty() {
+        let chunks: Vec<serde_json::Value> = vec![
+            serde_json::json!({"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}),
+            serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+        ];
+        let (parts, finish) = GenAIBuilder::merge_sse_chunks(&chunks);
+        assert!(parts.is_empty(), "no content blocks means no parts");
+        assert_eq!(finish.as_deref(), Some("end_turn"));
+    }
+
+    /// Responses-API SSE bodies (codex 0.137+ via /v1/responses) carry no
+    /// `choices` array either; the merger must aggregate their `response.*`
+    /// events instead of yielding no parts. Same merger the drain path
+    /// persists through.
+    #[test]
+    fn test_extract_parts_from_sse_body_responses_events() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}},
+            {"type":"response.output_text.delta","delta":"Hel"},
+            {"type":"response.output_text.delta","delta":"lo"},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"},
+            {"type":"response.function_call_arguments.delta","delta":"\"/tmp/a.md\"}"},
+            {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments, &Some(serde_json::json!({"path": "/tmp/a.md"})));
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert_eq!(finish.as_deref(), Some("tool_calls"));
     }
 
     #[test]
