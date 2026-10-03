@@ -96,9 +96,9 @@ get_latest_kernel() {
     
     if [ -z "$version" ]; then
         version="6.12.9"  # Fallback version
-        warn "Could not fetch latest version, using fallback: $version"
+        warn "Could not fetch latest version, using fallback: $version" >&2
     else
-        success "Latest stable kernel: $version"
+        success "Latest stable kernel: $version" >&2
     fi
     
     echo "$version"
@@ -277,7 +277,12 @@ install_kernel() {
         success "SRPM kernel installed"
         
     elif [ "$method" = "upstream" ]; then
-        local kernel_ver="${KERNEL_VERSION:-$(get_latest_kernel)}"
+        local kernel_ver
+        if [ "$KERNEL_VERSION" = "latest" ]; then
+            kernel_ver=$(get_latest_kernel)
+        else
+            kernel_ver="$KERNEL_VERSION"
+        fi
         local src_dir="$WORK_DIR/linux-$kernel_ver"
         
         cd "$src_dir"
