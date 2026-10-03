@@ -68,6 +68,12 @@ impl SkillFs {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().to_string();
+                        // The ordinary view hides the same top-level entries
+                        // the flat `/skills` listing hides (S3 reserved roots,
+                        // I2 staging roots, D1.1 hidden skills).
+                        if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
+                            continue;
+                        }
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -705,6 +711,13 @@ impl SkillFs {
                                 continue;
                             }
                             let name = entry.file_name().to_string_lossy().to_string();
+                            // The ordinary view hides the same top-level
+                            // entries the flat `/skills` listing hides (S3
+                            // reserved roots, I2 staging roots, D1.1 hidden
+                            // skills).
+                            if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
+                                continue;
+                            }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = self.skill_inode_path(&name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);

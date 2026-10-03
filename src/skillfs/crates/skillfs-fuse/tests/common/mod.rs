@@ -189,6 +189,22 @@ impl MountFixture {
         )
     }
 
+    /// Mount in normal mode with Hermes layout.
+    pub fn normal_hermes<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            Some(skillfs_fuse::SkillLayout::Hermes),
+            None,
+            None,
+            None,
+        )
+    }
+
     /// Mount in normal mode with an opt-in OS adapter transform stage.
     pub fn normal_with_os_adapter<F: FnOnce(&Path)>(seed: F, stage: OsAdapterStage) -> Self {
         let source = tempfile::tempdir().expect("source tempdir");

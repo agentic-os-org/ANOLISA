@@ -358,6 +358,34 @@ impl SkillFs {
         !self.is_post_publish_grace_allowed(skill_name, relative_path)
     }
 
+    /// Whether a top-level Hermes root entry must be hidden from the ordinary
+    /// view.
+    ///
+    /// The Hermes root listing is the physical workspace, so the filters the
+    /// flat `/skills` listing applies have to run here as well: reserved
+    /// lifecycle roots (S3), installer staging roots (I2), and
+    /// activation-hidden skills (D1.1). Only skill-shaped leaves are gated by
+    /// activation — plain files and category directories are passthrough
+    /// content and stay visible.
+    pub(super) fn hermes_root_entry_is_hidden(
+        &self,
+        name: &str,
+        physical: &std::path::Path,
+    ) -> bool {
+        use crate::fs::read_resolution::ReadResolution;
+        if is_reserved_lifecycle_name(name) {
+            return true;
+        }
+        if let Some(ref matcher) = self.staging_matcher {
+            if matcher.is_staging_root(name) {
+                return true;
+            }
+        }
+        self.active_resolver.is_some()
+            && skillfs_core::store::has_regular_skill_md(physical)
+            && matches!(self.resolve_skill_read(name), ReadResolution::Hidden)
+    }
+
     /// Hidden-write gate for a Hermes nested path (`category/skill/...`).
     ///
     /// Mirrors [`Self::should_reject_hidden_write`] but resolves through
