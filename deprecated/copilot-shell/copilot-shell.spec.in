@@ -127,8 +127,11 @@ if f then
 end
 
 %postun -p <lua>
--- Run it only if we are uninstalling
-if arg[2] == 0
+-- Run it only if we are uninstalling. In an rpm lua scriptlet the first
+-- scriptlet argument ($1, the count of instances left after the erase) is
+-- exposed as arg[1]; arg[2] is always nil, so the old guard never fired and
+-- the stale /usr/bin/cosh line survived uninstall.
+if arg[1] == 0
 then
   t={}
   for line in io.lines("/etc/shells")
