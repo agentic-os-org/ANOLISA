@@ -260,4 +260,66 @@ mod tests {
         assert!(index.snapshots.contains_key("msg1-step0"));
         assert!(index.snapshots.contains_key("my-snapshot"));
     }
+
+    fn missing_meta(parent: Option<&str>, children: Vec<&str>) -> SnapshotMeta {
+        SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: parent.map(str::to_string),
+            child_ids: children.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    // ── Startup reachability of cyclic parent links ──
+    //
+    // load()/rebuild_from_persisted parse index.json without DAG
+    // validation, so a corrupt index (manual subvolume deletion, crash
+    // between backend delete and index save, restore-from-backup) can
+    // carry a parent cycle whose subvolumes are absent. reconcile_from_fs
+    // feeds that absent set to prune_chain; the watchdog keeps a
+    // regression a bounded failure instead of a wedged daemon startup.
+
+    #[test]
+    fn reconcile_from_fs_survives_cyclic_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshots = dir.path().join("snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        // No snapshot subdirectories on disk: every record is absent.
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+                index
+                    .snapshots
+                    .insert("a".into(), missing_meta(Some("b"), vec!["c"]));
+                index
+                    .snapshots
+                    .insert("b".into(), missing_meta(Some("a"), vec![]));
+                index.snapshots.insert(
+                    "c".into(),
+                    missing_meta(Some("a"), vec![ws_ckpt_common::LIVE_CHILD]),
+                );
+                index.head = Some("c".into());
+                let _ = reconcile_from_fs(&snapshots, &mut index).await;
+                tx.send(()).unwrap();
+                index
+            })
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|e| {
+                panic!("reconcile_from_fs hung at startup: prune_chain never returns when index.json contains a parent cycle and the subvolumes are absent: {e}")
+            });
+        let index = handle.join().unwrap();
+        // All three records were absent and unpinned: the whole cycle is
+        // pruned and the index survives empty.
+        assert!(index.snapshots.is_empty());
+        assert_eq!(index.head, None);
+    }
 }

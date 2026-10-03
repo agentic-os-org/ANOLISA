@@ -768,6 +768,31 @@ impl SnapshotIndex {
         }
     }
 
+    /// Walk up the parent chain from `start`, skipping nodes in `ids`, and
+    /// return the nearest surviving ancestor.
+    ///
+    /// A parent cycle that lies fully inside `ids` can never reach a
+    /// surviving node, so the walk stops at the first revisited id and
+    /// reports no ancestor instead of looping forever.
+    fn nearest_surviving_ancestor(
+        &self,
+        start: Option<String>,
+        ids: &HashSet<String>,
+    ) -> Option<String> {
+        let mut sp = start;
+        let mut visited = HashSet::new();
+        while let Some(ref pid) = sp {
+            if !ids.contains(pid) {
+                break;
+            }
+            if !visited.insert(pid.clone()) {
+                return None;
+            }
+            sp = self.snapshots.get(pid).and_then(|m| m.parent_id.clone());
+        }
+        sp
+    }
+
     /// Remove a batch of nodes from the DAG, processing only boundary edges.
     pub fn prune_chain(&mut self, ids: &HashSet<String>) {
         let mut edges: Vec<(String, String)> = Vec::new();
@@ -794,16 +819,12 @@ impl SnapshotIndex {
         }
 
         for (child_id, deleted_parent) in &edges {
-            let mut sp = self
-                .snapshots
-                .get(deleted_parent)
-                .and_then(|m| m.parent_id.clone());
-            while let Some(ref pid) = sp {
-                if !ids.contains(pid) {
-                    break;
-                }
-                sp = self.snapshots.get(pid).and_then(|m| m.parent_id.clone());
-            }
+            let sp = self.nearest_surviving_ancestor(
+                self.snapshots
+                    .get(deleted_parent)
+                    .and_then(|m| m.parent_id.clone()),
+                ids,
+            );
             if let Some(cm) = self.snapshots.get_mut(child_id) {
                 cm.parent_id = sp.clone();
             }
@@ -818,13 +839,10 @@ impl SnapshotIndex {
 
         if let Some(ref h) = self.head.clone() {
             if ids.contains(h) {
-                let mut p = self.snapshots.get(h).and_then(|m| m.parent_id.clone());
-                while let Some(ref pid) = p {
-                    if !ids.contains(pid) {
-                        break;
-                    }
-                    p = self.snapshots.get(pid).and_then(|m| m.parent_id.clone());
-                }
+                let p = self.nearest_surviving_ancestor(
+                    self.snapshots.get(h).and_then(|m| m.parent_id.clone()),
+                    ids,
+                );
                 self.head = p;
                 if let Some(ref nh) = self.head {
                     if let Some(m) = self.snapshots.get_mut(nh) {
@@ -3762,5 +3780,156 @@ mod tests {
         assert!(
             validate_checkpoint_id_v2(&"a".repeat(GUARDED_CHECKPOINT_ID_MAX_BYTES_V2 + 1)).is_err()
         );
+    }
+
+    // ── prune_chain termination on cyclic parent links ──
+    //
+    // Both parent walks inside prune_chain terminate only on a missing
+    // parent or the first id outside the deleted set; a parent cycle that
+    // lies fully inside the deleted set satisfies neither. The watchdog
+    // (5s channel timeout) keeps a regression a bounded failure with a
+    // pointed message instead of a wedged test binary.
+
+    fn cyclic_meta(parent: Option<&str>, children: Vec<&str>) -> SnapshotMeta {
+        SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: parent.map(str::to_string),
+            child_ids: children.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn assert_prune_completes(index: &mut SnapshotIndex, ids: &HashSet<String>, what: &str) {
+        let ids = ids.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let mut snapshot = std::mem::replace(index, SnapshotIndex::new(PathBuf::from("/ws")));
+        let handle = std::thread::spawn(move || {
+            snapshot.prune_chain(&ids);
+            tx.send(()).unwrap();
+            snapshot
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("prune_chain hung on {what}: {e}"));
+        *index = handle.join().unwrap();
+    }
+
+    #[test]
+    fn prune_chain_surviving_child_of_cyclic_deleted_parents_terminates() {
+        // A.parent = B, B.parent = A (cycle inside the deleted set); C is a
+        // surviving child of A, so the boundary-edge walk starts inside the
+        // cycle and can never reach a surviving ancestor.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("a".into(), cyclic_meta(Some("b"), vec!["c"]));
+        idx.snapshots
+            .insert("b".into(), cyclic_meta(Some("a"), vec![]));
+        idx.snapshots
+            .insert("c".into(), cyclic_meta(Some("a"), vec![LIVE_CHILD]));
+        idx.head = Some("c".into());
+        let mut ids = HashSet::new();
+        ids.insert("a".to_string());
+        ids.insert("b".to_string());
+        assert_prune_completes(
+            &mut idx,
+            &ids,
+            "the boundary-edge parent walk over a deleted parent cycle",
+        );
+        // No surviving ancestor is reachable: the link is dropped, not
+        // pointed at a node that is about to be removed.
+        assert_eq!(idx.snapshots["c"].parent_id, None);
+    }
+
+    #[test]
+    fn prune_chain_deleted_head_inside_cycle_terminates() {
+        // head = A, A.parent = B, B.parent = A — both deleted, so the head
+        // fix-up walk cycles forever before the fix.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("a".into(), cyclic_meta(Some("b"), vec![LIVE_CHILD, "b"]));
+        idx.snapshots
+            .insert("b".into(), cyclic_meta(Some("a"), vec![]));
+        idx.head = Some("a".into());
+        let mut ids = HashSet::new();
+        ids.insert("a".to_string());
+        ids.insert("b".to_string());
+        assert_prune_completes(
+            &mut idx,
+            &ids,
+            "the head fix-up walk over a deleted parent cycle",
+        );
+        assert_eq!(idx.head, None);
+    }
+
+    #[test]
+    fn prune_chain_self_cycle_terminates() {
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("a".into(), cyclic_meta(Some("a"), vec![LIVE_CHILD]));
+        idx.head = Some("a".into());
+        let mut ids = HashSet::new();
+        ids.insert("a".to_string());
+        assert_prune_completes(&mut idx, &ids, "a self-referential parent");
+        assert_eq!(idx.head, None);
+    }
+
+    #[test]
+    fn prune_chain_acyclic_control_reparents_to_surviving_grandparent() {
+        // Same shapes as above without the cycle: the surviving child must
+        // be reparented onto the surviving grandparent.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("g".into(), cyclic_meta(None, vec!["m"]));
+        idx.snapshots
+            .insert("m".into(), cyclic_meta(Some("g"), vec!["c"]));
+        idx.snapshots
+            .insert("c".into(), cyclic_meta(Some("m"), vec![LIVE_CHILD]));
+        idx.head = Some("c".into());
+        let mut ids = HashSet::new();
+        ids.insert("m".to_string());
+        idx.prune_chain(&ids);
+        assert_eq!(idx.snapshots["c"].parent_id.as_deref(), Some("g"));
+        assert!(idx.snapshots["g"].child_ids.contains(&"c".to_string()));
+        assert!(!idx.snapshots["g"].child_ids.contains(&"m".to_string()));
+        assert_eq!(idx.head.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn prune_chain_acyclic_control_drops_link_at_chain_end() {
+        // Deleting a whole acyclic prefix leaves the surviving child with
+        // no ancestor to attach to.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("a".into(), cyclic_meta(Some("b"), vec!["c"]));
+        idx.snapshots
+            .insert("b".into(), cyclic_meta(None, vec!["a"]));
+        idx.snapshots
+            .insert("c".into(), cyclic_meta(Some("a"), vec![LIVE_CHILD]));
+        idx.head = Some("c".into());
+        let mut ids = HashSet::new();
+        ids.insert("a".to_string());
+        ids.insert("b".to_string());
+        idx.prune_chain(&ids);
+        assert_eq!(idx.snapshots["c"].parent_id, None);
+        assert_eq!(idx.head.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn prune_chain_acyclic_control_moves_head_to_surviving_parent() {
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots
+            .insert("g".into(), cyclic_meta(None, vec![LIVE_CHILD, "a"]));
+        idx.snapshots
+            .insert("a".into(), cyclic_meta(Some("g"), vec![LIVE_CHILD]));
+        idx.head = Some("a".into());
+        let mut ids = HashSet::new();
+        ids.insert("a".to_string());
+        idx.prune_chain(&ids);
+        assert_eq!(idx.head.as_deref(), Some("g"));
+        assert!(idx.snapshots["g"]
+            .child_ids
+            .contains(&LIVE_CHILD.to_string()));
     }
 }
