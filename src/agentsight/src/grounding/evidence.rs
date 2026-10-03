@@ -305,7 +305,17 @@ fn digest_pool(pool: &[EvidenceEntry]) -> String {
             break;
         }
         let remaining = EVIDENCE_DIGEST_LIMIT - out.len();
-        let take: String = entry.haystack.chars().take(remaining).collect();
+        // Truncate by bytes, not chars: the limit is a byte budget, but
+        // chars().take(remaining) counts characters, so CJK haystacks
+        // (3-4 bytes per char) could push the digest to ~4x the limit.
+        let bytes = entry.haystack.as_bytes();
+        let take_end = remaining.min(bytes.len());
+        // Snap to a char boundary so from_utf8 cannot fail mid-codepoint.
+        let mut end = take_end;
+        while end > 0 && !entry.haystack.is_char_boundary(end) {
+            end -= 1;
+        }
+        let take = String::from_utf8_lossy(&bytes[..end]);
         out.push_str(&format!("[step{}] {}\n", entry.step_id, take));
     }
     out
