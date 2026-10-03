@@ -190,10 +190,10 @@ anolisa adapter enable <component> [framework]
 
 ```bash
 # Tokenless hook for cosh
-/usr/share/tokenless/scripts/install.sh --cosh
+anolisa adapter enable tokenless cosh
 
 # Tokenless plugin for OpenClaw
-/usr/share/tokenless/scripts/install.sh --openclaw
+anolisa adapter enable tokenless openclaw
 
 # ws-ckpt plugin for OpenClaw (requires OpenClaw >= 2026.2.13)
 ws-ckpt plugin install --runtime openclaw
