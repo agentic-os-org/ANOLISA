@@ -758,6 +758,14 @@ try:
                       f"accept the terms at "
                       f"https://huggingface.co/datasets/{{hf_dataset}}", flush=True)
             sys.exit(1)
+        elif resume_from and resp.status_code == 200:
+            # Server ignored Range and is sending the FULL body. Appending it
+            # to the partial would corrupt the archive (partial + full copy)
+            # while still reporting success; discard the stale partial and
+            # restart from scratch.
+            print("  server ignored Range; restarting download from 0", flush=True)
+            resume_from = 0
+            mode = "wb"
 
         total = int(resp.headers.get("content-length", 0)) + resume_from
         downloaded = resume_from
