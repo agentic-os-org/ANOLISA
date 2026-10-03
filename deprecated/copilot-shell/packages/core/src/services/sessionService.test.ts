@@ -552,6 +552,88 @@ describe('SessionService', () => {
     });
   });
 
+  describe('renameSession', () => {
+    it('should chain the session_name record to the last record so the session stays resumable', async () => {
+      // In-memory jsonl store shared by the read/write mocks.
+      const store = new Map<string, ChatRecord[]>([
+        [sessionIdB, [recordB1, recordB2]],
+      ]);
+      const recordsFor = (filePath: string): ChatRecord[] | undefined => {
+        for (const [id, records] of store.entries()) {
+          if (filePath.includes(id)) {
+            return records;
+          }
+        }
+        return undefined;
+      };
+      vi.mocked(jsonl.read).mockImplementation(
+        async (filePath: string) => recordsFor(filePath) ?? [],
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string, count?: number) =>
+          (recordsFor(filePath) ?? []).slice(0, count),
+      );
+      vi.mocked(jsonl.writeLine).mockImplementation(
+        async (filePath: string, data: unknown) => {
+          const records = recordsFor(filePath);
+          if (records) {
+            records.push(data as ChatRecord);
+          }
+        },
+      );
+
+      const result = await sessionService.renameSession(sessionIdB, 'new-name');
+
+      expect(result).toBe(true);
+
+      // The appended session_name record must extend the existing chain.
+      const appended = store.get(sessionIdB)?.[2];
+      expect(appended).toBeDefined();
+      expect(appended?.type).toBe('system');
+      expect(appended?.subtype).toBe('session_name');
+      expect(appended?.parentUuid).toBe(recordB2.uuid);
+
+      // The full conversation must still be reconstructable after the rename.
+      const loaded = await sessionService.loadSession(sessionIdB);
+      expect(loaded).toBeDefined();
+      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
+        recordB1.uuid,
+        recordB2.uuid,
+        appended?.uuid,
+      ]);
+    });
+
+    it('should return false when session does not exist', async () => {
+      vi.mocked(jsonl.read).mockResolvedValue([]);
+
+      const result = await sessionService.renameSession(
+        '00000000-0000-0000-0000-000000000000',
+        'new-name',
+      );
+
+      expect(result).toBe(false);
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+    });
+
+    it('should return false for session from different project', async () => {
+      const differentProjectRecord: ChatRecord = {
+        ...recordB1,
+        cwd: '/different/project',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([differentProjectRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.renameSession(sessionIdB, 'new-name');
+
+      expect(result).toBe(false);
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
