@@ -611,6 +611,12 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
+        // Global capacity budget shared by every maintenance job: each job
+        // re-evaluates its effective size limit right before running.
+        let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
+            config.config_path.clone(),
+            &config.storage,
+        ));
         if config.features.sqlite_storage_enabled && config.storage.primary.check_interval_secs > 0
         {
             // The primary facade uses bare rusqlite connections and is Send but
@@ -619,13 +625,18 @@ impl AgentSight {
             let target = database_manager.open_read_write(DatabaseId::Primary, |db_path| {
                 Self::create_storage(db_path, &config)
             })?;
+            let budget = Arc::clone(&storage_budget);
+            let own_limit_mb = config.storage.primary.max_db_size_mb;
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Primary,
                 Duration::from_secs(config.storage.primary.check_interval_secs),
                 move || {
-                    target.maintain().map_err(|error| {
-                        LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
-                    })
+                    let limit_mb = budget.effective_limit_mb(DatabaseId::Primary, own_limit_mb);
+                    target
+                        .maintain_with_limit_bytes(limit_mb.saturating_mul(1024 * 1024))
+                        .map_err(|error| {
+                            LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
+                        })
                 },
             )?);
         }
@@ -633,11 +644,14 @@ impl AgentSight {
             && config.storage.genai.check_interval_secs > 0
         {
             let target = Arc::clone(target);
+            let budget = Arc::clone(&storage_budget);
+            let own_limit_mb = config.storage.genai.max_db_size_mb;
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::GenAi,
                 Duration::from_secs(config.storage.genai.check_interval_secs),
                 move || {
-                    target.maintain().map_err(|error| {
+                    let limit_mb = budget.effective_limit_mb(DatabaseId::GenAi, own_limit_mb);
+                    target.maintain_with_limit_mb(limit_mb).map_err(|error| {
                         LifecycleError::MaintenanceJobFailed(format!("genai: {error}"))
                     })
                 },
@@ -648,12 +662,15 @@ impl AgentSight {
         {
             let target = Arc::clone(target);
             let policy = config.storage.interruptions;
+            let budget = Arc::clone(&storage_budget);
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Interruptions,
                 Duration::from_secs(policy.check_interval_secs),
                 move || {
+                    let limit_mb =
+                        budget.effective_limit_mb(DatabaseId::Interruptions, policy.max_db_size_mb);
                     target
-                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .purge_old_and_oversized(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| {
                             LifecycleError::MaintenanceJobFailed(format!("interruptions: {error}"))
@@ -665,14 +682,18 @@ impl AgentSight {
             && config.storage.trajectories.check_interval_secs > 0
         {
             let target = Arc::clone(target);
-            let policy = agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
-                retention_days: config.storage.trajectories.retention_days,
-                max_db_size_mb: config.storage.trajectories.max_db_size_mb,
-            };
+            let retention_days = config.storage.trajectories.retention_days;
+            let own_limit_mb = config.storage.trajectories.max_db_size_mb;
+            let budget = Arc::clone(&storage_budget);
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Trajectories,
                 Duration::from_secs(config.storage.trajectories.check_interval_secs),
                 move || {
+                    let policy = agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+                        retention_days,
+                        max_db_size_mb: budget
+                            .effective_limit_mb(DatabaseId::Trajectories, own_limit_mb),
+                    };
                     target.maintain(policy).map(|_| ()).map_err(|error| {
                         LifecycleError::MaintenanceJobFailed(format!("trajectories: {error}"))
                     })

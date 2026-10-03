@@ -275,7 +275,8 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
 | `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
 | `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |
-| `/api/storage/status` | GET | schema v2：各 SQLite store（含 reuse/causal 与外部 tokenless）的策略、物理/逻辑占用、full/partial/external 覆盖和 worker 调度/heartbeat/尝试结果，不返回文件路径 |
+| `/api/storage/status` | GET | schema v3：各 SQLite store（含 reuse/causal 与外部 tokenless）的策略、物理/逻辑占用、full/partial/external 覆盖和 worker 调度/heartbeat/尝试结果；顶层另含全局总上限 `max_total_size_mb` 与总占用 `total_physical_bytes`，不返回文件路径 |
+| `/api/storage/config` | POST | 持久化全局存储上限（Body: `{"max_total_size_mb": N}`，`0` 表示不限制总量）到运行时配置文件；维护 worker 每轮重读配置，无需重启即生效；无 `--config` 时返回 503 |
 
 ## 9. Frontend
 
@@ -306,7 +307,12 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 当前配置为 schema v4。所有 `storage` 策略统一使用 `retention_days`、`max_db_size_mb`、
 `check_interval_secs`；旧 `check_interval_inserts` 不受支持。旧 schema 按上述机制备份后整体替换。三个值中
-任一为 `0` 都关闭对应的按时间、按容量或定时治理。默认策略如下：
+任一为 `0` 都关闭对应的按时间、按容量或定时治理。
+
+`storage.max_total_size_mb`（默认 2200，即各库默认上限之和）是全局总上限，Dashboard 设置页只暴露这一项；
+`0` 关闭总量治理。总占用超过上限时，超出部分按占用从大到小分摊给各库，由各库按自身安全删除规则清理。
+该值由 `POST /api/storage/config` 写回配置文件，维护任务每轮重读，无需重启。默认配置文件只包含
+`base_path` 与 `max_total_size_mb`；下表各库策略是代码内建默认值，仍可在配置文件中按键覆盖：
 
 | Store | retention_days | max_db_size_mb | check_interval_secs |
 |-------|---------------:|---------------:|--------------------:|

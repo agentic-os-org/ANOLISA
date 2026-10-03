@@ -113,14 +113,19 @@ fn trajectory_maintenance_jobs(
         return Ok(Vec::new());
     }
 
-    let maintenance_policy = TrajectoryMaintenancePolicy {
-        retention_days: policy.retention_days,
-        max_db_size_mb: policy.max_db_size_mb,
-    };
+    let budget = Arc::new(crate::storage_budget::StorageBudget::new(
+        None,
+        storage_config,
+    ));
     let job = manager.maintenance_job(
         DatabaseId::Trajectories,
         Duration::from_secs(policy.check_interval_secs),
         move || {
+            let maintenance_policy = TrajectoryMaintenancePolicy {
+                retention_days: policy.retention_days,
+                max_db_size_mb: budget
+                    .effective_limit_mb(DatabaseId::Trajectories, policy.max_db_size_mb),
+            };
             store
                 .maintain(maintenance_policy)
                 .map(|_| ())

@@ -1034,6 +1034,11 @@ mod tests {
             base_dir,
         ));
         actix_web::web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             storage_path: base_dir.join("agentsight.db"),
             genai_store: None,
             start_time: Instant::now(),

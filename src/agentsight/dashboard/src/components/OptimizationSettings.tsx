@@ -126,13 +126,17 @@ const inputCls =
 
 //  Component 
 
+/** Save trigger exposed to the settings page's unified save button. */
+export interface LlmConfigFormHandle {
+  /** Persists the current form values; resolves to false on failure. */
+  save: () => Promise<boolean>;
+}
+
 /** LLM configuration form for the optimization analysis feature (rendered in the settings page). */
-export const LlmConfigForm: React.FC = () => {
+export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   const { t } = useI18n();
   const [config, setConfig] = useState<OptimizeLlmConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Form fields
@@ -199,18 +203,14 @@ export const LlmConfigForm: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, availableModels]);
 
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setSaved(false);
+  async function save(): Promise<boolean> {
     setError(null);
 
     const effectiveModel = isKnownModel ? model : customModel;
     const timeoutSecs = Number(semanticSearchTimeoutSecs);
     if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
       setError(t('opt.llm.semanticSearchTimeout.invalid'));
-      setSaving(false);
-      return;
+      return false;
     }
 
     try {
@@ -231,15 +231,15 @@ export const LlmConfigForm: React.FC = () => {
       const updated = await saveOptimizeConfig(body);
       setConfig(updated);
       setApiKey('');
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      return true;
     } catch (e2) {
       const msg = e2 instanceof Error ? e2.message : String(e2);
       setError(t('opt.llm.saveFailed', { msg }));
-    } finally {
-      setSaving(false);
+      return false;
     }
   }
+
+  React.useImperativeHandle(ref, () => ({ save }));
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
@@ -259,7 +259,7 @@ export const LlmConfigForm: React.FC = () => {
           {t('opt.llm.loading')}
         </div>
       ) : (
-        <form onSubmit={handleSave} className="px-6 py-5 space-y-4">
+        <div className="px-6 py-5 space-y-4">
           {/* Provider */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -397,22 +397,11 @@ export const LlmConfigForm: React.FC = () => {
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 pt-1">
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-            >
-              {saving ? t('opt.llm.saving') : t('opt.llm.save')}
-            </button>
-            {saved && (
-              <span className="text-sm text-green-600">{t('opt.llm.saved')}</span>
-            )}
-          </div>
-        </form>
+        </div>
       )}
     </div>
   );
-};
+});
+
+LlmConfigForm.displayName = 'LlmConfigForm';
 

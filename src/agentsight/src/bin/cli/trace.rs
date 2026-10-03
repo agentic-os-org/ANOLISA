@@ -291,12 +291,19 @@ impl TraceCommand {
         if config.storage.trajectories.check_interval_secs > 0 {
             let target = Arc::clone(&store);
             let policy = collector_config.maintenance;
+            let budget = Arc::new(agentsight::storage_budget::StorageBudget::new(
+                config.config_path.clone(),
+                &config.storage,
+            ));
             let job = manager
                 .maintenance_job(
                     DatabaseId::Trajectories,
                     Duration::from_secs(config.storage.trajectories.check_interval_secs),
                     move || {
-                        target.maintain(policy).map(|_| ()).map_err(|error| {
+                        let mut effective = policy;
+                        effective.max_db_size_mb = budget
+                            .effective_limit_mb(DatabaseId::Trajectories, policy.max_db_size_mb);
+                        target.maintain(effective).map(|_| ()).map_err(|error| {
                             LifecycleError::MaintenanceJobFailed(error.to_string())
                         })
                     },

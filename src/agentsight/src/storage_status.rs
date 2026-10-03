@@ -19,6 +19,10 @@ pub struct StorageStatusResponse {
     pub schema_version: u32,
     /// Observation time in Unix milliseconds.
     pub observed_at_unix_ms: u64,
+    /// Combined size limit for all AgentSight databases in MiB; zero disables.
+    pub max_total_size_mb: u64,
+    /// Combined physical bytes of every measured store.
+    pub total_physical_bytes: u64,
     /// Status of each known SQLite store.
     pub stores: Vec<StoreStatus>,
 }
@@ -188,6 +192,7 @@ pub fn collect_storage_status(
     genai_path: &Path,
     config: &StorageConfig,
     manager: Option<&DatabaseManager>,
+    cap_mb: u64,
 ) -> StorageStatusResponse {
     let private = config.base_path.join(".agentsight-private");
     let maintenance_state = manager.and_then(|manager| manager.maintenance_state().ok().flatten());
@@ -299,7 +304,7 @@ pub fn collect_storage_status(
         maintenance: maintenance_status(DatabaseId::Tokenless, maintenance_state.as_ref()),
     });
 
-    response(stores)
+    response(stores, cap_mb)
 }
 
 /// Collects the subset available in local trajectory-viewer mode.
@@ -307,6 +312,7 @@ pub fn collect_local_storage_status(
     trajectory_path: &Path,
     config: &StorageConfig,
     manager: Option<&DatabaseManager>,
+    cap_mb: u64,
 ) -> StorageStatusResponse {
     let maintenance_state = manager.and_then(|manager| manager.maintenance_state().ok().flatten());
     let reuse_path = config
@@ -367,16 +373,23 @@ pub fn collect_local_storage_status(
         size_state: SizeState::Unknown,
         maintenance: maintenance_status(DatabaseId::Tokenless, maintenance_state.as_ref()),
     });
-    response(stores)
+    response(stores, cap_mb)
 }
 
-fn response(stores: Vec<StoreStatus>) -> StorageStatusResponse {
+fn response(stores: Vec<StoreStatus>, cap_mb: u64) -> StorageStatusResponse {
+    let total_physical_bytes = stores
+        .iter()
+        .filter_map(|store| store.size.as_ref())
+        .map(|size| size.physical_bytes)
+        .sum();
     StorageStatusResponse {
-        schema_version: 2,
+        schema_version: 3,
         observed_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0),
+        max_total_size_mb: cap_mb,
+        total_physical_bytes,
         stores,
     }
 }
@@ -580,7 +593,7 @@ mod tests {
     #[test]
     fn missing_manager_uses_fallback_without_claiming_maintenance() {
         let config = StorageConfig::default();
-        let response = collect_storage_status(Path::new("/missing/genai.db"), &config, None);
+        let response = collect_storage_status(Path::new("/missing/genai.db"), &config, None, 0);
         let genai = response
             .stores
             .iter()
@@ -611,13 +624,14 @@ mod tests {
     }
 
     #[test]
-    fn response_v2_has_runtime_fields_without_filesystem_paths() {
+    fn response_v3_has_runtime_fields_without_filesystem_paths() {
         let config = StorageConfig::default();
         let response =
-            collect_storage_status(Path::new("/secret/location/genai.db"), &config, None);
+            collect_storage_status(Path::new("/secret/location/genai.db"), &config, None, 7);
         let json = serde_json::to_value(&response).unwrap();
         let encoded = serde_json::to_string(&json).unwrap();
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["max_total_size_mb"], 7);
         assert_eq!(json["stores"][0]["maintenance"]["scheduled"], false);
         assert!(json["stores"][0]["maintenance"]["last_result"].is_null());
         assert!(json["stores"][0]["maintenance"]["next_run_unix_ms"].is_null());
@@ -644,6 +658,7 @@ mod tests {
             Path::new("/missing/fallback-genai.db"),
             &StorageConfig::default(),
             Some(&manager),
+            0,
         );
         let genai = response
             .stores
@@ -719,9 +734,10 @@ mod tests {
             base_path: base.clone(),
             ..StorageConfig::default()
         };
-        let response = collect_local_storage_status(&config.trajectory_path(), &config, None);
+        let response = collect_local_storage_status(&config.trajectory_path(), &config, None, 5);
 
-        assert_eq!(response.schema_version, 2);
+        assert_eq!(response.schema_version, 3);
+        assert_eq!(response.max_total_size_mb, 5);
         assert_eq!(
             response
                 .stores
@@ -750,7 +766,7 @@ mod tests {
             enforcement: PeriodicStoragePolicy::new(31, 32, 33),
             ..StorageConfig::default()
         };
-        let response = collect_storage_status(Path::new("/missing/genai.db"), &config, None);
+        let response = collect_storage_status(Path::new("/missing/genai.db"), &config, None, 0);
         let reuse = response
             .stores
             .iter()

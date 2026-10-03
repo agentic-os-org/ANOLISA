@@ -284,6 +284,7 @@ async fn storage_status(state: web::Data<LocalState>) -> impl Responder {
         &state.db_path,
         &state.storage_config,
         Some(&state.database_manager),
+        state.storage_config.max_total_size_mb,
     ))
 }
 
@@ -408,6 +409,10 @@ fn local_maintenance_jobs(
     storage_config: &StorageConfig,
     stores: LocalMaintenanceStores,
 ) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
+    let budget = Arc::new(crate::storage_budget::StorageBudget::new(
+        None,
+        storage_config,
+    ));
     let mut jobs = Vec::new();
     for (id, policy) in [
         (DatabaseId::Optimization, storage_config.optimization),
@@ -417,14 +422,16 @@ fn local_maintenance_jobs(
             continue;
         }
         let interval = Duration::from_secs(policy.check_interval_secs);
+        let budget = Arc::clone(&budget);
         let job = match id {
             DatabaseId::Optimization => stores.optimization.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(OptimizationMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -433,8 +440,9 @@ fn local_maintenance_jobs(
             DatabaseId::Reuse => stores.reuse.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
