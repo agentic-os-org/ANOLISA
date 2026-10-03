@@ -126,7 +126,12 @@ async fn auto_cleanup(state: &DaemonState) {
                 .filter(|(_, meta)| !meta.pinned && !meta.missing)
                 .map(|(id, meta)| (id.clone(), meta.created_at))
                 .collect();
-            unpinned.sort_by_key(|(_, ts)| *ts);
+            // Same tie-break as cleanup_snapshots: equal created_at is the
+            // normal case for scripted agents, and HashMap iteration order
+            // must not decide which snapshot survives keep = n. The greatest
+            // id wins, matching the listing order (created_at, ws_id,
+            // snapshot_id).
+            unpinned.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
             let to_remove: Vec<String> = match &retention {
                 CleanupRetention::Count(n) => {
@@ -670,5 +675,154 @@ mod tests {
             }
             other => panic!("expected Error line, got {:?}", other),
         }
+    }
+    // ── Retention tie-break determinism in auto_cleanup ──
+    //
+    // The scheduler's selector must agree with cleanup_snapshots: among
+    // equal created_at (the normal case for scripted agents) the
+    // survivor under keep = n must be picked by the listing order
+    // (created_at, ws_id, snapshot_id) — the greatest snapshot id — not
+    // by HashMap iteration order.
+
+    struct TieRecordingBackend {
+        data_root: std::path::PathBuf,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ws_ckpt_common::backend::StorageBackend for TieRecordingBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _ws_id: &str,
+            ids: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            let mut deleted = self.deleted.lock().unwrap();
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    deleted.push(id.clone());
+                    (
+                        id.clone(),
+                        ws_ckpt_common::backend::SnapshotDeleteOutcome::Removed,
+                    )
+                })
+                .collect())
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<std::path::PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_cleanup_tie_breaking_keeps_greatest_id() {
+        use std::sync::Arc;
+
+        use crate::state::DaemonState;
+        use ws_ckpt_common::backend::StorageBackend;
+
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(TieRecordingBackend {
+            data_root: temp.path().join("data"),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = Arc::new(DaemonState::new(
+            cfg(true, CleanupRetention::Count(1)),
+            backend.clone() as Arc<dyn ws_ckpt_common::backend::StorageBackend>,
+            temp.path().join("state"),
+        ));
+        let ws_id = "ws-tie".to_string();
+        let subvol = backend.data_root().join(&ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        let link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &link).unwrap();
+        let mut index = ws_ckpt_common::SnapshotIndex::new(link.clone());
+        let ts = chrono::Utc::now();
+        for i in 0..12 {
+            index.snapshots.insert(
+                format!("snap-{i:03}"),
+                ws_ckpt_common::SnapshotMeta {
+                    message: None,
+                    metadata: None,
+                    pinned: false,
+                    created_at: ts,
+                    missing: false,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            );
+        }
+        state
+            .register_workspace(ws_id.clone(), link, index)
+            .unwrap();
+
+        super::auto_cleanup(&state).await;
+
+        let mut deleted = backend.deleted.lock().unwrap().clone();
+        deleted.sort();
+        let mut expected: Vec<String> = (0..11).map(|i| format!("snap-{i:03}")).collect();
+        expected.sort();
+        assert_eq!(
+            deleted, expected,
+            "auto-cleanup must remove exactly the 11 smallest ids among equal created_at"
+        );
+        let arc = state.get_by_wsid(&ws_id).expect("registered");
+        let ws = arc.read().await;
+        let mut remaining: Vec<String> = ws.index.snapshots.keys().cloned().collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec!["snap-011".to_string()],
+            "auto-cleanup must keep the snapshot the listing order defines as newest"
+        );
     }
 }

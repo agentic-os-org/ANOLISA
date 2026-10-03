@@ -970,7 +970,13 @@ pub async fn cleanup_snapshots(
             .filter(|(_, meta)| !meta.pinned && !meta.missing)
             .map(|(id, meta)| (id.clone(), meta.created_at))
             .collect();
-        unpinned.sort_by_key(|(_, ts)| *ts);
+        // Equal created_at is the normal case for scripted agents, and the
+        // Vec comes from a HashMap: sorting by timestamp alone leaves the
+        // survivor among ties to HashMap iteration order (re-randomized per
+        // process). Break ties by snapshot id so keep-newest keeps the
+        // greatest id, matching the listing order (created_at, ws_id,
+        // snapshot_id).
+        unpinned.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
         let to_remove_ids: Vec<String> = if unpinned.len() > keep {
             unpinned[..unpinned.len() - keep]
@@ -2955,6 +2961,177 @@ mod tests {
             backend.call_count(),
             1,
             "missing entries must not be re-cleaned on every pass"
+        );
+    }
+    // ── Retention tie-break determinism ──
+    //
+    // Scripted agents routinely checkpoint several snapshots within the
+    // same instant, so equal created_at is the normal case, and the Vec
+    // being sorted comes from a HashMap. Sorting by timestamp alone
+    // leaves the relative order of equal-ts entries to HashMap
+    // iteration order (a per-process random seed), so which snapshot
+    // survives keep = n is re-randomized on every daemon restart. The
+    // listing order (ListKey) already defines the total order:
+    // (created_at, ws_id, snapshot_id); retention must tie-break the
+    // same way.
+
+    struct TieRecordingBackend {
+        data_root: PathBuf,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TieRecordingBackend {
+        fn new(data_root: PathBuf) -> Self {
+            Self {
+                deleted: std::sync::Mutex::new(Vec::new()),
+                data_root,
+            }
+        }
+
+        fn deleted(&self) -> Vec<String> {
+            self.deleted.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for TieRecordingBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &Path {
+            &self.data_root
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _ws_id: &str,
+            ids: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            let mut deleted = self.deleted.lock().unwrap();
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    deleted.push(id.clone());
+                    (
+                        id.clone(),
+                        ws_ckpt_common::backend::SnapshotDeleteOutcome::Removed,
+                    )
+                })
+                .collect())
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            unimplemented!()
+        }
+    }
+
+    /// Build a fresh state whose workspace holds `n` unpinned snapshots
+    /// sharing one created_at, run cleanup with keep = 1, and return the
+    /// ids the backend was asked to delete.
+    async fn tie_cleanup_keep_one(n: usize) -> Vec<String> {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(TieRecordingBackend::new(temp.path().join("data")));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            temp.path().join("state"),
+        ));
+        let ws_id = "ws-tie".to_string();
+        let subvol = backend.data_root().join(&ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        let link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &link).unwrap();
+        let mut index = SnapshotIndex::new(link.clone());
+        let ts = Utc::now();
+        for i in 0..n {
+            index
+                .snapshots
+                .insert(format!("snap-{i:03}"), make_snapshot_meta_at(false, ts));
+        }
+        state
+            .register_workspace(ws_id.clone(), link, index)
+            .unwrap();
+        let resp = cleanup_snapshots(&state, &ws_id, Some(1)).await.unwrap();
+        match resp {
+            Response::CleanupOk { removed } => assert_eq!(removed.len(), n - 1),
+            other => panic!("expected CleanupOk, got {other:?}"),
+        }
+        backend.deleted()
+    }
+
+    #[tokio::test]
+    async fn cleanup_tie_breaking_is_deterministic_across_runs() {
+        let n = 12;
+        let deleted_a = tie_cleanup_keep_one(n).await;
+        let deleted_b = tie_cleanup_keep_one(n).await;
+        let survivors = |deleted: &[String]| -> Vec<String> {
+            (0..n)
+                .map(|i| format!("snap-{i:03}"))
+                .filter(|id| !deleted.contains(id))
+                .collect()
+        };
+        let survivor_a = survivors(&deleted_a);
+        let survivor_b = survivors(&deleted_b);
+        assert_eq!(
+            survivor_a.len(),
+            1,
+            "keep=1 must keep exactly one: {survivor_a:?}"
+        );
+        assert_eq!(
+            survivor_b.len(),
+            1,
+            "keep=1 must keep exactly one: {survivor_b:?}"
+        );
+        assert_eq!(
+            survivor_a[0], "snap-011",
+            "keep-newest must keep the snapshot the listing order (created_at, ws_id, \
+             snapshot_id) defines as newest among equal created_at"
+        );
+        assert_eq!(
+            survivor_a[0], survivor_b[0],
+            "two identical cleanups chose different survivors"
         );
     }
 }
