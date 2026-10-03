@@ -107,7 +107,7 @@ python3 __SKILL_DIR__/scripts/validate_mcp.py '<json>' --merge <config_path>
 - 默认写项目级：`.copilot-shell/settings.json`（当前工作目录下）
 - 用户说"全局"或"所有项目"时写用户级：`~/.copilot-shell/settings.json`
 
-脚本会自动处理目录创建、已有配置保留和新条目合并。如果脚本报错，看错误信息自己修正 JSON 后重试，不要把错误丢给用户。
+脚本会自动处理目录创建、已有配置保留和新条目合并。如果脚本报错，看错误信息自己修正 JSON 后重试，不要把错误丢给用户。注意区分两种错误：输入 JSON 有问题改完可以重试；如果脚本报 `refusing to merge/overwrite`，说明已有的配置文件本身无法解析或不是 JSON 对象——这是用户的存量数据出了问题，不要重试或绕过，把原始错误展示给用户，让他们决定修复还是备份后重写。
 
 ### 4. 确认结果
 

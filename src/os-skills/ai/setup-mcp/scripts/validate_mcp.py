@@ -27,17 +27,30 @@ def merge(json_str, config_path):
         print("ERROR: No mcpServers found in input", file=sys.stderr)
         sys.exit(1)
 
-    # Read existing config
+    # Read existing config. A config we cannot read or understand must abort
+    # the merge: writing the newly merged servers would silently discard every
+    # other server and setting the user had.
     existing = {}
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"WARNING: Could not parse {config_path}: {e}", file=sys.stderr)
+        except (json.JSONDecodeError, UnicodeDecodeError, IOError) as e:
+            print(f"ERROR: Could not parse {config_path}: {e}", file=sys.stderr)
+            print(
+                "ERROR: Refusing to merge into an unreadable config; "
+                "fix or move the file and retry",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    if not isinstance(existing, dict):
-        existing = {}
+        if not isinstance(existing, dict):
+            print(
+                f"ERROR: {config_path} is valid JSON but not an object; "
+                "refusing to overwrite it",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Merge
     if "mcpServers" not in existing:
