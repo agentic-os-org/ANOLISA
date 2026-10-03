@@ -3603,3 +3603,122 @@ describe('truncateAndSaveToFile', () => {
     );
   });
 });
+
+describe('CoreToolScheduler completion handler resilience', () => {
+  it('keeps scheduling after onAllToolCallsComplete throws', async () => {
+    const executeFn = vi.fn().mockResolvedValue({
+      llmContent: 'done',
+      returnDisplay: 'done',
+    });
+    const mockTool = new MockTool({ name: 'mockTool', execute: executeFn });
+
+    const mockToolRegistry = {
+      getTool: () => mockTool,
+      getToolByName: () => mockTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => mockTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onComplete = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('completion handler failed');
+      })
+      .mockResolvedValue(undefined);
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-finalize',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getAllowedTools: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getEnableHooks: () => false,
+      getHookSystem: () => undefined,
+    } as unknown as Config;
+
+    // Swallow the process-level rejection the throwing handler produces so
+    // the timeout assertion below is the failure that surfaces.
+    const onUnhandled = () => {};
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete: onComplete,
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const signal = new AbortController().signal;
+      await scheduler.schedule(
+        [
+          {
+            callId: 'throwing-batch-1',
+            name: 'mockTool',
+            args: { a: 1 },
+            isClientInitiated: false,
+            prompt_id: 'p-throw-1',
+          },
+        ],
+        signal,
+      );
+      await vi.waitFor(() => {
+        expect(onComplete).toHaveBeenCalledTimes(1);
+      });
+
+      // The first completion handler threw; the scheduler must not be
+      // permanently marked as running, or this schedule call hangs.
+      const secondSchedule = scheduler.schedule(
+        [
+          {
+            callId: 'throwing-batch-2',
+            name: 'mockTool',
+            args: { b: 2 },
+            isClientInitiated: false,
+            prompt_id: 'p-throw-2',
+          },
+        ],
+        signal,
+      );
+      const outcome = await Promise.race([
+        secondSchedule.then(() => 'completed'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('timed out'), 3000),
+        ),
+      ]);
+
+      expect(outcome).toBe('completed');
+      await vi.waitFor(() => {
+        expect(onComplete).toHaveBeenCalledTimes(2);
+      });
+      expect(executeFn).toHaveBeenCalledTimes(2);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});
