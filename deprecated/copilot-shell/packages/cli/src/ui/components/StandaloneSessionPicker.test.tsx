@@ -58,7 +58,7 @@ function createMockSessionService(
     listSessions: vi.fn().mockResolvedValue({
       items: sessions,
       hasMore,
-      nextCursor: hasMore ? Date.now() : undefined,
+      nextCursor: hasMore ? `${Date.now()}|next.jsonl` : undefined,
     } as ListSessionsResult),
     loadSession: vi.fn(),
     loadLastSession: vi
@@ -625,7 +625,7 @@ describe('SessionPicker', () => {
           .mockResolvedValueOnce({
             items: firstPage,
             hasMore: true,
-            nextCursor: Date.now() - 5000,
+            nextCursor: `${Date.now() - 5000}|next.jsonl`,
           })
           .mockResolvedValueOnce({
             items: secondPage,

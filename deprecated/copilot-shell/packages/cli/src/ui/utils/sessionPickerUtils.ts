@@ -12,7 +12,8 @@ import type { SessionListItem } from '@copilot-shell/core';
 export interface SessionState {
   sessions: SessionListItem[];
   hasMore: boolean;
-  nextCursor?: number;
+  /** `"<mtimeMs>|<fileName>"` cursor of the last loaded page */
+  nextCursor?: string;
 }
 
 /**
