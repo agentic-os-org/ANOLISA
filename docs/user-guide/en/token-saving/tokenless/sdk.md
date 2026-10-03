@@ -251,11 +251,15 @@ result = await sdk.post_tool(
         output_optimization=call.output_optimization,
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
+        command=None,  # the executed command line for a shell tool
     )
 )
 ```
 
-Set `content_origin` from the tool's registered contract; do not infer it from result text. Core
+Set `content_origin` from the tool's registered contract; do not infer it from result text. For a
+shell tool, pass the command line that actually ran (the PreTool result when RTK rewrote it) as
+`command`: Core reports a plain print of local files as `file_read`, so a printed HTML page stays
+verbatim while data in that output still compresses. Leave `command` unset for other tools. Core
 routes Retrieve output, errors, interrupted or denied calls, RTK-optimized output, and ordinary
 successful output. It returns the final output plus disposition, operations, recoverability, token
 counts, Stash keys, and optional diagnostic context. Adapters should pass intermediate streaming

@@ -12,15 +12,16 @@ use serde_json::Value;
 use tokenless_ccr::{RecoveryMethod, StashStore, extract_hash, is_valid_hash, recovery_hashes};
 use tokenless_compressors::JsonCompressionConfig;
 use tokenless_protocol::{
-    AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, Disposition, Operation,
-    OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction, PreToolRequest,
-    PreToolResponse, Recoverability, Request, RequestEnvelope, Response, ResponseEnvelope,
-    ResultKind, RetrieveRequest, RetrieveResponse, TOKENIZER_ID, ToolResultStatus, estimate_tokens,
+    AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
+    Disposition, Operation, OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction,
+    PreToolRequest, PreToolResponse, Recoverability, Request, RequestEnvelope, Response,
+    ResponseEnvelope, ResultKind, RetrieveRequest, RetrieveResponse, TOKENIZER_ID,
+    ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{OperationType, StatsRecorder};
 
-use crate::post_tool::{PostToolPipeline, PostToolPipelineConfig};
+use crate::post_tool::{self, PostToolPipeline, PostToolPipelineConfig};
 use crate::{
     MAX_INPUT_BYTES, MIN_TOON_CHARS, RESPONSE_PIPELINE_TIMEOUT, RuntimeError,
     finish_schema_compression, taxonomy,
@@ -750,6 +751,23 @@ pub(crate) fn post_tool_with_store(
     options: &EntryOptions,
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> Result<PostToolOutcome, RuntimeError> {
+    // Refine the origin before routing so that thresholds, the pipeline and
+    // the stats row all see the same classification.
+    let refined;
+    let request = if request.content_origin == ContentOrigin::CommandOutput
+        && request
+            .command
+            .as_deref()
+            .is_some_and(post_tool::file_read::prints_local_files)
+    {
+        refined = PostToolRequest {
+            content_origin: ContentOrigin::FileRead,
+            ..request.clone()
+        };
+        &refined
+    } else {
+        request
+    };
     let before_tokens = estimate_tokens(&request.content) as u64;
     let routed = if request.result_kind == ResultKind::Retrieve
         || matches!(
@@ -983,8 +1001,7 @@ mod tests {
     use tempfile::tempdir;
     use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite};
     use tokenless_protocol::{
-        BeforeModelCapabilities, ContentOrigin, ContentType, PostToolCapabilities,
-        PreToolCapabilities,
+        BeforeModelCapabilities, ContentType, PostToolCapabilities, PreToolCapabilities,
     };
 
     use super::*;
@@ -1820,6 +1837,7 @@ mod tests {
                 content: r#"{"debug":"remove me","value":1}"#.into(),
                 status: ToolResultStatus::Success,
                 content_origin: ContentOrigin::CommandOutput,
+                command: None,
                 output_optimization: optimization,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
@@ -1830,6 +1848,32 @@ mod tests {
             let outcome = post_tool_with_store(&request, &options(), None).unwrap();
             assert_eq!(outcome.response.disposition, Disposition::Passthrough);
             assert!(outcome.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn post_tool_reports_plain_file_prints_as_file_read() {
+        let content = r#"{"debug":"remove me","value":1}"#;
+        for (origin, command, expected) in [
+            (ContentOrigin::CommandOutput, "cat data.json", "file_read"),
+            (
+                ContentOrigin::CommandOutput,
+                "cat data.json | jq .",
+                "command_output",
+            ),
+            (ContentOrigin::ApiResponse, "cat data.json", "api_response"),
+        ] {
+            let request = PostToolRequest {
+                content_origin: origin,
+                command: Some(command.into()),
+                ..post_tool_request(content)
+            };
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(
+                outcome.stats.content_origin.as_deref(),
+                Some(expected),
+                "{command}"
+            );
         }
     }
 
@@ -1974,6 +2018,7 @@ mod tests {
             content: content.into(),
             status: ToolResultStatus::Success,
             content_origin: ContentOrigin::CommandOutput,
+            command: None,
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,

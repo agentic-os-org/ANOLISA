@@ -399,8 +399,15 @@ pub struct PostToolRequest {
     pub content: String,
     /// Host-reported execution status.
     pub status: ToolResultStatus,
-    /// Authoritative origin selected by the adapter.
+    /// Origin selected by the adapter; Core refines `command_output` to
+    /// `file_read` when `command` only prints local files.
     pub content_origin: ContentOrigin,
+    /// Shell command line behind a `command_output` result, when the host has it.
+    ///
+    /// Core reports a plain print of local files such as `cat page.html` as
+    /// `file_read`; the field is ignored for every other origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// Optimization state returned by PreTool.
     pub output_optimization: OutputOptimization,
     /// Host capabilities for applying the result.

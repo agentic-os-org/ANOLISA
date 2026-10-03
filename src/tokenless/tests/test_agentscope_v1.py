@@ -154,6 +154,7 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.attribution.session_id, "session-1")
             self.assertEqual(request.attribution.tool_use_id, "call-1")
             self.assertEqual(request.content_origin, core.ContentOrigin.API_RESPONSE)
+            self.assertIsNone(request.command)
             return _post_response("short")
 
         self.integration.sdk.post_tool = post_tool
@@ -264,6 +265,7 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
             final,
         )
         self.assertEqual(observed[0].output_optimization, core.OutputOptimization.RTK)
+        self.assertEqual(observed[0].command, "rtk grep needle file.txt")
         self.assertNotIn("call-rtk", self.toolkit.output_optimizations)
 
     def test_unknown_custom_tool_requires_contract(self) -> None:

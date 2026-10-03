@@ -141,14 +141,18 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         default_sdk = self.sdk(rtk_enabled=False)
         disabled_sdk = self.sdk(rtk_enabled=False, html_extraction_enabled=False)
-        for sdk, origin, applied in (
-            (disabled_sdk, ContentOrigin.COMMAND_OUTPUT, False),
-            (default_sdk, ContentOrigin.COMMAND_OUTPUT, True),
-            (default_sdk, ContentOrigin.API_RESPONSE, True),
-            (default_sdk, ContentOrigin.FILE_CONTENT, False),
-            (default_sdk, ContentOrigin.FILE_READ, False),
+        for sdk, origin, command, applied in (
+            (disabled_sdk, ContentOrigin.COMMAND_OUTPUT, None, False),
+            (default_sdk, ContentOrigin.COMMAND_OUTPUT, None, True),
+            (default_sdk, ContentOrigin.COMMAND_OUTPUT, "cat page.html", False),
+            (default_sdk, ContentOrigin.COMMAND_OUTPUT, "cat page.html | head -c 9000", True),
+            (default_sdk, ContentOrigin.API_RESPONSE, "cat page.html", True),
+            (default_sdk, ContentOrigin.FILE_CONTENT, None, False),
+            (default_sdk, ContentOrigin.FILE_READ, None, False),
         ):
-            with self.subTest(enabled=sdk.config.html_extraction_enabled, origin=origin):
+            with self.subTest(
+                enabled=sdk.config.html_extraction_enabled, origin=origin, command=command
+            ):
                 attribution = Attribution("sdk-agent", "sdk-session", "html-1")
                 result = await sdk.post_tool(
                     PostToolRequest(
@@ -162,6 +166,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                             True, RecoveryMethod.tool("tokenless_retrieve"), True
                         ),
                         attribution=attribution,
+                        command=command,
                     )
                 )
                 self.assertEqual(result.content_type, ContentType.HTML)
