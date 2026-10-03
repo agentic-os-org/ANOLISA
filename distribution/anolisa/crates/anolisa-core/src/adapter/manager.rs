@@ -25,7 +25,7 @@
 //!    directory wins.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -3060,8 +3060,9 @@ fn symlink_file(_target: &Path, _link: &Path) -> std::io::Result<()> {
 }
 
 /// Spawn `cmd` as a direct argv (no shell), enforce its timeout, and return
-/// truncated output. The child's stdout/stderr are drained on separate
-/// threads so a full pipe can never deadlock the wait loop.
+/// truncated output. Both pipes are drained from the poll loop itself, so a
+/// full pipe can never deadlock the wait loop and no reader can outlive the
+/// deadline.
 fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
     run_capture_with_stdout_cap(cmd, OUTPUT_CAP)
 }
@@ -3100,15 +3101,35 @@ fn run_capture_with_stdout_cap(
         }
     })?;
 
-    let stdout_handle = child.stdout.take().map(|r| spawn_drain(r, stdout_cap));
-    let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
+    // Drain the pipes from this poll loop instead of parking helper threads
+    // on them. A helper can only finish at EOF, and a grandchild that
+    // inherits a write end can keep EOF from ever arriving — waiting for it
+    // would outlive the child's own exit and the command timeout with it.
+    // The read ends are non-blocking, so a stalled writer costs one poll
+    // iteration at most.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    for result in [
+        stdout_pipe.as_ref().map(set_nonblocking),
+        stderr_pipe.as_ref().map(set_nonblocking),
+    ] {
+        if let Some(Err(source)) = result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: format!("failed to configure child pipes: {source}"),
+            });
+        }
+    }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
     let start = Instant::now();
     let mut stdin_handle = if let Some(input) = &cmd.stdin {
         let Some(mut stdin) = child.stdin.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = collect_drain(stdout_handle);
-            let _ = collect_drain(stderr_handle);
             return Err(AdapterError::FrameworkCli {
                 program: cmd.program.clone(),
                 reason: "failed to open child stdin".to_string(),
@@ -3122,6 +3143,8 @@ fn run_capture_with_stdout_cap(
 
     let mut timed_out = false;
     let status = loop {
+        drain_pipe(&mut stdout_pipe, &mut stdout, stdout_cap);
+        drain_pipe(&mut stderr_pipe, &mut stderr, OUTPUT_CAP);
         if stdin_handle
             .as_ref()
             .is_some_and(|handle| handle.is_finished())
@@ -3129,8 +3152,6 @@ fn run_capture_with_stdout_cap(
         {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = collect_drain(stdout_handle);
-            let _ = collect_drain(stderr_handle);
             return Err(AdapterError::FrameworkCli {
                 program: cmd.program.clone(),
                 reason: format!("failed to write child stdin: {reason}"),
@@ -3152,8 +3173,6 @@ fn run_capture_with_stdout_cap(
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = collect_stdin_writer(stdin_handle.take());
-                let _ = collect_drain(stdout_handle);
-                let _ = collect_drain(stderr_handle);
                 return Err(AdapterError::FrameworkCli {
                     program: cmd.program.clone(),
                     reason: format!("failed to wait: {source}"),
@@ -3165,15 +3184,19 @@ fn run_capture_with_stdout_cap(
     if let Err(reason) = collect_stdin_writer(stdin_handle) {
         let _ = child.kill();
         let _ = child.wait();
-        let _ = collect_drain(stdout_handle);
-        let _ = collect_drain(stderr_handle);
         return Err(AdapterError::FrameworkCli {
             program: cmd.program.clone(),
             reason: format!("failed to write child stdin: {reason}"),
         });
     }
-    let stdout = collect_drain(stdout_handle);
-    let stderr = collect_drain(stderr_handle);
+    // Collect whatever the child wrote between the last poll and its exit,
+    // then close the read ends. A writer that outlives the child (a
+    // background grandchild holding the pipe) gets no more time: the direct
+    // child has exited or been killed, so its own output is complete.
+    drain_pipe(&mut stdout_pipe, &mut stdout, stdout_cap);
+    drain_pipe(&mut stderr_pipe, &mut stderr, OUTPUT_CAP);
+    drop(stdout_pipe.take());
+    drop(stderr_pipe.take());
 
     Ok(CliOutput {
         status: status.and_then(|s| s.code()),
@@ -3183,14 +3206,18 @@ fn run_capture_with_stdout_cap(
     })
 }
 
+/// Poll cadence for the JSON-RPC session loops: responsive for short
+/// handshakes without burning a core while waiting on the server.
+const RPC_POLL: Duration = Duration::from_millis(5);
+
 /// Drive a line-delimited JSON-RPC session, holding the server's stdin open
 /// until `session.expected_responses` id-bearing replies have been read (or
 /// the command timeout elapses), then closing it so the child exits.
 ///
-/// stdout is read line-by-line on a worker thread rather than drained to EOF,
-/// because the close decision depends on what has already been answered — a
-/// server that only exits once its stdin closes would otherwise deadlock
-/// against a drain-to-EOF reader.
+/// Both pipes are drained from the session loop itself (non-blocking) rather
+/// than by helper threads: a server that keeps writing after answering can
+/// neither block on a full pipe while the session is open, nor hold the
+/// session past its deadline through a process that outlives the child.
 fn run_rpc_capture(
     session: &FrameworkRpcSession,
     stdout_cap: usize,
@@ -3228,7 +3255,21 @@ fn run_rpc_capture(
             reason: "failed to open child stdio pipes".to_string(),
         });
     };
-    let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
+    let mut stdout_pipe = Some(stdout);
+    let mut stderr_pipe = child.stderr.take();
+    for result in [
+        stdout_pipe.as_ref().map(set_nonblocking),
+        stderr_pipe.as_ref().map(set_nonblocking),
+    ] {
+        if let Some(Err(source)) = result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: format!("failed to configure child pipes: {source}"),
+            });
+        }
+    }
 
     // The writer thread owns stdin and only drops it (signalling EOF) once
     // `close_tx` is dropped by this thread.
@@ -3246,137 +3287,105 @@ fn run_rpc_capture(
     let writer = thread::spawn(move || {
         let mut stdin = stdin;
         let result = stdin.write_all(&payload).and_then(|()| stdin.flush());
-        // Park until the reader is done; `recv` returns Err on sender drop.
+        // Park until the exchange is over; `recv` returns Err on sender drop.
         let _ = close_rx.recv();
         result
     });
 
-    enum RpcStdoutEvent {
-        Line(String),
-        LimitExceeded,
-        ReadFailed(String),
-    }
-
-    // A rendezvous channel prevents the reader from queuing output faster
-    // than this thread can account for it.
-    let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<RpcStdoutEvent>(0);
-    let reader = thread::spawn(move || {
-        // Read at most one byte beyond the cap so overflow is detectable
-        // without allocating an arbitrarily large unterminated JSONL line.
-        let limit = (stdout_cap as u64).saturating_add(1);
-        let mut reader = std::io::BufReader::new(stdout).take(limit);
-        let mut total = 0usize;
-        let mut drain_after_disconnect = false;
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(read) => {
-                    total = total.saturating_add(read);
-                    if total > stdout_cap {
-                        drain_after_disconnect =
-                            line_tx.send(RpcStdoutEvent::LimitExceeded).is_err();
-                        break;
-                    }
-                    if line.ends_with('\n') {
-                        line.pop();
-                        if line.ends_with('\r') {
-                            line.pop();
-                        }
-                    }
-                    if line_tx.send(RpcStdoutEvent::Line(line)).is_err() {
-                        drain_after_disconnect = true;
-                        break;
-                    }
-                }
-                Err(source) => {
-                    let _ = line_tx.send(RpcStdoutEvent::ReadFailed(source.to_string()));
-                    break;
-                }
-            }
-        }
-        if drain_after_disconnect {
-            let mut reader = reader.into_inner();
-            let mut chunk = [0u8; 8192];
-            while reader.read(&mut chunk).is_ok_and(|read| read != 0) {
-                // Keep draining after the RPC exchange completes so the child
-                // can flush and exit without retaining any additional output.
-            }
-        }
-    });
-
     let start = Instant::now();
     let mut kept = String::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut total_read = 0usize;
+    let mut stderr = Vec::new();
     let mut answered = 0usize;
     let mut timed_out = false;
-    let mut stdout_failure = None;
-    while answered < session.expected_responses {
-        let Some(remaining) = cmd.timeout.checked_sub(start.elapsed()) else {
-            timed_out = true;
-            break;
-        };
-        match line_rx.recv_timeout(remaining) {
-            Ok(RpcStdoutEvent::Line(line)) => {
-                if kept.len().saturating_add(line.len()).saturating_add(1) > stdout_cap {
-                    stdout_failure = Some(format!(
-                        "app-server stdout exceeded the {stdout_cap}-byte limit"
-                    ));
-                    break;
-                }
-                if is_rpc_response(&line) {
-                    answered += 1;
-                }
-                kept.push_str(&line);
-                kept.push('\n');
+    let mut stdout_failure: Option<String> = None;
+    let mut stdout_eof = false;
+
+    // Response exchange: the server's stdout is split into lines as it
+    // arrives, and only id-bearing replies count toward the session.
+    while answered < session.expected_responses && stdout_failure.is_none() && !stdout_eof {
+        match read_rpc_stdout(&mut stdout_pipe, &mut pending, &mut total_read, stdout_cap) {
+            RpcStdoutRead::Progress => {}
+            RpcStdoutRead::Eof => stdout_eof = true,
+            RpcStdoutRead::Failed(reason) => {
+                stdout_failure = Some(format!("failed to read app-server stdout: {reason}"));
             }
-            Ok(RpcStdoutEvent::LimitExceeded) => {
+        }
+        if total_read > stdout_cap {
+            stdout_failure = Some(format!(
+                "app-server stdout exceeded the {stdout_cap}-byte limit"
+            ));
+        }
+        for line in take_lines(&mut pending) {
+            let Ok(line) = String::from_utf8(line) else {
+                // Matches the error a line reader produced for the same input.
+                stdout_failure = Some(
+                    "failed to read app-server stdout: stream did not contain valid UTF-8"
+                        .to_string(),
+                );
+                break;
+            };
+            if kept.len().saturating_add(line.len()).saturating_add(1) > stdout_cap {
                 stdout_failure = Some(format!(
                     "app-server stdout exceeded the {stdout_cap}-byte limit"
                 ));
                 break;
             }
-            Ok(RpcStdoutEvent::ReadFailed(reason)) => {
-                stdout_failure = Some(format!("failed to read app-server stdout: {reason}"));
-                break;
+            if is_rpc_response(&line) {
+                answered += 1;
             }
-            // The server closed stdout (or died) before answering.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                timed_out = true;
-                break;
-            }
+            kept.push_str(&line);
+            kept.push('\n');
         }
+        drain_pipe(&mut stderr_pipe, &mut stderr, OUTPUT_CAP);
+        if start.elapsed() >= cmd.timeout {
+            timed_out = true;
+            break;
+        }
+        thread::sleep(RPC_POLL);
     }
 
-    // Unblock a reader waiting to publish another event. It will drain the
-    // pipe without retaining output once all expected replies are complete.
-    drop(line_rx);
-    // Closing stdin lets a well-behaved server flush and exit. If the
-    // exchange is incomplete, terminate the child before joining the writer:
-    // it may be blocked in `write_all` on a full pipe that the server stopped
-    // reading, and waiting for it first would defeat the session timeout.
-    drop(close_tx);
+    // The exchange is over (or the deadline passed): close stdin so a
+    // well-behaved server exits, and keep draining both pipes until it does.
+    // A server that writes after answering still gets to exit, while a
+    // writer that outlives the child is bounded by the same deadline as the
+    // response phase instead of holding the session open.
     let incomplete = answered < session.expected_responses || stdout_failure.is_some();
-    let mut status = if incomplete {
+    drop(close_tx);
+    if incomplete || timed_out {
+        // A half-open session must not outlive its deadline, and the writer
+        // may be parked on a full stdin pipe the server stopped reading.
+        let _ = child.kill();
+    }
+    let mut discard = Vec::new();
+    let status = loop {
+        // Discard post-exchange stdout (retaining nothing) so the server can
+        // flush and exit without blocking on a full pipe.
+        let _ = drain_pipe(&mut stdout_pipe, &mut discard, 0);
+        drain_pipe(&mut stderr_pipe, &mut stderr, OUTPUT_CAP);
         match child.try_wait() {
-            Ok(Some(status)) => Some(status),
-            Ok(None) | Err(_) => {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= cmd.timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                thread::sleep(RPC_POLL);
+            }
+            Err(_) => {
                 let _ = child.kill();
-                child.wait().ok()
+                child.wait().ok();
+                break None;
             }
         }
-    } else {
-        None
     };
+    drop(stdout_pipe.take());
+    drop(stderr_pipe.take());
     let write_result = writer.join();
-    if !incomplete {
-        status = wait_bounded(&mut child, start, cmd.timeout);
-        if status.is_none() {
-            timed_out = true;
-        }
-    }
-    let _ = reader.join();
-    let mut stderr = String::from_utf8_lossy(&collect_drain(stderr_handle)).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
 
     // A failed stdin write is a symptom, not the diagnosis: a server that does
     // not implement the subcommand exits before the request lands, and EPIPE
@@ -3409,6 +3418,76 @@ fn run_rpc_capture(
     })
 }
 
+/// Outcome of one non-blocking read burst from the RPC server's stdout.
+enum RpcStdoutRead {
+    /// Some data (or nothing) was read; the session continues.
+    Progress,
+    /// The server closed its stdout.
+    Eof,
+    /// The pipe could not be read.
+    Failed(String),
+}
+
+/// Read one currently-readable burst of the server's stdout into `pending`,
+/// bounded by [`DRAIN_BUDGET_PER_POLL`] so a server that streams without end
+/// cannot starve the deadline checks. At most `cap` bytes are retained: the
+/// caller reports the overflow once `total` passes it, and a line that never
+/// crosses a newline cannot grow the buffer past that. The pipe must already
+/// be non-blocking; callers own that setup so this helper can never park
+/// their session loop on a stalled writer.
+fn read_rpc_stdout(
+    pipe: &mut Option<impl Read>,
+    pending: &mut Vec<u8>,
+    total: &mut usize,
+    cap: usize,
+) -> RpcStdoutRead {
+    let Some(reader) = pipe.as_mut() else {
+        return RpcStdoutRead::Eof;
+    };
+    let mut budget = DRAIN_BUDGET_PER_POLL;
+    let mut chunk = [0u8; 8192];
+    while budget > 0 {
+        match reader.read(&mut chunk) {
+            Ok(0) => return RpcStdoutRead::Eof,
+            Ok(read) => {
+                *total = total.saturating_add(read);
+                if *total <= cap {
+                    pending.extend_from_slice(&chunk[..read]);
+                }
+                budget = budget.saturating_sub(read);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return RpcStdoutRead::Progress;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return RpcStdoutRead::Failed(err.to_string()),
+        }
+    }
+    RpcStdoutRead::Progress
+}
+
+/// Split every complete line out of `pending`, leaving the trailing fragment
+/// for the next burst. Both the `\n` and the `\r\n` endings the wire format
+/// allows are trimmed.
+fn take_lines(pending: &mut Vec<u8>) -> Vec<Vec<u8>> {
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    while let Some(offset) = pending[start..].iter().position(|byte| *byte == b'\n') {
+        let end = start + offset;
+        let line_end = if end > start && pending[end - 1] == b'\r' {
+            end - 1
+        } else {
+            end
+        };
+        lines.push(pending[start..line_end].to_vec());
+        start = end + 1;
+    }
+    if start > 0 {
+        pending.drain(..start);
+    }
+    lines
+}
+
 /// Whether a server stdout line is a JSON-RPC *response* (carries an `id`)
 /// rather than a notification. Only responses count toward the session's
 /// expected reply count.
@@ -3417,33 +3496,6 @@ fn is_rpc_response(line: &str) -> bool {
         .ok()
         .and_then(|value| value.get("id").cloned())
         .is_some_and(|id| !id.is_null())
-}
-
-/// Reap `child` within what remains of `timeout` measured from `start`,
-/// killing it on expiry. Returns `None` when the child had to be killed.
-fn wait_bounded(
-    child: &mut std::process::Child,
-    start: Instant,
-    timeout: Duration,
-) -> Option<std::process::ExitStatus> {
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
 }
 
 /// Build a `PATH` value with `prepend` dirs in front of the current one.
@@ -3582,33 +3634,48 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Drain a child pipe to EOF on its own thread, keeping at most `cap`
-/// bytes. Reading to EOF (even past the cap) keeps the child from blocking
-/// on a full pipe.
-fn spawn_drain<R: Read + Send + 'static>(mut reader: R, cap: usize) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut kept = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if kept.len() < cap {
-                        let take = (cap - kept.len()).min(n);
-                        kept.extend_from_slice(&chunk[..take]);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        kept
-    })
+/// Upper bound on bytes one poll iteration may read from a single pipe, so
+/// a child that writes without end cannot starve the exit/timeout checks.
+const DRAIN_BUDGET_PER_POLL: usize = 1 << 20;
+
+/// Switch a pipe read end to non-blocking mode so the capture poll loop can
+/// drain it in place instead of parking a helper thread on it.
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    nix::fcntl::fcntl(
+        pipe.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .map(|_| ())
+    .map_err(std::io::Error::from)
 }
 
-/// Join a drain thread, returning its captured bytes (empty on panic or
-/// absent pipe).
-fn collect_drain(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    handle.and_then(|h| h.join().ok()).unwrap_or_default()
+/// Read one currently-readable burst of `pipe` into `kept`, retaining at
+/// most `cap` bytes and discarding the rest so the writer never blocks on a
+/// full pipe. Returns whether the pipe reached EOF. The pipe must already
+/// be non-blocking; callers own that setup so this helper can never park
+/// their poll loop on a stalled writer.
+fn drain_pipe(pipe: &mut Option<impl Read>, kept: &mut Vec<u8>, cap: usize) -> bool {
+    let Some(reader) = pipe.as_mut() else {
+        return true;
+    };
+    let mut budget = DRAIN_BUDGET_PER_POLL;
+    let mut chunk = [0u8; 8192];
+    while budget > 0 {
+        match reader.read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(read) => {
+                if kept.len() < cap {
+                    let take = (cap - kept.len()).min(read);
+                    kept.extend_from_slice(&chunk[..take]);
+                }
+                budget = budget.saturating_sub(read);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn collect_stdin_writer(handle: Option<JoinHandle<std::io::Result<()>>>) -> Result<(), String> {
@@ -5205,6 +5272,86 @@ mod tests {
         assert!(!out.success());
     }
 
+    /// A framework CLI that leaves a background process behind must not hold
+    /// `run_capture` past the child's own exit: the pipe stays open in the
+    /// grandchild, so waiting for EOF is waiting for a process anolisa does
+    /// not own.
+    #[test]
+    fn run_capture_does_not_wait_for_a_writer_that_outlives_the_child() {
+        let cmd = FrameworkCommand {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                // The shell exits immediately; the background sleep inherits
+                // stdout/stderr and keeps their write ends open.
+                "sleep 8 & exit 0".to_string(),
+            ],
+            stdin: None,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            path_prepend: Vec::new(),
+            timeout: Duration::from_secs(1),
+        };
+        let started = Instant::now();
+        let out = run_capture(&cmd).expect("run");
+        let elapsed = started.elapsed();
+        assert!(out.success(), "{out:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "run_capture waited {elapsed:?} for a writer that outlives the child"
+        );
+    }
+
+    /// A timeout must bound the whole capture, not just the direct child:
+    /// killing the shell leaves the background writer holding the pipe, and
+    /// `run_capture` still has to return when the deadline passes.
+    #[test]
+    fn run_capture_timeout_does_not_wait_for_a_writer_that_outlives_the_child() {
+        let cmd = FrameworkCommand {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 8 & sleep 30".to_string()],
+            stdin: None,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            path_prepend: Vec::new(),
+            timeout: Duration::from_millis(200),
+        };
+        let started = Instant::now();
+        let out = run_capture(&cmd).expect("run");
+        let elapsed = started.elapsed();
+        assert!(out.timed_out, "expected timeout, got {out:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "run_capture timed out after {elapsed:?} instead of its 200ms deadline"
+        );
+    }
+
+    /// Regression guard for the in-loop drain: a child that writes more than
+    /// the OS pipe buffer (64 KiB on Linux) must neither block on the full
+    /// pipe nor grow the retained capture past the cap.
+    #[test]
+    fn run_capture_drains_output_larger_than_the_pipe_buffer() {
+        let cmd = FrameworkCommand {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"awk 'BEGIN { for (i = 0; i < 131072; i++) printf "a" }'
+                   awk 'BEGIN { for (i = 0; i < 8192; i++) printf "b" > "/dev/stderr" }'"#
+                    .to_string(),
+            ],
+            stdin: None,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            path_prepend: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        let out = run_capture(&cmd).expect("run");
+        assert!(out.success(), "child blocked on a full pipe: {out:?}");
+        assert_eq!(out.stdout.len(), OUTPUT_CAP);
+        assert!(out.stdout.bytes().all(|byte| byte == b'a'));
+        assert_eq!(out.stderr.len(), 8192);
+    }
+
     #[test]
     fn spawn_failure_is_framework_cli_error() {
         let cmd = FrameworkCommand {
@@ -5377,6 +5524,69 @@ mod tests {
         };
         let error = run_rpc_capture(&session, 16).expect_err("oversized response must fail");
         assert!(error.to_string().contains("exceeded the 16-byte limit"));
+    }
+
+    /// A session deadline must bound the whole session, not just the direct
+    /// child: killing the server leaves the background process that inherited
+    /// its pipes behind, and the runner still has to return.
+    #[test]
+    fn run_rpc_capture_timeout_does_not_wait_for_a_writer_that_outlives_the_child() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                // The shell execs `sleep` (the app-server shape: the server is
+                // the direct child), while the background sleep inherits
+                // stdout/stderr and keeps their write ends open.
+                args: vec!["-c".to_string(), "sleep 8 & exec sleep 30".to_string()],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_millis(200),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let started = Instant::now();
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        let elapsed = started.elapsed();
+        assert!(out.timed_out, "expected timeout, got {out:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "run_rpc_capture timed out after {elapsed:?} instead of its 200ms deadline"
+        );
+    }
+
+    /// The same bound applies when the server answers and then leaves a
+    /// writer behind: the session is over once stdin closes and the child
+    /// exits, not when the inherited pipe finally closes.
+    #[test]
+    fn run_rpc_capture_does_not_wait_for_a_writer_that_outlives_the_child() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    r#"IFS= read -r _; printf '{"id":1,"result":{}}\n'; sleep 8 &"#.to_string(),
+                ],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_secs(10),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let started = Instant::now();
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        let elapsed = started.elapsed();
+        assert!(!out.timed_out, "expected a completed session, got {out:?}");
+        assert!(out.stdout.contains(r#""id":1"#), "{out:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "run_rpc_capture waited {elapsed:?} for a writer that outlives the child"
+        );
     }
 
     #[test]
