@@ -317,7 +317,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE start_timestamp_ns BETWEEN ?1 AND ?2
                AND event_type = 'llm_call'
-               AND COALESCE(agent_name, process_name) = ?3
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
              ORDER BY start_timestamp_ns ASC"
         } else {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,

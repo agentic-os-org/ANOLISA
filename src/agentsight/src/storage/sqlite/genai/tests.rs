@@ -964,6 +964,24 @@ fn test_get_events_in_time_range_with_agent_filter() {
     cleanup_db(&path);
 }
 
+#[test]
+fn test_get_events_in_time_range_matches_agent_case_insensitively() {
+    let (store, path) = create_populated_store("range_agent_case");
+    // The stored rows are `agent-b`; a filter in another case must select the
+    // same rows, exactly as `get_latency_metrics` and the timeseries queries
+    // already do (COALESCE(agent_name, process_name) COLLATE NOCASE).
+    let r = store
+        .get_events_in_time_range(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-B"))
+        .unwrap();
+    assert_eq!(r.len(), 2); // call-4, call-5
+    let latency = store
+        .get_latency_metrics(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-B"))
+        .unwrap();
+    assert_eq!(latency.len(), 1);
+    assert_eq!(latency[0].call_count, 1); // call-4 (call-5 is still pending)
+    cleanup_db(&path);
+}
+
 // ─── preference window tests ──────────────────────────────────────────────────
 
 /// Insert `n` completed main-flow llm_call rows with strictly increasing
