@@ -282,6 +282,44 @@ fn grep_respects_glob_filter() {
     assert_eq!(hits[0].path, "notes/a.md");
 }
 
+#[test]
+fn grep_max_zero_returns_no_hits() {
+    // Regression: the cap check ran AFTER hits.push, so max=0 still
+    // returned one hit ("zero" must mean zero, not one).
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello world", false).unwrap();
+    svc.write("b.md", "hello again", false).unwrap();
+
+    let hits = svc
+        .grep(
+            "hello",
+            GrepOptions {
+                max: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "max=0 must return zero hits, got {hits:?}");
+}
+
+#[test]
+fn grep_max_one_returns_exactly_one_hit() {
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello world", false).unwrap();
+    svc.write("b.md", "hello again", false).unwrap();
+
+    let hits = svc
+        .grep(
+            "hello",
+            GrepOptions {
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "max=1 must return exactly one hit");
+}
+
 // ---------- mem_diff ----------
 
 #[test]
