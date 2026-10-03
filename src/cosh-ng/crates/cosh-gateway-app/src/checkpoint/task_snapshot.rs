@@ -1,4 +1,20 @@
 impl TaskSnapshotAdapter {
+    fn resolve_binding(&self) -> Result<CheckpointBinding, ContractError> {
+        self.endpoint.verify_socket_unchanged()?;
+        let identity = self
+            .endpoint
+            .client
+            .workspace_identity_v2(&self.endpoint.registration_path)
+            .map_err(|failure| task_snapshot_failure("checkpoint_identity_unavailable", &failure))?;
+        Ok(CheckpointBinding {
+            version: BINDING_VERSION,
+            ws_id: identity.ws_id,
+            registered_path: identity.registered_path,
+            generation: identity.generation.into_bytes(),
+            owner_uid: self.endpoint.owner_uid,
+        })
+    }
+
     pub(crate) fn admit(
         socket_path: PathBuf,
         registration_path: &Path,
@@ -28,7 +44,7 @@ impl TaskSnapshotAdapter {
         request: &TaskSnapshotProviderRequest,
     ) -> Result<(TaskSnapshotProviderPreview, CheckpointBinding, [u8; 32]), ContractError> {
         self.validate_request(request)?;
-        let binding = self.endpoint.resolve_binding()?;
+        let binding = self.resolve_binding()?;
         let preview = self
             .endpoint
             .client
@@ -38,7 +54,7 @@ impl TaskSnapshotAdapter {
                 WorkspaceGenerationTokenV2::from_bytes(binding.generation),
                 request.snapshot_id.as_str(),
             )
-            .map_err(|_| checkpoint_error("checkpoint_preview_failed", false))?;
+            .map_err(|failure| task_snapshot_failure("checkpoint_preview_failed", &failure))?;
         let changes = preview
             .changes
             .into_iter()
@@ -92,7 +108,7 @@ impl TaskSnapshotDriver for TaskSnapshotAdapter {
         preview_digest: &Digest,
     ) -> Result<(), ContractError> {
         self.validate_request(request)?;
-        let binding = self.endpoint.resolve_binding()?;
+        let binding = self.resolve_binding()?;
         let generation = WorkspaceGenerationTokenV2::from_bytes(binding.generation);
         let operation_digest = digest_parts(&[
             TASK_SWITCH_RECOVERY_DOMAIN,
@@ -196,7 +212,7 @@ impl TaskSnapshotDriver for TaskSnapshotAdapter {
             }
             Err(failure) if failure.effect == CkptRequestEffect::KnownNoEffect => {
                 Ok(TaskSnapshotProviderSwitchResult::Rejected {
-                    reason: bounded_text(&failure.error.message)?,
+                    error: task_snapshot_failure("checkpoint_switch_rejected", &failure.error),
                 })
             }
             Err(failure) => {

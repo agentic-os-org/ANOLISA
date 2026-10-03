@@ -86,8 +86,8 @@ pub enum TaskSnapshotProviderSwitchResult {
     Switched(TaskSnapshotProviderSwitch),
     /// The provider proved it rejected the request before any switch effect.
     Rejected {
-        /// Stable bounded reason suitable for user presentation.
-        reason: BoundedText,
+        /// Stable bounded contract error suitable for user presentation.
+        error: ContractError,
     },
     /// The provider may have applied the switch and must not be called again.
     PossiblyApplied {

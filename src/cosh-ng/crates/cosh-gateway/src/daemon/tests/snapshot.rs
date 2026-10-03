@@ -5,6 +5,7 @@ struct SnapshotDriver {
     recovery: Option<CheckpointId>,
     failure: &'static str,
     switch_calls: usize,
+    preview_failure: Option<ContractError>,
 }
 
 impl TaskSnapshotDriver for SnapshotDriver {
@@ -12,6 +13,9 @@ impl TaskSnapshotDriver for SnapshotDriver {
         &mut self,
         _: &TaskSnapshotProviderRequest,
     ) -> Result<TaskSnapshotProviderPreview, ContractError> {
+        if let Some(error) = &self.preview_failure {
+            return Err(error.clone());
+        }
         if self.recovery.is_some() && self.failure == "preview_error" {
             return Err(snapshot_error());
         }
@@ -46,7 +50,7 @@ impl TaskSnapshotDriver for SnapshotDriver {
         self.switch_calls += 1;
         match self.failure {
             "rejected" => Ok(TaskSnapshotProviderSwitchResult::Rejected {
-                reason: BoundedText::new("rejected").unwrap(),
+                error: snapshot_error(),
             }),
             "unknown" => Ok(TaskSnapshotProviderSwitchResult::PossiblyApplied {
                 error: snapshot_error(),
@@ -136,6 +140,7 @@ fn proven_snapshot_recovery_survives_switch_failure_and_reopen() {
             recovery: None,
             failure,
             switch_calls: 0,
+            preview_failure: None,
         };
         let preview = coordinator
             .snapshot_preview(&actor, &inspect, &mut driver)
@@ -207,6 +212,7 @@ fn snapshot_preview_fits_transport_and_binds_omitted_changes() {
         recovery: None,
         failure: "",
         switch_calls: 0,
+        preview_failure: None,
     };
     assert!(serde_json::to_vec(&driver.changes).unwrap().len() > MAX_GATEWAY_FRAME_BYTES);
     let preview = coordinator
@@ -249,4 +255,144 @@ fn snapshot_preview_fits_transport_and_binds_omitted_changes() {
         .switch_snapshot(&actor, switch_request(&changed), &mut driver)
         .unwrap();
     assert_eq!(driver.switch_calls, 1);
+}
+
+fn assert_wire_contract(error: &GatewayDaemonError, code: &str, recoverable: bool) {
+    let GatewayDaemonError::Contract {
+        code: actual_code,
+        message,
+        recoverable: actual_recoverable,
+    } = error
+    else {
+        panic!("expected contract error, got {error:?}")
+    };
+    assert_eq!(actual_code, code);
+    assert!(!message.is_empty());
+    assert_eq!(*actual_recoverable, recoverable);
+    let response = error_response(None, error);
+    let GatewayResponseOutcome::Error { error: body } = response.outcome else {
+        panic!("expected error response")
+    };
+    assert_eq!(body.code, code);
+    assert_eq!(body.message, *message);
+    assert_eq!(body.recoverable, recoverable);
+    assert_ne!(body.message, "request violates the Gateway contract");
+}
+
+#[test]
+fn snapshot_preview_preserves_provider_contract_error_on_wire() {
+    let root = private_tempdir();
+    let (coordinator, actor, inspect) = snapshot_task(&root.path().join("gateway.db"));
+    let mut driver = SnapshotDriver {
+        changes: vec![],
+        recovery: None,
+        failure: "",
+        switch_calls: 0,
+        preview_failure: Some(
+            ContractError::new(
+                "checkpoint_daemon_protocol_mismatch",
+                ErrorCategory::Transport,
+                false,
+                "Invalid response from ws-ckpt daemon",
+            )
+            .unwrap(),
+        ),
+    };
+    let error = coordinator
+        .snapshot_preview(&actor, &inspect, &mut driver)
+        .unwrap_err();
+    assert_wire_contract(&error, "checkpoint_daemon_protocol_mismatch", false);
+    let GatewayDaemonError::Contract { message, .. } = &error else {
+        panic!("expected contract error")
+    };
+    assert_eq!(message, "Invalid response from ws-ckpt daemon");
+}
+
+#[test]
+fn snapshot_switch_reports_revision_conflict_on_wire() {
+    let root = private_tempdir();
+    let (mut coordinator, actor, inspect) = snapshot_task(&root.path().join("gateway.db"));
+    let mut driver = SnapshotDriver {
+        changes: vec![],
+        recovery: None,
+        failure: "",
+        switch_calls: 0,
+        preview_failure: None,
+    };
+    let preview = coordinator
+        .snapshot_preview(&actor, &inspect, &mut driver)
+        .unwrap();
+    let mut stale = switch_request(&preview);
+    stale.expected_revision += 1;
+    let error = coordinator
+        .switch_snapshot(&actor, stale, &mut driver)
+        .unwrap_err();
+    assert_wire_contract(&error, "task_snapshot_revision_conflict", true);
+}
+
+#[test]
+fn snapshot_switch_reports_stale_preview_digest_on_wire() {
+    let root = private_tempdir();
+    let (mut coordinator, actor, inspect) = snapshot_task(&root.path().join("gateway.db"));
+    let mut driver = SnapshotDriver {
+        changes: vec![],
+        recovery: None,
+        failure: "",
+        switch_calls: 0,
+        preview_failure: None,
+    };
+    let preview = coordinator
+        .snapshot_preview(&actor, &inspect, &mut driver)
+        .unwrap();
+    driver.changes.push(TaskSnapshotChange {
+        path: BoundedText::new("changed.txt").unwrap(),
+        change: BoundedOpaque::new("modified").unwrap(),
+        detail: None,
+    });
+    let error = coordinator
+        .switch_snapshot(&actor, switch_request(&preview), &mut driver)
+        .unwrap_err();
+    assert_wire_contract(&error, "task_snapshot_preview_stale", true);
+}
+
+#[test]
+fn error_response_preserves_contract_codes_and_legacy_fallbacks() {
+    let response = error_response(
+        None,
+        &GatewayDaemonError::Protocol("framing violation".to_owned()),
+    );
+    let GatewayResponseOutcome::Error { error: body } = response.outcome else {
+        panic!("expected error response")
+    };
+    assert_eq!(body.code, "invalid_request");
+    assert_eq!(body.message, "request violates the Gateway contract");
+    assert!(!body.recoverable);
+
+    let response = error_response(
+        None,
+        &GatewayDaemonError::Store(StoreError::RevisionConflict {
+            expected: 1,
+            actual: 2,
+        }),
+    );
+    let GatewayResponseOutcome::Error { error: body } = response.outcome else {
+        panic!("expected error response")
+    };
+    assert_eq!(body.code, "task_version_conflict");
+    assert!(body.recoverable);
+
+    let response = error_response(
+        None,
+        &GatewayDaemonError::Contract {
+            code: "checkpoint_switch_rejected_diff_mismatch".to_owned(),
+            message: "workspace digest differs from the preview".to_owned(),
+            recoverable: false,
+        },
+    );
+    let GatewayResponseOutcome::Error { error: body } = response.outcome else {
+        panic!("expected error response")
+    };
+    assert_eq!(body.code, "checkpoint_switch_rejected_diff_mismatch");
+    assert_eq!(body.message, "workspace digest differs from the preview");
+    assert!(!body.recoverable);
 }
