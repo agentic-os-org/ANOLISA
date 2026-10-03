@@ -576,9 +576,15 @@ impl Uploader {
 /// Each source line is parsed as a JSON object (falling back to
 /// `{"raw": <line>}`), then enriched with `__time__` (Unix seconds), the
 /// common dimensions, and — when linked — the `link_id`. Common dimensions
-/// never overwrite fields the component already set. The originating
-/// component is conveyed by the destination logstore (and any `component`
-/// field the source line already carries), so it is not injected here.
+/// never overwrite fields the component already set, and `__time__` gets
+/// the same treatment: a line carrying its own event time ships with that
+/// time, and only lines without one are stamped at upload time. `link_id`
+/// is deliberately different — it is an ANOLISA-owned correlation id read
+/// from register.json, not a component field, so while linked the
+/// registered value always wins over whatever the line carried. The
+/// originating component is conveyed by the destination logstore (and any
+/// `component` field the source line already carries), so it is not
+/// injected here.
 ///
 /// PutWebtracking requires every field value inside `__logs__` to be a
 /// string; non-string values produce `PostBodyInvalid: Value in log is not
@@ -602,7 +608,10 @@ pub fn build_body(
                     m
                 }
             };
-            obj.insert("__time__".to_string(), Value::from(now));
+            // A component-provided event time is a field the component set;
+            // stamp only when absent.
+            obj.entry("__time__".to_string())
+                .or_insert_with(|| Value::from(now));
             for (k, v) in common {
                 obj.entry(k.clone()).or_insert_with(|| v.clone());
             }
@@ -1030,6 +1039,46 @@ mod tests {
         assert_eq!(parsed["__logs__"][0]["region"], "cn-line");
         // No link_id when unlinked.
         assert!(parsed["__logs__"][0].get("link_id").is_none());
+    }
+
+    #[test]
+    fn test_build_body_preserves_component_event_time() {
+        let common = BTreeMap::new();
+        // A line carrying its own event time ships with that time…
+        let lines = vec![r#"{"__time__":"1700000000"}"#.to_string()];
+        let body = build_body(&lines, None, &common, "t", "s").unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["__logs__"][0]["__time__"], "1700000000",
+            "component event time must survive upload"
+        );
+
+        // …while a line without one is stamped with the upload time.
+        let before = unix_now();
+        let lines = vec![r#"{"k":"v"}"#.to_string()];
+        let body = build_body(&lines, None, &common, "t", "s").unwrap();
+        let after = unix_now();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        let stamped: u64 = parsed["__logs__"][0]["__time__"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .expect("__time__ stamped as string seconds");
+        assert!(
+            (before..=after.saturating_add(1)).contains(&stamped),
+            "stamped {stamped} not within [{before}, {after}]"
+        );
+    }
+
+    #[test]
+    fn test_build_body_link_id_is_always_the_registered_one() {
+        // link_id is an ANOLISA-owned correlation id read from register.json,
+        // not a component event field: while linked, the registered value is
+        // authoritative and replaces whatever the line carried.
+        let common = BTreeMap::new();
+        let lines = vec![r#"{"link_id":"stale-line-value"}"#.to_string()];
+        let body = build_body(&lines, Some("registered"), &common, "t", "s").unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["__logs__"][0]["link_id"], "registered");
     }
 
     #[test]
