@@ -288,18 +288,21 @@ DEVICE=$1
 PARTITION=$2
 NEW_SIZE=$3
 
+# 分区设备路径：设备名以数字结尾时需加 p 分隔符（如 nvme0n1 -> /dev/nvme0n1p3）
+PART_PATH="/dev/${DEVICE}$([[ $DEVICE == *[0-9] ]] && echo p || true)${PARTITION}"
+
 # 自动检测文件系统类型
-FS_TYPE=$(lsblk -f /dev/${DEVICE}${PARTITION} --noheadings --output FSTYPE | tr -d ' ')
+FS_TYPE=$(lsblk -f ${PART_PATH} --noheadings --output FSTYPE | tr -d ' ')
 
 # 扩容分区
 growpart /dev/$DEVICE $PARTITION
 
 # 扩容文件系统
 if [ "$FS_TYPE" = "xfs" ]; then
-    MOUNTPOINT=$(df /dev/${DEVICE}${PARTITION} | tail -1 | awk '{print $6}')
+    MOUNTPOINT=$(df ${PART_PATH} | tail -1 | awk '{print $6}')
     xfs_growfs $MOUNTPOINT
 elif [ "$FS_TYPE" = "ext4" ]; then
-    resize2fs /dev/${DEVICE}${PARTITION}
+    resize2fs ${PART_PATH}
 fi
 
 echo "✅ 扩容完成！"
