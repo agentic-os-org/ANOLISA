@@ -39,7 +39,8 @@ jobs:
     name: "Build"
     runs-on: ${{ inputs.arch == 'arm64' && 'anolisa-k8s-arm2204-nightly' || 'anolisa-k8s-amd-nightly' }}
     container:
-      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+      # alinux4/alinux4:latest, pinned by digest resolved 2026-10-03
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4@sha256:87143e49580a7309bbc04c528f35274ead263b47c0c7c66d047e076797b851e9
     steps:
       - name: Fix repo mirror
         run: sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
