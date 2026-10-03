@@ -1312,11 +1312,13 @@ pub(crate) mod tests {
     use anolisa_platform::pkg_query::PackageVersion;
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    use crate::commands::common::redact_known_urls;
+
     use super::self_update::application::{
         SelfUpdateApplicationOutcome, SelfUpdateApplied, SelfUpdateChange, SelfUpdateExecution,
         SelfUpdateFailure, SelfUpdateFailureContext, SelfUpdateOps, SelfUpdateRequest,
-        append_self_update_log as append_self_update_log_with_intent, redact_known_urls,
-        run_application_with_deps, run_self_update_with_deps as run_self_update_with_intent,
+        append_self_update_log as append_self_update_log_with_intent, run_application_with_deps,
+        run_self_update_with_deps as run_self_update_with_intent,
     };
 
     #[allow(clippy::too_many_arguments)]
