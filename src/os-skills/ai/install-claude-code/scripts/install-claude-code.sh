@@ -114,11 +114,21 @@ install_sys_deps() {
   command_exists gzip  || pkgs_to_install+=(gzip)
 
   # glibc and libstdc++ should already be present on Alinux 4, but ensure
-  rpm -q glibc        &>/dev/null || pkgs_to_install+=(glibc)
-  rpm -q libstdc++    &>/dev/null || pkgs_to_install+=(libstdc++)
+  # (rpm -q only means something on RPM-based hosts)
+  if command_exists rpm; then
+    rpm -q glibc        &>/dev/null || pkgs_to_install+=(glibc)
+    rpm -q libstdc++    &>/dev/null || pkgs_to_install+=(libstdc++)
+  fi
 
   if [[ ${#pkgs_to_install[@]} -eq 0 ]]; then
     ok "All system prerequisites already installed."
+    return 0
+  fi
+
+  # No RPM package manager (macOS, Debian-family, ...): the native/npm/nvm
+  # install methods below do not need dnf, so skip distribution packages.
+  if ! command_exists dnf && ! command_exists rpm; then
+    warn "Neither dnf nor rpm found — skipping distribution packages: ${pkgs_to_install[*]}"
     return 0
   fi
 
