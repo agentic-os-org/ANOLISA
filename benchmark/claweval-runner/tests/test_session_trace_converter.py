@@ -22,7 +22,7 @@ Covers:
 - trace_start event completeness
 - trace_end event fields (scores/tokens/timing)
 - audit_data fetching (success/failure/partial)
-- Edge cases (empty session/invalid JSON/missing timestamp)
+- Edge cases (empty session/invalid JSON/missing or invalid timestamp)
 
 Task type coverage:
 - T tasks: standard tool_dispatch + audit_snapshot
@@ -148,9 +148,111 @@ class TestTimestampNormalization:
     def test_no_change_for_valid_offset(self):
         """Don't modify timestamps with valid offset."""
         from ce_runner.session_trace_converter import normalize_timestamp
-        
+
         ts = "2024-01-15T10:00:00.000+08:00"
         assert normalize_timestamp(ts) == ts
+
+    def test_null_timestamp_coerced_to_now(self):
+        """A present-but-null timestamp coerces to now, not a crash."""
+        from datetime import datetime
+
+        from ce_runner.session_trace_converter import normalize_timestamp, now_iso
+
+        before = datetime.fromisoformat(now_iso())
+        coerced = normalize_timestamp(None)
+        after = datetime.fromisoformat(now_iso())
+        assert before <= datetime.fromisoformat(coerced) <= after
+
+    def test_numeric_timestamp_coerced_to_now(self):
+        """A numeric timestamp coerces to now instead of AttributeError."""
+        from datetime import datetime
+
+        from ce_runner.session_trace_converter import normalize_timestamp, now_iso
+
+        before = datetime.fromisoformat(now_iso())
+        coerced = normalize_timestamp(1761300000)
+        after = datetime.fromisoformat(now_iso())
+        assert before <= datetime.fromisoformat(coerced) <= after
+
+    def test_empty_timestamp_coerced_to_now(self):
+        """An empty-string timestamp coerces to now."""
+        from datetime import datetime
+
+        from ce_runner.session_trace_converter import normalize_timestamp, now_iso
+
+        before = datetime.fromisoformat(now_iso())
+        coerced = normalize_timestamp("")
+        after = datetime.fromisoformat(now_iso())
+        assert before <= datetime.fromisoformat(coerced) <= after
+
+
+class TestInvalidTimestampConversion:
+    """A present-but-invalid timestamp must not abort the conversion.
+
+    The converter deliberately tolerates malformed lines and *missing*
+    timestamps (default now_iso()); one null/numeric/empty value in a
+    multi-hour session must behave the same way, not kill the trial with
+    "Trace conversion failed".
+    """
+
+    def _convert(self, tmp_path, timestamp):
+        from ce_runner._common import load_task_yaml
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text(
+            '{"type": "message", "timestamp": "2026-10-01T10:00:00+00:00", '
+            '"message": {"role": "user", "content": [{"type": "text", "text": "do the thing"}]}}\n'
+            + json.dumps({
+                "type": "message",
+                "timestamp": timestamp,
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "working"}],
+                            "usage": {"input": 10, "output": 5}},
+            }) + "\n"
+            '{"type": "message", "timestamp": "2026-10-01T10:00:20+00:00", '
+            '"message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], '
+            '"usage": {"input": 20, "output": 7}}}\n'
+        )
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text("task_id: T001\nservices: []\ntools: []\n")
+        task = load_task_yaml(str(task_yaml))
+        output_file = tmp_path / "output.jsonl"
+        convert_session_to_trace(str(session_file), task, str(output_file))
+        return [json.loads(l) for l in output_file.read_text().splitlines() if l]
+
+    def test_null_timestamp_converts(self, tmp_path):
+        """null timestamp: conversion succeeds and all messages are emitted."""
+        from datetime import datetime
+
+        events = self._convert(tmp_path, None)
+        roles = [e["message"]["role"] for e in events
+                 if e.get("type") == "message"]
+        assert roles == ["user", "assistant", "assistant"]
+        # Coerced message still carries a parseable ISO timestamp
+        bad = [e for e in events if e.get("type") == "message"][1]
+        datetime.fromisoformat(bad["timestamp"])
+
+    def test_numeric_timestamp_converts(self, tmp_path):
+        """Numeric timestamp: conversion succeeds and all messages are emitted."""
+        events = self._convert(tmp_path, 1761300000)
+        roles = [e["message"]["role"] for e in events
+                 if e.get("type") == "message"]
+        assert roles == ["user", "assistant", "assistant"]
+
+    def test_wall_time_from_valid_timestamps_only(self, tmp_path):
+        """trace_end wall time derives from the two valid timestamps (20s),
+        not from the coerced now() default."""
+        events = self._convert(tmp_path, None)
+        trace_end = next(e for e in events if e.get("type") == "trace_end")
+        assert trace_end["wall_time_s"] == 20.0
+
+    def test_valid_session_unchanged(self, tmp_path):
+        """Control: removing the invalid line entirely yields the same tokens."""
+        events = self._convert(tmp_path, None)
+        trace_end = next(e for e in events if e.get("type") == "trace_end")
+        assert trace_end["model_input_tokens"] == 30
+        assert trace_end["model_output_tokens"] == 12
 
 
 class TestTraceEvents:
