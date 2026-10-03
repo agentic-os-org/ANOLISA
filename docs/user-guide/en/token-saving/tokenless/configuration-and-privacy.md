@@ -241,7 +241,7 @@ Stash saves the original content removed by truncation, not a summary. For recor
 ls -l ~/.tokenless/stash.db*
 ```
 
-TTL means that `retrieve` no longer returns an entry after one hour. Expired rows are deleted lazily during a later retrieval; TTL is not an immediate secure-erasure guarantee for disk data. When more than 10,000 live entries exist, the store evicts entries with the earliest expiry first, so retrieval can fail before one hour under heavy use.
+TTL means that `retrieve` no longer returns an entry after one hour. Expired rows are deleted lazily during a later successful stash write or retrieval, so compression-only workloads also reclaim old entries. TTL is not an immediate secure-erasure guarantee for disk data, and deleting rows does not immediately shrink the SQLite file. When more than 10,000 live entries exist, the store evicts entries with the earliest expiry first, so retrieval can fail before one hour under heavy use.
 
 ### SLS excludes original text
 
