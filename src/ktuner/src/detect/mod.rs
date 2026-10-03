@@ -649,40 +649,103 @@ fn is_generic_runtime(comm: &str) -> bool {
 /// that matches the has_process() checks used by rules and classification.
 fn detect_runtime_service(pid: &str) -> Option<String> {
     let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
-    // cmdline args are NUL-separated.
-    let cmd = cmdline.replace('\0', " ").to_lowercase();
-    // Order matters: more specific markers first.
-    const MARKERS: &[(&str, &str)] = &[
-        ("org.elasticsearch", "elasticsearch"),
-        ("elasticsearch", "elasticsearch"),
-        ("org.opensearch", "opensearch"),
-        ("opensearch", "opensearch"),
-        ("kafka.kafka", "kafka"),
-        ("kafka", "kafka"),
-        ("org.apache.zookeeper", "zookeeper"),
-        ("zookeeper", "zookeeper"),
-        ("org.apache.flink", "flink"),
-        ("flink", "flink"),
-        ("org.apache.spark", "spark"),
-        ("spark", "spark"),
-        ("org.apache.cassandra", "cassandra"),
-        ("cassandra", "cassandra"),
-        ("org.apache.hadoop", "hadoop"),
-        ("hadoop", "hadoop"),
-        ("hbase", "hbase"),
-        ("solr", "solr"),
-        ("logstash", "logstash"),
-        ("pulsar", "pulsar"),
-        ("catalina", "tomcat"),
-        ("tomcat", "tomcat"),
-        ("jenkins", "jenkins"),
-    ];
-    for (marker, svc) in MARKERS {
-        if cmd.contains(marker) {
-            return Some(svc.to_string());
+    runtime_service_from_cmdline(&cmdline).map(str::to_string)
+}
+
+/// Markers mapped to canonical service names, most specific first.
+const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
+    ("org.elasticsearch", "elasticsearch"),
+    ("elasticsearch", "elasticsearch"),
+    ("org.opensearch", "opensearch"),
+    ("opensearch", "opensearch"),
+    ("kafka.kafka", "kafka"),
+    ("kafka", "kafka"),
+    ("org.apache.zookeeper", "zookeeper"),
+    ("zookeeper", "zookeeper"),
+    ("org.apache.flink", "flink"),
+    ("flink", "flink"),
+    ("org.apache.spark", "spark"),
+    ("spark", "spark"),
+    ("org.apache.cassandra", "cassandra"),
+    ("cassandra", "cassandra"),
+    ("org.apache.hadoop", "hadoop"),
+    ("hadoop", "hadoop"),
+    ("hbase", "hbase"),
+    ("solr", "solr"),
+    ("logstash", "logstash"),
+    ("pulsar", "pulsar"),
+    ("catalina", "tomcat"),
+    ("tomcat", "tomcat"),
+    ("jenkins", "jenkins"),
+];
+
+/// Decide the service a generic-runtime process (java/python/node/...) runs
+/// from its raw NUL-separated cmdline.
+///
+/// Only identity-bearing arguments decide: the jar after `-jar`, and the
+/// non-option arguments (the main class, a script path). JVM options and
+/// their values — a `-D` property, a log path, a classpath directory — merely
+/// *mention* services, and the old whole-cmdline substring scan matched them:
+/// `java -Dlog4j.configurationFile=/opt/spark/conf/... com.example.Main`
+/// classified as Spark and fired the streaming rules on an unrelated
+/// workload. This is the same class of false positive the name-boundary fix
+/// for `has_process` removed (etcdctl vs etcd).
+///
+/// Each candidate argument is matched by its file-name component only (a
+/// directory named after a service is not the program), and a marker matches
+/// only as a whole consecutive run of name tokens, so `sparklesh` or
+/// `etcdbackup` no longer satisfy `spark`/`etcd`.
+fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
+    // Collect identity-bearing args: everything that is not an option, plus
+    // the jar path that follows `-jar` (that one *is* an option's value but
+    // names the program).
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut args = cmdline.split('\0').filter(|a| !a.is_empty());
+    while let Some(arg) = args.next() {
+        if arg == "-jar" {
+            if let Some(jar) = args.next() {
+                candidates.push(jar);
+            }
+        } else if !arg.starts_with('-') {
+            candidates.push(arg);
+        }
+    }
+
+    let marker_tokens: Vec<Vec<String>> = RUNTIME_SERVICE_MARKERS
+        .iter()
+        .map(|(marker, _)| name_tokens(marker))
+        .collect();
+    let names: Vec<Vec<String>> = candidates
+        .iter()
+        .map(|c| {
+            let basename = c.rsplit('/').next().unwrap_or(c);
+            name_tokens(basename)
+        })
+        .collect();
+
+    for ((_, svc), needle) in RUNTIME_SERVICE_MARKERS.iter().zip(marker_tokens.iter()) {
+        if names
+            .iter()
+            .any(|tokens| token_run_contains(tokens, needle))
+        {
+            return Some(svc);
         }
     }
     None
+}
+
+/// Split a name into its runs of ASCII alphanumeric characters (lowercased).
+fn name_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `haystack` contains `needle` as a consecutive run of tokens.
+fn token_run_contains(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 impl SystemInfo {
@@ -1042,6 +1105,45 @@ mod tests {
         assert!(info.has_process("nginx"));
         assert!(info.has_process("elasticsearch"));
         assert!(info.has_process("redis-server"));
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_option_values_and_directories() {
+        // A JVM option's value (a config path) merely mentions a service; the
+        // main class decides. Before the boundary fix the whole cmdline was
+        // scanned as one string, so this classified as Spark and the streaming
+        // rules fired on an unrelated workload.
+        let cmdline =
+            "java\0-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties\0com.example.Main";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // A jar's directory names a service the jar is not.
+        let cmdline = "java\0-jar\0/opt/hadoop-tools/printer.jar";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // Markers must match whole name tokens: `sparklesh` is not `spark`.
+        let cmdline = "python3\0/opt/app/sparklesh-report.py";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+    }
+
+    #[test]
+    fn test_runtime_service_matches_main_classes_and_jars() {
+        // Zookeeper's main class.
+        let cmdline = "java\0-Xmx1g\0org.apache.zookeeper.server.quorum.QuorumPeerMain";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("zookeeper"));
+
+        // Kafka: the -jar value names the program.
+        let cmdline = "java\0-jar\0/opt/kafka/libs/kafka_2.13-3.7.0.jar\0kafka.Kafka";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+
+        // Tomcat's bootstrap class carries `catalina` mid-class, so the
+        // marker must match as a token run anywhere in the class name.
+        let cmdline = "java\0org.apache.catalina.startup.Bootstrap\0start";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("tomcat"));
+
+        // Elasticsearch, including a versioned jar basename.
+        let cmdline = "java\0-jar\0/usr/share/elasticsearch-8.12.0/lib/elasticsearch-8.12.0.jar";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("elasticsearch"));
     }
 
     #[test]
