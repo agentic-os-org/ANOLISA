@@ -175,25 +175,31 @@ fn read_kernel_version() -> Result<String> {
 }
 
 fn read_os_distro() -> String {
-    if let Ok(content) = fs::read_to_string("/etc/os-release") {
-        let mut pretty_name = None;
-        let mut name = None;
-        let mut version = None;
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
-                pretty_name = Some(val.trim_matches('"').to_string());
-            } else if let Some(val) = line.strip_prefix("NAME=") {
-                name = Some(val.trim_matches('"').to_string());
-            } else if let Some(val) = line.strip_prefix("VERSION=") {
-                version = Some(val.trim_matches('"').to_string());
-            }
+    fs::read_to_string("/etc/os-release")
+        .map_or_else(|_| "Unknown".to_string(), |c| parse_os_release(&c))
+}
+
+/// Pure /etc/os-release parsing: PRETTY_NAME wins; otherwise NAME + VERSION;
+/// quotes are stripped; anything else yields "Unknown" (the value shown in
+/// every check output).
+fn parse_os_release(content: &str) -> String {
+    let mut pretty_name = None;
+    let mut name = None;
+    let mut version = None;
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
+            pretty_name = Some(val.trim_matches('"').to_string());
+        } else if let Some(val) = line.strip_prefix("NAME=") {
+            name = Some(val.trim_matches('"').to_string());
+        } else if let Some(val) = line.strip_prefix("VERSION=") {
+            version = Some(val.trim_matches('"').to_string());
         }
-        if let Some(pn) = pretty_name {
-            return pn;
-        }
-        if let (Some(n), Some(v)) = (name, version) {
-            return format!("{n} {v}");
-        }
+    }
+    if let Some(pn) = pretty_name {
+        return pn;
+    }
+    if let (Some(n), Some(v)) = (name, version) {
+        return format!("{n} {v}");
     }
     "Unknown".to_string()
 }
@@ -233,51 +239,78 @@ fn read_numa_nodes() -> usize {
 
 fn read_memory_total_gb() -> Result<u64> {
     let meminfo = fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
-    let mut host_kb: u64 = 0;
-    for line in meminfo.lines() {
+    Ok(effective_memory_gb(
+        parse_meminfo_total_kb(&meminfo),
+        read_cgroup_memory_limit_kb(),
+    ))
+}
+
+/// Pure /proc/meminfo parsing: the numeric field of the MemTotal line, 0 when
+/// absent or unparseable.
+fn parse_meminfo_total_kb(content: &str) -> u64 {
+    for line in content.lines() {
         if line.starts_with("MemTotal:") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some(kb_str) = parts.get(1) {
-                host_kb = kb_str.parse().unwrap_or(0);
-                break;
+                return kb_str.parse().unwrap_or(0);
             }
         }
     }
+    0
+}
 
-    let cgroup_kb = read_cgroup_memory_limit_kb();
+/// Effective memory in whole GB: the cgroup limit only when it is a real
+/// limit that is smaller than the host; floored to GB; never 0 when any RAM
+/// exists (the sub-1GB clamp — a 0 here would mis-scale every memory rule,
+/// which is why every memory-scaled rule consumes this one number).
+fn effective_memory_gb(host_kb: u64, cgroup_kb: u64) -> u64 {
     let effective_kb = if cgroup_kb > 0 && cgroup_kb < host_kb {
         cgroup_kb
     } else {
         host_kb
     };
-
-    // Floor to GB (unchanged), but never report 0 when the machine has any RAM:
-    // a sub-1GB host floored to 0 GB would make every memory-scaled rule
-    // misbehave.
     let gb = effective_kb / 1024 / 1024;
-    Ok(if gb == 0 && effective_kb > 0 { 1 } else { gb })
+    if gb == 0 && effective_kb > 0 {
+        1
+    } else {
+        gb
+    }
 }
 
 fn read_cgroup_memory_limit_kb() -> u64 {
     // cgroup v2
     if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
-        let s = s.trim();
-        if s != "max" {
-            if let Ok(bytes) = s.parse::<u64>() {
-                return bytes / 1024;
-            }
-        }
-        return 0;
+        return cgroup_v2_limit_kb(&s);
     }
     // cgroup v1
     if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
         if let Ok(bytes) = s.trim().parse::<u64>() {
-            if bytes < 1u64 << 62 {
-                return bytes / 1024;
-            }
+            return cgroup_v1_limit_kb(bytes);
         }
     }
     0
+}
+
+/// cgroup v2 memory.max content → KB, 0 for the "max" (no-limit) sentinel or
+/// unparseable content.
+fn cgroup_v2_limit_kb(raw: &str) -> u64 {
+    let s = raw.trim();
+    if s != "max" {
+        if let Ok(bytes) = s.parse::<u64>() {
+            return bytes / 1024;
+        }
+    }
+    0
+}
+
+/// cgroup v1 limit_in_bytes → KB, 0 at/above the 1<<62 "unlimited" sentinel
+/// (v1 reports a huge constant rather than "max").
+fn cgroup_v1_limit_kb(bytes: u64) -> u64 {
+    if bytes < 1u64 << 62 {
+        bytes / 1024
+    } else {
+        0
+    }
 }
 
 fn read_disk_info() -> Result<Vec<DiskInfo>> {
@@ -356,17 +389,24 @@ fn detect_disk_type(name: &str) -> DiskType {
 
 fn read_current_scheduler(name: &str) -> String {
     let path = format!("/sys/block/{name}/queue/scheduler");
-    if let Ok(content) = fs::read_to_string(&path) {
-        // Current scheduler is enclosed in brackets: "none [mq-deadline] bfq"
-        for part in content.split_whitespace() {
-            if part.starts_with('[') && part.ends_with(']') {
-                return part[1..part.len() - 1].to_string();
-            }
-        }
-        content.trim().to_string()
-    } else {
-        "unknown".to_string()
-    }
+    // Current scheduler is enclosed in brackets: "none [mq-deadline] bfq"
+    fs::read_to_string(&path).map_or_else(
+        |_| "unknown".to_string(),
+        |c| active_option(&c).unwrap_or_else(|| c.trim().to_string()),
+    )
+}
+
+/// The ACTIVE option of a sysfs list file: the token in brackets, wherever it
+/// appears ("none [mq-deadline] bfq" → "mq-deadline"). None when the file has
+/// no bracketed token (the caller falls back to the raw trimmed content).
+/// Shared by the scheduler and THP readers so the two can never drift apart —
+/// that copy-paste drift is exactly how the tuner's readback handling
+/// historically missed THP.
+fn active_option(content: &str) -> Option<String> {
+    content
+        .split_whitespace()
+        .find(|t| t.starts_with('[') && t.ends_with(']') && t.len() > 2)
+        .map(|t| t[1..t.len() - 1].to_string())
 }
 
 fn read_available_schedulers(name: &str) -> Vec<String> {
@@ -459,16 +499,10 @@ pub(crate) fn read_sysctl_u64(path: &str) -> u64 {
 
 fn read_thp_enabled() -> String {
     let path = "/sys/kernel/mm/transparent_hugepage/enabled";
-    if let Ok(content) = fs::read_to_string(path) {
-        for part in content.split_whitespace() {
-            if part.starts_with('[') && part.ends_with(']') {
-                return part[1..part.len() - 1].to_string();
-            }
-        }
-        content.trim().to_string()
-    } else {
-        "unknown".to_string()
-    }
+    fs::read_to_string(path).map_or_else(
+        |_| "unknown".to_string(),
+        |c| active_option(&c).unwrap_or_else(|| c.trim().to_string()),
+    )
 }
 
 fn read_processes() -> Result<Vec<ProcessInfo>> {
@@ -577,19 +611,26 @@ impl SystemInfo {
 }
 
 fn has_tcp_listen_sockets() -> bool {
-    for path in &["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(content) = fs::read_to_string(path) {
-            for line in content.lines().skip(1) {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if let Some(state) = fields.get(3) {
-                    if *state == "0A" {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    [" /proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .map(|p| p.trim())
+        .any(|path| {
+            fs::read_to_string(path)
+                .map(|content| has_listen_socket(&content))
+                .unwrap_or(false)
+        })
+}
+
+/// Pure /proc/net/tcp (or tcp6) table parse: true when any row is in LISTEN
+/// (state "0A", 4th whitespace field). The header line is skipped; any other
+/// state (01 established, 06 time-wait, ...) is not a listener. This gates
+/// the somaxconn and syn-backlog rules, so a misparse either recommends a
+/// needless change or skips a needed one.
+fn has_listen_socket(content: &str) -> bool {
+    content
+        .lines()
+        .skip(1)
+        .any(|line| line.split_whitespace().nth(3) == Some("0A"))
 }
 
 #[cfg(test)]
@@ -602,6 +643,165 @@ mod tests {
         assert!(!info.kernel_version.is_empty());
         assert!(info.cpu_cores > 0);
         assert!(info.memory_total_gb > 0);
+    }
+
+    #[test]
+    fn parse_os_release_prefers_pretty_name() {
+        // PRETTY_NAME wins even when NAME/VERSION appear first; surrounding
+        // quotes are stripped.
+        let content =
+            "NAME=\"Alinux\"\nVERSION=\"3 (Hupo)\"\nPRETTY_NAME=\"Alinux 3 (Hupo Dragon)\"\n";
+        assert_eq!(parse_os_release(content), "Alinux 3 (Hupo Dragon)");
+        // Last PRETTY_NAME wins (os-release keys are unique, but be explicit).
+        assert_eq!(
+            parse_os_release("PRETTY_NAME=\"A\"\nPRETTY_NAME=\"B\"\n"),
+            "B"
+        );
+    }
+
+    #[test]
+    fn parse_os_release_falls_back_to_name_version() {
+        assert_eq!(
+            parse_os_release("NAME=\"Alinux\"\nVERSION=\"3\"\n"),
+            "Alinux 3"
+        );
+        // NAME alone (no VERSION) is not enough.
+        assert_eq!(parse_os_release("NAME=\"Alinux\"\n"), "Unknown");
+        // Empty or unrelated content.
+        assert_eq!(parse_os_release(""), "Unknown");
+        assert_eq!(parse_os_release("ID=alinux\nHOME_URL=\"x\"\n"), "Unknown");
+    }
+
+    #[test]
+    fn parse_meminfo_total_kb_reads_the_memtotal_line() {
+        let typical = "MemTotal:       16384000 kB\nMemFree:         8000000 kB\n";
+        assert_eq!(parse_meminfo_total_kb(typical), 16384000);
+        // MemTotal not first line is still found.
+        let later = "MemFree: 1 kB\nMemTotal:       2048 kB\n";
+        assert_eq!(parse_meminfo_total_kb(later), 2048);
+        // Absent -> 0.
+        assert_eq!(parse_meminfo_total_kb("MemFree: 1 kB\n"), 0);
+        // Garbage number -> 0, not a panic.
+        assert_eq!(parse_meminfo_total_kb("MemTotal: not-a-number kB\n"), 0);
+    }
+
+    #[test]
+    fn effective_memory_gb_prefers_smaller_cgroup_limit() {
+        // 16 GB host, 2 GB cgroup limit -> 2.
+        assert_eq!(effective_memory_gb(16 * 1024 * 1024, 2 * 1024 * 1024), 2);
+        // No cgroup limit (0) -> host value.
+        assert_eq!(effective_memory_gb(16 * 1024 * 1024, 0), 16);
+        // Cgroup limit at/above host -> host.
+        assert_eq!(effective_memory_gb(1024, 2048), 1);
+    }
+
+    #[test]
+    fn effective_memory_gb_clamps_sub_gb_hosts() {
+        // 512 MB must not floor to 0 — the documented past bug class.
+        assert_eq!(effective_memory_gb(512 * 1024, 0), 1);
+        // Exactly 1 GB stays 1.
+        assert_eq!(effective_memory_gb(1024 * 1024, 0), 1);
+        // 1.5 GB floors to 1.
+        assert_eq!(effective_memory_gb((1.5 * 1024.0 * 1024.0) as u64, 0), 1);
+        // No RAM at all stays 0.
+        assert_eq!(effective_memory_gb(0, 0), 0);
+        // The clamp applies to the cgroup limit too (a 512 MB container).
+        assert_eq!(effective_memory_gb(16 * 1024 * 1024, 512 * 1024), 1);
+    }
+
+    #[test]
+    fn cgroup_v2_limit_kb_handles_max_sentinel() {
+        // "max" is the no-limit sentinel, not a value.
+        assert_eq!(cgroup_v2_limit_kb("max\n"), 0);
+        assert_eq!(cgroup_v2_limit_kb("2147483648\n"), 2 * 1024 * 1024);
+        // Garbage / empty -> 0.
+        assert_eq!(cgroup_v2_limit_kb("garbage"), 0);
+        assert_eq!(cgroup_v2_limit_kb(""), 0);
+    }
+
+    #[test]
+    fn cgroup_v1_limit_kb_rejects_unlimited_sentinel() {
+        // A real 2 GB limit converts.
+        assert_eq!(cgroup_v1_limit_kb(2 * 1024 * 1024 * 1024), 2 * 1024 * 1024);
+        // v1's unlimited sentinel and anything at/above it -> 0.
+        assert_eq!(cgroup_v1_limit_kb(1u64 << 62), 0);
+        assert_eq!(cgroup_v1_limit_kb(1u64 << 63), 0);
+        // Just below the sentinel is still a real limit.
+        assert_eq!(
+            cgroup_v1_limit_kb((1u64 << 62) - 1024),
+            (1u64 << 62) / 1024 - 1
+        );
+    }
+
+    #[test]
+    fn active_option_finds_bracketed_token_anywhere() {
+        // The active option is the bracketed token, wherever it appears.
+        assert_eq!(
+            active_option("none [mq-deadline] bfq").as_deref(),
+            Some("mq-deadline")
+        );
+        assert_eq!(
+            active_option("always madvise [never]").as_deref(),
+            Some("never")
+        );
+        assert_eq!(active_option("[none]").as_deref(), Some("none"));
+        // No brackets -> None (caller falls back to trimmed content).
+        assert_eq!(active_option("none bfq"), None);
+        assert_eq!(active_option(""), None);
+        // A bare "[]" is not an option.
+        assert_eq!(active_option("[] none"), None);
+    }
+
+    #[test]
+    fn readers_agree_on_active_option() {
+        // An unreadable file yields "unknown" from BOTH bracket-scan readers
+        // — the shared fallback pins that the deduplication did not change
+        // semantics.
+        assert_eq!(read_current_scheduler("ktuner_no_such_disk"), "unknown");
+        // When the THP file exists (any Linux host), the reader must return
+        // exactly the bracketed active option of its real content, proving
+        // both readers route through the same active_option helper.
+        if let Ok(content) = fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled") {
+            let expected = active_option(&content).unwrap_or_else(|| content.trim().to_string());
+            assert_eq!(read_thp_enabled(), expected);
+        } else {
+            assert_eq!(read_thp_enabled(), "unknown");
+        }
+    }
+
+    #[test]
+    fn has_listen_socket_detects_only_listen_state() {
+        let header = "  sl  local_address rem_address        st tx_queue\n";
+        // LISTEN (0A) row -> true.
+        assert!(has_listen_socket(&format!(
+            "{header}   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000\n"
+        )));
+        // ESTABLISHED (01) and TIME_WAIT (06) rows are not listeners.
+        assert!(!has_listen_socket(&format!(
+            "{header}   0: 0100007F:1F90 0100007F:E1D8 01 00000000:00000000\n"
+        )));
+        assert!(!has_listen_socket(&format!(
+            "{header}   0: 0100007F:1F90 0100007F:E1D8 06 00000000:00000000\n"
+        )));
+        // Header only -> false.
+        assert!(!has_listen_socket(header));
+        // Short/malformed row -> false (no panic, no match).
+        assert!(!has_listen_socket(&format!("{header}garbage\n")));
+        assert!(!has_listen_socket(&format!(
+            "{header}   0: only two fields\n"
+        )));
+    }
+
+    #[test]
+    fn has_listen_socket_skips_header_line() {
+        // The header's 4th field is "st", never "0A", but a malformed header
+        // whose 4th field IS 0A-looking must not count as a listener.
+        assert!(!has_listen_socket("a b c 0A\n"));
+        // A LISTEN row in tcp6-shaped content still counts.
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue\n";
+        assert!(has_listen_socket(
+            &format!("{tcp6}   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000\n")
+        ));
     }
 
     #[test]
