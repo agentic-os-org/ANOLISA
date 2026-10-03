@@ -178,8 +178,10 @@ def ordered_unique(items):
 
 
 def merge_plugin_allow(existing, merged):
-    existing_allow = existing.get("plugins", {}).get("allow", [])
-    merged_allow = merged.get("plugins", {}).get("allow")
+    existing_plugins = existing.get("plugins") if isinstance(existing, dict) else None
+    existing_allow = existing_plugins.get("allow", []) if isinstance(existing_plugins, dict) else []
+    merged_plugins = merged.get("plugins") if isinstance(merged, dict) else None
+    merged_allow = merged_plugins.get("allow") if isinstance(merged_plugins, dict) else None
     if merged_allow is None:
         return merged
 
@@ -535,6 +537,11 @@ def apply_config(config, config_path, *, dry_run=False):
                 existing = json.load(fh)
         except json.JSONDecodeError as exc:
             raise SystemExit(f"Invalid JSON in {config_path}: {exc}") from exc
+        if not isinstance(existing, dict):
+            raise SystemExit(
+                f"Invalid config in {config_path}: expected a JSON object, "
+                f"got {type(existing).__name__}. Fix or remove the file and rerun."
+            )
 
     merged = deep_merge(existing, config)
     merged = merge_plugin_allow(existing, merged)
