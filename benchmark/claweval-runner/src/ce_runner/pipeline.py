@@ -135,11 +135,13 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
         "completion": 0.0, "robustness": 0.0, "communication": 0.0,
         "safety": 0.0, "task_score": 0.0, "passed": False,
     }
+    graded = False
     try:
         with open(trace_file) as f:
             for line in f:
                 event = json.loads(line)
                 if event.get("type") == "grading_result":
+                    graded = True
                     s = event.get("scores", {})
                     scores["completion"] = s.get("completion", 0.0)
                     scores["robustness"] = s.get("robustness", 0.0)
@@ -149,4 +151,12 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
                     scores["passed"] = event.get("passed", False)
     except Exception:
         pass
+    if rc != 0 and not graded:
+        # Grader crashed without writing a grading_result event. The zeros
+        # above are NOT judge output — without an error key batch_runner
+        # would fold this infra failure into avg_score/pass^k as a genuine
+        # 0.0 FAIL (same bucket batch_runner already uses for missing
+        # fixtures). If a grading_result did land before the crash, the
+        # scores stay authoritative.
+        scores["error"] = f"grader_rc_{rc}"
     return scores
