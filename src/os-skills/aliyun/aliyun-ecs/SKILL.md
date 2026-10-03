@@ -175,11 +175,11 @@ aliyun ecs DescribeInstances --RegionId cn-hangzhou --PageSize 10 --PageNumber 1
 ### 输出格式
 
 ```bash
-# JSON格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output json
+# JSON格式输出（默认格式，无需额外参数）
+aliyun ecs DescribeInstances --RegionId cn-hangzhou
 
-# 表格格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output table
+# 表格格式输出（--output 需指定 cols/rows 字段）
+aliyun ecs DescribeInstances --RegionId cn-hangzhou --output cols=InstanceId,InstanceName rows=Instances.Instance[]
 ```
 
 ## 执行前检查
