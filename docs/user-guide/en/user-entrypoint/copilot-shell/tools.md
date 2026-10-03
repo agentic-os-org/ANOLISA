@@ -58,12 +58,12 @@ Auto-approves all tool calls without any confirmation.
 
 ### Allowlist
 
-Set specific tools for auto-execution without confirmation:
+Set specific tools for auto-execution without confirmation. Entries use tool registration names, such as `read_file`, `list_directory`, `grep_search`, or `run_shell_command`:
 
 ```json
 {
   "tools": {
-    "allowed": ["ReadFile", "ListDir", "GrepSearch"]
+    "allowed": ["read_file", "list_directory", "grep_search"]
   }
 }
 ```
@@ -77,7 +77,7 @@ Prevent specific tools from being called:
 ```json
 {
   "tools": {
-    "exclude": ["WebSearch"]
+    "exclude": ["web_search"]
   }
 }
 ```
