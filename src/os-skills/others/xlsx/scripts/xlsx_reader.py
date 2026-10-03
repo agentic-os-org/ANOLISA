@@ -19,6 +19,7 @@ Exit codes:
 
 import sys
 import json
+import codecs
 import argparse
 from pathlib import Path
 
@@ -59,6 +60,15 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
     elif suffix in (".csv", ".tsv"):
         sep = "\t" if suffix == ".tsv" else ","
         encodings = ["utf-8-sig", "gbk", "utf-8", "latin-1"]
+        # Excel's Unicode exports ("Unicode Text" / CSV Unicode) are UTF-16 with a
+        # BOM. The trial chain above has no UTF-16 entry, and while utf-8/gbk
+        # reject the BOM bytes, latin-1 accepts ANY byte pair — the file would be
+        # silently decoded into mojibake and reported as a successful read. Sniff
+        # the BOM before falling back to the lossy chain.
+        with open(file_path, "rb") as raw:
+            signature = raw.read(4)
+        if signature.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            encodings = ["utf-16"]
         last_error = None
         for enc in encodings:
             try:
