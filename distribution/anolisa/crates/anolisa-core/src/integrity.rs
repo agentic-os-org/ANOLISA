@@ -296,6 +296,10 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
 
     // The size just observed is the read budget. Growth past it means the
     // file changed under the probe, which is a finding, not a budget stop.
+    // Hex digests are case-insensitive and the probe always computes
+    // lowercase, so the recording is normalized before comparing — the
+    // same treatment the download and self-update verifiers give theirs.
+    let expected = expected.to_ascii_lowercase();
     match hash_file_sha256(&file.path, meta.len()) {
         Err(err) => IntegrityStatus::ReadError(err.to_string()),
         Ok(actual) if actual != expected => IntegrityStatus::ShaMismatch { expected, actual },
@@ -783,6 +787,50 @@ mod tests {
                 actual,
             } => {
                 assert_eq!(e, expected);
+                assert_eq!(
+                    actual,
+                    "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+                );
+            }
+            other => panic!("expected ShaMismatch, got {other:?}"),
+        }
+    }
+
+    /// A sha256 digest is case-insensitive hex: the probe computes
+    /// lowercase, so an uppercase/mixed-case recording of CORRECT content
+    /// must verify (Ok), not report tampering. Mirrors the case
+    /// normalization the download and self-update verifiers already do.
+    #[test]
+    fn uppercase_recorded_sha_of_matching_content_verifies() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("foo");
+        fs::write(&path, b"payload").expect("write");
+        let owned = anolisa_owned(
+            path,
+            Some("239F59ED55E737C77147CF55AD0C1B030B6D7EE748A7426952F9B852D5A935E5".to_string()),
+        );
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
+    }
+
+    /// Case normalization must not mask a genuinely different digest: an
+    /// uppercase recording of the WRONG bytes still mismatches.
+    #[test]
+    fn uppercase_recorded_sha_of_diverged_content_still_mismatches() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("foo");
+        fs::write(&path, b"payload").expect("write");
+        let owned = anolisa_owned(
+            path,
+            Some("DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".to_string()),
+        );
+        match check_owned_file(&layout, &owned) {
+            IntegrityStatus::ShaMismatch { expected, actual } => {
+                assert_eq!(
+                    expected,
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                );
                 assert_eq!(
                     actual,
                     "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
