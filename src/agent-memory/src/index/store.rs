@@ -732,12 +732,38 @@ impl BM25Store {
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?;
+        let and_rows: Vec<(String, f64)> = stmt
+            .query_map(params![fts_q], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .flatten()
+            .collect();
+
+        // OR fallback (mirrors `search_scoped`): FTS5 implicit-AND semantics
+        // return 0 rows when any single query token is absent from the
+        // corpus, so a near-duplicate differing by one word produced zero
+        // candidates and FactWriter's supersede never fired. Retry with
+        // OR-joined quoted tokens so partial matches still surface as
+        // candidates; the threshold filter below still applies.
+        let rows: Vec<(String, f64)> = if and_rows.is_empty() && tokens.len() > 1 {
+            let or_q = tokens
+                .iter()
+                .map(|t| format!("\"{}\"", t))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let mut or_stmt = self.conn.prepare(sql)?;
+            or_stmt
+                .query_map(params![or_q], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                })?
+                .flatten()
+                .collect()
+        } else {
+            and_rows
+        };
 
         let results: Vec<(String, f64)> = rows
-            .flatten()
+            .into_iter()
             .filter(|(_, score)| *score >= threshold)
             .collect();
 
@@ -755,40 +781,56 @@ impl BM25Store {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
-        let like_clause = tokens
-            .iter()
-            .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        // No ORDER BY: the MATCH path orders by BM25 rank, but the LIKE path
-        // has no rank, and ordering by mtime would cut high-frequency old
-        // documents before scoring. Fetch a generous pool, score in Rust,
-        // then sort + truncate.
-        let sql = format!(
-            r#"
+        let run_query = |joiner: &str| -> Result<Vec<(String, String, i64)>> {
+            let like_clause = tokens
+                .iter()
+                .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+                .collect::<Vec<_>>()
+                .join(joiner);
+            // No ORDER BY: the MATCH path orders by BM25 rank, but the LIKE path
+            // has no rank, and ordering by mtime would cut high-frequency old
+            // documents before scoring. Fetch a generous pool, score in Rust,
+            // then sort + truncate.
+            let sql = format!(
+                r#"
             SELECT f.path, files_fts.body, f.mtime_ms
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
-            WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
+            WHERE ({like_clause}) AND f.is_cold = 0 AND f.is_superseded = 0
             LIMIT 50
             "#
-        );
-        let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
-        let bind: Vec<rusqlite::types::Value> = like_patterns
-            .iter()
-            .map(|s| rusqlite::types::Value::Text(s.clone()))
-            .collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
+            );
+            let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
+            let bind: Vec<rusqlite::types::Value> = like_patterns
+                .iter()
+                .map(|s| rusqlite::types::Value::Text(s.clone()))
+                .collect();
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            Ok(rows.flatten().collect())
+        };
+
+        let rows = run_query(" AND ")?;
+        // OR fallback mirroring `search_like`: AND-joined LIKE clauses
+        // return zero rows when any token is absent from the corpus, so a
+        // near-duplicate differing in one short-CJK word yielded zero
+        // candidates and slipped past conflict detection. Retry with OR so
+        // partial matches still surface; the caller still reviews flagged
+        // conflicts before superseding.
+        let rows = if rows.is_empty() && tokens.len() > 1 {
+            run_query(" OR ")?
+        } else {
+            rows
+        };
 
         let mut out: Vec<(String, f64)> = Vec::new();
-        for row in rows.flatten() {
+        for row in rows {
             let (path, body, mtime_ms) = row;
             // Case-insensitive frequency: SQLite LIKE is ASCII
             // case-insensitive, so a Rust `matches()` (case-sensitive) would
@@ -1874,6 +1916,76 @@ mod tests {
         let conflicts = s.detect_conflicts("花名", -2.0).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0, "dup.md");
+    }
+
+    #[test]
+    fn detect_conflicts_near_duplicate_recalls_via_or_fallback() {
+        // Regression: the MATCH path implicit-ANDs every query token, so a
+        // near-duplicate differing by one word produced ZERO candidate rows —
+        // FactWriter's supersede never fired and both facts stayed active.
+        // Candidate generation must mirror search_scoped's OR-quoted retry.
+        // threshold=-inf isolates candidate generation from the score filter.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            100,
+            50,
+            "the user prefers rust for systems programming",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "unrelated.md",
+            100,
+            50,
+            "cooking pasta with olive oil",
+            None,
+        )
+        .unwrap();
+
+        // Exact-duplicate control: the AND path finds it directly.
+        let conflicts = s
+            .detect_conflicts(
+                "the user prefers rust for systems programming",
+                f64::NEG_INFINITY,
+            )
+            .unwrap();
+        assert!(
+            conflicts.iter().any(|(p, _)| p == "old.md"),
+            "exact duplicate must be a candidate, got {conflicts:?}"
+        );
+
+        // Near-duplicate, one word changed: the AND MATCH returns 0 rows
+        // ("python" is absent); the OR retry must still surface old.md.
+        let conflicts = s
+            .detect_conflicts(
+                "the user prefers python for systems programming",
+                f64::NEG_INFINITY,
+            )
+            .unwrap();
+        assert!(
+            conflicts.iter().any(|(p, _)| p == "old.md"),
+            "near-duplicate must be a conflict candidate, got {conflicts:?}"
+        );
+        assert!(!conflicts.iter().any(|(p, _)| p == "unrelated.md"));
+    }
+
+    #[test]
+    fn detect_conflicts_like_near_duplicate_or_fallback() {
+        // Same gap on the short-CJK LIKE path: AND-joined LIKE clauses
+        // return zero rows when any token is absent, so a near-duplicate
+        // differing in one short-CJK word slipped past conflict detection.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("old.md", 100, 50, "花名登记为小云", None).unwrap();
+        s.upsert("unrelated.md", 100, 50, "完全无关的内容", None)
+            .unwrap();
+
+        let conflicts = s.detect_conflicts("花名 登记为大云", -2.0).unwrap();
+        assert!(
+            conflicts.iter().any(|(p, _)| p == "old.md"),
+            "near-duplicate must be a conflict candidate, got {conflicts:?}"
+        );
+        assert!(!conflicts.iter().any(|(p, _)| p == "unrelated.md"));
     }
 
     #[test]

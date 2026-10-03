@@ -239,4 +239,57 @@ mod tests {
         let lines: Vec<_> = content.lines().collect();
         assert_eq!(lines.len(), 2);
     }
+
+    #[test]
+    fn write_supersedes_near_duplicate_fact() {
+        // Regression (candidate generation): detect_conflicts implicit-ANDed
+        // its MATCH query, so a near-duplicate fact differing by one word
+        // produced zero candidates — supersede never fired and the old fact
+        // stayed active in the index after writing the near-duplicate.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(
+            BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap(),
+        ));
+        let writer = FactWriter::new(tmp.path()).with_index(store.clone(), -2.0);
+
+        let old = ConsolidatedFact::new(
+            "s1",
+            FactCategory::Interest,
+            "Favourite language".into(),
+            "The user prefers rust for systems programming tasks".into(),
+            "mem_write".into(),
+            vec![],
+            0.8,
+        );
+        writer.write(&old).unwrap();
+        {
+            // Simulate the index worker having indexed the old fact's file.
+            let mut s = store.lock().unwrap();
+            s.upsert("facts/interest/s1.md", 100, 50, &old.to_markdown(), None)
+                .unwrap();
+        }
+
+        // Near-duplicate: one word changed (rust → python).
+        let near_dup = ConsolidatedFact::new(
+            "s2",
+            FactCategory::Interest,
+            "Favourite language".into(),
+            "The user prefers python for systems programming tasks".into(),
+            "mem_write".into(),
+            vec![],
+            0.8,
+        );
+        writer.write(&near_dup).unwrap();
+
+        // The old fact must have been superseded out of normal search.
+        let hits = {
+            let s = store.lock().unwrap();
+            s.search("user prefers systems programming", 10, true)
+                .unwrap()
+        };
+        assert!(
+            !hits.iter().any(|h| h.path == "facts/interest/s1.md"),
+            "old fact must be superseded after the near-duplicate lands, still active: {hits:?}"
+        );
+    }
 }
