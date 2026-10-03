@@ -94,9 +94,15 @@ async function addMcpServer(
         args: args?.map(String),
         env: env?.reduce(
           (acc, curr) => {
-            const [key, value] = curr.split('=');
-            if (key && value) {
-              acc[key] = value;
+            // Split on the first '=' only: values may themselves contain
+            // '=' (query strings, base64 padding, connection strings).
+            const eqIndex = curr.indexOf('=');
+            if (eqIndex > 0) {
+              const key = curr.slice(0, eqIndex);
+              const value = curr.slice(eqIndex + 1);
+              if (key && value) {
+                acc[key] = value;
+              }
             }
             return acc;
           },
