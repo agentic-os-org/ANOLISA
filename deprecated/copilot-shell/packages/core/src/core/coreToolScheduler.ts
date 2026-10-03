@@ -1815,8 +1815,16 @@ export class CoreToolScheduler {
 
       if (this.onAllToolCallsComplete) {
         this.isFinalizingToolCalls = true;
-        await this.onAllToolCallsComplete(completedCalls);
-        this.isFinalizingToolCalls = false;
+        try {
+          await this.onAllToolCallsComplete(completedCalls);
+        } catch (error) {
+          // A throwing completion handler must not leave the scheduler
+          // permanently marked as running (every later schedule() call
+          // would queue and never drain) nor skip the queue drain below.
+          console.error(`onAllToolCallsComplete handler error: ${error}`);
+        } finally {
+          this.isFinalizingToolCalls = false;
+        }
       }
       this.notifyToolCallsUpdate();
       // After completion, process the next item in the queue.
