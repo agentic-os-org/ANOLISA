@@ -154,4 +154,67 @@ mod tests {
         );
         assert!(NON_INTERACTIVE_PAGER_PREFIX.ends_with(' '));
     }
+
+    /// Native zsh reads a login+interactive shell as
+    /// `/etc/zshenv -> ~/.zshenv -> /etc/zprofile -> ~/.zprofile ->
+    /// /etc/zshrc -> ~/.zshrc -> /etc/zlogin -> ~/.zlogin`. The marker's
+    /// login replay must source the files it replays in that same relative
+    /// order (`/etc/zshenv` and `/etc/zshrc` were already read by the real
+    /// zsh process and are deliberately not replayed), in both the
+    /// `COSH_ZDOTDIR_ORIG` and `~` branches.
+    #[test]
+    fn zsh_marker_replays_login_files_in_native_zsh_order() {
+        let script = zsh_marker_script();
+        let replay_start = script
+            .find("if [[ -z \"${COSH_SHELL_ISOLATED:-}\" ]]; then")
+            .expect("zsh marker replay block");
+        let replay_end = script[replay_start..]
+            .find("_COSH_AI_ENABLED=")
+            .map(|offset| replay_start + offset)
+            .expect("zsh marker replay block end");
+        let replay = &script[replay_start..replay_end];
+        let (zdotdir_branch, home_branch) = replay
+            .split_once("  else\n")
+            .expect("zsh marker replay has COSH_ZDOTDIR_ORIG and ~ branches");
+
+        for (branch, name, sources) in [
+            (
+                zdotdir_branch,
+                "COSH_ZDOTDIR_ORIG",
+                [
+                    "source \"${COSH_ZDOTDIR_ORIG}/.zshenv\"",
+                    "source /etc/zprofile",
+                    "source \"${COSH_ZDOTDIR_ORIG}/.zprofile\"",
+                    "source \"${COSH_ZDOTDIR_ORIG}/.zshrc\"",
+                    "source /etc/zlogin",
+                    "source \"${COSH_ZDOTDIR_ORIG}/.zlogin\"",
+                ],
+            ),
+            (
+                home_branch,
+                "~",
+                [
+                    "source ~/.zshenv",
+                    "source /etc/zprofile",
+                    "source ~/.zprofile",
+                    "source ~/.zshrc",
+                    "source /etc/zlogin",
+                    "source ~/.zlogin",
+                ],
+            ),
+        ] {
+            let positions = sources
+                .iter()
+                .map(|source| {
+                    branch
+                        .find(source)
+                        .unwrap_or_else(|| panic!("{name} branch must {source}"))
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{name} branch must keep native zsh source order: {positions:?}"
+            );
+        }
+    }
 }

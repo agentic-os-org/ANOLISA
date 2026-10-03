@@ -19,20 +19,33 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
       HISTFILE="${COSH_ZDOTDIR_ORIG}/.zsh_history"
     fi
     export ZDOTDIR="${COSH_ZDOTDIR_ORIG}"
+    # Native zsh login order: zshenv -> [login: /etc/zprofile, .zprofile]
+    # -> zshrc -> [login: /etc/zlogin, .zlogin]. /etc/zshenv and /etc/zshrc
+    # were already read by the real zsh process and need no replay; the system
+    # login files are login-only and must be replayed here like the bash
+    # marker replays /etc/profile.
     [[ -f "${COSH_ZDOTDIR_ORIG}/.zshenv" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshenv"
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f /etc/zprofile ]] && source /etc/zprofile
       [[ -f "${COSH_ZDOTDIR_ORIG}/.zprofile" ]] && source "${COSH_ZDOTDIR_ORIG}/.zprofile"
-      [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
     fi
     [[ -f "${COSH_ZDOTDIR_ORIG}/.zshrc" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshrc"
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f /etc/zlogin ]] && source /etc/zlogin
+      [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
+    fi
     unset _cosh_marker_zdotdir
   else
     [[ -f ~/.zshenv ]] && source ~/.zshenv
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f /etc/zprofile ]] && source /etc/zprofile
       [[ -f ~/.zprofile ]] && source ~/.zprofile
-      [[ -f ~/.zlogin ]] && source ~/.zlogin
     fi
     [[ -f ~/.zshrc ]] && source ~/.zshrc
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f /etc/zlogin ]] && source /etc/zlogin
+      [[ -f ~/.zlogin ]] && source ~/.zlogin
+    fi
   fi
 fi
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
