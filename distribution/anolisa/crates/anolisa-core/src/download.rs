@@ -160,6 +160,21 @@ impl DownloadCache {
         let _entry_lock = CacheEntryLock::acquire(&lock_path)?;
 
         let tmp_path = tmp_sibling(&cached_path);
+        // A crashed prior fetch may have left the fixed-name tmp behind; the
+        // HTTP retry loop cleans it before each attempt but the file:// path
+        // opened with O_EXCL and failed once on the stale entry. Self-heal
+        // only a plain regular file: anything else (a pre-planted symlink in
+        // particular) stays in place so the O_EXCL|O_NOFOLLOW open below
+        // still refuses it with Io instead of silently taking the slot over.
+        match fs::symlink_metadata(&tmp_path) {
+            Ok(meta) if meta.file_type().is_file() => {
+                fs::remove_file(&tmp_path).map_err(|source| DownloadError::Io {
+                    path: tmp_path.clone(),
+                    source,
+                })?;
+            }
+            _ => {}
+        }
         let sha256 = match scheme {
             "file" => stream_copy_file_and_hash(&parse_file_url(url)?, &tmp_path),
             "http" | "https" => stream_http_and_hash(url, &tmp_path, self.http_read_timeout),
@@ -382,7 +397,12 @@ fn stream_http_once_and_hash(
     })?;
     let mut input = response.into_reader();
     stream_reader_and_hash(&mut input, dst, Path::new(url)).map_err(|err| match err {
-        DownloadError::Io { source, .. } => DownloadError::Network {
+        // Only a read failure from the network side is a Network error and
+        // worth retrying. An Io error whose path is the local tmp file is
+        // a local disk problem (ENOSPC, EACCES) — classifying it as Network
+        // both retried a permanent failure three times and told the user
+        // to look at the network when the disk was the problem.
+        DownloadError::Io { path, source } if path.as_os_str() == url => DownloadError::Network {
             url: url.to_string(),
             reason: source.to_string(),
         },
@@ -796,6 +816,36 @@ mod tests {
         );
         // Cached entry was never produced.
         assert!(!cached.exists(), "no cache file may exist after refusal");
+    }
+
+    #[test]
+    fn fetch_self_heals_a_stale_regular_tmp_sibling() {
+        // A crashed prior fetch leaves a plain `.tmp` behind; the next fetch
+        // of the same URL must recover instead of failing forever on the
+        // O_EXCL open. Only regular files self-heal — the symlink case
+        // above must keep refusing.
+        let src_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let src = write_source(src_dir.path(), "x.bin", b"fresh-bytes");
+        let cache = DownloadCache::new(cache_dir.path().to_path_buf());
+
+        let url = file_url(&src);
+        let cached = cache.cached_path_for(&url);
+        let downloads = cached
+            .parent()
+            .expect("cached path has downloads parent")
+            .to_path_buf();
+        fs::create_dir_all(&downloads).unwrap();
+        let tmp_stale = tmp_sibling(&cached);
+        fs::write(&tmp_stale, b"partial-bytes-from-crashed-fetch").unwrap();
+
+        let artifact = cache.fetch(&url, None).expect("stale regular tmp heals");
+        assert_eq!(fs::read(&cached).unwrap(), b"fresh-bytes");
+        assert!(
+            !tmp_stale.exists(),
+            "the stale tmp must be consumed by the rename"
+        );
+        assert_eq!(artifact.sha256.len(), 64);
     }
 
     #[test]
