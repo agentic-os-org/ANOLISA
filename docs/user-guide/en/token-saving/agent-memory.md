@@ -379,6 +379,8 @@ BM25 + dense vector hybrid retrieval, fused via RRF (Reciprocal Rank Fusion, k=6
 
 On shutdown, automatically extracts atomic facts from the session audit log (`mem_consolidate`) using 6 heuristic rules (zero LLM calls) — identifies high-frequency paths, search patterns, etc., and persists them as structured memory. Also manually triggerable via the `mem_consolidate` tool. Includes episodic memory extraction and conflict detection (BM25 threshold).
 
+Conflict detection only compares a new fact against the facts already on disk: the scan is scoped to `facts/`, so a memory file the fact was derived from is never superseded by it (a superseded row is hidden from every search path, and the flag survives re-indexing). When an older fact is similar enough it is marked `superseded_by` and drops out of search. `conflict_bm25_threshold` is on FTS5's `bm25()` scale, where scores are negative and *more negative is more similar* — so lower is stricter: the default `-2.0` flags near-duplicates, while `-0.5` also catches loose topical overlap. `bm25()` is relative to the whole index, so in a brand-new namespace it has nothing to separate and the threshold cannot fire; an older fact whose content the new one fully restates is superseded whatever the threshold says, and the threshold decides the borderline rows.
+
 ### Audit & observability
 
 Every successful tool call appends a JSONL line to `<mount>/.anolisa/audit.log`; with sessions enabled, also to `/run/anolisa/sessions/<sid>/log.jsonl`. `audit.journald=true` fans out to systemd-journald with structured fields (`MESSAGE_ID`, `AGENT_MEMORY_TOOL`, etc.) for `journalctl --user-unit=anolisa-memory@<user>` filtering.
@@ -480,7 +482,7 @@ Every config key has a matching `MEMORY_*` env var. Priority: **env > config.tom
 | `MEMORY_MIN_EPISODE_STEPS` | min episode steps | 3 |
 | `MEMORY_MAX_EPISODES` | max episodes per session | 10 |
 | `MEMORY_CONFLICT_DETECTION` | conflict detection | true |
-| `MEMORY_CONFLICT_THRESHOLD` | BM25 conflict threshold | -2.0 |
+| `MEMORY_CONFLICT_THRESHOLD` | BM25 conflict threshold (`bm25()` scale: lower = stricter, facts only) | -2.0 |
 
 Data storage: `~/.anolisa/memory/<namespace>/`.
 
