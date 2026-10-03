@@ -548,13 +548,13 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         new_path = str(value).strip()
         mgr = get_manager()
         old_path = mgr.config.workspace
-        mgr.set_workspace(new_path)
         from .cron import CrontabManager
         cron_map = mgr.config.cron_schedules
-        warnings = CrontabManager.migrate(old_path, new_path, cron_map)
         err = _persist_plugin_yaml(workspace=new_path, cronSchedules=cron_map)
         if err:
             return _err(f"Failed to persist config: {err}")
+        mgr.set_workspace(new_path)
+        warnings = CrontabManager.migrate(old_path, new_path, cron_map)
         msg = f"Config updated: workspace = {new_path}"
         if warnings:
             msg += "\n\n" + "\n".join(warnings)
@@ -575,10 +575,10 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         new_schedules, err_msg = parse_schedules_update(str(value), current)
         if err_msg:
             return _err(err_msg)
-        mgr.config.cron_schedules = new_schedules
         err = _persist_plugin_yaml(cronSchedules=new_schedules)
         if err:
             return _err(f"Failed to persist config: {err}")
+        mgr.config.cron_schedules = new_schedules
         cron_note = ""
         if not CrontabManager.sync_with_retry(ws, new_schedules):
             cron_note = (
