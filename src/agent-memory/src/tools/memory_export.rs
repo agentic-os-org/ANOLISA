@@ -87,7 +87,18 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     if let Some(rest) = content.strip_prefix("---\n") {
         if let Some(end) = rest.find("\n---\n") {
             let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
+            // The blank line behind the closing delimiter is the separator
+            // every writer of this format emits between frontmatter and body
+            // (`memory_import::reconstruct_markdown` writes "---\n\n"), not
+            // body content. Handing it back as part of the body made every
+            // exported `content` start with a stray newline, so an export ->
+            // import cycle re-inserted the separator and grew each memory body
+            // by one more blank line per round trip.
+            let after_delim = &rest[end + 5..];
+            body = after_delim
+                .strip_prefix('\n')
+                .unwrap_or(after_delim)
+                .to_string();
             let mut current_list_key: Option<String> = None;
             let mut current_list_items: Vec<String> = Vec::new();
             for line in fm_str.lines() {
@@ -235,6 +246,81 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An isolated service on a tempdir, with the subsystems that need a
+    /// network or a kernel feature turned off (same shape as the other
+    /// tool-level tests).
+    fn setup() -> (tempfile::TempDir, MemoryService) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = tmp.path().to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        config.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().to_string();
+        let svc = MemoryService::new(config).unwrap();
+        (tmp, svc)
+    }
+
+    #[test]
+    fn parse_frontmatter_body_excludes_the_separator_line() {
+        let content = "---\nid: abc123\ncategory: lesson\n---\n\nThis is the body.";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        // The blank line closing the frontmatter is a separator, not content.
+        assert_eq!(body, "This is the body.");
+    }
+
+    #[test]
+    fn export_import_cycles_do_not_grow_the_body() {
+        let (_tmp, svc) = setup();
+        svc.write(
+            "notes/prefs.md",
+            "---\ncategory: preference\ntitle: \"Prefs\"\n---\n\nThe user prefers tabs over spaces.\n",
+            true,
+        )
+        .unwrap();
+        let path = svc.mount.root.join("notes/prefs.md");
+
+        // One warm-up cycle: re-import normalises the frontmatter key order,
+        // which is a legitimate one-off rewrite, not growth.
+        let json = memory_export(&svc, &ExportFilter::default()).unwrap();
+        crate::tools::memory_import::memory_import(
+            &svc,
+            &json,
+            crate::tools::memory_import::ImportStrategy::Merge,
+            false,
+        )
+        .unwrap();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+
+        for cycle in 1..=3 {
+            let json = memory_export(&svc, &ExportFilter::default()).unwrap();
+            let archive: AmaArchive = serde_json::from_str(&json).unwrap();
+            let exported = archive
+                .memories
+                .iter()
+                .find(|m| m.path == "notes/prefs.md")
+                .unwrap_or_else(|| panic!("cycle {cycle}: notes/prefs.md missing from export"));
+            assert_eq!(
+                exported.content, "The user prefers tabs over spaces.\n",
+                "cycle {cycle}: exported body must not carry the separator"
+            );
+
+            crate::tools::memory_import::memory_import(
+                &svc,
+                &json,
+                crate::tools::memory_import::ImportStrategy::Merge,
+                false,
+            )
+            .unwrap();
+            let now = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                now, baseline,
+                "cycle {cycle}: memory grew on re-import:\n{now}"
+            );
+        }
+    }
 
     #[test]
     fn parse_frontmatter_with_yaml() {
