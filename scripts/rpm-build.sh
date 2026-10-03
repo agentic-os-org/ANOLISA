@@ -29,12 +29,6 @@ MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
 KTUNER_DIR="${ROOT_DIR}/src/ktuner"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
-SANDBOX_PKG_DIR="${ROOT_DIR}/distribution/anolisa/packaging/sandbox"
-
-# gVisor upstream release (overridable via env). Format: YYYYMMDD
-GVISOR_RELEASE="${GVISOR_RELEASE:-20260601}"
-GVISOR_RELEASE_VERSION="${GVISOR_RELEASE}.0"
-GVISOR_BASE_URL="${GVISOR_BASE_URL:-https://storage.googleapis.com/gvisor/releases/release}"
 
 # Distro tag override (e.g. .alinux4 / .alinux3). Empty = let rpmbuild choose.
 DIST_TAG="${DIST_TAG:-}"
@@ -1071,265 +1065,6 @@ build_cosh_ng() {
 }
 
 # =============================================================================
-# sandbox: shared helpers
-# =============================================================================
-
-# Map architecture to gVisor release directory naming
-gvisor_arch() {
-    case "$HOST_ARCH" in
-        x86_64|amd64)  echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        *) err "Unsupported arch: $HOST_ARCH"; return 1 ;;
-    esac
-}
-
-# Run rpmbuild with optional --define dist override (alinux4/alinux3 etc.)
-rpmbuild_with_dist() {
-    local spec_file="$1"
-    local extra_defines=()
-    # Pass spec_release_suffix through if set (used by cmdoutput-fix.patch path).
-    if [ -n "${SPEC_RELEASE_SUFFIX:-}" ]; then
-        extra_defines+=( --define "spec_release_suffix ${SPEC_RELEASE_SUFFIX}" )
-    fi
-    if [ -n "$DIST_TAG" ]; then
-        "$RPMBUILD" -ba --nodeps \
-            --define "_topdir ${BUILD_DIR}" \
-            --define "dist ${DIST_TAG}" \
-            "${extra_defines[@]}" \
-            "$spec_file"
-    else
-        "$RPMBUILD" -ba --nodeps \
-            --define "_topdir ${BUILD_DIR}" \
-            "${extra_defines[@]}" \
-            "$spec_file"
-    fi
-}
-
-# Download upstream gvisor binary + sha512 with retry. Idempotent.
-# Args: <name> <out_dir>   where <name> ∈ runsc | containerd-shim-runsc-v1
-fetch_gvisor_binary() {
-    local bin_name="$1"
-    local out_dir="$2"
-    local arch
-    arch="$(gvisor_arch)" || return 1
-
-    install -d -m 0755 "$out_dir"
-
-    # Local-binary override hook (cmdoutput-fix.patch RPM build path).
-    # When SHIM_LOCAL_BINARY is set and we are fetching the shim, copy the
-    # locally-built patched ELF instead of pulling from upstream. This is the
-    # only injection point needed because the spec is a rebrand-only wrapper:
-    # %install just `install -p -m 0755 <bin> /usr/bin/<bin>`.
-    if [ "$bin_name" = "containerd-shim-runsc-v1" ] && [ -n "${SHIM_LOCAL_BINARY:-}" ]; then
-        if [ ! -f "$SHIM_LOCAL_BINARY" ]; then
-            err "SHIM_LOCAL_BINARY=$SHIM_LOCAL_BINARY does not exist"; return 1
-        fi
-        if ! file "$SHIM_LOCAL_BINARY" 2>/dev/null | grep -q 'ELF.*executable'; then
-            warn "SHIM_LOCAL_BINARY=$SHIM_LOCAL_BINARY is not an ELF executable"
-        fi
-        log "Using local patched binary: $SHIM_LOCAL_BINARY (overrides upstream fetch)"
-        install -p -m 0755 "$SHIM_LOCAL_BINARY" "${out_dir}/${bin_name}"
-        ( cd "$out_dir" && sha512sum "$bin_name" > "${bin_name}.sha512" )
-        ok "local binary staged: ${bin_name} ($(du -h "${out_dir}/${bin_name}" | cut -f1))"
-        return 0
-    fi
-
-    local url="${GVISOR_BASE_URL}/${GVISOR_RELEASE}/${arch}/${bin_name}"
-    local sha_url="${url}.sha512"
-
-    log "Fetching ${bin_name} from ${url}"
-    curl -fL --retry 3 --retry-delay 2 -o "${out_dir}/${bin_name}" "$url" || {
-        err "Failed to download ${bin_name} from upstream"; return 1; }
-    curl -fL --retry 3 --retry-delay 2 -o "${out_dir}/${bin_name}.sha512" "$sha_url" || {
-        warn "sha512 sidecar not available for ${bin_name}; skipping integrity check"; }
-
-    if [ -f "${out_dir}/${bin_name}.sha512" ]; then
-        ( cd "$out_dir" && sha512sum -c "${bin_name}.sha512" ) \
-            || { err "sha512 mismatch for ${bin_name}"; return 1; }
-        ok "sha512 verified: ${bin_name}"
-    fi
-    chmod 0755 "${out_dir}/${bin_name}"
-}
-
-# Generic packager for sandbox specs that wrap an upstream binary.
-# Args: <pkg_name> <bin_name>
-_build_sandbox_upstream() {
-    local pkg_name="$1"
-    local bin_name="$2"
-    local spec_in="${SANDBOX_PKG_DIR}/${pkg_name}.spec.in"
-    [ -f "$spec_in" ] || { err "Spec template not found: $spec_in"; return 1; }
-
-    local version="${VERSION:-$GVISOR_RELEASE_VERSION}"
-    local tarball_name="${pkg_name}-${version}.tar.gz"
-
-    local spec_file
-    spec_file=$(process_spec_template "$spec_in" "$version")
-
-    log "Step 1/3: Fetching upstream binary (${bin_name})..."
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"
-    fetch_gvisor_binary "$bin_name" "$pkg_dir" || { rm -rf "$tmp_dir"; return 1; }
-
-    # LICENSE / README placeholders (so spec %doc works under --strict)
-    cat > "${pkg_dir}/LICENSE" <<'EOF'
-Copyright 2018 The gVisor Authors. Licensed under Apache-2.0.
-Full text: https://www.apache.org/licenses/LICENSE-2.0.txt
-EOF
-    cat > "${pkg_dir}/README.md" <<EOF
-# ${pkg_name} ${version}
-
-Repackaged upstream gVisor binary — see
-https://gvisor.dev/docs/architecture_guide/ and
-ANOLISA-design/docs/anolisa/osbase/sandbox/sandbox-rpm-packaging.md
-EOF
-
-    log "Step 2/3: Creating source tarball ${tarball_name}..."
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
-    rm -rf "$tmp_dir"
-
-    log "Step 3/3: Running rpmbuild..."
-    rpmbuild_with_dist "$spec_file"
-    ok "${pkg_name} RPM built successfully"
-}
-
-# Generic packager for sandbox specs whose source is just a placeholder shim
-# (atelet, ateom-gvisor). Spec generates the binary at %install time.
-# Args: <pkg_name> <default_version>
-_build_sandbox_placeholder() {
-    local pkg_name="$1"
-    local default_version="$2"
-    local spec_in="${SANDBOX_PKG_DIR}/${pkg_name}.spec.in"
-    [ -f "$spec_in" ] || { err "Spec template not found: $spec_in"; return 1; }
-
-    local version="${VERSION:-$default_version}"
-    local tarball_name="${pkg_name}-${version}.tar.gz"
-
-    local spec_file
-    spec_file=$(process_spec_template "$spec_in" "$version")
-
-    log "Step 1/2: Creating placeholder source tarball ${tarball_name}..."
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"
-    cat > "${pkg_dir}/LICENSE" <<'EOF'
-Copyright 2026 The ANOLISA Authors. Licensed under Apache-2.0.
-Full text: https://www.apache.org/licenses/LICENSE-2.0.txt
-EOF
-    cat > "${pkg_dir}/README.md" <<EOF
-# ${pkg_name} ${version}
-
-Placeholder ANOLISA Substrate component. Real implementation pending —
-see ANOLISA-design/docs/anolisa/osbase/sandbox/sandbox-rpm-packaging.md
-EOF
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
-    rm -rf "$tmp_dir"
-
-    log "Step 2/2: Running rpmbuild..."
-    rpmbuild_with_dist "$spec_file"
-    ok "${pkg_name} RPM built successfully"
-}
-
-build_gvisor_runsc() {
-    log "=========================================="
-    log "Building RPM: gvisor-runsc (release-${GVISOR_RELEASE_VERSION}, arch=$(gvisor_arch))"
-    log "=========================================="
-    _build_sandbox_upstream "gvisor-runsc" "runsc"
-}
-
-build_containerd_shim_runsc_v1() {
-    log "=========================================="
-    if [ -n "${SHIM_LOCAL_BINARY:-}" ]; then
-        : "${SPEC_RELEASE_SUFFIX:=.cmdoutput.fix1}"
-        export SPEC_RELEASE_SUFFIX
-        log "Building RPM: containerd-shim-runsc-v1 (release-${GVISOR_RELEASE_VERSION}${SPEC_RELEASE_SUFFIX}) [PATCHED via SHIM_LOCAL_BINARY]"
-    else
-        log "Building RPM: containerd-shim-runsc-v1 (release-${GVISOR_RELEASE_VERSION})"
-    fi
-    log "=========================================="
-    _build_sandbox_upstream "containerd-shim-runsc-v1" "containerd-shim-runsc-v1"
-}
-
-build_atelet() {
-    log "=========================================="
-    log "Building RPM: atelet (placeholder)"
-    log "=========================================="
-    _build_sandbox_placeholder "atelet" "0.1.0"
-}
-
-build_ateom_gvisor() {
-    log "=========================================="
-    log "Building RPM: ateom-gvisor (placeholder)"
-    log "=========================================="
-    _build_sandbox_placeholder "ateom-gvisor" "0.1.0"
-}
-
-build_sandbox_all() {
-    build_gvisor_runsc
-    build_containerd_shim_runsc_v1
-    build_atelet
-    build_ateom_gvisor
-    # Repo metadata is the final stitch that makes the 4 RPMs consumable via
-    # `dnf install -y gvisor-runsc ...`. We attempt to generate it, but DO NOT
-    # fail the build if createrepo_c is missing — operators can run
-    # `bash scripts/rpm-build.sh sandbox-repo` later (or the SRE pipeline will
-    # do it on the internal yum host). See sandbox-rpm-packaging.md §8.5.
-    if command -v createrepo_c >/dev/null 2>&1 || command -v createrepo >/dev/null 2>&1; then
-        build_sandbox_repo
-    else
-        log "createrepo_c not installed; skipping repodata generation."
-        log "Install with: dnf install -y createrepo_c"
-        log "Then run: bash scripts/rpm-build.sh sandbox-repo"
-    fi
-}
-
-# Generate yum/dnf repo metadata for the sandbox RPM set.
-# Writes repodata/ in BOTH locations:
-#   1. ${BUILD_DIR}/RPMS/<arch>/   (the local rpmbuild tree)
-#   2. The dist staging tree if SANDBOX_DIST_DIR is set, e.g.
-#      SANDBOX_DIST_DIR=$REPO/dist/sandbox/alinux4 with subdirs RPMS/ SRPMS/
-build_sandbox_repo() {
-    log "=========================================="
-    log "Generating sandbox yum/dnf repo metadata"
-    log "=========================================="
-    local createrepo
-    if command -v createrepo_c >/dev/null 2>&1; then
-        createrepo="createrepo_c"
-    elif command -v createrepo >/dev/null 2>&1; then
-        createrepo="createrepo"
-    else
-        err "createrepo_c (or createrepo) is required. Install: dnf install -y createrepo_c"
-        return 1
-    fi
-
-    local arch_dir="${BUILD_DIR}/RPMS/$(gvisor_arch)"
-    if [ -d "$arch_dir" ]; then
-        log "createrepo on ${arch_dir}"
-        "$createrepo" --update "$arch_dir"
-    fi
-
-    if [ -n "${SANDBOX_DIST_DIR:-}" ] && [ -d "$SANDBOX_DIST_DIR" ]; then
-        for sub in RPMS SRPMS; do
-            if [ -d "${SANDBOX_DIST_DIR}/${sub}" ]; then
-                log "createrepo on ${SANDBOX_DIST_DIR}/${sub}"
-                "$createrepo" --update "${SANDBOX_DIST_DIR}/${sub}"
-            fi
-        done
-    fi
-
-    log "Repo metadata ready. Sample dnf repo file:"
-    cat <<'REPO_EOF'
-[anolisa-sandbox]
-name=ANOLISA Sandbox RPMs (gvisor-runsc, containerd-shim-runsc-v1, atelet, ateom-gvisor)
-baseurl=file://<absolute-path-to-RPMS-dir>
-enabled=1
-gpgcheck=0
-REPO_EOF
-}
-
-# =============================================================================
 # Main
 # =============================================================================
 usage() {
@@ -1347,20 +1082,12 @@ usage() {
     echo "  ktuner                    Build ktuner RPM"
     echo "  anolisa                   Build anolisa RPM"
     echo "  cosh-ng                   Build cosh-ng RPM"
-    echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
-    echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
-    echo "  atelet                    Build atelet RPM (sandbox, placeholder)"
-    echo "  ateom-gvisor              Build ateom-gvisor RPM (sandbox, placeholder)"
-    echo "  sandbox-all               Build all 4 sandbox RPMs"
-    echo "  sandbox-repo              Generate yum/dnf repo metadata (createrepo_c) for sandbox RPMs"
     echo "  all                       Build all primary RPM packages"
     echo ""
     echo "Environment variables:"
     echo "  VERSION                   Override version for .spec.in templates"
     echo "  RPMBUILD                  Path to rpmbuild binary (default: rpmbuild)"
     echo "  DIST_TAG                  Override %{dist} (e.g. .alinux4, .alinux3)"
-    echo "  GVISOR_RELEASE            gVisor upstream release date (default: 20260601)"
-    echo "  GVISOR_BASE_URL           gVisor mirror base URL (overridable for offline)"
     echo "  TARGET_ARCH               Force arch (x86_64|aarch64; default: uname -m)"
     echo ""
     echo "Output: scripts/rpmbuild/RPMS/"
@@ -1414,24 +1141,6 @@ case "$TARGET" in
         ;;
     cosh-ng)
         build_cosh_ng
-        ;;
-    gvisor-runsc)
-        build_gvisor_runsc
-        ;;
-    containerd-shim-runsc-v1)
-        build_containerd_shim_runsc_v1
-        ;;
-    atelet)
-        build_atelet
-        ;;
-    ateom-gvisor)
-        build_ateom_gvisor
-        ;;
-    sandbox-all)
-        build_sandbox_all
-        ;;
-    sandbox-repo)
-        build_sandbox_repo
         ;;
     all)
         build_copilot_shell
