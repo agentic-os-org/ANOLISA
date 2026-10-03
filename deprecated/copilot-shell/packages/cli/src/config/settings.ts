@@ -212,6 +212,25 @@ function setNestedProperty(
   current[lastKey] = value;
 }
 
+/**
+ * Build the `hooks` value to persist for one scope from that scope's own hooks.
+ *
+ * `setValue` assigns the whole value it is given, so persisting a derived object
+ * - for example the merged view with one entry added - copies every other scope's
+ * hooks into this file, and those hooks then merge with themselves on the next
+ * load (the hook arrays use `MergeStrategy.CONCAT`) and fire twice. The merged
+ * view is also the env-resolved copy, so a `$HOME/bin/hook.sh` command would be
+ * frozen to an absolute path for everyone who shares the file.
+ *
+ * Only `disabled` changes here, and only `hooks` is materialized.
+ */
+export function withScopedHooks<T extends Record<string, unknown>>(
+  current: Record<string, unknown> | undefined | null,
+  disabled: string[],
+): T {
+  return { ...(current ?? {}), disabled } as T;
+}
+
 export function needsMigration(settings: Record<string, unknown>): boolean {
   // Check version field first - if present and matches current version, no migration needed
   if (SETTINGS_VERSION_KEY in settings) {
