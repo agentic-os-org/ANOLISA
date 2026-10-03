@@ -181,6 +181,11 @@ pub(crate) fn redact_json_or_text(text: &str) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| redact_text(text))
 }
 
+/// Exact-match, not substring: `tokenizer` and `api_key_id`-style keys
+/// contain secret-looking fragments but are not secrets, so the platform
+/// redactor's substring needles (SENSITIVE_KEY_NEEDLES) cannot be reused
+/// here verbatim. Extend this set only with names that are unambiguous
+/// secrets — keep in sync with cosh-platform/src/audit/redact.rs.
 fn is_sensitive_key(key: &str) -> bool {
     let normalized = key
         .chars()
@@ -196,16 +201,26 @@ fn is_sensitive_key(key: &str) -> bool {
             | "accesstoken"
             | "refreshtoken"
             | "idtoken"
+            | "sessiontoken"
+            | "authtoken"
             | "secret"
+            | "secretkey"
+            | "secretaccesskey"
             | "clientsecret"
+            | "privatekey"
             | "apikey"
+            | "accesskey"
             | "accesskeyid"
             | "accesskeysecret"
             | "securitytoken"
             | "awssecretaccesskey"
+            | "awsaccesskeyid"
             | "openaiapikey"
             | "dashscopeapikey"
             | "githubtoken"
+            | "credentials"
+            | "credential"
+            | "bearer"
             | "authorization"
             | "cookie"
             | "setcookie"
@@ -465,5 +480,60 @@ mod tests {
         let redacted = redact_text(input);
 
         assert_eq!(redacted, "<redacted private key block>' --token <redacted>");
+    }
+
+    #[test]
+    fn redacts_common_compound_secret_json_keys() {
+        // All of these JSON keys returned false from is_sensitive_key
+        // before — the values leaked into hook payloads and persisted
+        // tool-call arguments.
+        let mut value = serde_json::json!({
+            "auth_token": "AUTHLEAK123",
+            "session_token": "SESSLEAK456",
+            "secret_key": "django-insecure-1a2b3c",
+            "private_key": "RAWKEYLEAK",
+            "access_key": "AKIDLEAK",
+            "credentials": "user:pass-leak",
+            "bearer": "bearer-leak-9",
+        });
+        redact_value(&mut value);
+        for leaked in [
+            "AUTHLEAK123",
+            "SESSLEAK456",
+            "django-insecure-1a2b3c",
+            "RAWKEYLEAK",
+            "AKIDLEAK",
+            "user:pass-leak",
+            "bearer-leak-9",
+        ] {
+            assert!(!value.to_string().contains(leaked), "leaked {leaked}");
+        }
+        assert_eq!(value["auth_token"], "<redacted>");
+        assert_eq!(value["secret_key"], "<redacted>");
+    }
+
+    #[test]
+    fn json_key_precision_is_preserved_for_lookalikes() {
+        // Exact-match semantics must survive the extension: keys that merely
+        // contain secret-looking fragments stay visible.
+        let mut value = serde_json::json!({
+            "tokenizer": "bert-base-uncased",
+            "api_key_id_shape": "not-a-secret",
+            "safe": "visible",
+        });
+        redact_value(&mut value);
+        assert_eq!(value["tokenizer"], "bert-base-uncased");
+        assert_eq!(value["api_key_id_shape"], "not-a-secret");
+        assert_eq!(value["safe"], "visible");
+    }
+
+    #[test]
+    fn redacts_json_secret_keys_inside_tool_call_arguments() {
+        // The session-persistence path: redact_json_or_text parses tool-call
+        // arguments as JSON and runs redact_value over the object.
+        let out = super::redact_json_or_text(r#"{"auth_token":"AUTHLEAK123","region":"cn"}"#);
+        assert!(!out.contains("AUTHLEAK123"), "leaked: {out}");
+        assert!(out.contains("<redacted>"), "must mark: {out}");
+        assert!(out.contains("cn"), "non-secret fields kept: {out}");
     }
 }
