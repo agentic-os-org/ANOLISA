@@ -612,7 +612,6 @@ class OpenClawExternalAgent(BaseAgent):
         jsonl_path = max(jsonl_files, key=os.path.getmtime)
 
         rounds: list[dict[str, Any]] = []
-        total_input = 0
         total_output = 0
         prev_input = 0
 
@@ -629,7 +628,10 @@ class OpenClawExternalAgent(BaseAgent):
                         inp: int = usage.get("input", 0)
                         out: int = usage.get("output", 0)
                         delta = inp - prev_input
-                        total_input += inp
+                        # `input` is the cumulative context size at this turn
+                        # (see input_delta); only the final round's value is
+                        # the session's true total input. Output is per turn,
+                        # so it is summed.
                         total_output += out
                         prev_input = inp
                         rounds.append({
@@ -638,7 +640,7 @@ class OpenClawExternalAgent(BaseAgent):
                             "input_delta": delta,
                             "output": out,
                             "total": inp + out,
-                            "cumulative": total_input + total_output,
+                            "cumulative": inp + total_output,
                         })
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
@@ -652,13 +654,17 @@ class OpenClawExternalAgent(BaseAgent):
         if not rounds:
             return None
 
+        # Cumulative input: the final round's value IS the session total
+        # (matches the final_input field). Summing per-round cumulative
+        # values inflated total_input superlinearly with round count.
+        total_input = rounds[-1]["input"]
         return {
             "session_file": os.path.basename(jsonl_path),
             "num_rounds": len(rounds),
             "total_input": total_input,
             "total_output": total_output,
             "total_tokens": total_input + total_output,
-            "final_input": rounds[-1]["input"],
+            "final_input": total_input,
             "avg_input_delta": (
                 (rounds[-1]["input"] - rounds[0]["input"])
                 // max(len(rounds) - 1, 1)
