@@ -50,10 +50,10 @@ React/Ink UI-history model.
 
 ### cosh-core
 
-- [`session.rs`](../../../src/cosh-ng/crates/cosh-core/src/session.rs) can write, read, list,
+- [`session.rs`](../../crates/cosh-core/src/session.rs) can write, read, list,
   and remove a raw `Vec<Message>`, but no production caller constructs a
   `SessionStore`.
-- [`headless.rs`](../../../src/cosh-ng/crates/cosh-core/src/headless.rs) handles `--resume`
+- [`headless.rs`](../../crates/cosh-core/src/headless.rs) handles `--resume`
   by assigning `engine.session_id`; it does not load `engine.messages`.
 - No runtime path persists `engine.messages` after a turn.
 - The default persistence directory is the relative path `sessions`, making
@@ -66,14 +66,14 @@ React/Ink UI-history model.
 
 ### cosh-shell
 
-- [`adapter/cosh_core.rs`](../../../src/cosh-ng/crates/cosh-shell/src/adapter/cosh_core.rs)
+- [`adapter/cosh_core.rs`](../../crates/cosh-shell/src/adapter/cosh_core.rs)
   automatically passes the committed provider session ID through
   `--resume`, scoped to an exact cwd, but cannot select a historical ID.
-- [`adapter/cosh_core_process.rs`](../../../src/cosh-ng/crates/cosh-shell/src/adapter/cosh_core_process.rs)
+- [`adapter/cosh_core_process.rs`](../../crates/cosh-shell/src/adapter/cosh_core_process.rs)
   serializes its user message with no session ID.
-- [`adapter/control_protocol.rs`](../../../src/cosh-ng/crates/cosh-shell/src/adapter/control_protocol.rs)
+- [`adapter/control_protocol.rs`](../../crates/cosh-shell/src/adapter/control_protocol.rs)
   replaces a missing ID with `"default"`.
-- [`headless.rs`](../../../src/cosh-ng/crates/cosh-core/src/headless.rs) accepts that value and
+- [`headless.rs`](../../crates/cosh-core/src/headless.rs) accepts that value and
   overwrites the engine session ID. Auto and trust modes therefore lose the
   startup or resumed identity on the main control-protocol path.
 - `/debug session` exposes diagnostic provider state, but there is no
