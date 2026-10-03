@@ -1784,8 +1784,8 @@ mod tests {
     #[tokio::test]
     async fn availability_constrained_to_active_backend() {
         // Create temp files to simulate both binaries existing.
-        let tmp = std::env::temp_dir().join("blaze-test-active-backend");
-        let _ = std::fs::create_dir_all(&tmp);
+        let temp = tempfile::tempdir().expect("temp");
+        let tmp = temp.path();
         let fc_bin = tmp.join("firecracker");
         let bwrap_bin = tmp.join("bwrap");
         std::fs::write(&fc_bin, b"fake-fc").unwrap();
@@ -1864,9 +1864,6 @@ mod tests {
             "instance backend should be the active backend (firecracker), \
              not the higher-priority bubblewrap"
         );
-
-        // Cleanup.
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
