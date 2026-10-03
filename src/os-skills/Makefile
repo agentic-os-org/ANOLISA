@@ -22,11 +22,13 @@ build:
 
 install:
 	@echo "==> Installing os-skills to $(DESTDIR)$(SKILLS_DIR)"
-	@find . -name SKILL.md -print | while read -r skill_file; do \
+	@set -eu; find . -name SKILL.md -print | while read -r skill_file; do \
 		skill_dir=$$(dirname "$$skill_file"); \
 		skill_name=$$(basename "$$skill_dir"); \
-		install -d -m 0755 "$(DESTDIR)$(SKILLS_DIR)/$$skill_name"; \
-		cp -pr "$$skill_dir/." "$(DESTDIR)$(SKILLS_DIR)/$$skill_name/"; \
+		install -d -m 0755 "$(DESTDIR)$(SKILLS_DIR)/$$skill_name" \
+			|| { echo "ERROR: failed to install skill $$skill_name" >&2; exit 1; }; \
+		cp -pr "$$skill_dir/." "$(DESTDIR)$(SKILLS_DIR)/$$skill_name/" \
+			|| { echo "ERROR: failed to install skill $$skill_name" >&2; exit 1; }; \
 	done
 	install -d -m 0755 "$(DESTDIR)$(COMPONENT_DIR)"
 	install -p -m 0644 component.toml "$(DESTDIR)$(COMPONENT_DIR)/component.toml"
