@@ -151,6 +151,30 @@ describe('ShellTool', () => {
       );
     });
 
+    it('should throw an error for a sibling-prefix directory outside the workspace', () => {
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir-evil',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/test/dir-evil' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should throw an error for a directory that traverses out of the workspace', () => {
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir/../escape',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/test/dir/../escape' is not within any of the registered workspace directories.",
+      );
+    });
+
     it('should throw an error for a directory within the user skills directory', () => {
       expect(() =>
         shellTool.build({
