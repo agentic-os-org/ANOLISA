@@ -88,6 +88,7 @@ pub(super) trait Adapter: Sync {
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
     match name {
         "qoder" => Ok(&super::qoder::Qoder),
+        "openclaw" => Ok(&super::adapters::openclaw::OpenClaw),
         _ => Err(format!("unsupported launcher adapter: {name}").into()),
     }
 }

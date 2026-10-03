@@ -3,10 +3,10 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI with configured tool Hooks, runs external Providers
-and keeps execution metadata independently of the Agent session. Users retain
-Qoder's terminal interface and native Hook scheduling. QwenPaw, OpenClaw and
-Hermes adapters remain planned; the current interfaces are experimental.
+Linux, it starts Qoder CLI and OpenClaw through verified native entrypoints,
+runs external Providers and keeps execution metadata independently of an Agent
+session. Native scheduling and permissions remain with the framework; the
+current interfaces are experimental.
 
 ## Available today
 
@@ -17,7 +17,8 @@ Hermes adapters remain planned; the current interfaces are experimental.
 | Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
 | Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |
 | Start or reuse a standalone service and query execution metadata | ✅ |
-| Start QwenPaw, OpenClaw or Hermes through AW | ❌ |
+| Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
+| Start the remaining first-release frameworks | ❌ Separate adapter delivery |
 | Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
 
 ## Run Qoder
@@ -48,6 +49,17 @@ The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains native
 settings coexistence, serial/parallel Hooks, Provider configuration, explicit
 service startup and record queries. Native Hooks retain their framework's
 limits; service status alone does not prove that Qoder adopted a policy.
+
+## Run OpenClaw
+
+Use OpenClaw 2026.9.6 with its existing native model configuration.
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
+required profile options and supported tool lifecycle. From `src/aw`:
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
+  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
 
 ## Integration and development
 
