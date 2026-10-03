@@ -88,17 +88,11 @@ impl SkillStore {
                 }
             }
 
-            // Check max_skills limit (rough guard)
-            if loaded_count >= config.max_skills {
-                errors.push(LoadError {
-                    path: path.clone(),
-                    error: format!("max skills limit reached ({})", config.max_skills),
-                });
-                continue;
-            }
-
             if is_category_dir(&path) {
                 // ---- Categorized layout ----
+                // The max_skills limit is enforced per nested skill by
+                // `load_skills_from_category`, so the category itself is
+                // never charged a slot or an error of its own.
                 let cat_name = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -115,7 +109,17 @@ impl SkillStore {
                 errors.extend(cat_errors);
             } else {
                 // ---- Flat layout ----
+                // Classify before enforcing the limit: a directory that is
+                // not a skill is skipped silently whether or not the limit
+                // has been reached, exactly as below the limit.
                 if !has_regular_skill_md(&path) {
+                    continue;
+                }
+                if loaded_count >= config.max_skills {
+                    errors.push(LoadError {
+                        path: path.clone(),
+                        error: format!("max skills limit reached ({})", config.max_skills),
+                    });
                     continue;
                 }
                 let skill_md = path.join("SKILL.md");
@@ -190,15 +194,17 @@ impl SkillStore {
                 }
             }
 
+            // Classify before enforcing the limit: a category child that is
+            // not a skill is skipped silently whether or not the limit has
+            // been reached, exactly as below the limit.
+            if !has_regular_skill_md(&path) {
+                continue;
+            }
             if *loaded_count >= config.max_skills {
                 errors.push(LoadError {
                     path: path.clone(),
                     error: format!("max skills limit reached ({})", config.max_skills),
                 });
-                continue;
-            }
-
-            if !has_regular_skill_md(&path) {
                 continue;
             }
             let skill_md = path.join("SKILL.md");
@@ -777,5 +783,92 @@ mod tests {
             store.get("linknested").is_none(),
             "symlinked nested skill must not load"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // max_skills limit classification tests
+    // -----------------------------------------------------------------------
+
+    fn limit_config(max_skills: usize) -> ParseConfig {
+        ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills,
+        }
+    }
+
+    #[test]
+    fn store_max_skills_skips_non_skill_dirs_silently() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let skill = temp_dir.path().join("alpha");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: alpha\ndescription: a\n---\n",
+        )
+        .unwrap();
+        let plain = temp_dir.path().join("not-a-skill");
+        std::fs::create_dir(&plain).unwrap();
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(0));
+
+        // The real skill still reports the limit as before...
+        assert_eq!(errors.len(), 1, "only the skill may error, got {errors:?}");
+        assert_eq!(errors[0].path, skill);
+        assert!(
+            errors[0].error.contains("max skills"),
+            "{}",
+            errors[0].error
+        );
+        // ...but the non-skill directory is skipped silently, exactly as
+        // it is below the limit.
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn store_max_skills_charges_category_skills_once() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nested = temp_dir.path().join("cat").join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: inner\ndescription: i\n---\n",
+        )
+        .unwrap();
+        // A non-skill sibling inside the category must stay silent too.
+        std::fs::create_dir_all(temp_dir.path().join("cat").join("docs")).unwrap();
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(0));
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "the category must be charged once per skill, got {errors:?}"
+        );
+        assert_eq!(errors[0].path, nested);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn store_max_skills_limit_still_enforced_for_real_skills() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for name in ["first", "second"] {
+            let dir = temp_dir.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(1));
+
+        assert_eq!(store.len(), 1, "the first skill still loads");
+        assert_eq!(errors.len(), 1, "the second skill still errors");
+        assert!(errors[0].error.contains("max skills"));
     }
 }
