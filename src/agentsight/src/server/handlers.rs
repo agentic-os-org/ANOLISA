@@ -54,6 +54,24 @@ pub(super) const DEFAULT_WINDOW_NS: i64 = 86_400_000_000_000;
 /// `i64::MIN` overflows the subtraction, and the wrapped result is a start far
 /// *after* the end — an inverted window that matches nothing while still
 /// answering 200. `/metrics/latency` already rejects the same input.
+/// Reject an explicitly inverted time window (`start_ns > end_ns`).
+///
+/// `/sessions/{session_id}/resources` and `/metrics/latency` already answer
+/// 400 for it; the other window endpoints handed the inverted range to the
+/// store and answered 200 with an empty result, which the caller cannot tell
+/// apart from "this range has no data".
+pub(super) fn reject_inverted_window(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Option<HttpResponse> {
+    if matches!((start_ns, end_ns), (Some(start), Some(end)) if start > end) {
+        return Some(
+            HttpResponse::BadRequest().json(json!({"error": "start_ns must not exceed end_ns"})),
+        );
+    }
+    None
+}
+
 pub(super) fn start_or_default(
     requested: Option<i64>,
     end_ns: i64,
@@ -171,6 +189,9 @@ pub async fn list_sessions(
     data: web::Data<AppState>,
     query: web::Query<SessionQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -201,6 +222,9 @@ pub async fn list_traces_by_session(
 ) -> impl Responder {
     let session_id = path.into_inner();
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
 
@@ -543,6 +567,9 @@ pub async fn list_agent_names(
     data: web::Data<AppState>,
     query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -577,6 +604,9 @@ pub async fn get_timeseries(
     data: web::Data<AppState>,
     query: web::Query<TimeseriesQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -2469,6 +2499,100 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn genai_window_endpoints_reject_an_inverted_range() {
+        let storage_path = unique_handler_db("inverted-window-genai");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(storage_path.clone()))
+                .service(list_sessions)
+                .service(list_agent_names)
+                .service(get_timeseries)
+                .service(list_traces_by_session)
+                .service(skill_metrics_all),
+        )
+        .await;
+
+        for uri in [
+            "/sessions?start_ns=2000&end_ns=1000",
+            "/agent-names?start_ns=2000&end_ns=1000",
+            "/timeseries?start_ns=2000&end_ns=1000&buckets=1",
+            "/sessions/any/traces?start_ns=2000&end_ns=1000",
+            "/skill-metrics?start_ns=2000&end_ns=1000",
+        ] {
+            let rejected = awtest::call_service(
+                &app,
+                awtest::TestRequest::get().uri(uri).to_request(),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject an inverted range like /metrics/latency does"
+            );
+        }
+
+        // Guard: an ordinary window still answers.
+        for uri in [
+            "/sessions?start_ns=1000&end_ns=2000",
+            "/timeseries?start_ns=1000&end_ns=2000&buckets=1",
+        ] {
+            let ok = awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(ok.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&storage_path);
+    }
+
+    #[actix_web::test]
+    async fn interruption_window_endpoints_reject_an_inverted_range() {
+        let interruption_path = unique_handler_db("inverted-window-interruptions");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions)
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        for uri in [
+            "/interruptions?start_ns=2000&end_ns=1000",
+            "/interruptions/count?start_ns=2000&end_ns=1000",
+            "/interruptions/stats?start_ns=2000&end_ns=1000",
+            "/interruptions/session-counts?start_ns=2000&end_ns=1000",
+            "/interruptions/conversation-counts?start_ns=2000&end_ns=1000",
+        ] {
+            let rejected = awtest::call_service(
+                &app,
+                awtest::TestRequest::get().uri(uri).to_request(),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject an inverted range like /metrics/latency does"
+            );
+        }
+
+        // Guard: an ordinary window still answers.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?start_ns=1000&end_ns=2000")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        cleanup_db(&interruption_path);
+    }
+
+    #[actix_web::test]
     async fn health_reports_status_version_and_uptime() {
         let app =
             awtest::init_service(App::new().app_data(test_app_state(0)).service(health)).await;
@@ -3816,6 +3940,9 @@ pub async fn list_interruptions(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -3855,6 +3982,9 @@ pub async fn interruption_count(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -3907,6 +4037,9 @@ pub async fn interruption_stats(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -3934,6 +4067,9 @@ pub async fn interruption_session_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -4006,6 +4142,9 @@ pub async fn interruption_conversation_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
@@ -4574,6 +4713,9 @@ fn compute_skill_metrics_response(
         }
     }
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match start_or_default(query.start_ns, end_ns, 7 * DEFAULT_WINDOW_NS) {
         Ok(start_ns) => start_ns,
