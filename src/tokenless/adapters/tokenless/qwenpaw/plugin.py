@@ -130,7 +130,7 @@ def _sdk_for(data_dir: str) -> Any:
 
         sdk = TokenlessSdk(
             TokenlessConfig(
-                data_dir=data_dir, rtk_enabled=True, retrieve_tool_name=RETRIEVE_TOOL
+                data_dir=data_dir, retrieve_tool_name=RETRIEVE_TOOL
             )
         )
         _SDKS[data_dir] = sdk
@@ -207,7 +207,7 @@ class TokenlessMiddleware(MiddlewareBase):
         attribution = Attribution(AGENT_ID, agent.state.session_id, source.id)
         optimization = OutputOptimization.NONE
         forwarded = source
-        if command_field is not None:
+        if command_field is not None and self.sdk.config.rtk_enabled:
             arguments = json.loads(source.input)
             if not isinstance(arguments, dict):
                 raise TypeError(f"{source.name} arguments must be a JSON object")

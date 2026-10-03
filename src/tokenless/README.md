@@ -34,6 +34,20 @@ For framework developers, the Python SDK has a framework-neutral layer and an **
 layer**. Together they cover schema compression, RTK rewriting, response compression, TOON,
 retrieval, and attribution.
 
+RTK command rewriting is disabled by default in automatic Agent integrations and the Python SDK.
+To opt in, set `TOKENLESS_RTK_ENABLED=1` in the host Agent's environment before starting it.
+Python callers can instead use `TokenlessConfig(rtk_enabled=True)` or AgentScope 2.x
+`TokenlessMiddleware(rtk_enabled=True)`; OpenClaw accepts `rtk_enabled: true` in the Tokenless
+plugin configuration.
+A non-empty environment variable overrides explicit SDK/plugin configuration: `1`, `true`, and
+`yes` enable rewriting (case-insensitively); all other non-empty values disable it. An empty
+variable is unset. This switch is not a `~/.tokenless/config.json` field.
+
+With rewriting disabled, commands reach host approval unchanged; RTK-specific token savings are
+lost, while BeforeModel, PostTool, and Retrieve retain their existing behavior. Hosts still
+control approvals when rewriting is enabled, and may request approval for the rewritten command.
+Direct `rtk` calls and low-level Protocol v2 PreTool requests are unchanged.
+
 ## Features
 
 | Capability | Savings indicator | Details |
@@ -575,7 +589,7 @@ The plugin translates two OpenClaw events into Protocol v2 lifecycle operations:
 | Hook | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | ✅ Active |
+| PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | Opt-in |
 | PostTool | `tool_result_persist` | Rewrites supported OpenClaw-owned transcript tool results | ✅ Active |
 | BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor marker-authorized recovery | — |
 
@@ -601,7 +615,7 @@ Options in `openclaw.plugin.json`:
 
 | Option | Default | Description |
 |---|---|---|
-| `rtk_enabled` | `true` | Enable RTK command rewriting |
+| `rtk_enabled` | `false` | Enable RTK command rewriting |
 | `post_tool_enabled` | `true` | Enable Protocol v2 PostTool handling of persisted tool results |
 | `tool_ready_enabled` | `true` | Register the currently hard-disabled Tool Ready hook |
 | `verbose` | `false` | Log lifecycle rewrites and applied PostTool results |
@@ -616,7 +630,7 @@ The plugin registers hooks at three Hermes events while Core owns the lifecycle 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `pre_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `pre_tool_call` | Sends the command to Core, then blocks and suggests the returned RTK form | ✅ Active |
+| Command rewriting | `pre_tool_call` | Sends the command to Core, then blocks and suggests the returned RTK form | Opt-in |
 | PostTool optimization | `transform_tool_result` | Sends the final model-bound result to Core and applies accepted output | ✅ Active |
 | Session tracking | `on_session_start` | Propagates agent/session IDs for stats recording | ✅ Active |
 | Schema compression | — | Hermes exposes no schema-transform seam | — |
@@ -661,7 +675,7 @@ The plugin registers hooks at three Qoder events, covering three strategies:
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | Opt-in |
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 
 Each hook degrades gracefully — if the corresponding binary is not installed, that hook is silently skipped.
@@ -683,7 +697,7 @@ The plugin registers hooks at two Claude Code events, covering four strategies:
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `PreToolUse` (Bash) | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Command rewriting | `PreToolUse` (Bash) | Rewrites shell commands via RTK for token savings | Opt-in |
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 | TOON encoding | `PostToolUse` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
 
@@ -707,7 +721,7 @@ The plugin registers hooks at four Codex events, covering four strategies:
 |---|---|---|---|
 | Session check | `SessionStart` | Verifies tokenless CLI is installed and functional (non-blocking) | ✅ Active |
 | Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | Opt-in |
 | Environment diagnostics | `PostToolUse` | Adds actionable context only for classified environment failures | ✅ Active |
 
 > **Codex protocol constraint**: `PostToolUse` cannot replace or suppress the
@@ -729,7 +743,7 @@ replaces the original model-visible response instead of being appended to it.
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
+| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | Opt-in |
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
 | Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
 
@@ -771,7 +785,7 @@ AgentScope middleware through `api.register_middleware` and a
 | Feature | Middleware hook | Behavior | Status |
 |---|---|---|---|
 | Schema compression | `on_model_call` | Compresses tool schemas and appends the retrieve tool | ✅ Active |
-| Command rewriting | `on_acting` | Rewrites `execute_shell_command` input via RTK after QwenPaw's approval step | ✅ Active |
+| Command rewriting | `on_acting` | Rewrites `execute_shell_command` input via RTK after QwenPaw's approval step | Opt-in |
 | Response + TOON compression | `on_acting` | Replaces text blocks of the tool result for QwenPaw's built-in tools; file readers and tools outside the built-in table pass through untouched | ✅ Active |
 | Recovery | `tokenless_retrieve` tool | Restores omitted content from the hash in a visible recovery instruction | ✅ Active |
 
@@ -942,7 +956,7 @@ to each user or tenant for direct Agents;
 Retain the default one-hour stash TTL unless the application has a deliberate
 lifecycle policy, and do not expect retrieval across nodes.
 
-Both AgentScope adapters enable schema compression, RTK command rewriting,
+Both AgentScope adapters support opt-in RTK command rewriting and enable schema compression,
 response compression, TOON, retrieval, environment-error guidance, and
 per-call attribution. The native wheel contains RTK and links TOON directly;
 it does not search for system executables. Host objects and streaming chunks

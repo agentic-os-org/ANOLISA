@@ -29,6 +29,7 @@ from hook_utils import (
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
+    rtk_rewriting_enabled,
     run_compress,
     skip,
     warn,
@@ -39,6 +40,9 @@ _AGENT_ID = resolve_agent_id()
 
 
 def main() -> None:
+    if not rtk_rewriting_enabled():
+        skip()
+
     tokenless_bin = resolve_binary(
         "tokenless",
         _TOKENLESS_FALLBACK,

@@ -45,11 +45,27 @@ def post_tool_payload(call_id: str) -> dict:
 
 
 class PreToolContractTest(unittest.TestCase):
+    def test_rewriting_requires_explicit_opt_in(self) -> None:
+        for value in (None, "", "0", "false", "no", "unexpected", "1", "TRUE", "Yes"):
+            with self.subTest(value=value):
+                env = {"TOKENLESS_AGENT_ID": "qoder-cli"}
+                if value is not None:
+                    env["TOKENLESS_RTK_ENABLED"] = value
+                result = contract_runner.run_case(
+                    corpus.PRE_TOOL_HOOK, json.dumps(pre_tool_payload()), env, "applied"
+                )
+                if value in ("1", "TRUE", "Yes"):
+                    self.assertEqual(result.spawns, ["compress"])
+                    self.assertIn("updatedInput", result.envelope["hookSpecificOutput"])
+                else:
+                    self.assertEqual(result.envelope, {})
+                    self.assertEqual(result.spawns, [])
+
     def run_case(self, behavior: str | None, call_id: str = "call-1"):
         return contract_runner.run_case(
             corpus.PRE_TOOL_HOOK,
             json.dumps(pre_tool_payload(call_id)),
-            {"TOKENLESS_AGENT_ID": "qoder-cli"},
+            {"TOKENLESS_AGENT_ID": "qoder-cli", "TOKENLESS_RTK_ENABLED": "1"},
             behavior,
         )
 
@@ -132,6 +148,7 @@ class HookLifecycleStateTest(unittest.TestCase):
             "PATH": f"{self.bin_dir}:/usr/bin:/bin",
             "LC_ALL": "C.UTF-8",
             "TOKENLESS_AGENT_ID": "qoder-cli",
+            "TOKENLESS_RTK_ENABLED": "1",
             "TOKENLESS_STATS_ENABLED": "0",
             "TOKENLESS_SLS_ENABLED": "0",
             "TOKENLESS_MOCK_BEHAVIOR": "applied",
@@ -169,6 +186,46 @@ class HookLifecycleStateTest(unittest.TestCase):
         second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
         self.assertIn("hookSpecificOutput", second)
         self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "none")
+
+    def test_default_preserves_post_tool_compression_without_rtk_state(self) -> None:
+        self.env.pop("TOKENLESS_RTK_ENABLED")
+        self.assertEqual(self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload()), {})
+        self.assertFalse(self.request_log.exists())
+        self.assertFalse((self.home / ".tokenless" / "hook-state").exists())
+        result = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
+        self.assertIn("hookSpecificOutput", result)
+        self.assertEqual(len(self.requests()), 1)
+        self.assertEqual(self.requests()[0]["input"]["output_optimization"], "none")
+
+    def test_codex_opt_in_never_grants_permission(self) -> None:
+        hook = REPO_ROOT / "adapters/tokenless/codex/scripts/rewrite-hook"
+        rtk = self.bin_dir / "rtk"
+        rtk.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "with open(os.environ['TOKENLESS_MOCK_REQUEST_LOG'], 'a') as log:\n"
+            "    log.write(sys.argv[1] + '\\n')\n"
+            "print('rtk 0.49.0' if sys.argv[1] == '--version' else 'rtk grep error log')\n"
+        )
+        rtk.chmod(0o755)
+        for value in (None, "", "0", "false", "no", "invalid", "1", "TRUE", "Yes"):
+            with self.subTest(value=value):
+                self.request_log.unlink(missing_ok=True)
+                env = dict(self.env)
+                env.pop("TOKENLESS_RTK_ENABLED", None)
+                if value is not None:
+                    env["TOKENLESS_RTK_ENABLED"] = value
+                result = self.run_hook(hook, pre_tool_payload(), env=env)
+                if value in ("1", "TRUE", "Yes"):
+                    self.assertEqual(self.request_log.read_text(), "--version\nrewrite\n")
+                    specific = result["hookSpecificOutput"]
+                    self.assertEqual(specific["updatedInput"], {
+                        "command": "rtk grep error log", "timeout": 30,
+                    })
+                    self.assertNotIn("permissionDecision", specific)
+                else:
+                    self.assertEqual(result, {})
+                    self.assertFalse(self.request_log.exists())
 
     def test_state_is_isolated_by_tool_call(self) -> None:
         self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload("call-a"))
@@ -266,6 +323,7 @@ class RealCorePreToolTest(unittest.TestCase):
                 "HOME": str(home),
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
                 "TOKENLESS_AGENT_ID": "qoder-cli",
+                "TOKENLESS_RTK_ENABLED": "1",
                 "TOKENLESS_STATS_ENABLED": "0",
                 "TOKENLESS_SLS_ENABLED": "0",
             }

@@ -163,7 +163,7 @@ class TokenlessMiddleware(MiddlewareBase):
         *,
         data_dir: str | os.PathLike[str] | None = None,
         retrieve_tool_name: str = "tokenless_retrieve",
-        rtk_enabled: bool = True,
+        rtk_enabled: bool = False,
         tool_contracts: Mapping[str, ToolContract] | None = None,
         _config: TokenlessConfig | None = None,
     ) -> None:

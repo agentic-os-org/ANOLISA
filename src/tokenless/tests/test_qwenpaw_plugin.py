@@ -13,7 +13,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -251,7 +251,7 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(core, "TokenlessSdk", side_effect=fake_sdk):
             sdk = plugin._sdk_for("/tmp/tokenless-qwenpaw-test-config")
         self.assertEqual(sdk.config.retrieve_tool_name, "tokenless_retrieve")
-        self.assertTrue(sdk.config.rtk_enabled)
+        self.assertFalse(sdk.config.rtk_enabled)
 
     def test_register_refuses_a_wheel_without_the_required_sdk_surface(self) -> None:
         api = _FakeApi()
@@ -309,6 +309,7 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_shell_call_is_rewritten_on_a_copy_and_result_replaced(self) -> None:
+        self.sdk.config = replace(self.sdk.config, rtk_enabled=True)
         seen = {}
 
         async def pre_tool(request):
@@ -353,6 +354,7 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[1].content, [_TextBlock(text="small")])
 
     async def test_non_object_shell_arguments_are_rejected(self) -> None:
+        self.sdk.config = replace(self.sdk.config, rtk_enabled=True)
         call = _Call(id="call-1", name="execute_shell_command", input='["ls"]')
 
         async def next_handler(**_kwargs):
@@ -362,6 +364,7 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
             await _collect(self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler))
 
     async def test_block_and_suggest_is_rejected(self) -> None:
+        self.sdk.config = replace(self.sdk.config, rtk_enabled=True)
         async def pre_tool(_request):
             return core.PreToolResponse(
                 arguments={}, action=core.PreToolAction.BLOCK_AND_SUGGEST,
@@ -383,13 +386,17 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
 
         async def post_tool(request):
             origins[request.tool_name] = request.content_origin
+            self.assertEqual(request.output_optimization, core.OutputOptimization.NONE)
             recoveries.add(request.capabilities.recovery)
             return _post_response(request.content)
 
         self.sdk.post_tool = post_tool
 
-        for name in ("read_file", "grep_search", "mcp__weather__lookup"):
-            call = _Call(id=f"call-{name}", name=name, input="{}")
+        for name in (
+            "read_file", "grep_search", "mcp__weather__lookup", "execute_shell_command"
+        ):
+            arguments = '{"command": "ls"}' if name == "execute_shell_command" else "{}"
+            call = _Call(id=f"call-{name}", name=name, input=arguments)
 
             async def next_handler(**kwargs):
                 self.assertIs(kwargs["tool_call"], call)

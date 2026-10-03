@@ -130,9 +130,10 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
             for name in ("large_result", "dynamic", "api")
         }
         self.integration = api.TokenlessAgentScope(
-            api.TokenlessConfig(rtk_enabled=False),
+            api.TokenlessConfig(),
             tool_contracts=contracts,
         )
+        self.assertFalse(self.integration.config.rtk_enabled)
         self.toolkit = self.integration.create_toolkit()
 
         async def large_result():

@@ -584,6 +584,7 @@ class TestCoshNGRewriteIntegration(HookIntegrationTestCase):
                 "TOKENLESS_STATS_ENABLED": "0",
                 "TOKENLESS_SLS_ENABLED": "0",
                 "TOKENLESS_MOCK_BEHAVIOR": "applied",
+                "TOKENLESS_RTK_ENABLED": "1",
                 "TOKENLESS_MOCK_REQUEST_LOG": str(self.request_log),
             }
         )

@@ -9,7 +9,7 @@
   "configSchema": {
     "type": "object",
     "properties": {
-      "rtk_enabled": { "type": "boolean", "default": true },
+      "rtk_enabled": { "type": "boolean", "default": false },
       "tool_ready_enabled": { "type": "boolean", "default": true },
       "post_tool_enabled": { "type": "boolean", "default": true },
       "verbose": { "type": "boolean", "default": false }

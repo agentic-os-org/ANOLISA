@@ -69,7 +69,7 @@ async def tokenless_retrieve() -> ToolResponse:
     return ToolResponse(content=[TextBlock(type="text", text="application")])
 
 
-async def main() -> None:
+async def main(rtk_enabled: bool = False) -> None:
     """Run one real AgentScope 1.x postprocessor and retrieval cycle."""
     version = tuple(int(part) for part in agentscope.__version__.split(".")[:3])
     assert (1, 0, 11) <= version < (1, 1, 0)
@@ -77,6 +77,7 @@ async def main() -> None:
         integration = TokenlessAgentScope(
             TokenlessConfig(
                 data_dir=Path(directory),
+                rtk_enabled=rtk_enabled,
             ),
             tool_contracts={"large_result": ToolContract(ContentOrigin.API_RESPONSE)},
         )
@@ -136,11 +137,14 @@ async def main() -> None:
             ),
         )
         assert len(_SHELL_COMMANDS) == 1
-        assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
-        assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
-        assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
-        assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
-        assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+        if rtk_enabled:
+            assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
+            assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
+            assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
+            assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
+            assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+        else:
+            assert _SHELL_COMMANDS == ["grep needle file.txt"]
 
         tool_call = ToolUseBlock(
             type="tool_use",
@@ -187,3 +191,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+    asyncio.run(main(rtk_enabled=True))

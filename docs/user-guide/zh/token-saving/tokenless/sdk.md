@@ -228,7 +228,10 @@ call = await sdk.pre_tool(
 Core 只处理显式指定的 `command_field`。如果 RTK 产生改写，Response 的 Action 为
 `replace_arguments`，参数包含 Wheel 内置 RTK 路径，并返回 `output_optimization=rtk`。
 应执行返回参数，并把该优化状态传给 PostTool。关闭 RTK 是 Adapter 的选择：
-`TokenlessConfig.rtk_enabled` 为 false 时不要调用 `pre_tool()`。
+`TokenlessConfig.rtk_enabled` 默认为 false，此时 `pre_tool()` 原样返回参数，
+动作是 `passthrough`、`output_optimization=none`，且不查找 RTK。设置
+`rtk_enabled=True` 可显式启用；非空 `TOKENLESS_RTK_ENABLED` 优先覆盖该配置
+（`1`、`true`、`yes` 不区分大小写表示开启，其他非空值表示关闭）。
 
 #### 工具调用后
 
@@ -271,7 +274,7 @@ PostTool。
 config = TokenlessConfig(
     data_dir="/absolute/path/to/tenant-tokenless-data",
     retrieve_tool_name="tokenless_retrieve",
-    rtk_enabled=True,
+    rtk_enabled=False,
 )
 ```
 

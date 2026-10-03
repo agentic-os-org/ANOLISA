@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PLUGIN_SRC = os.path.join(_REPO_ROOT, "adapters", "tokenless", "hermes", "__init__.py")
@@ -56,6 +57,16 @@ class HermesLifecycleTest(unittest.TestCase):
         self.plugin.run_compress = self.original_run
         self.plugin.tokenless_retrieve_command_available = self.original_retrieve_available
 
+    def test_default_does_not_resolve_binaries_or_block(self):
+        with patch.dict(os.environ), patch.object(self.plugin, "_resolve_binary") as resolve:
+            os.environ.pop("TOKENLESS_RTK_ENABLED", None)
+            self.assertIsNone(self.plugin.on_pre_tool_call(
+                tool_name="terminal", args={"command": "git status"}
+            ))
+        resolve.assert_not_called()
+        self.assertEqual(self.requests, [])
+
+    @patch.dict(os.environ, {"TOKENLESS_RTK_ENABLED": "1"})
     def test_pre_tool_blocks_with_core_rewrite(self):
         rewritten = (
             "env TOKENLESS_AGENT_ID=hermes-agent TOKENLESS_SESSION_ID=session-1 "
@@ -109,6 +120,7 @@ class HermesLifecycleTest(unittest.TestCase):
             },
         )
 
+    @patch.dict(os.environ, {"TOKENLESS_RTK_ENABLED": "1"})
     def test_pre_tool_fail_open_paths(self):
         cases = [
             None,

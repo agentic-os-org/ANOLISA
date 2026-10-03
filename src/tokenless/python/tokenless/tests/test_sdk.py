@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -206,14 +207,45 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             "tenant-retrieve_2",
         )
 
+    def test_rtk_environment_override_precedes_explicit_config(self) -> None:
+        for value in (None, "", "0", "false", "no", "invalid", "1", "TRUE", "Yes"):
+            for configured in (None, False, True):
+                with self.subTest(value=value, configured=configured), patch.dict(os.environ):
+                    os.environ.pop("TOKENLESS_RTK_ENABLED", None)
+                    if value is not None:
+                        os.environ["TOKENLESS_RTK_ENABLED"] = value
+                    kwargs = {} if configured is None else {"rtk_enabled": configured}
+                    expected = value in ("1", "TRUE", "Yes") if value else bool(configured)
+                    self.assertEqual(TokenlessConfig(**kwargs).rtk_enabled, expected)
+
+    async def test_disabled_pre_tool_preserves_arguments_without_resolving_rtk(self) -> None:
+        for value in (None, "0"):
+            with self.subTest(value=value), patch.dict(os.environ), patch.object(
+                TokenlessSdk, "_resolve_rtk"
+            ) as resolve:
+                os.environ.pop("TOKENLESS_RTK_ENABLED", None)
+                if value is not None:
+                    os.environ["TOKENLESS_RTK_ENABLED"] = value
+                sdk = self.sdk(**({"rtk_enabled": True} if value else {}))
+                arguments = {"command": "git status", "timeout": 30}
+                result = await sdk.pre_tool(PreToolRequest(
+                    tool_name="shell", arguments=arguments, command_field="command",
+                    capabilities=PreToolCapabilities(True, False),
+                    attribution=Attribution("sdk-agent", "sdk-session", "call-default"),
+                ))
+                self.assertEqual(result.arguments, arguments)
+                self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+                self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+                resolve.assert_not_called()
+
     def test_packaged_rtk_requires_a_stable_filesystem_resource(self) -> None:
         with patch("anolisa_tokenless.sdk.files") as package_files:
             package_files.return_value.joinpath.return_value = object()
             with self.assertRaisesRegex(RuntimeError, "unpacked wheel"):
-                self.sdk()
+                self.sdk(rtk_enabled=True)
 
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
-        sdk = self.sdk()
+        sdk = self.sdk(rtk_enabled=True)
         original_arguments = {"command": "grep needle file.txt", "other": [1]}
         result = await sdk.pre_tool(
             PreToolRequest(
@@ -240,7 +272,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_pre_tool_leaves_build_log_commands_for_post_tool(self) -> None:
-        sdk = self.sdk()
+        sdk = self.sdk(rtk_enabled=True)
         original_arguments = {"command": "cargo test --workspace", "timeout": 120}
         result = await sdk.pre_tool(
             PreToolRequest(

@@ -153,7 +153,7 @@ class ExistingRetrieveTool(ToolBase):
         return await self._execute()
 
 
-async def main() -> None:
+async def main(rtk_enabled: bool = False) -> None:
     """Run one real AgentScope middleware and retrieval cycle."""
     version = tuple(int(part) for part in agentscope.__version__.split(".")[:3])
     assert (2, 0, 0) <= version < (2, 1, 0)
@@ -162,6 +162,7 @@ async def main() -> None:
         integration = TokenlessAgentScope(
             TokenlessConfig(
                 data_dir=Path(directory),
+                rtk_enabled=rtk_enabled,
                 retrieve_tool_name="tenant_tokenless_retrieve",
             ),
             tool_contracts={
@@ -213,11 +214,14 @@ async def main() -> None:
         shell_events = [event async for event in agent._acting(shell_call)]
         assert len(shell_events) == 2
         assert len(_SHELL_COMMANDS) == 1
-        assert str(integration.middleware.sdk._rtk_path) in _SHELL_COMMANDS[0]
-        assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
-        assert f"TOKENLESS_SESSION_ID={agent.state.session_id}" in _SHELL_COMMANDS[0]
-        assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
-        assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+        if rtk_enabled:
+            assert str(integration.middleware.sdk._rtk_path) in _SHELL_COMMANDS[0]
+            assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
+            assert f"TOKENLESS_SESSION_ID={agent.state.session_id}" in _SHELL_COMMANDS[0]
+            assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
+            assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+        else:
+            assert _SHELL_COMMANDS == ["grep needle file.txt"]
 
         tool_call = ToolCallBlock(id="call-large", name="large_result", input="{}")
         events = [event async for event in agent._acting(tool_call)]
@@ -328,3 +332,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+    asyncio.run(main(rtk_enabled=True))

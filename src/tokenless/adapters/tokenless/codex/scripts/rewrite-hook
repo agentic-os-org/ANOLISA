@@ -8,7 +8,6 @@ command via ``updatedInput``.
 Protocol:
     stdin  ← codex PreToolUse JSON (tool_name, tool_input.command, ...)
     stdout → {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                      "permissionDecision": "allow",
                                       "updatedInput": {...}}}
 
 rtk exit code protocol:
@@ -196,6 +195,9 @@ def _find_rtk() -> Optional[str]:
 
 
 def main() -> None:
+    if os.environ.get("TOKENLESS_RTK_ENABLED", "").lower() not in {"1", "true", "yes"}:
+        _skip()
+
     # 1. Resolve rtk binary
     rtk_bin = _find_rtk()
     if not rtk_bin:
@@ -271,7 +273,6 @@ def main() -> None:
     response = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
             "updatedInput": updated_input,
         }
     }

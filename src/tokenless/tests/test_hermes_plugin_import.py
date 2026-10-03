@@ -299,6 +299,7 @@ class VersionMismatchTest(unittest.TestCase):
                 "def is_tokenless_retrieve_command(*args, **kwargs): return False\n"
                 "def is_file_read_command(*args, **kwargs): return False\n"
                 "def tokenless_retrieve_command_available(): return False\n"
+                "def rtk_rewriting_enabled(): return False\n"
             )
         shutil.copy(
             os.path.join(_HOOKS_SRC, "tool_categories.json"),

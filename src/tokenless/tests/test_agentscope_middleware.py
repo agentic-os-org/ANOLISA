@@ -198,9 +198,9 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             for name in ("api", "large_result")
         }
         self.middleware = api.TokenlessMiddleware(
-            _config=api.TokenlessConfig(rtk_enabled=False),
             tool_contracts=contracts,
         )
+        self.assertFalse(self.middleware.config.rtk_enabled)
         self.agent = _Agent("agent-2", _State("session-2"))
 
     async def test_model_call_keeps_tools_static_while_markers_change(self) -> None:

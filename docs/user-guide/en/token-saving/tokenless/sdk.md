@@ -236,7 +236,10 @@ call = await sdk.pre_tool(
 Core considers only the explicitly named `command_field`. If RTK has a rewrite, the response uses
 `replace_arguments`, contains the packaged RTK path, and reports `output_optimization=rtk`. Execute
 the returned arguments and carry that optimization value into PostTool. A disabled RTK is an
-adapter choice: do not call `pre_tool()` when `TokenlessConfig.rtk_enabled` is false.
+adapter choice: when `TokenlessConfig.rtk_enabled` is false (the default), `pre_tool()`
+returns the original arguments with `passthrough` and `output_optimization=none` without resolving RTK.
+Set `rtk_enabled=True` to opt in; a non-empty `TOKENLESS_RTK_ENABLED` overrides this setting
+(`1`, `true`, or `yes`, case-insensitively, enable it; other non-empty values disable it).
 
 #### After a tool call
 
@@ -280,7 +283,7 @@ byte-exact content; adapters must not send it through PostTool again.
 config = TokenlessConfig(
     data_dir="/absolute/path/to/tenant-tokenless-data",
     retrieve_tool_name="tokenless_retrieve",
-    rtk_enabled=True,
+    rtk_enabled=False,
 )
 ```
 

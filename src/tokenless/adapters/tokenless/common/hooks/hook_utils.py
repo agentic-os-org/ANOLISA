@@ -47,6 +47,11 @@ _RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
 _TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
 
 
+def rtk_rewriting_enabled() -> bool:
+    """Keep host approval inputs unchanged unless rewriting is explicitly enabled."""
+    return os.environ.get("TOKENLESS_RTK_ENABLED", "").lower() in {"1", "true", "yes"}
+
+
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     """Return install-layout fallbacks for a binary outside ``PATH``."""
     if not name or os.path.basename(name) != name or name in {".", ".."}:

@@ -21,6 +21,8 @@ const requestLog = join(sandbox, "requests.jsonl");
 const behaviorFile = join(sandbox, "behavior");
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalRtkEnabled = process.env.TOKENLESS_RTK_ENABLED;
+delete process.env.TOKENLESS_RTK_ENABLED;
 
 mkdirSync(fakeBinDir, { recursive: true });
 writeFileSync(
@@ -144,11 +146,14 @@ function persist(toolName, toolCallId, message, context = {}, extraEvent = {}) {
 }
 
 beforeEach(() => {
+  delete process.env.TOKENLESS_RTK_ENABLED;
   rmSync(requestLog, { force: true });
   rmSync(behaviorFile, { force: true });
 });
 
 after(() => {
+  if (originalRtkEnabled === undefined) delete process.env.TOKENLESS_RTK_ENABLED;
+  else process.env.TOKENLESS_RTK_ENABLED = originalRtkEnabled;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (originalPath === undefined) delete process.env.PATH;
@@ -160,12 +165,45 @@ test("plugin manifest exposes only lifecycle policy switches", () => {
   const manifest = JSON.parse(
     readFileSync(resolve(testDir, "../adapters/tokenless/openclaw/openclaw.plugin.json"), "utf8"),
   );
+  assert.equal(manifest.configSchema.properties.rtk_enabled.default, false);
   assert.deepEqual(Object.keys(manifest.configSchema.properties).sort(), [
     "post_tool_enabled",
     "rtk_enabled",
     "tool_ready_enabled",
     "verbose",
   ]);
+});
+
+test("RTK is opt-in with environment priority and PostTool stays active", () => {
+  for (const value of [undefined, "", "0", "false", "no", "invalid", "1", "TRUE", "Yes"]) {
+    for (const configured of [undefined, false, true]) {
+      rmSync(requestLog, { force: true });
+      if (value === undefined) delete process.env.TOKENLESS_RTK_ENABLED;
+      else process.env.TOKENLESS_RTK_ENABLED = value;
+      const hooks = new Map();
+      plugin.register({
+        pluginConfig: configured === undefined ? {} : { rtk_enabled: configured },
+        on(name, callback) { hooks.set(name, callback); },
+      });
+      const context = { toolName: "exec", sessionId: "opt-in", toolCallId: "call-1" };
+      const result = hooks.get("before_tool_call")({
+        toolName: "exec", toolCallId: "call-1", params: { command: "git status" },
+      }, context);
+      const enabled = value ? ["1", "TRUE", "Yes"].includes(value) : configured === true;
+      if (enabled) {
+        assert.equal(result.params.command, "/mock/rtk git status");
+        assert.equal(requests().length, 1);
+      } else {
+        assert.equal(result, undefined);
+        assert.deepEqual(requests(), []);
+        const output = hooks.get("tool_result_persist")({
+          toolName: "exec", toolCallId: "call-1", message: "payload",
+        }, context);
+        assert.equal(output.message, "compressed text");
+        assert.equal(requests()[0].request.input.output_optimization, "none");
+      }
+    }
+  }
 });
 
 test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
