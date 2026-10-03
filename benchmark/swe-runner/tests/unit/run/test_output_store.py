@@ -99,3 +99,84 @@ def test_write_run_metadata_merges_existing_payload(tmp_path: Path) -> None:
     assert payload["attempt_count"] == 2
     assert payload["run_count"] == 2
     assert payload["session_ids"] == {"inst-2": "sess-2"}
+
+
+def _prediction(instance_id: str, patch: str = "diff") -> Prediction:
+    return Prediction(
+        instance_id=instance_id,
+        model_name_or_path="cosh",
+        model_patch=patch,
+    )
+
+
+def _result(instance_id: str) -> InstanceResult:
+    return InstanceResult(
+        instance=_instance(instance_id),
+        prediction=_prediction(instance_id),
+        agent_result=AgentResult(raw_output="ok", patch="diff", success=True, duration_seconds=1.0),
+        success=True,
+    )
+
+
+def test_save_instance_result_survives_truncated_preds(tmp_path: Path) -> None:
+    """A truncated preds.json (crash/disk-full mid-write) must not raise.
+
+    One corrupt file previously killed every later save_instance_result
+    with an uncaught JSONDecodeError and wedged all resumed runs; the store
+    must mirror load_attempted_instance_ids' tolerance and self-heal.
+    """
+    tmp_path.joinpath("preds.json").write_text(
+        '{"inst-1": {"instance_id": "inst-1", "model_na', encoding="utf-8"
+    )
+    store = RunOutputStore(tmp_path)
+
+    store.save_instance_result(_result("inst-2"))  # must not raise
+
+    predictions = json.loads((tmp_path / "preds.json").read_text(encoding="utf-8"))
+    assert "inst-2" in predictions
+
+
+def test_write_prediction_non_object_json_treated_as_empty(tmp_path: Path) -> None:
+    """A valid-JSON-but-not-an-object preds.json also self-heals."""
+    tmp_path.joinpath("preds.json").write_text("[]", encoding="utf-8")
+    store = RunOutputStore(tmp_path)
+
+    store.write_prediction(_prediction("inst-1"))
+
+    predictions = json.loads((tmp_path / "preds.json").read_text(encoding="utf-8"))
+    assert set(predictions) == {"inst-1"}
+
+
+def test_write_prediction_is_atomic_no_tmp_left(tmp_path: Path) -> None:
+    """Successive writes leave no temp files and produce valid JSON."""
+    store = RunOutputStore(tmp_path)
+
+    store.write_prediction(_prediction("inst-1", patch="one"))
+    store.write_prediction(_prediction("inst-2", patch="two"))
+
+    leftovers = list(tmp_path.glob("*.tmp")) + list(tmp_path.glob(".*tmp*"))
+    assert leftovers == []
+    predictions = json.loads((tmp_path / "preds.json").read_text(encoding="utf-8"))
+    assert set(predictions) == {"inst-1", "inst-2"}
+    assert predictions["inst-1"]["model_patch"] == "one"
+    assert predictions["inst-2"]["model_patch"] == "two"
+
+
+def test_write_prediction_failed_replace_keeps_previous_file(tmp_path: Path) -> None:
+    """A failure at the replace step keeps the previous complete file and
+    leaves no temp file behind."""
+    from unittest.mock import patch
+
+    store = RunOutputStore(tmp_path)
+    store.write_prediction(_prediction("inst-1", patch="one"))
+
+    with patch("swe_runner.run.io.output_store.os.replace", side_effect=OSError("disk full")):
+        try:
+            store.write_prediction(_prediction("inst-2", patch="two"))
+        except OSError:
+            pass  # the write error itself propagates
+
+    leftovers = list(tmp_path.glob("*.tmp")) + list(tmp_path.glob(".*tmp*"))
+    assert leftovers == []
+    predictions = json.loads((tmp_path / "preds.json").read_text(encoding="utf-8"))
+    assert set(predictions) == {"inst-1"}  # previous complete file intact

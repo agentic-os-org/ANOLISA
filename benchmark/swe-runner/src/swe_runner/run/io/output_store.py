@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -54,12 +56,29 @@ class RunOutputStore:
 
         with _predictions_lock:
             if self.predictions_path.exists():
-                predictions = json.loads(self.predictions_path.read_text(encoding="utf-8"))
+                try:
+                    predictions = json.loads(self.predictions_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError) as exc:
+                    # A truncated preds.json (crash/disk-full mid-write in an
+                    # earlier run) must not wedge every later save: mirror
+                    # load_attempted_instance_ids and restart from empty.
+                    logger.warning(
+                        "OUTPUT_WRITE_PREDICTION_CORRUPT file=%s error=%s",
+                        self.predictions_path,
+                        exc,
+                    )
+                    predictions = {}
+                if not isinstance(predictions, dict):
+                    logger.warning(
+                        "OUTPUT_WRITE_PREDICTION_CORRUPT file=%s error=not_a_json_object",
+                        self.predictions_path,
+                    )
+                    predictions = {}
             else:
                 predictions = {}
 
             predictions[prediction.instance_id] = prediction.model_dump()
-            self.predictions_path.write_text(json.dumps(predictions, indent=2), encoding="utf-8")
+            self._atomic_write_json(self.predictions_path, predictions)
 
         logger.info(
             "OUTPUT_WRITE_PREDICTION_END instance=%s total_predictions=%s",
@@ -81,6 +100,31 @@ class RunOutputStore:
             payload.get("run_count"),
         )
         return self.run_metadata_path
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        """Atomically write *payload* as JSON to *path*.
+
+        Write-to-tempfile + ``os.replace`` (the same pattern as
+        ``ce_runner._common.atomic_write_config``) so a crash or disk-full
+        mid-write can never leave a torn file behind: readers either see the
+        previous complete file or the new complete file.
+        """
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{path.name}-", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                tmp_file.write(json.dumps(payload, indent=2))
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def write_instance_result_file(self, result: InstanceResult) -> None:
         """Write a per-instance result summary under ``results/<instance_id>.json``."""
