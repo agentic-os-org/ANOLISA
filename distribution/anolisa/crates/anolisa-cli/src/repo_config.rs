@@ -583,8 +583,19 @@ impl RepoConfig {
 /// Validate and normalize a one-off `--repo <URL>` override. Same shape
 /// rules as configured base_urls, except plaintext `http://` is allowed:
 /// typing the flag is itself the explicit opt-in that `insecure = true`
-/// provides in the file. Returns the URL with any trailing slash trimmed.
+/// provides in the file. `$variables` are rejected outright — the
+/// override is used verbatim, never substituted, so a `$` would be
+/// fetched literally. Returns the URL with any trailing slash trimmed.
 pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
+    if url.contains('$') {
+        return Err(RepoConfigError::InvalidBaseUrl {
+            backend: "<cli-override>".to_string(),
+            url: url.to_string(),
+            reason: "variable references ('$...') are not substituted in --repo overrides \
+                     and would be fetched literally — pass the resolved URL"
+                .to_string(),
+        });
+    }
     validate_base_url("<cli-override>", url, true)?;
     Ok(url.trim_end_matches('/').to_string())
 }
@@ -1198,6 +1209,41 @@ base_url = "https://example.com/repo?token=x"
         )
         .expect_err("must reject");
         assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
+    }
+
+    /// A `--repo` override is used verbatim — it is never substituted —
+    /// so a `$variable` inside it would be preserved literally and
+    /// fetched as-is. The template path hard-errors on `$typo` for
+    /// exactly this reason; overrides must get the same treatment.
+    #[test]
+    fn override_url_with_dollar_is_rejected() {
+        for url in [
+            "https://example.com/anolisa/$arch/v1/",
+            "https://example.com/anolisa/v1/?x=$y",
+        ] {
+            let err = match normalize_override_url(url) {
+                Ok(normalized) => {
+                    panic!("$ in override {url:?} must be rejected, got {normalized}")
+                }
+                Err(err) => err,
+            };
+            assert!(
+                matches!(&err, RepoConfigError::InvalidBaseUrl { reason, .. } if reason.contains('$')),
+                "url {url:?}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn override_url_without_dollar_normalizes() {
+        assert_eq!(
+            normalize_override_url("https://example.com/anolisa/v1/").expect("clean override"),
+            "https://example.com/anolisa/v1"
+        );
+        assert_eq!(
+            normalize_override_url("file:///srv/repo/").expect("file override"),
+            "file:///srv/repo"
+        );
     }
 
     #[test]
