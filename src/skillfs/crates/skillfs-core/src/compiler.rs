@@ -478,37 +478,92 @@ fn rewrite_command_invocations(line: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// Run `rewrite` over the command text that follows an optional leading
+/// `Run: ` documentation label, keeping the label and the original leading
+/// whitespace. The label is the only transparent prose form: a bare word in
+/// front of the match still means the match is that word's argument.
+fn rewrite_after_doc_label(line: &str, rewrite: impl Fn(&str) -> String) -> String {
+    let commands = line.trim_start().strip_prefix("Run: ").unwrap_or(line);
+    let label_len = line.len() - commands.len();
+    let rewritten = rewrite(commands);
+    let mut output = String::with_capacity(line.len());
+    output.push_str(&line[..label_len]);
+    output.push_str(&rewritten);
+    output
+}
+
+/// Rewrite every occurrence of one of `candidates` that is the command being
+/// invoked, leaving matches inside larger words (`pnpm run` contains `npm
+/// run`, `python -m venvwrapper` contains `python -m venv`) and in argument
+/// position (`echo npm run`) untouched.
+///
+/// Each candidate is its full source spelling plus the replacement. A
+/// candidate matches only when it starts at `needle`, begins at a command
+/// position, and is followed by a token boundary (whitespace, a command
+/// separator, or the end of the line), so a longer module or subcommand name
+/// is never partially rewritten. Position checks always run against the full
+/// (pre-substitution) line with absolute offsets, so a later match on the same
+/// line — an argument of an earlier rewritten command — keeps its original
+/// context.
+fn rewrite_invocation_tokens(line: &str, needle: &str, candidates: &[(&str, &str)]) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut copied = 0; // bytes of `line` already emitted
+    for (pos, _) in line.match_indices(needle) {
+        let suffix = &line[pos..];
+        let Some((matched, replacement)) = candidates
+            .iter()
+            .find(|(from, _)| suffix.starts_with(*from))
+        else {
+            continue;
+        };
+        let end = pos + matched.len();
+        // The matched command must end where its token ends.
+        let token_ends = line[end..].chars().next().is_none_or(|ch| {
+            ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | ')' | '`' | '<' | '>')
+        });
+        if token_ends && is_command_position(line, pos) {
+            output.push_str(&line[copied..pos]);
+            output.push_str(replacement);
+            copied = end;
+        }
+    }
+    output.push_str(&line[copied..]);
+    output
+}
+
 /// Normalize bare pip invocations without changing interpreter module calls.
 /// The historical `Run: ` documentation label is transparent only at the
 /// beginning of a line; other prose and shell arguments stay untouched.
 fn rewrite_pip_install_invocations(line: &str) -> String {
-    let commands = line.trim_start().strip_prefix("Run: ").unwrap_or(line);
-    let label_len = line.len() - commands.len();
-    let mut output = String::with_capacity(line.len());
-    output.push_str(&line[..label_len]);
-    let mut copied = 0;
-    for (pos, _) in commands.match_indices("pip") {
-        let suffix = &commands[pos..];
-        let matched = if suffix.starts_with("pip3 install") {
-            "pip3 install"
-        } else if suffix.starts_with("pip install") {
-            "pip install"
-        } else {
-            continue;
-        };
-        let end = pos + matched.len();
-        // `install` must be the whole subcommand, not `installable`.
-        let token_ends = commands[end..].chars().next().is_none_or(|ch| {
-            ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | ')' | '`' | '<' | '>')
-        });
-        if token_ends && is_command_position(commands, pos) {
-            output.push_str(&commands[copied..pos]);
-            output.push_str("uv pip install");
-            copied = end;
-        }
-    }
-    output.push_str(&commands[copied..]);
-    output
+    rewrite_after_doc_label(line, |commands| {
+        rewrite_invocation_tokens(
+            commands,
+            "pip",
+            &[
+                ("pip3 install", "uv pip install"),
+                ("pip install", "uv pip install"),
+            ],
+        )
+    })
+}
+
+/// Normalize `python -m venv` / `python3 -m venv` without changing prose or
+/// argument positions: `echo python -m venv`, a prose mention, and the module
+/// name inside another command's arguments are not invocations. `venv` must be
+/// the whole module name, so `python -m venvwrapper` keeps its text. Both
+/// spellings are rewritten wherever they are invoked, and the `Run: `
+/// documentation label is transparent, as for the pip form.
+fn rewrite_python_venv_invocations(line: &str) -> String {
+    rewrite_after_doc_label(line, |commands| {
+        rewrite_invocation_tokens(
+            commands,
+            "python",
+            &[
+                ("python3 -m venv", "uv venv"),
+                ("python -m venv", "uv venv"),
+            ],
+        )
+    })
 }
 
 /// Apply heuristic substitutions to a single line.
@@ -520,13 +575,9 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
         // the selected interpreter can import the uv Python module.
         result = rewrite_pip_install_invocations(&result);
 
-        // python -m venv / python3 -m venv → uv venv
-        for venv_cmd in &["python3 -m venv", "python -m venv"] {
-            if result.contains(venv_cmd) {
-                result = result.replace(venv_cmd, "uv venv");
-                break;
-            }
-        }
+        // python -m venv / python3 -m venv → uv venv — only when it is the
+        // command being invoked, like the virtualenv form below.
+        result = rewrite_python_venv_invocations(&result);
 
         // virtualenv <name> → uv venv <name> — only when `virtualenv` is the
         // command being invoked: mkvirtualenv, pyenv virtualenv, and
@@ -543,15 +594,22 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
     // `ppnpm run build` (`pnpm install` → `pyarn install` on a yarn-only
     // host). The previous line-wide `contains(pm_*)` guards are gone with the
     // position check: `npm install && pnpm install` now rewrites only the npm
-    // side instead of leaving the whole line alone.
+    // side instead of leaving the whole line alone. The subcommand must also
+    // end where the token ends: `npm installable` and `npm testing` are not
+    // npm commands and keep their text.
     if !node_pm.is_empty() && node_pm != "npm" {
-        for (from, to) in [
-            ("npm install", format!("{node_pm} install")),
-            ("npm run ", format!("{node_pm} run ")),
-            ("npm test", format!("{node_pm} test")),
-        ] {
-            result = rewrite_command_invocations(&result, from, &to);
-        }
+        let install = format!("{node_pm} install");
+        let run = format!("{node_pm} run");
+        let test = format!("{node_pm} test");
+        result = rewrite_invocation_tokens(
+            &result,
+            "npm",
+            &[
+                ("npm install", install.as_str()),
+                ("npm run", run.as_str()),
+                ("npm test", test.as_str()),
+            ],
+        );
     }
 
     result
@@ -840,6 +898,58 @@ mod tests {
     }
 
     #[test]
+    fn test_heuristic_venv_rewrites_invocations() {
+        let env = env_darwin_uv();
+        let input = concat!(
+            "python -m venv .venv\n",
+            "python3 -m venv /opt/venv\n",
+            "sudo python3 -m venv /opt/venv\n",
+            "cd /tmp && python -m venv .venv\n",
+            "env FOO=1 python -m venv .venv\n",
+            "python3 -m venv a && python -m venv b\n",
+            "  Run: python3 -m venv .venv\n",
+            "python -m venv; echo done\n",
+            "python3 -m venv\n",
+        );
+        let expected = concat!(
+            "uv venv .venv\n",
+            "uv venv /opt/venv\n",
+            "sudo uv venv /opt/venv\n",
+            "cd /tmp && uv venv .venv\n",
+            "env FOO=1 uv venv .venv\n",
+            "uv venv a && uv venv b\n",
+            "  Run: uv venv .venv\n",
+            "uv venv; echo done\n",
+            "uv venv\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
+    }
+
+    #[test]
+    fn test_heuristic_venv_ignores_arguments_and_prose() {
+        let env = env_darwin_uv();
+        // The venv form is rewritten only where it is the invoked command,
+        // the rule the virtualenv and npm forms already follow: an argument,
+        // a prose mention, a `Run:` label that is itself the argument of
+        // another command, or a longer module name that merely starts with
+        // `venv` keeps the original text.
+        let unchanged = concat!(
+            "echo python -m venv .venv\n",
+            "echo \"python3 -m venv .venv\"\n",
+            "Use python -m venv to isolate dependencies.\n",
+            "Run: echo python -m venv .venv\n",
+            "echo Run: python3 -m venv .venv\n",
+            "ENV_CMD=python -m venv .venv\n",
+            "python -m venvwrapper project\n",
+            "python3 -m venv_tools project\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+    }
+
+    #[test]
     fn test_heuristic_virtualenv_to_uv_venv() {
         let env = env_darwin_uv();
         let content = "virtualenv myenv\n";
@@ -1016,6 +1126,15 @@ mod tests {
             compile(argument, &pnpm),
             argument,
             "an argument of another command is not an invocation"
+        );
+
+        // `install` / `test` must be whole subcommands: a longer word that
+        // merely starts with one is not an npm command.
+        let longer_token = "npm installable packages\nnpm testing\n";
+        assert_eq!(
+            compile(longer_token, &pnpm),
+            longer_token,
+            "a longer word is not a rewritten subcommand"
         );
 
         let yarn = env_node_yarn();
