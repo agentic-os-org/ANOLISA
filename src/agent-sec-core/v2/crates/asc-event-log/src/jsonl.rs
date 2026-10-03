@@ -769,35 +769,88 @@ mod tests {
     ///
     /// This is the one failure v1 forwards to `on_error` without failing the
     /// call: the log keeps growing past its limit, which is exactly the state an
-    /// operator needs to hear about. A read-only parent directory reproduces it
-    /// faithfully — `O_APPEND` on the existing file still works, only the rename
-    /// is denied.
+    /// operator needs to hear about. The rename is forced to fail by file name
+    /// length instead of directory permissions: the log and its `.lock`
+    /// sibling still fit the file system's name limit, while the rotated
+    /// name — the log name plus `.` and a 19-character timestamp — exceeds
+    /// it. Unlike a `0500` parent directory, `ENAMETOOLONG` is reported even
+    /// to root retaining `CAP_DAC_OVERRIDE`, so the fixture holds for every
+    /// user.
     #[test]
     fn a_rotation_that_cannot_rename_reports_and_still_appends() {
         let dir = TempDir::new().expect("temp dir");
-        let path = dir.path().join("stream.jsonl");
-        let errors = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&errors);
+
+        // The log name is sized so it and its `.lock` sibling stay creatable
+        // while the rotation target cannot: `.lock` appends 5 characters, the
+        // rotation timestamp appends 20 (`.` plus 19 characters), so a name at
+        // `name_max - 5` leaves the target 15 characters over the limit.
+        let name_limit = name_max(dir.path());
+        let stem = "s".repeat(name_limit - ".lock".len() - ".jsonl".len());
+        let path = dir.path().join(format!("{stem}.jsonl"));
+
+        let operations: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&operations);
+        let line_len = u64::try_from(json!({"a": 1}).to_string().len() + 1).expect("small");
         let writer = JsonlEventWriter::new(&path)
-            .with_max_bytes(1)
-            .with_error_handler(Box::new(move |_| {
-                counter.fetch_add(1, Ordering::SeqCst);
+            .with_max_bytes(line_len + 1)
+            .with_error_handler(Box::new(move |err| {
+                if let EventLogError::Io { operation, .. } = err {
+                    seen.lock().expect("lock").push(*operation);
+                }
             }));
 
+        // One line stays below the threshold, so the first write must land
+        // without rotating and without any error callback.
         writer.write(&json!({"a": 1}));
-        assert_eq!(errors.load(Ordering::SeqCst), 0);
+        assert!(
+            operations.lock().expect("lock").is_empty(),
+            "the first write must not report anything"
+        );
+        assert!(
+            writer.lock_path().exists(),
+            "fixture sanity: the .lock sibling must still fit the name limit"
+        );
 
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).expect("chmod dir");
+        // The second write reaches the threshold; only the rename may fail.
         writer.write(&json!({"a": 2}));
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("restore");
 
-        assert_eq!(errors.load(Ordering::SeqCst), 1);
+        let operations = operations.lock().expect("lock");
+        assert_eq!(operations.len(), 1, "operations: {operations:?}");
+        assert_eq!(
+            operations[0], "rotate",
+            "the failure must come from rotation, not from open or append"
+        );
+        drop(operations);
+
         let contents = fs::read_to_string(&path).expect("read log");
         assert_eq!(
             contents.lines().count(),
             2,
             "a failed rotation must not cost the caller its line"
         );
+    }
+
+    /// Length of the longest file name creatable in `dir` (`NAME_MAX`).
+    ///
+    /// rustix 1.x no longer wraps `fpathconf`, so probe with `std` alone:
+    /// grow a candidate name until the file system rejects it. POSIX
+    /// guarantees at least 14 usable characters and every file system used
+    /// for build and test trees reports 255; the cap only guards against a
+    /// file system that never rejects a name.
+    fn name_max(dir: &Path) -> usize {
+        for len in 14..4096 {
+            let probe = dir.join("n".repeat(len));
+            match fs::write(&probe, b"") {
+                Ok(()) => {
+                    let _ = fs::remove_file(&probe);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidFilename => {
+                    return len - 1;
+                }
+                Err(err) => panic!("name probe failed at length {len}: {err}"),
+            }
+        }
+        panic!("file system accepted file names up to 4095 bytes");
     }
 
     #[test]
