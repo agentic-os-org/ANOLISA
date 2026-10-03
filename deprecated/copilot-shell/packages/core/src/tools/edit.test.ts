@@ -862,3 +862,80 @@ describe('EditTool', () => {
     });
   });
 });
+
+describe('EditTool line-ending preservation', () => {
+  let tool: EditTool;
+  let tempDir: string;
+  let rootDir: string;
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-crlf-test-'));
+    rootDir = path.join(tempDir, 'root');
+    fs.mkdirSync(rootDir);
+
+    const fsService = new StandardFileSystemService();
+    mockConfig = {
+      getTargetDir: () => rootDir,
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      setApprovalMode: vi.fn(),
+      getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
+      getFileSystemService: () => fsService,
+      getIdeMode: () => false,
+      getDebugMode: () => false,
+    } as unknown as Config;
+
+    tool = new EditTool(mockConfig);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('preserves CRLF line endings when editing a single line of a CRLF file', async () => {
+    const filePath = path.join(rootDir, 'crlf.txt');
+    fs.writeFileSync(filePath, 'line one\r\nline two\r\nline three\r\n');
+
+    const invocation = tool.build({
+      file_path: filePath,
+      old_string: 'line two',
+      new_string: 'line 2 edited',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(
+      'line one\r\nline 2 edited\r\nline three\r\n',
+    );
+  });
+
+  it('preserves per-line endings in a mixed CRLF/LF file', async () => {
+    const filePath = path.join(rootDir, 'mixed.txt');
+    fs.writeFileSync(filePath, 'alpha\r\nbeta\ngamma\r\n');
+
+    const invocation = tool.build({
+      file_path: filePath,
+      old_string: 'beta',
+      new_string: 'BETA',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('alpha\r\nBETA\ngamma\r\n');
+  });
+
+  it('proposes real content when the model sends LF old_string for a CRLF file', async () => {
+    const filePath = path.join(rootDir, 'crlf-proposed.txt');
+    fs.writeFileSync(filePath, 'aaa\r\nbbb\r\nccc\r\n');
+
+    const modifyContext = tool.getModifyContext(new AbortController().signal);
+    const proposed = await modifyContext.getProposedContent({
+      file_path: filePath,
+      old_string: 'aaa\nbbb',
+      new_string: 'aaa\nBBB',
+    });
+
+    expect(proposed).not.toBe('aaa\r\nbbb\r\nccc\r\n');
+    expect(proposed).toBe('aaa\r\nBBB\r\nccc\r\n');
+  });
+});
