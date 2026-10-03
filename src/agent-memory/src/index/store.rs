@@ -274,7 +274,7 @@ impl BM25Store {
         let prefix = format!("{rel_path}/");
         let rowids: Vec<i64> = {
             let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR instr(path, ?2) = 1")?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +285,7 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 OR instr(path, ?2) = 1",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
