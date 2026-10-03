@@ -257,6 +257,27 @@ fn get_context_skips_meta_dir() {
     );
 }
 
+#[test]
+fn get_context_zero_max_tokens_still_returns_content() {
+    // Regression: max_tokens=0 → max_bytes=0 → the walk loop broke before
+    // the first read and the tool claimed "(no memory files yet)" while
+    // files existed — a false, client-actionable emptiness claim.
+    let (_tmp, svc) = setup();
+    svc.write("first.md", "first note body", false).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    svc.write("second.md", "second note body", false).unwrap();
+
+    let ctx = svc.memory_get_context(0).unwrap();
+    assert_ne!(
+        ctx, "(no memory files yet)",
+        "zero max_tokens must not claim the store is empty:\n{ctx}"
+    );
+    assert!(
+        !ctx.is_empty(),
+        "floored to one token, the context must carry at least a prefix"
+    );
+}
+
 // ---------- error paths ----------
 
 #[test]

@@ -21,6 +21,13 @@ const TOKEN_TO_BYTES: usize = 4;
 /// This is a deliberately simple heuristic: it doesn't hit the index — it
 /// walks the file tree, sorts by mtime desc, and emits markdown sections.
 pub fn memory_get_context(svc: &MemoryService, max_tokens: usize) -> Result<String> {
+    // Floor at 1 token (one coherent floor for every caller, including the
+    // MCP wrapper's pass-through of an explicit 0): a zero byte budget
+    // would break the loop before the first read and the tool would claim
+    // "(no memory files yet)" even with files on disk — a false
+    // emptiness claim the client may act on. Sibling tools floor the
+    // same way (top_k.max(1), limit.max(1)).
+    let max_tokens = max_tokens.max(1);
     let max_bytes = max_tokens.saturating_mul(TOKEN_TO_BYTES);
     let meta_dir = svc.mount.meta_dir.clone();
 
