@@ -27,6 +27,9 @@ const SECRET_FILES: &[&str] = &[
     "id_ed25519",
     "id_rsa",
 ];
+/// How many skipped directories the coverage finding lists before
+/// summarizing the remainder as a count.
+const LISTED_SKIPPED_DIRS: usize = 16;
 
 struct Rule {
     id: String,
@@ -118,6 +121,33 @@ pub(super) fn scan(
                 }
             }
         }
+    }
+    if !tree.skipped.is_empty() {
+        // V2 trust signal: these directories are part of the signed content
+        // (content capture excludes only .git/.skill-meta) yet no scanner
+        // examines them. Warn, don't deny: dependency directories are
+        // legitimate payloads; the operator must decide.
+        let mut directories: Vec<&str> = tree.skipped.iter().map(String::as_str).collect();
+        directories.sort_unstable();
+        let additional = directories.len().saturating_sub(LISTED_SKIPPED_DIRS);
+        directories.truncate(LISTED_SKIPPED_DIRS);
+        let mut metadata = json!({
+            "source": "static-scanner-coverage",
+            "category": "scanner_limit",
+            "title": "Signed but unscanned directories",
+            "remediation": "Remove build output and dependencies from the Skill, or review them manually.",
+            "directories": directories,
+        });
+        if additional > 0 {
+            metadata["additional_directories"] = json!(additional);
+        }
+        findings.push(finding(
+            "scan-scope-skip",
+            ScanStatus::Warn,
+            "Skill contains scanner-excluded directories whose files are still signed and published.",
+            None,
+            metadata,
+        ));
     }
     network(&metadata, &files, &mut findings, deadline)?;
     Ok(findings)
