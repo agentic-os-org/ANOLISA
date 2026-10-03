@@ -233,6 +233,9 @@ jobs:
       - name: Regression test tokenless catalog version mismatch detection
         run: bash tests/test-check-component-versions.sh
 
+      - name: Regression test root runner e2e path resolution
+        run: bash tests/test-run-all-tests.sh
+
   check-build-runtime-deps:
     name: Check build runtime dependencies
     runs-on: anolisa-k8s-general-ci-x64
