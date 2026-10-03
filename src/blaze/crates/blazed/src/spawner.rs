@@ -850,6 +850,10 @@ impl ProcessInstance {
 
 #[async_trait]
 impl BackendInstance for ProcessInstance {
+    fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+
     fn backend(&self) -> BackendKind {
         self.backend
     }
@@ -2778,5 +2782,139 @@ mod tests {
             .await
             .expect("matching process is terminated");
         child.wait().await.expect("reap child");
+    }
+
+    // --- Second-round audit: ProcessInstance identity contract -----------------
+
+    /// The bubblewrap process owner must report the sandbox it runs. The trait
+    /// default returns the nil UUID, and hibernate/restore compare the owner
+    /// identity against durable state before checking capture support.
+    #[tokio::test]
+    async fn process_instance_reports_its_sandbox_identity() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = Uuid::new_v4();
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn child");
+        let instance = ProcessInstance::new(
+            id,
+            BackendKind::Bubblewrap,
+            child,
+            temp.path().join("backend.pid"),
+            temp.path().join("backend.stopped"),
+        );
+
+        assert_eq!(
+            instance.instance_id(),
+            id,
+            "the bubblewrap owner must report the sandbox identity it was started for"
+        );
+
+        instance.kill().await.expect("kill child");
+    }
+
+    /// Hibernating a sandbox whose backend cannot capture must be refused as
+    /// unsupported without touching durable state. A nil-identity owner (the
+    /// production bubblewrap `ProcessInstance`) must not flip a healthy
+    /// running sandbox into recovery-required first.
+    #[tokio::test]
+    async fn hibernate_rejects_a_default_identity_process_owner_without_state_mutation() {
+        use crate::file_provider::FileStorageProvider;
+        use crate::sandbox::template::TemplateCatalog;
+        use crate::sandbox::{HibernateSandbox, SandboxManager, SandboxManagerInit};
+        use crate::state_store::StateStore;
+        use blaze_core::config::TemplateSection;
+        use blaze_core::lifecycle::{BackendOwnership, SandboxInstance, SandboxState};
+        use blaze_core::policy::WorkloadClass;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let state_dir = temp.path().join("state");
+        let templates_dir = temp.path().join("templates");
+        std::fs::create_dir_all(&state_dir).expect("state");
+        std::fs::create_dir_all(&templates_dir).expect("templates");
+        let template_catalog = TemplateCatalog::open(&TemplateSection {
+            dir: templates_dir,
+            ..Default::default()
+        })
+        .expect("catalog");
+        let mut registry = SpawnerRegistry::new();
+        registry.insert(BackendKind::Mock, Arc::new(MockSpawner));
+        let (manager, resources) = SandboxManager::new(SandboxManagerInit {
+            instances: HashMap::new(),
+            spawners: registry,
+            active_backend: BackendKind::Bubblewrap,
+            storage: Arc::new(FileStorageProvider::with_images(
+                temp.path().join("images"),
+                temp.path().join("instances"),
+            )),
+            state_store: StateStore::new(state_dir),
+            rootfs_size: 64,
+            mem_size: 32,
+            template_catalog,
+        });
+        let manager = Arc::new(manager);
+
+        let id = Uuid::new_v4();
+        let mut metadata = SandboxInstance::new(
+            BackendKind::Bubblewrap,
+            WorkloadClass::AgentTool,
+            "sha256:hibernate-test".into(),
+            "hibernate-test".into(),
+        );
+        metadata.id = id;
+        metadata
+            .transition(SandboxState::Creating)
+            .expect("pending to creating");
+        metadata
+            .transition(SandboxState::Running)
+            .expect("creating to running");
+        metadata.backend_ownership = BackendOwnership::Running;
+        resources
+            .instances
+            .lock()
+            .expect("instances")
+            .insert(id, metadata);
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn child");
+        let owner: DynBackendInstance = Arc::new(ProcessInstance::new(
+            id,
+            BackendKind::Bubblewrap,
+            child,
+            temp.path().join("backend.pid"),
+            temp.path().join("backend.stopped"),
+        ));
+        manager
+            .insert_backend_owner(id, owner.clone())
+            .expect("insert owner");
+
+        let error = manager
+            .hibernate(
+                id,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("bubblewrap owners cannot hibernate");
+
+        assert!(
+            matches!(
+                error,
+                crate::error::BlazeDaemonError::UnsupportedOperation(_)
+            ),
+            "expected an unsupported-operation refusal, got: {error}"
+        );
+        let lifecycle = manager.get(id).expect("lifecycle");
+        assert_eq!(
+            lifecycle.state,
+            SandboxState::Running,
+            "a refused hibernate must leave the sandbox running"
+        );
+        assert!(lifecycle.operation.is_none());
+
+        owner.kill().await.expect("kill child");
     }
 }
