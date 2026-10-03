@@ -210,10 +210,8 @@ async fn run_watcher(
     shutdown_rx: Option<oneshot::Receiver<()>>,
 ) {
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-    use std::collections::HashMap;
-    use std::time::Instant;
 
-    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Construct the watcher. Surface any notify-side error through the
     // readiness channel and exit before starting the event loop.
@@ -247,7 +245,20 @@ async fn run_watcher(
     // startup failure.
     let _ = ready_tx.send(Ok(()));
 
-    // Debounce state: path -> (last_event_time, last_event_kind)
+    forward_events(&source, debounce_ms, notify_rx, tx, shutdown_rx).await;
+}
+
+async fn forward_events(
+    source: &Path,
+    debounce_ms: u64,
+    mut notify_rx: mpsc::UnboundedReceiver<notify::Event>,
+    tx: mpsc::UnboundedSender<SkillEvent>,
+    shutdown_rx: Option<oneshot::Receiver<()>>,
+) {
+    use std::collections::HashMap;
+    use tokio::time::{Instant, MissedTickBehavior};
+
+    // Debounce state: path -> (last_mutation_time, last_mutation_kind)
     let debounce = std::time::Duration::from_millis(debounce_ms);
     let mut pending: HashMap<PathBuf, (Instant, notify::EventKind)> = HashMap::new();
 
@@ -267,6 +278,12 @@ async fn run_watcher(
     };
     tokio::pin!(shutdown_fut);
 
+    // Poll due paths independently of incoming traffic. A new event must not
+    // cancel the quiet window of a different path. Zero debounce still needs
+    // a nonzero tick period; it flushes on the next tick.
+    let mut tick = tokio::time::interval(debounce.max(std::time::Duration::from_millis(1)));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             _ = tx.closed() => return,
@@ -278,11 +295,16 @@ async fn run_watcher(
                 return;
             }
             Some(event) = notify_rx.recv() => {
+                // inotify emits Close(Write) after Modify(Data). Access events
+                // must not replace a queued mutation or restart its debounce.
+                if !matches!(event.kind, notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)) {
+                    continue;
+                }
                 for path in &event.paths {
                     pending.insert(path.clone(), (Instant::now(), event.kind));
                 }
             }
-            _ = tokio::time::sleep(debounce) => {
+            _ = tick.tick() => {
                 let now = Instant::now();
                 let ready: Vec<(PathBuf, notify::EventKind)> = pending
                     .iter()
@@ -292,7 +314,7 @@ async fn run_watcher(
 
                 for (path, kind) in ready {
                     pending.remove(&path);
-                    if let Some(event) = classify_event(&source, &path, kind) {
+                    if let Some(event) = classify_event(source, &path, kind) {
                         if tx.send(event).is_err() {
                             return; // receiver dropped
                         }
@@ -384,6 +406,166 @@ fn classify_event(source: &Path, path: &Path, kind: notify::EventKind) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event_loop(
+        debounce_ms: u64,
+    ) -> (
+        mpsc::UnboundedSender<notify::Event>,
+        mpsc::UnboundedReceiver<SkillEvent>,
+        oneshot::Sender<()>,
+        JoinHandle<()>,
+    ) {
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join = tokio::spawn(async move {
+            forward_events(
+                Path::new("/skills"),
+                debounce_ms,
+                notify_rx,
+                tx,
+                Some(shutdown_rx),
+            )
+            .await;
+        });
+        (notify_tx, rx, shutdown_tx, join)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn access_events_preserve_queued_mutations() {
+        use notify::EventKind;
+        use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, RemoveKind};
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(notify::event::ModifyKind::Data(DataChange::Any)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            let (notify_tx, mut rx, shutdown_tx, join) = event_loop(50);
+            let path = PathBuf::from("/skills/demo/SKILL.md");
+            notify_tx
+                .send(notify::Event::new(kind).add_path(path.clone()))
+                .expect("mutation");
+            for access in [
+                AccessKind::Close(AccessMode::Write),
+                AccessKind::Open(AccessMode::Any),
+            ] {
+                notify_tx
+                    .send(notify::Event::new(EventKind::Access(access)).add_path(path.clone()))
+                    .expect("access");
+            }
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("mutation must survive access events")
+                .expect("event");
+            assert!(matches!(
+                (kind, event),
+                (EventKind::Create(_), SkillEvent::Created(p))
+                | (EventKind::Modify(_), SkillEvent::Modified(p))
+                | (EventKind::Remove(_), SkillEvent::Deleted(p)) if p == path
+            ));
+            shutdown_tx.send(()).expect("shutdown");
+            join.await.expect("event loop");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuous_other_paths_do_not_starve_a_quiet_manifest() {
+        use notify::event::{DataChange, ModifyKind};
+        let kind = notify::EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop(50);
+        let path = PathBuf::from("/skills/demo/SKILL.md");
+        notify_tx
+            .send(notify::Event::new(kind).add_path(path.clone()))
+            .expect("quiet manifest");
+        let noise = tokio::spawn(async move {
+            loop {
+                for other in ["/skills/noise.log", "/skills/busy/SKILL.md"] {
+                    notify_tx
+                        .send(notify::Event::new(kind).add_path(PathBuf::from(other)))
+                        .expect("noise");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+        noise.abort();
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            matches!(event, Ok(Some(SkillEvent::Modified(p))) if p == path),
+            "the quiet path must be delivered while other paths remain active"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn later_access_does_not_extend_a_mutations_quiet_window() {
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop(50);
+        let path = PathBuf::from("/skills/demo/SKILL.md");
+        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ));
+        notify_tx
+            .send(notify::Event::new(kind).add_path(path.clone()))
+            .expect("mutation");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(40)).await;
+        let access = notify::EventKind::Access(notify::event::AccessKind::Close(
+            notify::event::AccessMode::Write,
+        ));
+        notify_tx
+            .send(notify::Event::new(access).add_path(path.clone()))
+            .expect("access");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        let event = rx.try_recv();
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(matches!(event, Ok(SkillEvent::Modified(p)) if p == path));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn later_mutations_extend_the_same_paths_quiet_window() {
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop(50);
+        let path = PathBuf::from("/skills/demo/SKILL.md");
+        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ));
+        notify_tx
+            .send(notify::Event::new(kind).add_path(path.clone()))
+            .expect("first mutation");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(40)).await;
+        notify_tx
+            .send(notify::Event::new(kind).add_path(path.clone()))
+            .expect("later mutation");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err(), "the path is not quiet yet");
+        tokio::time::advance(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        let event = rx.try_recv();
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(matches!(event, Ok(SkillEvent::Modified(p)) if p == path));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_debounce_does_not_panic_and_emits_mutations() {
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop(0);
+        let path = PathBuf::from("/skills/demo/SKILL.md");
+        notify_tx
+            .send(
+                notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(path.clone()),
+            )
+            .expect("create");
+        let event = tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await;
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(matches!(event, Ok(Some(SkillEvent::Created(p))) if p == path));
+    }
 
     #[test]
     fn removed_immediate_directory_is_classified_without_restat() {
