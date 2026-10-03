@@ -100,11 +100,41 @@ jobs:
           set -e
           echo "=== Detect Changes ==="
 
-          # Get changed files
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+          # Get changed files across the whole event, not just the head commit.
+          #
+          # push: github.event.before is the tip the branch moved from, so
+          # before..HEAD covers every commit of a multi-commit push — with the
+          # depth-2 checkout alone the diff sees only the head commit and
+          # components touched in earlier commits of the same push get no CI
+          # jobs. The all-zero SHA means a created or force-pushed branch:
+          # there is no usable base (and fetching that "SHA" would fail).
+          # pull_request: the checkout is the PR merge commit, whose first
+          # parent (HEAD~1) is the base tip, so HEAD~1..HEAD is exactly the
+          # PR's changes.
+          # Other events (workflow_dispatch) keep HEAD~1 when it resolves;
+          # the dispatch force-flags remain the manual override.
+          BASE_SHA=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE_SHA="${{ github.event.before }}"
+            if [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git fetch --no-tags --depth=1 origin "$BEFORE_SHA"; then
+              BASE_SHA="$BEFORE_SHA"
+            else
+              echo "::warning::no usable push base ($BEFORE_SHA); diffing against the empty tree"
+            fi
+          elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+            BASE_SHA=$(git rev-parse HEAD~1)
+          fi
+
+          # No usable base (initial push, force push, or base not fetchable):
+          # diff against the empty tree so every component present in the head
+          # tree is detected and its jobs run, instead of none. Over-detecting
+          # is the safe direction for a skip-based gate. Diff failures are not
+          # swallowed: with `|| true` a git error silently ran zero jobs.
+          if [ -n "$BASE_SHA" ]; then
+            CHANGED=$(git diff --name-only "$BASE_SHA" HEAD)
           else
-            CHANGED=$(git diff --name-only --diff-filter=ACMRT HEAD || true)
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            CHANGED=$(git diff --name-only --diff-filter=ACMRT "$EMPTY_TREE" HEAD)
           fi
           echo "Changed files:"
           echo "$CHANGED"
