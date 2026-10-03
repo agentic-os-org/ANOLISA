@@ -172,6 +172,7 @@ fn plant_entries(prefix: &std::path::Path, home: &std::path::Path) {
                 }],
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: "cosh_extension_dir".to_string(),
+                    bundle_manifest: "cosh-extension.json".to_string(),
                 }),
             }],
             ..InstalledState::default()

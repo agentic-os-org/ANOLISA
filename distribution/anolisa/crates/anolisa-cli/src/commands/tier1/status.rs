@@ -3668,6 +3668,7 @@ dest = "{datadir}/adapters/{component}/cosh/"
                 }],
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: "cosh_extension_dir".to_string(),
+                    bundle_manifest: "cosh-extension.json".to_string(),
                 }),
             });
         }
