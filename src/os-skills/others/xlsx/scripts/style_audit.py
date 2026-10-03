@@ -59,11 +59,15 @@ BLACK_RGB = "00000000"
 GREEN_RGB = "00008000"
 RED_RGB   = "00ff0000"
 
-# numFmtIds that represent percentage formats (built-in + common custom)
-PERCENT_FMT_IDS = {9, 10, 165, 170}
+# numFmtIds that represent percentage formats (built-in only).
+# ids >= 164 are file-specific customs: each workbook defines its own
+# formatCode for them, so they must be classified via the formatCode.
+PERCENT_FMT_IDS = {9, 10}
 
-# numFmtIds that use comma separator (would corrupt year display)
-COMMA_FMT_IDS = {3, 4, 167, 168}  # #,##0 style — 4-digit years would show as 2,024
+# numFmtIds that use comma separator (would corrupt year display).
+# built-in only (#,##0 style — 4-digit years would show as 2,024);
+# custom ids are classified via their formatCode instead.
+COMMA_FMT_IDS = {3, 4}
 
 
 def _parse_styles(styles_xml: bytes) -> dict:
