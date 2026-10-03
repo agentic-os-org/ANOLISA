@@ -44,6 +44,7 @@ pub use mem_snapshot_restore::snapshot_restore;
 pub use memory_get_context::memory_get_context;
 pub use memory_observe::memory_observe;
 pub use memory_search::memory_search;
+pub use memory_task::{memory_task_close, memory_task_list, memory_task_resume, memory_task_save};
 pub use mkdir::mkdir;
 pub use promote::promote;
 pub use read::read;
