@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DateTimePicker } from '../components/DateTimePicker';
 import {
   fetchSecurityCountBy,
@@ -93,6 +93,15 @@ export const SecurityObservabilityPage: React.FC = () => {
   const [sessionEvents, setSessionEvents] = useState<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>> | null>(null);
   const [sessionEventsLoading, setSessionEventsLoading] = useState(false);
   const [sessionEventsError, setSessionEventsError] = useState<string | null>(null);
+  // The dep-driven effects re-issue loadOverview / loadEvents / loadSessions
+  // whenever the time range, the tab, or the applied event filters change, so
+  // responses can interleave; only the newest request may write state, or a
+  // slow older response lands last and the cards, event table, and session
+  // list show data that violates the active filters. Same pattern as
+  // `loadRequestIdRef` on the agent-health and reuse-labels pages.
+  const overviewRequestIdRef = useRef(0);
+  const eventsRequestIdRef = useRef(0);
+  const sessionsRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -121,6 +130,7 @@ export const SecurityObservabilityPage: React.FC = () => {
   }, [t]);
 
   const loadOverview = useCallback(async () => {
+    const requestId = ++overviewRequestIdRef.current;
     setOverviewLoading(true);
     setOverviewError(null);
     const results = await Promise.allSettled([
@@ -132,6 +142,7 @@ export const SecurityObservabilityPage: React.FC = () => {
       fetchSecurityEvents({ ...rangeParams, limit: OVERVIEW_EVENT_SAMPLE_LIMIT, offset: 0, include_details: true }),
       fetchSecuritySessions({ ...rangeParams, limit: 100, offset: 0 }),
     ]);
+    if (requestId !== overviewRequestIdRef.current) return;
 
     const errors: string[] = [];
     const collect = <T,>(
@@ -170,6 +181,7 @@ export const SecurityObservabilityPage: React.FC = () => {
 
   const loadEvents = useCallback(async (offset: number, filters = appliedEventFilters) => {
     if (!isAvailable) return;
+    const requestId = ++eventsRequestIdRef.current;
     setEventsLoading(true);
     setEventsError(null);
     try {
@@ -180,29 +192,40 @@ export const SecurityObservabilityPage: React.FC = () => {
         offset,
         include_details: true,
       });
+      if (requestId !== eventsRequestIdRef.current) return;
       setEvents(response);
     } catch (error) {
-      setEventsError(errorMessage(error, t));
+      if (requestId === eventsRequestIdRef.current) {
+        setEventsError(errorMessage(error, t));
+      }
     } finally {
-      setEventsLoading(false);
+      if (requestId === eventsRequestIdRef.current) {
+        setEventsLoading(false);
+      }
     }
   }, [appliedEventFilters, isAvailable, rangeParams, t]);
 
   const loadSessions = useCallback(async () => {
     if (!isAvailable) return;
+    const requestId = ++sessionsRequestIdRef.current;
     setSessionsLoading(true);
     setSessionsError(null);
     try {
       const response = await fetchSecuritySessions({ ...rangeParams, limit: 100, offset: 0 });
+      if (requestId !== sessionsRequestIdRef.current) return;
       setSecuritySessions(response);
       const ids = new Set(response.data.items.map((session) => session.session_id));
       setSelectedSessionId((current) => current && ids.has(current)
         ? current
         : response.data.items[0]?.session_id ?? null);
     } catch (error) {
-      setSessionsError(errorMessage(error, t));
+      if (requestId === sessionsRequestIdRef.current) {
+        setSessionsError(errorMessage(error, t));
+      }
     } finally {
-      setSessionsLoading(false);
+      if (requestId === sessionsRequestIdRef.current) {
+        setSessionsLoading(false);
+      }
     }
   }, [isAvailable, rangeParams, t]);
 

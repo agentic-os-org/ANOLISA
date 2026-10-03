@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   fetchSessions,
@@ -219,8 +219,16 @@ export const AgentSessionsPage: React.FC = () => {
   const [semanticMatches, setSemanticMatches] = useState<Record<string, SemanticSearchResult>>({});
   const [page, setPage] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  // Filter changes re-issue `loadData` immediately and the 10 s auto-refresh
+  // poll re-issues it on a timer, so responses can interleave; only the newest
+  // request may write state, or a slow older response lands last and the table
+  // shows the previous window's sessions (e.g. 24 h of data under the 30 d
+  // preset) while the spinner is cleared early. Same pattern as
+  // `loadRequestIdRef` on the agent-health and reuse-labels pages.
+  const loadRequestIdRef = useRef(0);
 
   const loadData = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     try {
       const endNs = Date.now() * 1_000_000;
@@ -230,12 +238,17 @@ export const AgentSessionsPage: React.FC = () => {
         fetchSessions(startNs, endNs),
         fetchTrajectories().catch(() => [] as TrajectorySummary[]),
       ]);
+      if (requestId !== loadRequestIdRef.current) return;
       setMerged(mergeSessions(ebpf, logs));
       setError(null);
     } catch (e: any) {
-      setError(e.message || t('as.fetchError'));
+      if (requestId === loadRequestIdRef.current) {
+        setError(e.message || t('as.fetchError'));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [rangeMs, t]);
 

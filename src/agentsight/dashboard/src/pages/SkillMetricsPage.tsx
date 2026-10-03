@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n';
 import {
@@ -35,19 +35,31 @@ export const SkillMetricsPage: React.FC = () => {
   const [report, setReport] = useState<SkillMetricsReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The effect below re-issues `loadData` whenever any filter changes, so two
+  // loads can be in flight at once; only the newest may write state, or a slow
+  // older response lands last and the report shows the previous agent or
+  // window while the controls say otherwise. Same pattern as
+  // `loadRequestIdRef` on the agent-health and reuse-labels pages.
+  const loadRequestIdRef = useRef(0);
 
   const loadData = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const startNs = startMs * 1_000_000;
       const endNs = endMs * 1_000_000;
       const data = await fetchSkillMetrics(startNs, endNs, agentName || undefined, granularity);
+      if (requestId !== loadRequestIdRef.current) return;
       setReport(data);
     } catch (e: any) {
-      setError((e && e.message) || t('skill.error.loadFailed'));
+      if (requestId === loadRequestIdRef.current) {
+        setError((e && e.message) || t('skill.error.loadFailed'));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [startMs, endMs, agentName, granularity, t]);
 
