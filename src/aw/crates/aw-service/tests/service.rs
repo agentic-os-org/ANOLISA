@@ -242,6 +242,7 @@ fn instance_identity_prevents_cross_binding_calls_and_early_unbind() {
         event(&first, "tool.before", "allow"),
     );
     let mismatched = Operation::InvokeStep {
+        native_environment: None,
         event_id: handle.event_id.clone(),
         instance_id: second.instance_id.clone(),
         step_id: "check".into(),

@@ -43,7 +43,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
-| `invoke_step` | `event_id`、`instance_id`、`step_id` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
+| `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
 | `audit` | 准备阶段或事件的 `key` | 已验证的持久记录信封和 `terminal` 标志 |
 | `stop` | 无 | 确认收到停止请求；进程退出才表示清理完成 |
@@ -55,6 +55,11 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 保持命令兼容性，并根据启动快照还原 Qoder 的来源、版本及站点元数据。不会把任意回调环境
 或原生 Hook 条目的 `env` 复制到 Provider 上下文，后续请求也不能修改。准备失败时，响应可能包含 `audit_key` 而没有成功绑定；
 Rust 客户端通过 `Error::Attempt` 暴露该记录键。
+
+原生命令可通过 `invoke_step.native_environment` 传入完整回调环境，替换绑定环境，
+不做合并；省略时沿用绑定环境。结构化 Provider 忽略该字段。快照最多 4096 项、
+1 MiB，拒绝非法键和 NUL，不进入事件输入、关联摘要或审计。非法快照会占用步骤
+执行权并返回明确执行故障，不延长事件期限。这是 RPC 字段，不是新增 `aw.yaml` 配置。
 
 当前服务准入结构化 `tool.before` 的 `observe`/`block`、`tool.after` 的 `observe`，
 以及这两个工具点位的显式原生步骤。

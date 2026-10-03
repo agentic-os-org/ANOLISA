@@ -35,7 +35,7 @@ fn run() -> cli::Result<cli::Exit> {
         return Ok(cli::Exit::Code(0));
     }
     let args = cli::Arguments::parse(args)?;
-    if matches!(command.as_str(), "run" | "hook") {
+    if matches!(command.as_str(), "run" | "hook" | "install") {
         return cli::dispatch(&command, &args);
     }
     let flags = &args.flags;

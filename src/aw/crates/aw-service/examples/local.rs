@@ -64,6 +64,7 @@ fn demonstrate(client: &Client, binding: &Binding) -> Result<(), Box<dyn std::er
             .map(|step| {
                 client.call(
                     Operation::InvokeStep {
+                        native_environment: None,
                         event_id: handle.event_id.clone(),
                         instance_id: binding.instance_id.clone(),
                         step_id: step.clone(),

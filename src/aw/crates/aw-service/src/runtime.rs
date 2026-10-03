@@ -41,6 +41,7 @@ struct EventEntry {
 enum Job {
     Invoke {
         step: String,
+        native_environment: Option<BTreeMap<String, String>>,
         reply: SyncSender<Result<Value>>,
     },
     Close {
@@ -132,12 +133,14 @@ impl Runtime {
                 event_id,
                 instance_id,
                 step_id,
+                native_environment,
             } => {
                 let (sender, cancelled) = self.event_sender(&event_id, &instance_id)?;
                 let (reply, result) = mpsc::sync_channel(1);
                 sender
                     .try_send(Job::Invoke {
                         step: step_id,
+                        native_environment,
                         reply,
                     })
                     .map_err(|_| rejected("event_busy_or_closed"))?;
@@ -441,7 +444,11 @@ impl Runtime {
                         close = Some(reply);
                         break;
                     }
-                    Job::Invoke { step, reply } => {
+                    Job::Invoke {
+                        step,
+                        native_environment,
+                        reply,
+                    } => {
                         if cancelled.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire)
                         {
                             let _ = reply.send(Err(rejected("event_cancelled")));
@@ -470,8 +477,17 @@ impl Runtime {
                             let result = (|| {
                                 self.audit
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
-                                let invocation =
-                                    event.invoke(&step).map_err(|_| rejected("step_rejected"))?;
+                                let invocation = match native_environment {
+                                    Some(environment) => event.invoke_with_native_environment(
+                                        &step,
+                                        &environment
+                                            .into_iter()
+                                            .map(|(key, value)| (key.into(), value.into()))
+                                            .collect(),
+                                    ),
+                                    None => event.invoke(&step),
+                                }
+                                .map_err(|_| rejected("step_rejected"))?;
                                 let (record, result) = audit::invocation(invocation);
                                 self.audit.append(key, record)?;
                                 Ok(result)

@@ -81,6 +81,14 @@ The protocol's integer `budget_ms` rounds positive remaining time up to the next
 millisecond, including sub-millisecond remainders. The exact `Instant` still
 enforces the deadline; rounding does not extend it.
 
+Native adapters may call `Event::invoke_with_native_environment(step_id, snapshot)`
+to supply the actual callback environment for raw commands. It replaces the bound
+environment only for native transport; structured Providers retain the prepared
+context. `Event::invoke` remains available and uses the bound environment. The
+snapshot is limited to 4096 entries and 1 MiB and rejects invalid keys and NUL.
+It changes neither event identity nor deadline, and is not included in stdin or
+execution reports. Invalid snapshots consume the step claim and fail visibly.
+
 Use `Event::steps()` to select retained steps, then `Event::invoke(step_id)`.
 Step order is available to the caller, which owns serial or parallel scheduling
 according to its native callback contract. Calls on the same Event share the

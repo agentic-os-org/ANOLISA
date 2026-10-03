@@ -4,9 +4,197 @@ use crate::common::{audit, event, invoke, Fixture, Running, PRIVATE_MARKER, TIME
 use aw_service::{Binding, Client, EventHandle, Operation};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs, thread,
     time::{Duration, Instant},
 };
+
+fn invoke_environment(
+    handle: &EventHandle,
+    step: &str,
+    native_environment: Option<BTreeMap<String, String>>,
+) -> Operation {
+    Operation::InvokeStep {
+        event_id: handle.event_id.clone(),
+        instance_id: handle.instance_id.clone(),
+        step_id: step.into(),
+        native_environment,
+    }
+}
+
+#[test]
+fn native_callback_environment_replaces_binding_without_changing_provider_input_or_audit() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    native(&mut document, "import json; print(json.dumps({'profile': os.environ.get('PROFILE_SECRET'), 'bound': os.environ.get('AW_SERVICE_MARKER'), 'stdin': sys.stdin.buffer.read().hex()}))", true);
+    let service = Running::start(&fixture, &document);
+    let binding = fixture.bind(&service.client);
+    let secret = "callback-profile-secret-not-for-audit";
+    let original = b"native input\x00\xff";
+    for (index, environment, expected_profile, expected_bound) in [
+        (0, None, Value::Null, json!("explicit-context")),
+        (1, Some(BTreeMap::new()), Value::Null, Value::Null),
+        (
+            2,
+            Some(BTreeMap::from([("PROFILE_SECRET".into(), secret.into())])),
+            json!(secret),
+            Value::Null,
+        ),
+    ] {
+        let mut value = event(&binding, "tool.before", "allow");
+        value["tool"]["call_id"] = json!(format!("environment-{index}"));
+        let handle = lease(&service.client, &binding, value.clone(), original);
+        let mut operation =
+            serde_json::to_value(invoke_environment(&handle, "raw", environment.clone())).unwrap();
+        if index == 0 {
+            operation
+                .as_object_mut()
+                .unwrap()
+                .remove("native_environment");
+        }
+        let result = service
+            .client
+            .call(
+                serde_json::from_value(operation).unwrap(),
+                Instant::now() + TIMEOUT,
+            )
+            .unwrap();
+        assert_eq!(result["status"], "ok");
+        let stdout: Vec<u8> = serde_json::from_value(result["native"]["stdout"].clone()).unwrap();
+        let observed: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(observed["profile"], expected_profile);
+        assert_eq!(observed["bound"], expected_bound);
+        assert_eq!(observed["stdin"], "6e617469766520696e70757400ff");
+        let provider = service
+            .client
+            .call(
+                invoke_environment(&handle, "check", environment),
+                Instant::now() + TIMEOUT,
+            )
+            .unwrap();
+        assert_eq!(provider["status"], "ok");
+        let calls = fixture.calls("invoke");
+        let observed = calls
+            .iter()
+            .find(|call| call["request"]["event"]["tool"]["call_id"] == value["tool"]["call_id"])
+            .unwrap();
+        assert_eq!(observed["request"]["event"], value);
+        assert_eq!(
+            observed["environment"]["AW_SERVICE_MARKER"],
+            "explicit-context"
+        );
+        assert!(observed["environment"].get("PROFILE_SECRET").is_none());
+        let evidence = terminal(&service.client, &handle.event_id).to_string();
+        assert!(!evidence.contains(secret));
+        assert!(!evidence.contains("PROFILE_SECRET"));
+    }
+    fixture.assert_reaped();
+}
+
+#[test]
+fn invalid_native_environments_are_recorded_failures_and_consume_the_step_claim() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    native(
+        &mut document,
+        "pathlib.Path('must-not-run').write_text('bad')",
+        false,
+    );
+    let service = Running::start(&fixture, &document);
+    let binding = fixture.bind(&service.client);
+    let invalid = [
+        BTreeMap::from([("".into(), PRIVATE_MARKER.into())]),
+        BTreeMap::from([("BAD=KEY".into(), PRIVATE_MARKER.into())]),
+        BTreeMap::from([("BAD\0KEY".into(), PRIVATE_MARKER.into())]),
+        BTreeMap::from([("BAD_VALUE".into(), format!("{PRIVATE_MARKER}\0"))]),
+        BTreeMap::from([(
+            "LARGE".into(),
+            "x".repeat(aw_host::MAX_NATIVE_ENVIRONMENT_BYTES),
+        )]),
+        (0..4097)
+            .map(|n| (format!("K{n}"), PRIVATE_MARKER.into()))
+            .collect(),
+    ];
+    for (index, environment) in invalid.into_iter().enumerate() {
+        let mut value = event(&binding, "tool.before", "unused");
+        value["tool"]["call_id"] = json!(format!("invalid-env-{index}"));
+        let handle = lease(&service.client, &binding, value, b"{}");
+        let result = service
+            .client
+            .call(
+                invoke_environment(&handle, "raw", Some(environment)),
+                Instant::now() + TIMEOUT,
+            )
+            .unwrap();
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["failure"], "native_environment");
+        assert_eq!(result["failure_action"], "block");
+        assert_eq!(result["call"]["process"], Value::Null);
+        assert!(service
+            .client
+            .call(invoke(&handle, "raw"), Instant::now() + TIMEOUT)
+            .is_err());
+        let evidence = terminal(&service.client, &handle.event_id).to_string();
+        assert!(evidence.contains("native_environment"));
+        assert!(!evidence.contains(PRIVATE_MARKER));
+        assert!(!evidence.contains("BAD_VALUE"));
+    }
+    assert!(!fixture.0.join("must-not-run").exists());
+    fixture.assert_reaped();
+}
+
+#[test]
+fn changing_native_snapshots_does_not_restart_event_budget_or_allow_replay() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    native(
+        &mut document,
+        "time.sleep(.35); print(os.environ.get('CALLBACK_STEP'))",
+        false,
+    );
+    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(600);
+    let mut second = document["spec"]["events"]["tool.before"]["steps"][0].clone();
+    second["id"] = json!("second");
+    document["spec"]["events"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let service = Running::start(&fixture, &document);
+    let binding = fixture.bind(&service.client);
+    let handle = lease(
+        &service.client,
+        &binding,
+        event(&binding, "tool.before", "unused"),
+        b"{}",
+    );
+    let snapshot = |value: &str| Some(BTreeMap::from([("CALLBACK_STEP".into(), value.into())]));
+    let first = service
+        .client
+        .call(
+            invoke_environment(&handle, "raw", snapshot("first")),
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(first["status"], "ok");
+    assert!(service
+        .client
+        .call(
+            invoke_environment(&handle, "raw", snapshot("replay")),
+            Instant::now() + TIMEOUT
+        )
+        .is_err());
+    let second = service
+        .client
+        .call(
+            invoke_environment(&handle, "second", snapshot("second")),
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(second["status"], "error");
+    assert_eq!(second["failure"], "transport");
+    terminal(&service.client, &handle.event_id);
+    fixture.assert_reaped();
+}
 
 fn native(document: &mut Value, code: &str, mixed: bool) {
     let python = document["spec"]["providers"]["policy"]["transport"]["argv"][0].clone();

@@ -135,6 +135,7 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
             "error",
             json!([]),
             Some(match error {
+                Failure::NativeEnvironment(_) => "native_environment",
                 Failure::Transport(_) => "transport",
                 Failure::Exit => "exit",
                 Failure::IncompleteInput => "incomplete_input",

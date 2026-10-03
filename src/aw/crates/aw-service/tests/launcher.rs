@@ -134,7 +134,7 @@ fn native_query_separator_keeps_generated_hooks_and_literal_query() {
 }
 
 #[test]
-fn native_commands_use_verified_project_directory_and_launch_environment() {
+fn native_commands_use_verified_directory_and_callback_environment() {
     for (after, work_mode, client_version, source, version) in [
         (false, None, None, "cli", "1.1.64"),
         (true, Some("1"), Some("custom"), "qoderwork", "custom"),
@@ -173,7 +173,7 @@ fn native_commands_use_verified_project_directory_and_launch_environment() {
         assert_eq!(
             environment,
             json!({"QODER_PROJECT_DIR":fixture.root,"CLAUDE_PROJECT_DIR":fixture.root,
-                   "FAKE_SHARED_ENV":"launcher","FAKE_CALLBACK_ONLY":null,
+                   "FAKE_SHARED_ENV":"callback","FAKE_CALLBACK_ONLY":"callback",
                    "QODER_HOOK_SOURCE":source,"QODER_HOOK_VERSION":version,"QODER_SITE":"GLOBAL"})
         );
         service.released(&fixture);

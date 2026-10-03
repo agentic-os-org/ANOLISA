@@ -1,31 +1,144 @@
 //! Qoder CLI 1.1.64 native command hooks; scheduling remains in the Agent.
 
-use super::{read_file, Result};
+use super::{
+    adapter::{
+        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        PreparedLaunch,
+    },
+    read_file, Exit, Result,
+};
 use aw_provider::admission::AdmittedStep;
-use aw_service::{Binding, Capabilities};
-use serde::{Deserialize, Serialize};
+use aw_service::Capabilities;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
 pub(super) const VERSION: &str = "1.1.64";
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HookBinding {
-    pub binding: Binding,
-    pub socket: PathBuf,
-    pub cwd: PathBuf,
-    pub events: BTreeMap<String, HookEvent>,
+pub(super) struct Qoder;
+
+struct Prepared {
+    input: LaunchInput,
+    settings: Value,
+    native: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HookEvent {
-    pub budget_ms: u64,
-    pub steps: BTreeMap<String, String>,
+impl Adapter for Qoder {
+    fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
+        for flag in input.flags.keys() {
+            if !matches!(flag.as_str(), "--config" | "--agent" | "--native-settings") {
+                return Err(format!("Qoder does not support {flag}").into());
+            }
+        }
+        let native = input
+            .command
+            .args
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(str::to_owned)
+                    .ok_or("non-UTF-8 native argument")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        check_args(&native)?;
+        let settings = settings(input.flags.get("--native-settings"))?;
+        check_sources(&input.command.cwd, &settings)?;
+        if adapter::version_output(&input.command, &["--version".into()])? != VERSION {
+            return Err(format!("Qoder CLI {VERSION} is required by this adapter").into());
+        }
+        Ok(Box::new(Prepared {
+            input,
+            settings,
+            native,
+        }))
+    }
+
+    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+        normalize(binding, event, native)
+    }
+
+    fn reply(&self, blocked: bool) -> HookOutput {
+        HookOutput {
+            exit: Exit::Code(if blocked { 2 } else { 0 }),
+            stdout: if blocked { vec![] } else { b"{}".to_vec() },
+            stderr: if blocked {
+                b"Tool blocked by AW policy\n".to_vec()
+            } else {
+                vec![]
+            },
+        }
+    }
+}
+
+impl PreparedLaunch for Prepared {
+    fn capabilities(&self) -> Capabilities {
+        capabilities(&self.native)
+    }
+
+    fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        generate(
+            self.settings.clone(),
+            &self.input.document,
+            &self.input.target,
+            steps,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )?;
+        Ok(())
+    }
+
+    fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
+        let (settings, events) = generate(
+            self.settings.clone(),
+            &self.input.document,
+            &self.input.target,
+            context.steps,
+            context.executable,
+            context.binding_path,
+        )?;
+        let path = context
+            .files
+            .write("settings.json", &serde_json::to_vec(&settings)?)?;
+        let mut command = self.input.command.clone();
+        command.args = vec![OsString::from("--settings"), path.into_os_string()];
+        command.args.extend(self.native.iter().map(OsString::from));
+        let mut environment = adapter::environment(&command)?;
+        for name in ["QODER_PROJECT_DIR", "CLAUDE_PROJECT_DIR"] {
+            environment.insert(
+                name.into(),
+                command
+                    .cwd
+                    .to_str()
+                    .ok_or("non-UTF-8 working directory")?
+                    .into(),
+            );
+        }
+        let source = if environment
+            .get("QODER_WORK_INTEGRATION_MODE")
+            .is_some_and(|v| v == "1")
+        {
+            "qoderwork"
+        } else {
+            "cli"
+        };
+        let version = environment
+            .get("QODER_CLIENT_VERSION")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .unwrap_or_else(|| VERSION.into());
+        environment.insert("QODER_HOOK_SOURCE".into(), source.into());
+        environment.insert("QODER_HOOK_VERSION".into(), version);
+        environment.insert("QODER_SITE".into(), "GLOBAL".into());
+        Ok(LaunchPlan {
+            command,
+            provider_environment: environment,
+            events,
+            readiness: None,
+        })
+    }
 }
 
 pub(super) fn capabilities(args: &[String]) -> Capabilities {
@@ -184,7 +297,7 @@ pub(super) fn generate(
             .map(|step| {
                 json!({
                     "type": "command", "command": executable,
-                    "args": ["hook", "--binding", binding_path, "--event", name,
+                    "args": ["hook", "--adapter", "qoder", "--binding", binding_path, "--event", name,
                              "--step", step.step_id, "--on-error", step.on_error],
                     "timeout": budget.div_ceil(1000) + 4,
                 })
