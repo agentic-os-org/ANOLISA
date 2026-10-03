@@ -922,11 +922,16 @@ fn write_repo_config(dest: &Path, body: &str) -> Result<(), RepoConfigProvisionE
             source,
         })?;
         f.write_all(body.as_bytes())
-            .and_then(|_| f.sync_all())
             .map_err(|source| RepoConfigProvisionError::Io {
                 path: tmp.clone(),
                 source,
-            })
+            })?;
+        // Best-effort fsync, like `anolisa_core::state::write_atomic`: a
+        // filesystem that cannot fsync must not turn the first-run
+        // bootstrap into a hard error. The rename below still publishes the
+        // complete body.
+        let _ = f.sync_all();
+        Ok(())
     })();
     if let Err(err) = write_result {
         let _ = std::fs::remove_file(&tmp);
