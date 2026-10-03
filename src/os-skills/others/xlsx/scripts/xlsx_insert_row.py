@@ -86,9 +86,12 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
             target = rel.get("Target")
-            # Handle absolute paths (starting with /) and relative paths
+            # Absolute targets (starting with /) are package-rooted;
+            # relative targets are relative to xl/ (as in formula_check.py)
             if target.startswith("/"):
                 target = target[1:]  # Remove leading /
+            elif not target.startswith("xl/"):
+                target = "xl/" + target
             return os.path.join(work_dir, target)
 
     print(f"ERROR: Relationship not found: {rid}")
@@ -165,7 +168,11 @@ def main() -> None:
     num_cells = parse_kv(args.values)
     formula_cells = parse_kv(args.formula)
 
-    # Step 1: Shift rows down using xlsx_shift_rows.py
+    # Step 1: Resolve the worksheet path BEFORE shifting, so a bad sheet
+    # name or unresolvable target aborts before any destructive change
+    ws_path = find_ws_path(args.work_dir, args.sheet)
+
+    # Step 2: Shift rows down using xlsx_shift_rows.py
     script_dir = os.path.dirname(os.path.abspath(__file__))
     shift_script = os.path.join(script_dir, "xlsx_shift_rows.py")
 
@@ -179,8 +186,7 @@ def main() -> None:
         sys.exit(1)
     print(result.stdout)
 
-    # Step 2: Resolve worksheet path and get reference styles
-    ws_path = find_ws_path(args.work_dir, args.sheet)
+    # Step 2: Get reference styles
     ws_tree = ET.parse(ws_path)
 
     ref_styles = {}
