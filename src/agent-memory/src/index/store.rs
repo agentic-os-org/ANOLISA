@@ -738,7 +738,14 @@ impl BM25Store {
 
         let results: Vec<(String, f64)> = rows
             .flatten()
-            .filter(|(_, score)| *score >= threshold)
+            // FTS5's `bm25()` is negative and *more negative is a better
+            // match* (same convention `search_scoped` negates). Compare by
+            // relevance — higher is better — so an exact duplicate in a
+            // corpus with real IDF (score ≈ -4) is flagged instead of
+            // silently dropped while marginal overlaps (score ≈ -1) pass.
+            // The typically-negative threshold keeps the MATCH path as
+            // recall-oriented as the LIKE fallback below.
+            .filter(|(_, score)| -*score >= threshold)
             .collect();
 
         Ok(results)
@@ -1874,6 +1881,49 @@ mod tests {
         let conflicts = s.detect_conflicts("花名", -2.0).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0, "dup.md");
+    }
+
+    #[test]
+    fn detect_conflicts_flags_strong_matches_in_a_real_corpus() {
+        // Regression: FTS5's bm25() is negative with more-negative-is-better,
+        // but the filter compared it against the threshold as if higher were
+        // better. In a corpus large enough for real IDF the exact duplicate
+        // (score ≈ -4) failed `score >= -2.0` and was dropped, while marginal
+        // one-term overlaps (score ≈ -1) were flagged and superseded instead.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        for i in 0..30 {
+            s.upsert(
+                &format!("filler{i}.md"),
+                100,
+                50,
+                &format!("完全无关的填充文档内容编号{i}，讨论数据库备份与网络配置"),
+                None,
+            )
+            .unwrap();
+        }
+        s.upsert(
+            "dup.md",
+            100,
+            50,
+            "kubernetes deployment rollback procedure",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "marginal.md",
+            100,
+            50,
+            "kubernetes cluster upgrade notes with unrelated wandering prose",
+            None,
+        )
+        .unwrap();
+        let conflicts = s
+            .detect_conflicts("kubernetes deployment rollback procedure", -2.0)
+            .unwrap();
+        assert!(
+            conflicts.iter().any(|(p, _)| p == "dup.md"),
+            "the exact duplicate must be flagged, got {conflicts:?}"
+        );
     }
 
     #[test]
