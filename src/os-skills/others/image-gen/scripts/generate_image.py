@@ -43,6 +43,7 @@ def _wanx(prompt, model, size, key):
             rs = st["output"].get("results",[])
             if rs and rs[0].get("url"): return rs[0]["url"]
             if rs and rs[0].get("b64_image"): return "b64:"+rs[0]["b64_image"]
+            print(f"ERROR: Task SUCCEEDED but results carry no image: {json.dumps(st)[:400]}",file=sys.stderr); sys.exit(1)
         elif s == "FAILED":
             print(f"ERROR: {st['output'].get('message','')}",file=sys.stderr); sys.exit(1)
     print("ERROR: Timeout",file=sys.stderr); sys.exit(1)
