@@ -205,6 +205,18 @@ impl PidAgentNameCache for lru::LruCache<u32, String> {
     }
 }
 
+/// OpenClaw prepends the user turn with a bracketed wall-clock header in one
+/// of two shapes: "[Day YYYY-MM-DD HH:MM TZ]" (e.g. "[Tue 2026-03-31 17:19
+/// GMT+8]") or "[Day, DD Mon YYYY HH:MM:SS TZ]" (e.g. "[Tuesday, 31 Mar 2026
+/// 17:19:05 +0800]"). Shape-anchored so a user's own bracketed text (e.g.
+/// "[0:10]" or "[status: 1]") can never satisfy it.
+static OPENCLAW_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"\[(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{2,4}[\s-]\d{1,2}[\s-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[^\]\[]{0,32}\]|\[(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[^\]\[]{0,32}\]",
+    )
+    .expect("OPENCLAW_TS_RE is a valid pattern")
+});
+
 impl GenAIBuilder {
     /// Path suffixes of the DashScope/Bailian **native** protocol.
     ///
@@ -567,21 +579,19 @@ impl GenAIBuilder {
             }
         }
 
-        // OpenClaw: 查找最后一个 [timestamp] 模式，取其后的内容
-        // 格式: [Day YYYY-MM-DD HH:MM TZ] 或 [Day, DD Mon YYYY HH:MM:SS TZ]
-        if let Some(pos) = text.rfind(']') {
-            // 确认 ] 前面有对应的 [
-            if let Some(bracket_start) = text[..pos].rfind('[') {
-                let bracket_content = &text[bracket_start + 1..pos];
-                // 简单验证：方括号内包含数字（日期）和冒号（时间）
-                if bracket_content.contains(':')
-                    && bracket_content.chars().any(|c| c.is_ascii_digit())
-                {
-                    let after = text[pos + 1..].trim_start();
-                    if !after.is_empty() {
-                        return after.to_string();
-                    }
-                }
+        // OpenClaw prepends the user turn with a bracketed wall-clock header,
+        // e.g. "[Tue 2026-03-31 17:19 GMT+8]" or
+        // "[Tuesday, 31 Mar 2026 17:19:05 +0800]". The match is anchored to
+        // the FIRST header-shaped bracket in the text — not the last bare
+        // bracket pair — so a user's own bracketed text can never be mistaken
+        // for the header. The previous rfind(']')+digit/colon heuristic
+        // truncated ordinary queries like "please slice indexes [0:10] and
+        // print them" to "and print them", and a genuine OpenClaw query that
+        // *ends* with a user bracket kept its untrusted-metadata preamble.
+        if let Some(m) = OPENCLAW_TS_RE.find(text) {
+            let after = text[m.end()..].trim_start();
+            if !after.is_empty() {
+                return after.to_string();
             }
         }
 
@@ -957,6 +967,59 @@ mod tests {
     #[test]
     fn test_extract_model_from_body_none() {
         assert_eq!(GenAIBuilder::extract_model_from_body(&None, &None), None);
+    }
+
+    #[test]
+    fn test_bracket_with_colon_and_digit_in_query_is_kept_verbatim() {
+        // A plain query whose own text contains a [x:y] token must never be
+        // truncated: the old rfind(']') heuristic stored only "and print them".
+        let text = "please slice indexes [0:10] and print them";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "please slice indexes [0:10] and print them"
+        );
+    }
+
+    #[test]
+    fn test_openclaw_timestamp_with_trailing_user_bracket() {
+        // A genuine OpenClaw query that ends with a user bracket: the header
+        // must still be stripped (the old heuristic returned the whole text
+        // including the untrusted-metadata preamble).
+        let text = "[Tue 2026-03-31 17:19 GMT+8] please slice [0:10]";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "please slice [0:10]"
+        );
+    }
+
+    #[test]
+    fn test_openclaw_second_timestamp_format() {
+        let text = "[Tuesday, 31 Mar 2026 17:19:05 +0800] real question";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "real question");
+    }
+
+    #[test]
+    fn test_openclaw_header_with_empty_remainder_falls_through() {
+        // Header only, nothing after it: keep the original text (existing
+        // fall-through preserved).
+        let text = "Sender (untrusted metadata):\n[Tue 2026-03-31 17:19 GMT+8]";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), text);
+    }
+
+    #[test]
+    fn test_non_openclaw_bracket_pair_at_start_is_not_treated_as_header() {
+        // digit+colon bracket that is NOT a timestamp shape: kept verbatim
+        // (the old heuristic truncated to "check the build").
+        let text = "[status: 1] check the build";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), text);
+    }
+
+    #[test]
+    fn test_openclaw_header_after_preamble_is_still_stripped() {
+        // The full real-world OpenClaw shape: untrusted metadata preamble,
+        // then the timestamp header, then the question.
+        let text = "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-03-31 17:19 GMT+8] hello world";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
     }
 
     #[test]
