@@ -32,6 +32,43 @@ from agent_sec_cli.sandbox.rules import (
     SHELL_UNSAFE_OPERATORS,
 )
 
+# Options that consume the following token as their value. Extracting a
+# subcommand must skip such values, or `git -C /repo push` reads "/repo" as
+# the subcommand: push/fetch/pull lose their network grant and clean escapes
+# the dangerous rule. Options passed as --opt=value are single tokens and
+# need no entry here.
+_VALUE_FLAGS: Dict[str, frozenset] = {
+    "git": frozenset(
+        {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
+    ),
+    "npm": frozenset({"--registry", "--cache", "--prefix"}),
+    "pip": frozenset({"-i", "--index-url", "--extra-index-url", "--target", "--prefix"}),
+    "pip3": frozenset({"-i", "--index-url", "--extra-index-url", "--target", "--prefix"}),
+    "docker": frozenset({"--context", "--config", "-H", "--host"}),
+    "cargo": frozenset({"--config", "-Z", "--color", "--manifest-path"}),
+    "go": frozenset({"-C"}),
+    "gem": frozenset({"--config-file"}),
+    "yarn": frozenset({"--cwd", "--use-yarnrc"}),
+    "pnpm": frozenset({"-C", "--dir"}),
+    "bundle": frozenset(),
+}
+
+
+def _extract_subcommand(args: List[str], cmd: str) -> Optional[str]:
+    """First non-flag argument, skipping the values of value-taking flags."""
+    value_flags = _VALUE_FLAGS.get(cmd, frozenset())
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in value_flags:
+            skip_next = True
+            continue
+        if not arg.startswith("-"):
+            return arg
+    return None
+
 
 class RuleEngine:
     """统一规则匹配引擎 - 支持 rules.py 中所有 Match Schema 字段"""
@@ -92,7 +129,7 @@ class RuleEngine:
 
         # subcommands: 子命令匹配（第一个非 flag 参数）
         if "subcommands" in rule:
-            subcmd = next((a for a in args if not a.startswith("-")), None)
+            subcmd = _extract_subcommand(args, cmd)
             if subcmd not in rule["subcommands"]:
                 return False, ""
 
@@ -235,7 +272,7 @@ class CommandClassifier:
 
         # 3. git 特殊处理：非危险 / 非网络子命令视为安全
         if cmd == "git":
-            subcmd = next((a for a in args if not a.startswith("-")), None)
+            subcmd = _extract_subcommand(args, cmd)
             dangerous_subcmds = {"clean"}
             network_subcmds = {"clone", "fetch", "pull", "push"}
             if subcmd is None or (
@@ -294,7 +331,7 @@ class CommandClassifier:
                 continue
             # 子命令匹配
             if "subcommands" in rule:
-                subcmd = next((a for a in args if not a.startswith("-")), None)
+                subcmd = _extract_subcommand(args, cmd)
                 if subcmd not in rule["subcommands"]:
                     continue
             # args_contain 匹配（参数须包含指定值）
