@@ -311,8 +311,8 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             font = fonts[font_id]
 
             # Check C2: color-role violation — formula cell with blue font
+            # (formula/input classification happens once, further below)
             if has_formula and _is_blue_font(font):
-                formula_cells += 1
                 f_elem = cell.find(f"{NSP}f")
                 formula_text = f_elem.text if f_elem is not None else ""
                 v.append({
