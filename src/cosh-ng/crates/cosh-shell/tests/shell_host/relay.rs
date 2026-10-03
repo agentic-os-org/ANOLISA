@@ -657,30 +657,31 @@ fn assert_bash_guard_preserves_partial_debug_output(
     trap_output: &str,
     expected_output: &str,
 ) {
-    let root = std::env::temp_dir().join(format!(
-        "cosh-shell-bash-{test_id}-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let home = root.join("home");
-    let work_dir = root.join("work");
+    let root = tempfile::Builder::new()
+        .prefix(&format!("cosh-shell-bash-{test_id}-"))
+        .tempdir()
+        .expect("test root");
+    let home = root.path().join("home");
+    let work_dir = root.path().join("work");
     std::fs::create_dir_all(&home).expect("home");
-    std::fs::write(home.join(".bashrc"), "PS1='guard$ '\n").expect("bashrc");
 
     let mut config =
         ShellHostConfig::new(test_id, &work_dir).with_env("HOME", home.display().to_string());
     config.slash_via_shell = true;
     let mut rendered = Vec::new();
-    let trap_setup = format!(
-        "set -T; trap 'case \"$BASH_COMMAND\" in READLINE_LINE=*) \
-         {trap_output} > /dev/tty;; esac' DEBUG"
-    );
+    // Startup waits for prompt_ready before driving input, so the trap is
+    // installed before /mode even when the runner is slow.
+    std::fs::write(
+        home.join(".bashrc"),
+        format!(
+            "PS1='guard$ '\nset -T; trap 'case \"$BASH_COMMAND\" in READLINE_LINE=*) \
+             : > \"$HOME/trap-fired\"; {trap_output} > /dev/tty;; esac' DEBUG\n"
+        ),
+    )
+    .expect("bashrc");
     let output = run_raw_relay_bash_with_actions(
         &config,
         vec![
-            RawRelayAction::wait(Duration::from_millis(200)),
-            RawRelayAction::line(&trap_setup),
-            RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/mode"),
             RawRelayAction::wait(Duration::from_millis(600)),
             RawRelayAction::line("trap - DEBUG"),
@@ -698,6 +699,10 @@ fn assert_bash_guard_preserves_partial_debug_output(
             && event.component.as_deref() == Some("slash")
     }));
     assert!(
+        home.join("trap-fired").exists(),
+        "the Readline DEBUG trap did not run: {rendered_text}"
+    );
+    assert!(
         rendered_text.contains(expected_output),
         "the guard filter dropped unrelated partial output: {rendered_text}"
     );
@@ -705,8 +710,6 @@ fn assert_bash_guard_preserves_partial_debug_output(
         !rendered_text.contains("__cosh_slash_guard__"),
         "the internal sentinel reached the terminal: {rendered_text}"
     );
-
-    std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]

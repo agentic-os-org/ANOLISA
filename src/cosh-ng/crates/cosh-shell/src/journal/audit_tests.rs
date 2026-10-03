@@ -59,6 +59,7 @@ fn command_projection_contains_no_raw_command_cwd_or_path() {
         mode: AuditMode::BestEffort,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: false,
         warning_emitted: false,
@@ -92,6 +93,7 @@ fn required_owned_approval_resolution_fails_before_execution_boundary() {
         mode: AuditMode::Required,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: true,
         warning_emitted: false,
@@ -162,6 +164,7 @@ fn required_core_host_execution_fails_before_handoff_boundary() {
         mode: AuditMode::Required,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: true,
         warning_emitted: false,
@@ -201,6 +204,7 @@ fn core_host_execution_does_not_duplicate_the_approval_resolution() {
         mode: AuditMode::BestEffort,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: false,
         warning_emitted: false,
@@ -243,6 +247,7 @@ fn shell_owned_approval_does_not_require_a_provider_tool_identity() {
         mode: AuditMode::Required,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: false,
         warning_emitted: false,
@@ -280,6 +285,7 @@ fn successful_write_closes_shell_degraded_episode() {
         mode: AuditMode::BestEffort,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: true,
         warning_emitted: true,
@@ -298,6 +304,161 @@ fn successful_write_closes_shell_degraded_episode() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Serializes the shrink tests: they share the warning callsite, and the
+/// thread-scoped capture subscriber can miss it when a concurrent test
+/// evaluates the same callsite without any subscriber installed.
+fn shrink_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SHRINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SHRINK_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[test]
+fn observe_shell_events_shrink_does_not_replay_recorded_commands() {
+    let _guard = shrink_guard();
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let started = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+    let mut completed = started.clone();
+    completed.kind = ShellEventKind::CommandCompleted;
+    completed.exit_code = Some(0);
+    recorder.observe_shell_events(&[started.clone(), completed]);
+    recorder.observe_shell_events(std::slice::from_ref(&started));
+    // A second shrunken batch in the same episode must not add another marker.
+    recorder.observe_shell_events(&[started]);
+    drop(recorder);
+
+    assert_eq!(
+        record_count(&root, "shell.command.started", None),
+        1,
+        "a shrunken event snapshot must not replay already-recorded commands"
+    );
+    assert_eq!(
+        record_count(&root, "audit.truncated", None),
+        1,
+        "the projection gap must be persisted exactly once per shrink episode"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn observe_shell_events_resumes_projection_after_a_shrink() {
+    let _guard = shrink_guard();
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let first = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+    let mut completed = first.clone();
+    completed.kind = ShellEventKind::CommandCompleted;
+    completed.exit_code = Some(0);
+    recorder.observe_shell_events(&[first.clone(), completed.clone()]);
+    // The transient shrunken view is skipped without moving the projected
+    // high-water mark, so the restored snapshot projects only the events
+    // past the mark and never re-records the persisted completion.
+    recorder.observe_shell_events(std::slice::from_ref(&first));
+    let second = ShellEvent::command_started("session-1", "cmd-2", "pwd", "/tmp/work", 2);
+    recorder.observe_shell_events(&[first.clone(), completed.clone(), second.clone()]);
+    // Advancing past the mark closes the episode; a later shrink is a new
+    // one and persists its own gap marker.
+    recorder.observe_shell_events(std::slice::from_ref(&first));
+    drop(recorder);
+
+    assert_eq!(record_count(&root, "shell.command.completed", None), 1);
+    assert_eq!(record_count(&root, "shell.command.started", None), 2);
+    assert_eq!(
+        record_count(&root, "shell.command.started", Some("cmd-2")),
+        1
+    );
+    assert_eq!(
+        record_count(&root, "audit.truncated", None),
+        2,
+        "each shrink episode persists its own gap marker"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn observe_shell_events_retries_the_truncation_marker_until_durable() {
+    let _guard = shrink_guard();
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let started = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+    let mut completed = started.clone();
+    completed.kind = ShellEventKind::CommandCompleted;
+    completed.exit_code = Some(0);
+    recorder.observe_shell_events(&[started.clone(), completed]);
+    // The first shrunken snapshot hits an unavailable writer: the marker is
+    // not durable, so the episode must stay unreported.
+    recorder.writer = None;
+    let saved_root = recorder.writer_root.take();
+    recorder.observe_shell_events(std::slice::from_ref(&started));
+    // The writer recovers while the same episode keeps shrinking: the next
+    // observation retries and persists the marker exactly once.
+    recorder.writer_root = saved_root;
+    recorder.observe_shell_events(std::slice::from_ref(&started));
+    recorder.observe_shell_events(&[started]);
+    drop(recorder);
+
+    assert_eq!(
+        record_count(&root, "audit.truncated", None),
+        1,
+        "the gap marker must be retried until durable, then stay bounded"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn observe_shell_events_shrink_emits_a_warning() {
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer_handle = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || SharedWriter(writer_handle.clone()))
+        .finish();
+    let _guard = shrink_guard();
+    let root = private_root();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut recorder = recording_recorder(&root);
+        let started = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+        let mut completed = started.clone();
+        completed.kind = ShellEventKind::CommandCompleted;
+        completed.exit_code = Some(0);
+        recorder.observe_shell_events(&[started.clone(), completed]);
+        recorder.observe_shell_events(&[started]);
+    });
+
+    let output = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(
+        output.contains("shell event snapshot shrank"),
+        "the skipped batch must leave a warning trail: {output}"
+    );
+    assert!(output.contains("cosh_audit"), "{output}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Counts persisted command records by event type and optional command id.
+fn record_count(root: &Path, event_type: &str, command_id: Option<&str>) -> usize {
+    walk_segment_text(root)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("audit record"))
+        .filter(|record| record["event_type"] == event_type)
+        .filter(|record| {
+            command_id.is_none_or(|command_id| record["identity"]["command_id"] == command_id)
+        })
+        .count()
+}
+
 fn recording_recorder(root: &Path) -> ShellAuditRecorder {
     ShellAuditRecorder {
         writer: Some(AuditSegmentWriter::create(root).unwrap()),
@@ -305,6 +466,7 @@ fn recording_recorder(root: &Path) -> ShellAuditRecorder {
         mode: AuditMode::BestEffort,
         shell_session_id: "session-1".to_string(),
         seen_events: 0,
+        truncation_reported: false,
         hash_salt: "salt".to_string(),
         degraded: false,
         warning_emitted: false,
