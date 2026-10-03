@@ -33,3 +33,7 @@ tempfile.workspace = true
 [dev-dependencies]
 flate2.workspace = true
 tar.workspace = true
+# Test-only extension of the core dependency: enables the in-memory
+# service/capability executors used by test_support and the tier1 test
+# modules. Regular builds of the `anolisa` binary keep the feature off.
+anolisa-core = { workspace = true, features = ["test-util"] }
