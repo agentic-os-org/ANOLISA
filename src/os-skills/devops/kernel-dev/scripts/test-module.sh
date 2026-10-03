@@ -15,7 +15,9 @@ NC='\033[0m'
 # Parse arguments
 MODULE_NAME="${1:?Usage: $0 <module_name> [module_params...]}"
 shift
-MODULE_PARAMS="$*"
+# Keep parameters as separate arguments: values may contain spaces or
+# glob characters, which a string re-expansion would split or expand.
+MODULE_PARAMS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
@@ -39,8 +41,8 @@ echo "========================================"
 echo ""
 echo "Module: $MODULE_NAME"
 echo "Path:   $MODULE_FILE"
-if [ -n "$MODULE_PARAMS" ]; then
-    echo "Params: $MODULE_PARAMS"
+if [ "${#MODULE_PARAMS[@]}" -gt 0 ]; then
+    echo "Params: ${MODULE_PARAMS[*]}"
 fi
 echo ""
 
@@ -77,9 +79,9 @@ echo ""
 
 # Load module
 echo -e "${BLUE}Step 3: Loading Module${NC}"
-if [ -n "$MODULE_PARAMS" ]; then
-    echo "Loading with parameters: $MODULE_PARAMS"
-    insmod "$MODULE_FILE" $MODULE_PARAMS
+if [ "${#MODULE_PARAMS[@]}" -gt 0 ]; then
+    echo "Loading with parameters: ${MODULE_PARAMS[*]}"
+    insmod "$MODULE_FILE" "${MODULE_PARAMS[@]}"
 else
     insmod "$MODULE_FILE"
 fi
