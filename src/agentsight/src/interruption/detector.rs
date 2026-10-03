@@ -16,14 +16,24 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// `pause_turn` (Anthropic) means a long-running turn was paused by the server
 /// and will be resumed by the client; the SSE stream itself completed normally,
 /// so it must not be treated as truncation.
+///
+/// `refusal` (Anthropic) is the stop reason a safety classifier reports for a
+/// declined answer; the API documents it as a normal `200` completion, not an
+/// error, so the stream is complete and nothing was truncated.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     matches!(
         reason,
-        Some("stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence" | "pause_turn")
+        Some(
+            "stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence" | "pause_turn"
+                | "refusal"
+        )
     )
 }
 
-/// Whether the finish reason indicates a token-limit stop (handled by rules 9/10).
+/// Whether the finish reason indicates a token-limit stop (handled by rule 9).
+///
+/// Both spellings are in use: OpenAI and the DashScope native protocol report
+/// `length`, Anthropic reports `max_tokens`.
 fn is_token_limit_finish(reason: Option<&str>) -> bool {
     matches!(reason, Some("length" | "max_tokens"))
 }
@@ -579,7 +589,8 @@ impl InterruptionDetector {
         // ── 8. SSE truncated ──────────────────────────────────────────────────
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
         // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence/pause_turn
-        // token-limit (length/max_tokens) 由 rule 9/10 单独处理
+        // token-limit (length/max_tokens) 由 rule 9 单独处理（rule 10 只处理
+        // `length` 下的输入溢出启发式）
         if is_sse
             && !is_normal_finish(finish_reason)
             && !is_token_limit_finish(finish_reason)
@@ -604,7 +615,7 @@ impl InterruptionDetector {
         }
 
         // ── 9. Token limit (output capped by max_tokens) ──────────────────────
-        if finish_reason == Some("length") {
+        if is_token_limit_finish(finish_reason) {
             if let Some(max_tokens) = call.request.max_tokens {
                 if let Some(usage) = &call.token_usage {
                     let ratio = usage.output_tokens as f64 / max_tokens as f64;
@@ -974,6 +985,36 @@ mod tests {
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::TokenLimit);
+    }
+
+    #[test]
+    fn test_detect_token_limit_for_anthropic_spelling() {
+        // Anthropic reports the same cap with `stop_reason: "max_tokens"`.
+        // Rule 8 intentionally excludes token-limit stops, so with rule 9
+        // matching only `length` the call produced no interruption at all.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(4096);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 3900, // 3900/4096 = 0.952 >= 0.95
+            total_tokens: 4900,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("max_tokens".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "an Anthropic max_tokens stop must report TokenLimit"
+        );
     }
 
     #[test]
@@ -1481,6 +1522,30 @@ mod tests {
                 .iter()
                 .all(|e| e.interruption_type != InterruptionType::SseTruncated),
             "pause_turn should not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_refusal_sse_not_reported_as_truncated() {
+        // SSE + finish_reason="refusal"（Anthropic 安全分类器拒绝回答，官方文档
+        // 说明它是正常的 200 完成）→ 流是完整的，不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("refusal".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "a refusal is a normal completion and must not trigger SseTruncated"
         );
     }
 
