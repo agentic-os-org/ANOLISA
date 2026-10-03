@@ -147,6 +147,17 @@ impl SessionLogService {
                 tracing::warn!("failed to create session log mirror dir: {}", dir.display());
                 return None;
             }
+            // The mirror duplicates log.jsonl (per-tool-call path/bytes/errors),
+            // so it gets the same owner-only protection as the session root:
+            // 0700 on the directory and 0600 on the file.
+            if let Err(e) =
+                std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            {
+                tracing::warn!(
+                    "failed to restrict session log mirror dir {}: {e}",
+                    dir.display()
+                );
+            }
             let mirror_path = dir.join(format!("{}.jsonl", sid.as_str()));
             match OpenOptions::new()
                 .create(true)
@@ -155,6 +166,18 @@ impl SessionLogService {
                 .open(&mirror_path)
             {
                 Ok(f) => {
+                    // O_CREAT applies 0666 & ~umask, and an existing mirror
+                    // file keeps whatever mode it had; fix up both through
+                    // the open descriptor.
+                    if let Err(e) = nix::sys::stat::fchmod(
+                        std::os::fd::AsRawFd::as_raw_fd(&f),
+                        nix::sys::stat::Mode::from_bits_truncate(0o600),
+                    ) {
+                        tracing::warn!(
+                            "failed to restrict session log mirror {}: {e}",
+                            mirror_path.display()
+                        );
+                    }
                     tracing::debug!("session log mirror: {}", mirror_path.display());
                     Some(f)
                 }
