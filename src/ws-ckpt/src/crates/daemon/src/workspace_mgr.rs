@@ -520,6 +520,13 @@ pub async fn delete_snapshot(
     snapshot_id: &str,
     force: bool,
 ) -> anyhow::Result<Response> {
+    // 0. The id is joined verbatim into `snapshots_root/<ws_id>/<id>` for the
+    //    existence probe and the backend delete; an index key poisoned with
+    //    separators would authorize deleting outside the snapshots root.
+    if let Err(resp) = crate::snapshot_mgr::ensure_valid_snapshot_id(snapshot_id) {
+        return Ok(*resp);
+    }
+
     // 1. Resolve workspace (by ID, absolute path, or relative path)
     let ws_lock = match state.resolve_workspace(workspace).await {
         Some(ws) => ws,
@@ -1878,6 +1885,208 @@ mod tests {
             }
             other => panic!("expected detach error, got {other:?}"),
         }
+    }
+
+    // ── Legacy snapshot-id validation: delete (issue #4415) ──
+    //
+    // Backend stub that materializes snapshot ids as plain directories and
+    // deletes them with `remove_dir_all`, joined verbatim just like the btrfs
+    // backends join subvolume paths. This reproduces the pre-fix escape: with
+    // a poisoned index key, `Delete` removed
+    // `snapshots_root/<ws_id>/../../victim` and returned `DeleteOk`.
+
+    struct DeletingBackend {
+        data_root: PathBuf,
+        snapshots_root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for DeletingBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.snapshots_root
+        }
+        async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            let target = self.snapshots_root.join(ws_id).join(snapshot_id);
+            tokio::fs::create_dir_all(&target).await?;
+            Ok(())
+        }
+        async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            tokio::fs::remove_dir_all(self.snapshots_root.join(ws_id).join(snapshot_id)).await?;
+            Ok(())
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            Ok((100, 1))
+        }
+        async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Audit probe 2: a pre-poisoned index key must not authorize a delete
+    /// outside the snapshots root. Pre-fix on this backend the victim
+    /// directory was removed and `DeleteOk` returned.
+    #[tokio::test]
+    async fn delete_snapshot_cannot_escape_snapshots_root_via_index_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = DeletingBackend {
+            data_root: temp.path().join("data"),
+            snapshots_root: temp.path().join("snapshots"),
+        };
+        let ws_id = "ws-del-escape";
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            Arc::new(backend),
+            temp.path().join("state"),
+        ));
+
+        // Live registration over the stub backend.
+        let live = state.backend.data_root().join(ws_id);
+        std::fs::create_dir_all(&live).unwrap();
+        let ws_link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&live, &ws_link).unwrap();
+        let mut index = SnapshotIndex::new(ws_link.clone());
+        index.snapshots.insert(
+            "../../victim".to_string(),
+            ws_ckpt_common::SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![],
+            },
+        );
+        state
+            .register_workspace(ws_id.to_string(), ws_link, index)
+            .unwrap();
+
+        // The directory the poisoned key resolves to:
+        // `snapshots_root/<ws_id>/../../victim`, i.e. outside snapshots_root.
+        let victim = state
+            .backend
+            .snapshots_root()
+            .join(ws_id)
+            .join("../../victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("marker"), "do-not-delete").unwrap();
+
+        let resp = delete_snapshot(&state, ws_id, "../../victim", false)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidPath, "{message}");
+                assert!(message.contains("invalid snapshot id"), "{message}");
+            }
+            other => panic!("poisoned index key must be rejected, got {other:?}"),
+        }
+
+        // The victim survived and the poisoned record was not consumed.
+        assert!(victim.join("marker").exists());
+        let arc = state.get_by_wsid(ws_id).unwrap();
+        let ws = arc.read().await;
+        assert!(ws.index.snapshots.contains_key("../../victim"));
+    }
+
+    /// Legitimate ids keep working: an ordinary snapshot is deleted on disk
+    /// and the index record is removed.
+    #[tokio::test]
+    async fn delete_snapshot_valid_id_still_deletes() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = DeletingBackend {
+            data_root: temp.path().join("data"),
+            snapshots_root: temp.path().join("snapshots"),
+        };
+        let ws_id = "ws-del-ok";
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            Arc::new(backend),
+            temp.path().join("state"),
+        ));
+
+        let live = state.backend.data_root().join(ws_id);
+        std::fs::create_dir_all(&live).unwrap();
+        let ws_link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&live, &ws_link).unwrap();
+        let mut index = SnapshotIndex::new(ws_link.clone());
+        index.snapshots.insert(
+            "snap-1".to_string(),
+            ws_ckpt_common::SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![],
+            },
+        );
+        state
+            .register_workspace(ws_id.to_string(), ws_link, index)
+            .unwrap();
+        let snap_dir = state.backend.snapshots_root().join(ws_id).join("snap-1");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let resp = delete_snapshot(&state, ws_id, "snap-1", false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &resp,
+            Response::DeleteOk { target } if target == "snap-1"
+        ));
+        assert!(!snap_dir.exists());
+        let arc = state.get_by_wsid(ws_id).unwrap();
+        let ws = arc.read().await;
+        assert!(!ws.index.snapshots.contains_key("snap-1"));
     }
 
     // ── Pure logic: ws-id edge cases ──

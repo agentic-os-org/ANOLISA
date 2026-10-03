@@ -36,15 +36,20 @@ pub(crate) async fn delete_snapshots_locked(
 ) -> CleanupOutcome {
     // Recheck the plan while serialized against every workspace mutation. Pins,
     // missing markers, and prior removals may have changed since selection.
+    // Ids that fail validation (a poisoned pre-existing index key) are skipped
+    // as well: they would be joined verbatim into the backend batch delete
+    // path and escape the snapshots root.
     let requested = {
         let ws = arc.read().await;
         to_remove
             .iter()
             .filter(|id| {
-                ws.index
-                    .snapshots
-                    .get(*id)
-                    .is_some_and(|meta| !meta.pinned && !meta.missing)
+                ws_ckpt_common::validate_checkpoint_id_v2(id).is_ok()
+                    && ws
+                        .index
+                        .snapshots
+                        .get(*id)
+                        .is_some_and(|meta| !meta.pinned && !meta.missing)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -208,6 +213,27 @@ fn workspace_not_found(workspace: &str) -> Response {
     }
 }
 
+/// Legacy-IPC guard for every caller-supplied snapshot id.
+///
+/// A snapshot id is joined verbatim into backend paths
+/// (`snapshots_root/<ws_id>/<id>`) and becomes an index key, so the legacy
+/// surface must enforce the same rules the V2 guarded API already applies
+/// via [`ws_ckpt_common::validate_checkpoint_id_v2`]: no empty/whitespace,
+/// separators (`/`, `\`), `.`, `..`, NUL, reserved marker, or over-length
+/// ids. The CLI (`snapshot_id_value_parser`) and the V2 API reject these
+/// shapes; without this check the raw socket path accepts them and writes
+/// outside the per-ws snapshot namespace.
+pub(crate) fn ensure_valid_snapshot_id(id: &str) -> Result<(), Box<Response>> {
+    ws_ckpt_common::validate_checkpoint_id_v2(id).map_err(|reason| {
+        // Echo a bounded prefix: the rejected id may be attacker-sized.
+        let echo: String = id.chars().take(32).collect();
+        Box::new(Response::Error {
+            code: ErrorCode::InvalidPath,
+            message: format!("invalid snapshot id '{echo}': {reason}"),
+        })
+    })
+}
+
 pub async fn checkpoint(
     state: &Arc<DaemonState>,
     workspace: &str,
@@ -216,6 +242,12 @@ pub async fn checkpoint(
     metadata: Option<String>,
     pin: bool,
 ) -> anyhow::Result<Response> {
+    // 0. The id becomes a path component and an index key; reject unsafe
+    //    shapes before any state is touched (the CLI and V2 API already do).
+    if let Err(resp) = ensure_valid_snapshot_id(id) {
+        return Ok(*resp);
+    }
+
     // 1. Resolve workspace (by ID, absolute path, or relative path)
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
@@ -329,6 +361,15 @@ pub async fn rollback(
     to: Option<&str>,
     num_ancestors: Option<u32>,
 ) -> anyhow::Result<Response> {
+    // 0. Reject unsafe caller-supplied targets before any resolution; the
+    //    resolved id is re-checked below (it can be index-derived via
+    //    prefix match or --num-ancestors).
+    if let Some(target) = to {
+        if let Err(resp) = ensure_valid_snapshot_id(target) {
+            return Ok(*resp);
+        }
+    }
+
     // 1. Resolve workspace
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
@@ -363,6 +404,13 @@ pub async fn rollback(
         Ok(id) => id,
         Err(resp) => return Ok(*resp),
     };
+
+    // Re-validate the resolved id: it may be index-derived (prefix match or
+    // ancestor walk), so a poisoned pre-existing index key must not reach the
+    // backend path join.
+    if let Err(resp) = ensure_valid_snapshot_id(&resolved_id) {
+        return Ok(*resp);
+    }
 
     if let Err(resp) = reject_missing_snapshot(&ws.index, &resolved_id) {
         return Ok(*resp);
@@ -407,6 +455,14 @@ pub async fn rollback_preview(
     to: Option<&str>,
     num_ancestors: Option<u32>,
 ) -> anyhow::Result<Response> {
+    // Reject unsafe caller-supplied targets before any resolution; the
+    // resolved id is re-checked below (it can be index-derived).
+    if let Some(target) = to {
+        if let Err(resp) = ensure_valid_snapshot_id(target) {
+            return Ok(*resp);
+        }
+    }
+
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
@@ -427,6 +483,11 @@ pub async fn rollback_preview(
             Ok(id) => id,
             Err(resp) => return Ok(*resp),
         };
+        // Re-validate the resolved id: a poisoned pre-existing index key must
+        // not reach the backend diff path join.
+        if let Err(resp) = ensure_valid_snapshot_id(&id) {
+            return Ok(*resp);
+        }
         if let Err(resp) = reject_missing_snapshot(&ws.index, &id) {
             return Ok(*resp);
         }
@@ -859,6 +920,18 @@ pub async fn diff_snapshots(
     from: &str,
     to: Option<&str>,
 ) -> anyhow::Result<Response> {
+    // Reject unsafe caller-supplied references before any resolution; the
+    // resolved ids are re-checked below (prefix match can select a poisoned
+    // pre-existing index key whose suffix carries separators).
+    if let Err(resp) = ensure_valid_snapshot_id(from) {
+        return Ok(*resp);
+    }
+    if let Some(t) = to {
+        if let Err(resp) = ensure_valid_snapshot_id(t) {
+            return Ok(*resp);
+        }
+    }
+
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
@@ -892,6 +965,11 @@ pub async fn diff_snapshots(
     };
 
     for id in std::iter::once(&from_id).chain(to_id.iter()) {
+        // Re-validate the resolved id: index-derived ids from a poisoned
+        // pre-existing index must not reach the backend path join.
+        if let Err(resp) = ensure_valid_snapshot_id(id) {
+            return Ok(*resp);
+        }
         if let Err(resp) = reject_missing_snapshot(&ws.index, id) {
             return Ok(*resp);
         }
@@ -1755,6 +1833,336 @@ mod tests {
             }
             other => panic!("expected SnapshotAlreadyExists, got {other:?}"),
         }
+    }
+
+    // ── Legacy snapshot-id validation (issue #4415) ──
+    //
+    // Backend stub that materializes snapshot ids as plain directories under
+    // `snapshots_root/<ws_id>/<id>`, exactly the way the btrfs backends
+    // materialize them as subvolumes. The id is joined verbatim, so a
+    // traversal id escapes the per-ws namespace — the pre-fix behavior these
+    // probes pin down.
+
+    struct PlainDirBackend {
+        data_root: PathBuf,
+        snapshots_root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for PlainDirBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &Path {
+            &self.snapshots_root
+        }
+        async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            let target = self.snapshots_root.join(ws_id).join(snapshot_id);
+            std::fs::create_dir_all(&target)?;
+            std::fs::copy(
+                self.data_root.join(ws_id).join("canary"),
+                target.join("canary"),
+            )?;
+            Ok(())
+        }
+        async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            std::fs::remove_dir_all(self.snapshots_root.join(ws_id).join(snapshot_id))?;
+            Ok(())
+        }
+        async fn cleanup_snapshots(
+            &self,
+            ws_id: &str,
+            ids: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            let mut report = Vec::new();
+            for id in ids {
+                self.delete_snapshot(ws_id, id).await?;
+                report.push((
+                    id.clone(),
+                    ws_ckpt_common::backend::SnapshotDeleteOutcome::Removed,
+                ));
+            }
+            Ok(report)
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            Ok((100, 1))
+        }
+        async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct PlainDirFixture {
+        _temp: tempfile::TempDir,
+        state: Arc<DaemonState>,
+        ws_id: String,
+        snapshots_root: PathBuf,
+    }
+
+    impl PlainDirFixture {
+        /// Live registration (symlink at the data-root subvolume) over a
+        /// plain-directory backend, with a non-empty workspace.
+        fn new(ws_id: &str) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = PlainDirBackend {
+                data_root: temp.path().join("data"),
+                snapshots_root: temp.path().join("snapshots"),
+            };
+            let snapshots_root = backend.snapshots_root.clone();
+            let state = Arc::new(DaemonState::new(
+                test_config(),
+                Arc::new(backend),
+                temp.path().join("state"),
+            ));
+            let live = state.backend.data_root().join(ws_id);
+            std::fs::create_dir_all(&live).unwrap();
+            std::fs::write(live.join("canary"), "live").unwrap();
+            let ws_link = temp.path().join("ws-link");
+            std::os::unix::fs::symlink(&live, &ws_link).unwrap();
+            state
+                .register_workspace(
+                    ws_id.to_string(),
+                    ws_link.clone(),
+                    SnapshotIndex::new(ws_link),
+                )
+                .unwrap();
+            Self {
+                _temp: temp,
+                state,
+                ws_id: ws_id.to_string(),
+                snapshots_root,
+            }
+        }
+
+        fn index_arc(&self) -> Arc<RwLock<WorkspaceState>> {
+            self.state.get_by_wsid(&self.ws_id).unwrap()
+        }
+    }
+
+    /// Audit probe 1: `Request::Checkpoint` must reject traversal (and empty)
+    /// ids instead of returning `CheckpointOk` and poisoning the index.
+    /// Pre-fix on this backend: `CheckpointOk` with an index key `../escape`
+    /// and a directory created outside the per-ws snapshot namespace.
+    #[tokio::test]
+    async fn checkpoint_rejects_traversal_snapshot_ids() {
+        let fx = PlainDirFixture::new("ws-ckpt-escape");
+
+        for id in ["../escape", ""] {
+            let resp = checkpoint(&fx.state, &fx.ws_id, id, None, None, false)
+                .await
+                .unwrap();
+            match resp {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath, "{id:?}: {message}");
+                }
+                other => panic!("checkpoint with id {id:?} must be rejected, got {other:?}"),
+            }
+        }
+
+        // The index was not poisoned…
+        let arc = fx.index_arc();
+        {
+            let ws = arc.read().await;
+            assert!(!ws.index.snapshots.contains_key("../escape"));
+            assert!(ws.index.snapshots.is_empty());
+        }
+        // …and nothing was created outside the per-ws snapshot namespace.
+        assert!(!fx
+            .snapshots_root
+            .join(&fx.ws_id)
+            .join("..")
+            .join("escape")
+            .exists());
+    }
+
+    /// Boundary shapes mirror the V2 validator's own test set
+    /// (`v2_checkpoint_id_validator_accepts_only_safe_non_reserved_components`)
+    /// plus whitespace-only and NUL: the legacy surface accepts and rejects
+    /// exactly what `validate_checkpoint_id_v2` does.
+    #[tokio::test]
+    async fn checkpoint_snapshot_id_validation_mirrors_v2_boundary() {
+        let fx = PlainDirFixture::new("ws-ckpt-boundary");
+
+        for valid in ["turn-42", "checkpoint_1", "ckpt.2026"] {
+            match checkpoint(&fx.state, &fx.ws_id, valid, None, None, false)
+                .await
+                .unwrap()
+            {
+                Response::CheckpointOk { snapshot_id } => assert_eq!(snapshot_id, valid),
+                other => panic!("valid id {valid:?} must be accepted, got {other:?}"),
+            }
+        }
+        let max_len = "a".repeat(ws_ckpt_common::GUARDED_CHECKPOINT_ID_MAX_BYTES_V2);
+        match checkpoint(&fx.state, &fx.ws_id, &max_len, None, None, false)
+            .await
+            .unwrap()
+        {
+            Response::CheckpointOk { .. } => {}
+            other => panic!("max-length id must be accepted, got {other:?}"),
+        }
+
+        let over_len = "a".repeat(ws_ckpt_common::GUARDED_CHECKPOINT_ID_MAX_BYTES_V2 + 1);
+        for invalid in [
+            "",
+            " ",
+            ".",
+            "..",
+            ws_ckpt_common::LIVE_CHILD,
+            "with space",
+            "../escape",
+            "slash/path",
+            "back\\slash",
+            "nul\0byte",
+            over_len.as_str(),
+        ] {
+            match checkpoint(&fx.state, &fx.ws_id, invalid, None, None, false)
+                .await
+                .unwrap()
+            {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath, "{invalid:?}: {message}");
+                }
+                other => panic!("invalid id {invalid:?} must be rejected, got {other:?}"),
+            }
+        }
+    }
+
+    /// Every other legacy surface that resolves a caller-supplied id rejects
+    /// traversal references with `InvalidPath` — including a syntactically
+    /// valid prefix that resolves to a poisoned pre-existing index key.
+    #[tokio::test]
+    async fn rollback_and_diff_reject_traversal_snapshot_ids() {
+        let fx = PlainDirFixture::new("ws-ckpt-resolve");
+
+        for bad in ["../escape", "a/b"] {
+            for resp in [
+                rollback(&fx.state, &fx.ws_id, Some(bad), None)
+                    .await
+                    .unwrap(),
+                rollback_preview(&fx.state, &fx.ws_id, Some(bad), None)
+                    .await
+                    .unwrap(),
+                diff_snapshots(&fx.state, &fx.ws_id, bad, None)
+                    .await
+                    .unwrap(),
+                diff_snapshots(&fx.state, &fx.ws_id, "snap-1", Some(bad))
+                    .await
+                    .unwrap(),
+            ] {
+                match resp {
+                    Response::Error { code, message } => {
+                        assert_eq!(code, ErrorCode::InvalidPath, "{bad:?}: {message}");
+                    }
+                    other => panic!("reference {bad:?} must be rejected, got {other:?}"),
+                }
+            }
+        }
+
+        // A valid prefix resolving to a poisoned index key ("abc/../evil")
+        // is rejected after resolution, before any backend path join.
+        let arc = fx.index_arc();
+        arc.write()
+            .await
+            .index
+            .snapshots
+            .insert("abc/../evil".to_string(), make_snapshot_meta(false));
+        for resp in [
+            rollback(&fx.state, &fx.ws_id, Some("abc"), None)
+                .await
+                .unwrap(),
+            rollback_preview(&fx.state, &fx.ws_id, Some("abc"), None)
+                .await
+                .unwrap(),
+            diff_snapshots(&fx.state, &fx.ws_id, "abc", None)
+                .await
+                .unwrap(),
+        ] {
+            match resp {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath, "{message}");
+                }
+                other => panic!("poisoned resolution must be rejected, got {other:?}"),
+            }
+        }
+    }
+
+    /// Retention (manual `Cleanup` and the scheduler's auto-cleanup) selects
+    /// ids from the index; a poisoned pre-existing key must never reach the
+    /// backend batch delete join (`btrfs_common.rs` `snap_dir.join(id)`).
+    #[tokio::test]
+    async fn cleanup_cannot_escape_snapshots_root_via_poisoned_index_key() {
+        let fx = PlainDirFixture::new("ws-ckpt-cleanup");
+        // Mirror the daemon's join: `snapshots_root/<ws_id>/<id>` with the
+        // poisoned id resolves one level above the temp root's snapshots dir.
+        let victim = fx.snapshots_root.join(&fx.ws_id).join("../../victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("marker"), "do-not-delete").unwrap();
+        // The legitimate snapshot must exist on disk so its backend delete succeeds.
+        std::fs::create_dir_all(fx.snapshots_root.join(&fx.ws_id).join("snap-old")).unwrap();
+
+        let arc = fx.index_arc();
+        {
+            let mut ws = arc.write().await;
+            ws.index
+                .snapshots
+                .insert("snap-old".to_string(), make_snapshot_meta(false));
+            ws.index
+                .snapshots
+                .insert("../../victim".to_string(), make_snapshot_meta(false));
+        }
+
+        let resp = cleanup_snapshots(&fx.state, &fx.ws_id, Some(0))
+            .await
+            .unwrap();
+        match resp {
+            Response::CleanupOk { removed } => assert_eq!(removed, vec!["snap-old".to_string()]),
+            other => panic!("cleanup of the legitimate snapshot must succeed, got {other:?}"),
+        }
+
+        // The victim outside the snapshots root survived the retention pass,
+        // and the poisoned key was left in the index for an operator instead
+        // of being joined into a backend delete path.
+        assert!(victim.join("marker").exists());
+        let ws = arc.read().await;
+        assert!(ws.index.snapshots.contains_key("../../victim"));
     }
 
     // ── SnapshotMeta pinned logic test ──
